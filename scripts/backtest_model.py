@@ -1,0 +1,704 @@
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from backtesting.backtest import ForexScalingBacktest
+from backtesting.improvements import MonteCarloBacktest
+from config.settings import BACKTEST, FEATURES
+from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile
+from data.data_ingestion import ForexDataPipeline, load_or_generate
+from data.news_feed import get_latest_headlines
+from features.advanced_features import AdvancedFeatureBuilder
+from features.feature_engineering import FeatureEngineer
+from features.finbert_sentiment import SentimentPipeline
+from training.train_gpu import build_model
+from models.ensemble import EnsembleMetaLearner
+
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
+PIP_SIZES = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001, "EURGBP": 0.0001, "NZDUSD": 0.0001, "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01}
+
+
+def log(m: str) -> None:
+    print(m, flush=True)
+
+
+def _append_jsonl(path: Path, rec: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+
+
+def _fmt_metric(value, fmt: str = ".4f", prefix: str = "", suffix: str = "") -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{prefix}{float(value):{fmt}}{suffix}"
+    except Exception:
+        return str(value)
+
+
+def _send_discord_backtest(fields: dict, force: bool = True) -> None:
+    try:
+        from monitoring.discord_alerts import DiscordAlerter
+        DiscordAlerter(verbose=False).send("backtest_result", fields, force=force)
+    except Exception as exc:
+        log(f"[Discord] backtest alert skipped: {exc}")
+
+
+def _normalize_backtest_metrics(metrics: dict) -> dict:
+    if not metrics or metrics.get("error"):
+        return {
+            "n_trades": 0.0,
+            "sharpe": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown": 0.0,
+            "net_pnl": 0.0,
+            "total_return_pct": 0.0,
+            "error": metrics.get("error", "No metrics") if isinstance(metrics, dict) else "No metrics",
+        }
+    if "win_rate_pct" in metrics:
+        win_rate = float(metrics.get("win_rate_pct", 0.0) or 0.0) / 100.0
+    else:
+        win_rate = float(metrics.get("win_rate", 0.0) or 0.0)
+        if win_rate > 1.0:
+            win_rate /= 100.0
+    if "max_drawdown_pct" in metrics:
+        max_dd = float(metrics.get("max_drawdown_pct", 0.0) or 0.0) / 100.0
+    else:
+        max_dd = float(metrics.get("max_drawdown", 0.0) or 0.0)
+        if abs(max_dd) > 1.0:
+            max_dd /= 100.0
+    return {
+        "n_trades": float(metrics.get("n_trades", 0.0) or 0.0),
+        "sharpe": float(metrics.get("sharpe", metrics.get("sharpe_ratio", 0.0)) or 0.0),
+        "win_rate": win_rate,
+        "max_drawdown": max_dd,
+        "net_pnl": float(metrics.get("net_pnl", metrics.get("net_pnl_usd", metrics.get("total_pnl_usd", 0.0))) or 0.0),
+        "total_return_pct": float(metrics.get("total_return_pct", 0.0) or 0.0),
+        "error": "",
+    }
+
+
+def _build_windows(start: str, end: str, window_days: int, step_days: int) -> list[tuple[str, str]]:
+    s, e = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    out, cur = [], s
+    while cur <= e:
+        w_end = min(cur + pd.Timedelta(days=max(1, window_days) - 1), e)
+        out.append((cur.strftime("%Y-%m-%d"), w_end.strftime("%Y-%m-%d")))
+        cur += pd.Timedelta(days=max(1, step_days))
+    return out
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--strategy-mode", default="scalping", choices=sorted(STRATEGY_PROFILES.keys()))
+    p.add_argument("--bar-freq", default=None, help="Backtest bar frequency, e.g. 1min, 15min, 1h")
+    p.add_argument("--model", required=True)
+    p.add_argument("--checkpoint", default=None)
+    p.add_argument("--checkpoint-dir", default=None,
+                   help="Directory containing production_best.pt or {model}_best.pt. Defaults to the selected strategy profile.")
+    p.add_argument("--start", default="2025-01-01")
+    p.add_argument("--end", default="2025-01-07")
+    p.add_argument("--pair", default="EURUSD")
+    p.add_argument("--lots", type=float, default=float(BACKTEST.get("lots", 0.1)))
+    p.add_argument("--equity", type=float, default=10000.0)
+    p.add_argument("--seq-len", type=int, default=60)
+    p.add_argument("--inference-batch-size", type=int, default=512)
+    p.add_argument("--min-confidence", type=float, default=float(BACKTEST.get("min_confidence", 0.45)))
+    p.add_argument("--stop-pips", type=float, default=float(BACKTEST.get("stop_pips", 12.0)))
+    p.add_argument("--take-pips", type=float, default=float(BACKTEST.get("take_profit_pips", 18.0)))
+    p.add_argument("--min-gap-bars", type=int, default=3)
+    p.add_argument("--slippage-pips", type=float, default=float(BACKTEST.get("slippage_pips", 0.7)))
+    p.add_argument("--commission-per-lot", type=float, default=float(BACKTEST.get("commission_per_lot", 3.5)))
+    p.add_argument("--execution-delay-bars", type=int, default=int(BACKTEST.get("execution_delay_bars", 1)))
+    p.add_argument("--mc-sims", type=int, default=int(BACKTEST.get("mc_sims", 500)))
+    p.add_argument("--multitask", action="store_true", default=False)
+    p.add_argument("--n-pairs", type=int, default=1)
+    p.add_argument("--source", default="dukascopy", choices=["dukascopy", "synthetic", "tds", "lmax_historical"])
+    p.add_argument("--walk-forward", action="store_true")
+    p.add_argument("--wf-window-days", type=int, default=7)
+    p.add_argument("--wf-step-days", type=int, default=7)
+    args = p.parse_args()
+    prof = strategy_profile(args.strategy_mode)
+    if args.bar_freq is None:
+        args.bar_freq = str(prof["bar_freq"])
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = str(prof["checkpoint_dir"])
+    if args.strategy_mode != "scalping":
+        if args.seq_len == 60:
+            args.seq_len = int(prof["seq_len"])
+        if args.min_confidence == float(BACKTEST.get("min_confidence", 0.45)):
+            args.min_confidence = float(prof["guard_min_confidence"])
+    return args
+
+
+def _resolve_checkpoint(model: str, ckpt: str | None, checkpoint_dir: str | Path | None = None) -> Path | None:
+    if ckpt:
+        p = Path(ckpt)
+        return p if p.exists() else None
+    model = str(model or "").lower().strip()
+    search_dirs = []
+    if checkpoint_dir:
+        search_dirs.append(Path(checkpoint_dir))
+    search_dirs.append(Path("checkpoints"))
+    seen = set()
+    candidates = []
+    for base in search_dirs:
+        key = str(base.resolve() if base.exists() else base)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.extend([
+            base / "production_best.pt",
+            base / f"{model}_best.pt",
+            base / model / f"{model}_best.pt",
+            base / "normal" / model / f"{model}_best.pt",
+            base / "baseline" / model / f"{model}_best.pt",
+        ])
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _checkpoint_state_dict(c):
+    if isinstance(c, dict):
+        for k in ("model_state", "model_state_dict", "state_dict"):
+            if isinstance(c.get(k), dict):
+                return c[k]
+    return c
+
+
+def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tensor:
+    outs = []
+    for s in range(seq_len, len(x), max(1, bs)):
+        e = min(len(x), s + max(1, bs))
+        w = torch.stack([x[i - seq_len:i] for i in range(s, e)], dim=0)
+        o = model(w)
+        if isinstance(o, dict):
+            o = o.get("direction_logits", o.get("logits", o.get("direction")))
+        elif isinstance(o, (tuple, list)):
+            o = o[0]
+        if isinstance(o, torch.Tensor) and o.ndim == 1:
+            # Scalar direction score -> synthesize 3-class logits [SELL, HOLD, BUY]
+            o = torch.stack([-o, torch.zeros_like(o), o], dim=1)
+        elif isinstance(o, torch.Tensor) and o.ndim == 2 and o.shape[1] == 1:
+            s = o.squeeze(1)
+            o = torch.stack([-s, torch.zeros_like(s), s], dim=1)
+        outs.append(o.detach().cpu())
+    return torch.cat(outs, dim=0)
+
+
+def _load_json_sidecar(ckpt: Path) -> dict:
+    p = ckpt.with_suffix(ckpt.suffix + ".json")
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _load_ensemble_manifest(ckpt: Path) -> dict:
+    path = ckpt.parent / "ensemble_manifest.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _load_checkpoint_config(ckpt: Path) -> dict:
+    candidates = [
+        ckpt.with_name(ckpt.stem + "_config.json"),
+        ckpt.parent / f"{ckpt.stem.replace('_best', '')}_config.json",
+        ckpt.parent / f"{ckpt.stem.replace('_best', '')}_fold0_config.json",
+        ckpt.parent.parent / f"{ckpt.stem.replace('_best', '')}_fold0_config.json",
+        ckpt.parent / "mamba_fold0_config.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+    return {}
+
+
+def _load_ensemble_model(ckpt: Path, n_features: int, seq_len: int, device: torch.device):
+    manifest = _load_ensemble_manifest(ckpt)
+    meta = _load_json_sidecar(ckpt).get("meta", {})
+    base_models = manifest.get("base_models") or []
+    base_names = [str(b.get("name")) for b in base_models if b.get("name")]
+    if not base_names:
+        base_names = list(meta.get("base_names", ["haelt", "mamba", "gnn"]))
+    bases = []
+    for name in base_names:
+        manifest_ckpt = next(
+            (
+                Path(str(b.get("checkpoint")))
+                for b in base_models
+                if str(b.get("name")) == name and b.get("checkpoint")
+            ),
+            None,
+        )
+        if manifest_ckpt is not None and not manifest_ckpt.is_absolute():
+            manifest_ckpt = (ckpt.parent / manifest_ckpt).resolve()
+        bck = manifest_ckpt if manifest_ckpt is not None and manifest_ckpt.exists() else _resolve_checkpoint(name, None, ckpt.parent)
+        if bck is None:
+            raise FileNotFoundError(f"Missing base checkpoint for ensemble base '{name}'")
+        class BCfg:
+            def __init__(self):
+                self.model = name
+                self.hidden_size = 256
+                self.d_model = 256
+                self.nhead = 8
+                self.num_layers = 3
+                self.dropout = 0.1
+                self.seq_len = seq_len
+                self.multitask = True
+                self.pair_embed_dim = 16
+                self.loss = "cross_entropy"
+                self.corr_window = 20
+                self.corr_window_long = 60
+                self.momentum_window = 20
+                self._n_pairs = max(1, n_features // 224)
+                self._f_per_pair = 224
+        bm = build_model(name, n_features, BCfg()).to(device)
+        bstate = torch.load(bck, map_location=device, weights_only=False)
+        bm.load_state_dict(_checkpoint_state_dict(bstate), strict=False)
+        bm.eval()
+        bases.append(bm)
+    em = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=base_names).to(device)
+    estate = torch.load(ckpt, map_location=device, weights_only=False)
+    em.load_state_dict(_checkpoint_state_dict(estate), strict=False)
+    em.eval()
+    return em
+
+
+def run_backtest():
+    args = parse_args()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out_dir = Path("logs/backtests")
+    wf_jsonl = out_dir / f"{args.model}_{run_id}_walkforward.jsonl"
+    windows = [(args.start, args.end)] if not args.walk_forward else _build_windows(args.start, args.end, args.wf_window_days, args.wf_step_days)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ckpt = _resolve_checkpoint(args.model, args.checkpoint, args.checkpoint_dir)
+    if not ckpt:
+        raise FileNotFoundError(f"checkpoint not found for model={args.model}")
+
+    ckpt_cfg = _load_checkpoint_config(ckpt)
+    ensemble_manifest = _load_ensemble_manifest(ckpt) if args.model.lower() == "ensemble" else {}
+    manifest_schema = ensemble_manifest.get("schema", {}) if isinstance(ensemble_manifest, dict) else {}
+    n_features = int(ckpt_cfg.get("n_features", args.n_pairs * 224))
+    seq_len = int(ckpt_cfg.get("seq_len", args.seq_len))
+    if args.model.lower() == "ensemble":
+        n_features = int(manifest_schema.get("n_features", n_features))
+        seq_len = int(manifest_schema.get("seq_len", seq_len))
+    n_pairs = max(1, n_features // 224)
+
+    class Cfg:
+        def __init__(self):
+            self.model = args.model
+            self.hidden_size = int(ckpt_cfg.get("hidden_size", 256))
+            self.d_model = int(ckpt_cfg.get("d_model", 256))
+            self.nhead = int(ckpt_cfg.get("nhead", 8))
+            self.num_layers = int(ckpt_cfg.get("num_layers", 3))
+            self.dropout = float(ckpt_cfg.get("dropout", 0.1))
+            self.seq_len = seq_len
+            self.multitask = args.multitask
+            self.pair_embed_dim = 16 if n_pairs > 1 else 0
+            self.loss = str(ckpt_cfg.get("loss", "cross_entropy"))
+            self.corr_window = 20
+            self.corr_window_long = 60
+            self.momentum_window = 20
+            self._n_pairs = n_pairs
+            self._f_per_pair = 224
+
+    if args.model.lower() == "ensemble":
+        model = _load_ensemble_model(ckpt, n_features, seq_len, device)
+    else:
+        model = build_model(args.model, n_features, Cfg()).to(device)
+        state = torch.load(ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(_checkpoint_state_dict(state), strict=False)
+        model.eval()
+
+    fe = FeatureEngineer(atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20]))
+    afb = AdvancedFeatureBuilder()
+    sent = SentimentPipeline(prefer_backend="finbert", use_cache=True)
+    pipeline = ForexDataPipeline(bar_freq=args.bar_freq)
+
+    wf_rows = []
+    for idx, (ws, we) in enumerate(windows, start=1):
+        log(f"[WF {idx}/{len(windows)}] {ws} -> {we}")
+        pair_list = DEFAULT_PAIRS[:args.n_pairs] if args.n_pairs > 1 else [args.pair]
+        per_pair = []
+        base_bars = None
+        for p in pair_list:
+            ticks = load_or_generate(source=args.source, pair=p, start=ws, end=we, n_rows=100000)
+            bars = pipeline.run(ticks)
+            if bars is None or len(bars) <= args.seq_len:
+                log(f"[WF {idx}/{len(windows)}] {p}: no usable bars after cleaning; skipping window")
+                per_pair = []
+                break
+            if base_bars is None:
+                base_bars = bars
+            f = pd.concat([fe.build(bars), afb.build(bars, base_features=fe.build(bars))], axis=1)
+            f = f.iloc[:, :224] if f.shape[1] >= 224 else pd.concat([f, pd.DataFrame(0.0, index=f.index, columns=[f"pad_{i}" for i in range(224 - f.shape[1])])], axis=1)
+            f = f.reindex(base_bars.index).ffill().fillna(0.0)
+            per_pair.append(f)
+
+        if not per_pair or base_bars is None or len(base_bars) <= args.seq_len:
+            continue
+
+        X = pd.concat(per_pair, axis=1)
+        try:
+            X["finbert_sentiment"] = float(sent.score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
+        except Exception:
+            X["finbert_sentiment"] = 0.0
+        X = X.iloc[:, :n_features] if X.shape[1] >= n_features else pd.concat([X, pd.DataFrame(0.0, index=X.index, columns=[f"xpad_{i}" for i in range(n_features - X.shape[1])])], axis=1)
+        if len(X) <= args.seq_len:
+            log(f"[WF {idx}/{len(windows)}] not enough feature rows ({len(X)}) for seq_len={args.seq_len}; skipping")
+            continue
+        x_t = torch.tensor(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            logits = _batched_logits(model, x_t, seq_len, args.inference_batch_size)
+            probs = torch.softmax(logits, dim=-1).numpy()
+        cls, conf = probs.argmax(axis=1), probs.max(axis=1)
+        if len(conf):
+            log(
+                f"[Signals] confidence min/median/max = "
+                f"{float(np.min(conf)):.3f}/{float(np.median(conf)):.3f}/{float(np.max(conf)):.3f} "
+                f"| threshold={args.min_confidence:.3f}"
+            )
+        signals = []
+        pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
+        stop_pips = float(args.stop_pips)
+        take_pips = float(args.take_pips)
+        last_signal_i = -10**9
+        for off, c in enumerate(cls):
+            i = seq_len + off
+            adj_min_conf = args.min_confidence
+            if "regime_label" in X.columns:
+                rl = float(X["regime_label"].iloc[i])
+                if rl > 0.5:
+                    adj_min_conf = max(0.5, args.min_confidence - 0.05)
+                elif rl < -0.5:
+                    adj_min_conf = min(0.95, args.min_confidence + 0.05)
+
+            if conf[off] < adj_min_conf:
+                continue
+            if i - last_signal_i < max(1, int(args.min_gap_bars)):
+                continue
+            price = float(base_bars["close"].iloc[i])
+            if c == 0:
+                act = 2
+                stop_loss = price + stop_pips * pip_size
+                take_profit = price - take_pips * pip_size
+            elif c == 2:
+                act = 1
+                stop_loss = price - stop_pips * pip_size
+                take_profit = price + take_pips * pip_size
+            else:
+                act = 0
+                stop_loss = 0.0
+                take_profit = 0.0
+            if act:
+                last_signal_i = i
+                
+                # Fractional Kelly Sizing
+                try:
+                    from config.settings import SIZING
+                    kelly_frac = SIZING.get("kelly_fraction", 0.25)
+                except ImportError:
+                    kelly_frac = 0.25
+                
+                win_prob = float(conf[off])
+                reward_to_risk = take_pips / max(stop_pips, 1e-5)
+                if reward_to_risk > 0:
+                    kelly_k = win_prob - ((1.0 - win_prob) / reward_to_risk)
+                else:
+                    kelly_k = 0.0
+                
+                dynamic_lots = args.lots * max(0.0, kelly_k * kelly_frac)
+                # Ensure minimum lot size
+                dynamic_lots = max(0.01, dynamic_lots)
+
+                signals.append({
+                    "timestamp": base_bars.index[i],
+                    "action": act,
+                    "lots": dynamic_lots,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "confidence": win_prob,
+                })
+        if not signals:
+            log(f"[Signals] No trades generated for {ws} -> {we}; lower --min-confidence or inspect class probabilities.")
+            _send_discord_backtest({
+                "Model": args.model,
+                "Pair": args.pair,
+                "Window": f"{ws} -> {we}",
+                "Checkpoint": ckpt.name,
+                "Source": args.source,
+                "Seq Len": str(seq_len),
+                "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
+                "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
+                "Take Pips": _fmt_metric(args.take_pips, ".1f"),
+                "Min Gap Bars": str(args.min_gap_bars),
+                "Trades": "0",
+                "Status": "No trades generated",
+                "Action": "Lower --min-confidence or inspect class probabilities",
+            })
+            continue
+
+        sig_df = pd.DataFrame(signals).set_index("timestamp")
+        bt = ForexScalingBacktest(
+            bars=base_bars.iloc[seq_len:],
+            signals=sig_df,
+            initial_equity=args.equity,
+            commission_per_lot=args.commission_per_lot,
+            slippage_pips=args.slippage_pips,
+            pip_size=pip_size,
+            execution_delay_bars=max(1, int(args.execution_delay_bars)),
+        )
+        bt.run()
+        metrics = bt.performance_metrics()
+        norm_metrics = _normalize_backtest_metrics(metrics)
+        mc = MonteCarloBacktest(n_simulations=args.mc_sims, initial_equity=args.equity).run_from_backtest(bt) if args.mc_sims > 0 and len(bt.trades) >= 5 else None
+
+        rec = {"ts": datetime.now(timezone.utc).isoformat(), "run_id": run_id, "component": "backtest", "event_type": "walkforward_window", "model": args.model, "window_index": idx, "window_start": ws, "window_end": we, "n_trades": norm_metrics["n_trades"], "sharpe": norm_metrics["sharpe"], "win_rate": norm_metrics["win_rate"], "max_drawdown": norm_metrics["max_drawdown"], "net_pnl": norm_metrics["net_pnl"]}
+        _append_jsonl(wf_jsonl, rec)
+        wf_rows.append(rec)
+        _send_discord_backtest({
+            "Model": args.model,
+            "Pair": args.pair,
+            "Window": f"{ws} -> {we}",
+            "Checkpoint": ckpt.name,
+            "Source": args.source,
+            "Seq Len": str(seq_len),
+            "N Pairs": str(args.n_pairs),
+            "Multitask": str(bool(args.multitask)),
+            "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
+            "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
+            "Take Pips": _fmt_metric(args.take_pips, ".1f"),
+            "Min Gap Bars": str(args.min_gap_bars),
+            "Lots": _fmt_metric(args.lots, ".2f"),
+            "Equity": _fmt_metric(args.equity, ",.2f", prefix="$"),
+            "Trades": _fmt_metric(norm_metrics["n_trades"], ".0f"),
+            "Sharpe": _fmt_metric(norm_metrics["sharpe"], ".4f"),
+            "Win Rate": _fmt_metric(norm_metrics["win_rate"], ".2%"),
+            "Max Drawdown": _fmt_metric(norm_metrics["max_drawdown"], ".2%"),
+            "Net PnL": _fmt_metric(norm_metrics["net_pnl"], ",.2f", prefix="$"),
+            "Return": _fmt_metric(norm_metrics["total_return_pct"], ".2f", suffix="%"),
+            "Metric Error": norm_metrics["error"] or "none",
+            "MC Sims": str(args.mc_sims),
+        })
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        bt.get_trade_log().to_csv(out_dir / f"{args.model}_{stamp}_trades.csv")
+        bt.results_df.to_csv(out_dir / f"{args.model}_{stamp}_equity.csv")
+        (out_dir / f"{args.model}_{stamp}_summary.json").write_text(json.dumps({"model": args.model, "checkpoint": str(ckpt), "start": ws, "end": we, "metrics": metrics, "monte_carlo": mc}, indent=2, default=str), encoding="utf-8")
+
+    if wf_rows:
+        wf_df = pd.DataFrame(wf_rows)
+        wf_df.to_csv(out_dir / f"{args.model}_{run_id}_walkforward.csv", index=False)
+        medians = {"sharpe": float(wf_df["sharpe"].median()), "win_rate": float(wf_df["win_rate"].median()), "max_drawdown": float(wf_df["max_drawdown"].median()), "net_pnl": float(wf_df["net_pnl"].median())}
+        (out_dir / f"{args.model}_{run_id}_walkforward_summary.json").write_text(json.dumps({"model": args.model, "run_id": run_id, "windows": len(wf_rows), "period": {"start": args.start, "end": args.end}, "medians": medians}, indent=2), encoding="utf-8")
+        _send_discord_backtest({
+            "Model": args.model,
+            "Run ID": run_id,
+            "Period": f"{args.start} -> {args.end}",
+            "Windows": str(len(wf_rows)),
+            "Median Sharpe": _fmt_metric(medians["sharpe"], ".4f"),
+            "Median Win Rate": _fmt_metric(medians["win_rate"], ".2%"),
+            "Median Max DD": _fmt_metric(medians["max_drawdown"], ".2%"),
+            "Median Net PnL": _fmt_metric(medians["net_pnl"], ",.2f", prefix="$"),
+            "Output": str(out_dir),
+        })
+
+
+def run_execution_backtest(
+    model: torch.nn.Module,
+    pair_list: list[str],
+    start_date: str,
+    end_date: str,
+    seq_len: int,
+    n_features: int,
+    device: torch.device,
+    bar_freq: str = "1min",
+    data_source: str = "dukascopy",
+    stop_pips: float = 12.0,
+    take_pips: float = 18.0,
+    inference_batch_size: int = 512,
+    min_confidence: float | None = None,
+    min_gap_bars: int = 3,
+    lots: float = 0.1,
+    equity: float = 10_000.0,
+    commission_per_lot: float = 3.5,
+    slippage_pips: float = 0.7,
+    execution_delay_bars: int = 1,
+) -> dict:
+    """Programmatic execution-aware backtest for a single window.
+
+    Mirrors `run_backtest` but takes a pre-built model and returns a metrics
+    dict consumed by training/train_gpu.py::_evaluate_forward_gate:
+    {n_trades, sharpe, profit_factor, max_drawdown, net_pnl,
+     signals_df (with pnl_pips), equity_curve, error}
+    """
+    if min_confidence is None:
+        min_confidence = float(BACKTEST.get("min_confidence", 0.45))
+
+    model.eval()
+    fe = FeatureEngineer(atr_window=FEATURES.get("atr_window", 14),
+                         lag_windows=FEATURES.get("lag_windows", [5, 10, 20]))
+    afb = AdvancedFeatureBuilder()
+    pipeline = ForexDataPipeline(bar_freq=bar_freq)
+
+    def _empty(reason: str) -> dict:
+        return {
+            "n_trades": 0,
+            "sharpe": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown": 0.0,
+            "net_pnl": 0.0,
+            "signals_df": pd.DataFrame(),
+            "equity_curve": [float(equity)],
+            "error": reason,
+        }
+
+    base_bars = None
+    per_pair = []
+    for p in pair_list:
+        try:
+            ticks = load_or_generate(source=data_source, pair=p, start=start_date,
+                                     end=end_date, n_rows=100_000)
+        except Exception as exc:
+            log(f"[Gate] {p}: data load failed ({exc}); skipping pair")
+            continue
+        bars = pipeline.run(ticks)
+        if bars is None or len(bars) <= seq_len:
+            log(f"[Gate] {p}: no usable bars after cleaning; skipping pair")
+            continue
+        if base_bars is None:
+            base_bars = bars
+        f = pd.concat([fe.build(bars), afb.build(bars, base_features=fe.build(bars))], axis=1)
+        if f.shape[1] >= 224:
+            f = f.iloc[:, :224]
+        else:
+            f = pd.concat([f, pd.DataFrame(0.0, index=f.index,
+                                           columns=[f"pad_{i}" for i in range(224 - f.shape[1])])], axis=1)
+        f = f.reindex(base_bars.index).ffill().fillna(0.0)
+        per_pair.append(f)
+
+    if not per_pair or base_bars is None or len(base_bars) <= seq_len:
+        return _empty("no usable data for any pair")
+
+    X = pd.concat(per_pair, axis=1)
+    try:
+        X["finbert_sentiment"] = float(SentimentPipeline(prefer_backend="finbert", use_cache=True)
+                                       .score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
+    except Exception:
+        X["finbert_sentiment"] = 0.0
+    if X.shape[1] >= n_features:
+        X = X.iloc[:, :n_features]
+    else:
+        X = pd.concat([X, pd.DataFrame(0.0, index=X.index,
+                                       columns=[f"xpad_{i}" for i in range(n_features - X.shape[1])])], axis=1)
+    if len(X) <= seq_len:
+        return _empty("not enough feature rows for seq_len")
+
+    x_t = torch.tensor(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0),
+                       dtype=torch.float32, device=device)
+    with torch.no_grad():
+        logits = _batched_logits(model, x_t, seq_len, inference_batch_size)
+        probs = torch.softmax(logits, dim=-1).cpu().numpy()
+    cls = probs.argmax(axis=1)
+    conf = probs.max(axis=1)
+
+    pip_size = PIP_SIZES.get(str(pair_list[0]).upper(), 0.0001)
+
+    signals = []
+    last_signal_i = -10**9
+    for off, c in enumerate(cls):
+        i = seq_len + off
+        if conf[off] < min_confidence:
+            continue
+        if i - last_signal_i < max(1, int(min_gap_bars)):
+            continue
+        price = float(base_bars["close"].iloc[i])
+        if c == 0:
+            act = 2
+            stop_loss = price + stop_pips * pip_size
+            take_profit = price - take_pips * pip_size
+        elif c == 2:
+            act = 1
+            stop_loss = price - stop_pips * pip_size
+            take_profit = price + take_pips * pip_size
+        else:
+            act = 0
+            stop_loss = 0.0
+            take_profit = 0.0
+        if not act:
+            continue
+        last_signal_i = i
+
+        try:
+            from config.settings import SIZING
+            kelly_frac = float(SIZING.get("kelly_fraction", 0.25))
+        except ImportError:
+            kelly_frac = 0.25
+
+        win_prob = float(conf[off])
+        reward_to_risk = take_pips / max(stop_pips, 1e-5)
+        kelly_k = win_prob - ((1.0 - win_prob) / reward_to_risk) if reward_to_risk > 0 else 0.0
+        dynamic_lots = max(0.01, lots * max(0.0, kelly_k * kelly_frac))
+
+        signals.append({
+            "timestamp": base_bars.index[i],
+            "action": act,
+            "lots": dynamic_lots,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "confidence": win_prob,
+        })
+
+    if not signals:
+        return _empty("no trades generated at min_confidence")
+
+    sig_df = pd.DataFrame(signals).set_index("timestamp")
+    bt = ForexScalingBacktest(
+        bars=base_bars.iloc[seq_len:],
+        signals=sig_df,
+        initial_equity=equity,
+        commission_per_lot=commission_per_lot,
+        slippage_pips=slippage_pips,
+        pip_size=pip_size,
+        execution_delay_bars=max(1, int(execution_delay_bars)),
+    )
+    bt.run()
+    metrics = _normalize_backtest_metrics(bt.performance_metrics())
+    metrics.update({
+        "profit_factor": float(bt.performance_metrics().get("profit_factor", 0.0) or 0.0),
+        "signals_df": bt.get_trade_log(),
+        "equity_curve": [float(v) for v in bt.equity_curve] or [float(equity)],
+        "confidence_scores": [float(s["confidence"]) for s in signals],
+    })
+    return metrics
+
+
+if __name__ == "__main__":
+    run_backtest()

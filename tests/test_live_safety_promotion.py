@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+from trading.live_engine import LiveSafetyConfig, LiveSafetyGate, PaperBroker
+from validation.promotion_gate import GateConfig, PromotionGate
+
+
+def test_live_safety_blocks_wide_spread():
+    gate = LiveSafetyGate(
+        LiveSafetyConfig(max_spread_pips=1.0),
+        starting_equity=10_000.0,
+    )
+
+    result = gate.allow_order(
+        pair="EURUSD",
+        side="buy",
+        lots=0.1,
+        bid=1.10000,
+        ask=1.10030,
+        equity=10_000.0,
+    )
+
+    assert not result["ok"]
+    assert str(result["reason"]).startswith("spread_too_wide")
+
+
+def test_live_safety_halts_on_daily_loss_limit():
+    gate = LiveSafetyGate(
+        LiveSafetyConfig(max_daily_loss_pct=0.05),
+        starting_equity=10_000.0,
+    )
+
+    result = gate.allow_order(
+        pair="EURUSD",
+        side="sell",
+        lots=0.1,
+        bid=1.10000,
+        ask=1.10005,
+        equity=9_499.0,
+    )
+
+    assert not result["ok"]
+    assert gate.halted
+    assert str(result["reason"]).startswith("daily_loss_limit")
+
+
+def test_live_safety_rate_limits_orders():
+    gate = LiveSafetyGate(
+        LiveSafetyConfig(max_orders_per_minute=2),
+        starting_equity=10_000.0,
+    )
+
+    for t in (1000.0, 1001.0):
+        result = gate.allow_order("EURUSD", "buy", 0.1, 1.1, 1.10005, 10_000.0, now=t)
+        assert result["ok"]
+
+    blocked = gate.allow_order("EURUSD", "buy", 0.1, 1.1, 1.10005, 10_000.0, now=1002.0)
+    assert not blocked["ok"]
+    assert blocked["reason"] == "order_rate_limit"
+
+
+def test_paper_broker_quote_moves_and_accepts_external_quote():
+    broker = PaperBroker(initial_equity=10_000.0)
+    broker.update_quote(1.23450, 1.23460)
+
+    bid, ask = broker.get_bid_ask("EURUSD")
+
+    assert abs(bid - 1.23450) < 1e-6
+    assert abs(ask - 1.23460) < 1e-6
+
+
+def test_promotion_gate_requires_high_psr():
+    gate = PromotionGate(
+        GateConfig(
+            min_psr=0.95,
+            strict_psr=True,
+            min_sharpe_per_latency=0.001,
+        )
+    )
+
+    result = gate.evaluate(
+        sharpe=1.6,
+        profit_factor=1.8,
+        max_drawdown=0.10,
+        n_trades=700,
+        gross_pnl=10_000.0,
+        transaction_costs=1_000.0,
+        n_obs=4,
+        turnover_rate=2.0,
+        avg_latency_ms=50.0,
+    )
+
+    assert not result["promoted"]
+    assert not result["gates"]["psr_ok"]
+
+
+def test_promotion_gate_requires_dsr_when_trials_are_reported():
+    gate = PromotionGate(
+        GateConfig(
+            min_psr=0.95,
+            min_dsr=0.95,
+            strict_psr=True,
+            min_sharpe_per_latency=0.001,
+        )
+    )
+
+    result = gate.evaluate(
+        sharpe=1.6,
+        profit_factor=1.8,
+        max_drawdown=0.10,
+        n_trades=700,
+        gross_pnl=10_000.0,
+        transaction_costs=1_000.0,
+        n_obs=50,
+        n_backtest_trials=1_000,
+        turnover_rate=2.0,
+        avg_latency_ms=50.0,
+    )
+
+    assert not result["promoted"]
+    assert not result["gates"]["dsr_ok"]

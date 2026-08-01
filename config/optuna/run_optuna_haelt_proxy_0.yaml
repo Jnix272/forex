@@ -1,0 +1,371 @@
+strategy:
+  mode: scalping
+  bar_freq: 1min
+  lookahead_bars: 30
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+download:
+  eodhd: false
+  eodhd_cross_asset: true
+  ticks: true
+  yearly: true
+  keep_going: true
+  cross_asset: true
+  verify: true
+  verify_fix: true
+  check_missing_months: true
+  check_missing_scope: both
+data:
+  source: dukascopy
+curriculum:
+  adaptation:
+    stable_window: 2
+    min_stable_sharpe: 0.05
+    collapse_min_peak: 0.25
+    collapse_drop: 0.15
+    advance_lr_mult: 0.85
+    collapse_lr_mult: 0.9
+    collapse_reversal_threshold: -0.1
+    recovery_window: 3
+    min_epochs_per_stage: 2
+    sharpe_ema_alpha: 0.3
+  calibration:
+    max_class_prior_delta: 0.05
+    min_class_share: 0.05
+  seq_schedule:
+  - epoch_start: 0
+    seq_len: 30
+  - epoch_start: 10
+    seq_len: 75
+  - epoch_start: 1
+    seq_len: 120
+  chunk_early_stop_patience: 3
+  chunk_early_stop_min_batches: 50
+  feature_groups:
+    microstructure:
+      epoch_unfreeze: 0
+      always_on: true
+      features:
+      - ofi
+      - ofi_z
+      - ofi_l2
+    momentum:
+      epoch_unfreeze: 0
+      always_on: true
+      features:
+      - yield_momentum_5d
+      - yield_momentum_20d
+      - cot_hf_mom_4w
+    session:
+      epoch_unfreeze: 0
+      always_on: true
+      features: []
+    execution_cost:
+      epoch_unfreeze: 0
+      always_on: true
+      features: []
+    volatility:
+      epoch_unfreeze: 0
+      always_on: true
+      features: []
+    market_regime:
+      epoch_unfreeze: 0
+      always_on: true
+      features: []
+    higher_timeframe:
+      epoch_unfreeze: 0
+      always_on: true
+      features: []
+    label_quality:
+      epoch_unfreeze: 0
+      always_on: true
+      features:
+      - rolling_hit_rate_240
+      - rolling_label_sharpe_240
+      - recent_loss_cluster_30
+      - label_confidence_prior_240
+      - rolling_false_breakout_rate_240
+    cross_asset:
+      epoch_unfreeze: 0
+      always_on: true
+      features:
+      - spread_us_de
+      - spread_us_jp
+      - spread_us_gb
+      - spread_us_au
+      - spread_us_ca
+      - spread_us_nz
+      - spread_de_gb
+      - spread_de_jp
+      - spread_us_ch
+      - carry_eur
+      - carry_jpy
+      - carry_gbp
+      - carry_aud
+      - carry_cad
+      - carry_nzd
+      - carry_eurgbp
+      - carry_eurjpy
+      - carry_chf
+      - carry_spot_forward
+      - yield_curve_slope
+      - corr_break_gold_DXY
+    macro:
+      epoch_unfreeze: 0
+      always_on: true
+      features:
+      - cot_net_hf
+      - cot_net_comm
+      - cot_extreme
+      - sentiment_raw
+      - sentiment_decayed
+      - fb_0
+      - fb_1
+      - fb_2
+      - fb_3
+      - fb_4
+      - fb_5
+      - fb_6
+      - fb_7
+  difficulty_schedule:
+  - epoch_start: 0
+    max_difficulty: 0
+  - epoch_start: 8
+    max_difficulty: 1
+  difficulty_spread_threshold: 1.5
+feature_ablation:
+  enabled: false
+  name: full_features
+  drop_groups: []
+  keep_groups: []
+  drop_features: []
+execution:
+  slippage_vol_alpha: 0.5
+  slippage_liq_alpha: 0.3
+  slippage_vol_window: 120
+  slippage_spread_window: 120
+  latency_baseline_ms: 50
+  fill_samples_path: data/execution/fills.csv
+  base_slippage_pips: 0.5
+  domain_randomization: true
+  random_seed: 17
+  edge_margin_pips: 0.25
+  rejection_penalty_pips: 1.0
+walk_forward:
+  enabled: true
+  folds: 6
+multitask:
+  enabled: true
+  w_ret: 0.08
+  w_conf: 0.05
+  class_balance_weight: 0.182
+  entropy_weight: 0.01
+  direction_weight_floor: 0.307
+  focal_gamma: 1.052
+direction_training:
+  probe: true
+  probe_epochs: 2
+  probe_samples: 4096
+  warmup_epochs: 2
+  min_true_class_share: 0.15
+  min_pred_class_share: 0.015
+  max_pred_class_share: 0.8
+  min_recall: 0.001
+  max_collapse_streak: 4
+pretrain:
+  enabled: false
+  ablation: 'false'
+  ablation_models: tft,transformer,haelt
+  method: byol
+  epochs: 18
+  min_epochs: 3
+  handoff_patience: 2
+  handoff_min_delta: 0.002
+  handoff_loss: 0.18
+  regime_aware: true
+  lr: 0.0001
+  batch: 256
+  projection_dim: 256
+  pred_dim: 128
+  ema_decay: 0.996
+  sample_windows: 4096
+  read_windows: 64
+  blocks_per_epoch: auto
+  mask_prob: 0.2
+  recon_hidden_dim: 512
+  augmentations:
+    jitter_std: 0.02
+    scaling_range:
+    - 0.85
+    - 1.15
+    feature_drop_p: 0.2
+    crop_ratio:
+    - 0.75
+    - 1.0
+distillation:
+  enabled: false
+  teacher_model: mamba
+  teacher_ckpt: ''
+  student_model: haelt
+  alpha: 0.5
+  temperature: 2.0
+ensemble:
+  enabled: false
+  deploy: false
+  epochs: 10
+  div_weight: 0.1
+  explicit_diversity: true
+  member_seed_offset: 997
+  member_lr_jitter: 0.2
+  member_dropout_jitter: 0.15
+diversity_loss:
+  weight: 0.1
+  same_role_mult: 2.0
+rl:
+  enabled: false
+  deploy: false
+  algo: dqn
+  episodes: 500
+  episode_len: 2048
+  encoder_obs: true
+  val_frac: 0.15
+  min_val_sharpe: -999.0
+  all_models: false
+  reward:
+    pnl: 1.0
+    drawdown: 1.5
+    tx_cost: 0.3
+    overtrade: 0.25
+  dqn:
+    lr: 0.0001
+    gamma: 0.99
+    eps_start: 1.0
+    eps_end: 0.01
+    eps_decay: 0.995
+    batch: 64
+    target_update: 100
+  ppo:
+    lr: 0.0003
+    gamma: 0.99
+    n_steps: 2048
+calibration:
+  overconf_penalty: true
+  overconf_weight: 0.2
+  overconf_threshold: 0.58
+  calibrate: true
+feature_cache:
+  enabled: true
+  regime_window: 60
+  ofi_z_threshold: 2.0
+  slow_cols:
+  - sentiment_decayed
+  - eco_surprise
+  - hurst
+  - cot_net_hf
+risk:
+  kelly_fraction: 0.25
+  max_position_pct: 0.05
+  max_drawdown_halt: 0.1
+  daily_loss_limit: 0.03
+  session_limits:
+    london:
+      max_lots: 2.0
+      max_open_trades: 6
+    ny:
+      max_lots: 2.0
+      max_open_trades: 6
+    asia:
+      max_lots: 1.0
+      max_open_trades: 3
+    false:
+      max_lots: 0.5
+      max_open_trades: 1
+  regime_scale:
+    trending: 1.0
+    ranging: 0.7
+    volatile: 0.5
+    unknown: 0.3
+xgboost:
+  enabled: true
+  task: classification
+  sequence_mode: temporal
+  n_estimators: 300
+  max_depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  gamma: 0.1
+  reg_alpha: 0.05
+  reg_lambda: 1.0
+  objective: ''
+  eval_metric: ''
+  early_stopping_rounds: 15
+  folds: 5
+  tune: false
+  tune_trials: 20
+  max_samples: 500000
+  feature_importance: true
+  feature_importance_top_n: 50
+maturity:
+  stage: paper
+quick:
+  enabled: false
+monitoring:
+  drift_gate: false
+  drift_fail_open: false
+  drift_baseline_samples: 20000
+  drift_live_samples: 5000
+  drift_psi_threshold: 0.2
+  drift_ks_pvalue_threshold: 0.05
+backtest:
+  min_confidence: 0.45
+  lots: 0.1
+  stop_pips: 12.0
+  take_profit_pips: 18.0
+  atr_stop_mult: 1.2
+  atr_take_profit_mult: 1.8
+  slippage_pips: 0.7
+  commission_per_lot: 3.5
+  execution_delay_bars: 1
+  mc_sims: 500
+hardware:
+  profile: ''
+  num_workers: 0
+  prefetch_factor: 4
+  val_num_workers: 0
+  val_prefetch_factor: 2
+  pin_memory: false
+  persistent_workers: false
+  thread_prefetch_batches: 4
+tracking:
+  wandb_project: forex-scaling-model
+  run_name: high-impact
+  no_wandb: true
+  auto_tune: true
+  dry_tune: true
+  ollama_auto_tune: false
+optuna:
+  auto_load: true
+  auto_launch: false
+  metric: val_sharpe
+  applied: true
+  model: haelt
+  curriculum_only: false
+paths:
+  checkpoint_dir: checkpoints/forex_3pair_2008_2025_haelt
+  data_cache: D:/forex_scaling_model/data/processed
+model:
+  name: haelt
+  all_models: false
+  hidden_size: 512
+  d_model: 512
+  nhead: 8
+  num_layers: 5
+  dropout: 0.151
+training:
+  lr: 0.00023
+  batch_size: 128
+  epochs: 2
+  resume: false
+  seq_len: 120

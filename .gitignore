@@ -1,0 +1,101 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.pytest_tmp/
+*.egg-info/
+dist/
+build/
+
+# Data (too large for git — store in Network Volume or cloud storage)
+data/raw/
+data/processed/
+*.parquet
+*.csv
+*.h5
+
+# Model artifacts (store in Network Volume)
+checkpoints/
+exports/
+*.pt
+*.pth
+*.pkl
+*.onnx
+
+# Logs
+logs/
+*.log
+runs/
+*.jsonl
+
+# Secrets
+.env
+.env.*
+*.key
+
+# Local environments / tooling
+.venv/
+.venv*/
+.cursor/
+.claude/
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+forex_scaling_model.zip
+
+# Local databases / tracking
+mlflow.db
+*.db
+
+# Root scratch/debug output (canonical copies live under logs/scratch/)
+test_out.txt
+dryrun_out.txt
+run1.txt
+missing_cols.txt
+
+# Root cleanup guardrails (archive useful copies under scripts/archive/)
+/patch*.py
+/fix_*.py
+/find_terms.py
+/test.py
+/promotion_*.json
+/parity_*.csv
+/scratch/
+/patch_archive/
+
+# Experiment tracking / coverage / local artifacts
+wandb/
+.coverage
+htmlcov/
+coverage.xml
+e2e_report.xml
+*.zarr/
+test_rl.html
+test_report_rl.html
+test_rl.zarr/
+
+# Scratch / debug / OS junk
+_scratch/
+debug_*.txt
+desktop.ini
+
+# Compact tick cache (large local data)
+data/compact/
+
+# Local tooling caches
+.agents/
+.opencode/
+vcpkg/

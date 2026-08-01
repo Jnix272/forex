@@ -1,0 +1,578 @@
+# ── Backtest simulation defaults (non-DRL walk-forward and Monte Carlo) ─────
+backtest:
+  atr_stop_mult: 1.2
+  atr_take_profit_mult: 1.8
+  commission_per_lot: 3.5
+  execution_delay_bars: 1
+  lots: 0.1
+  mc_sims: 500
+  min_confidence: 0.45
+  slippage_pips: 0.7
+  stop_pips: 12.0
+  take_profit_pips: 18.0
+# ── Post-training temperature scaling calibration to sharpen prob estimates ─
+calibration:
+  calibrate: true
+  overconf_penalty: true
+  overconf_threshold: 0.58
+  overconf_weight: 0.2
+# ── Adaptive training curriculum: seq_len, difficulty, feature-group unfreeze ─
+curriculum:
+  # ── Curriculum performance gate: advances seq_len/stage when Sharpe is stable,
+  #    stalls curriculum when Sharpe collapses ──────────────────────────────
+  adaptation:
+    advance_lr_mult: 1.0
+    collapse_drop: 0.15
+    collapse_lr_mult: 0.9
+    collapse_min_peak: 0.25
+    collapse_reversal_threshold: -0.1
+    min_epochs_per_stage: 1
+    min_stable_sharpe: 0.05
+    recovery_window: 2
+    sharpe_ema_alpha: 0.3
+    stable_window: 2
+  # ── Curriculum subset calibration: reject subsets that distort S/H/B prior ─
+  calibration:
+    max_class_prior_delta: 0.05
+    min_class_share: 0.05
+  chunk_early_stop_min_batches: 50
+  chunk_early_stop_patience: 3
+  # ── Difficulty stages: 0=easiest → filters training samples by difficulty ─
+  difficulty_schedule:
+  - epoch_start: 0
+    max_difficulty: 2
+  difficulty_spread_threshold: 1.5
+  feature_groups:
+    cross_asset:
+      always_on: false
+      epoch_unfreeze: 8
+      features:
+      - spread_us_de
+      - spread_us_jp
+      - spread_us_gb
+      - spread_us_au
+      - spread_us_ca
+      - spread_us_nz
+      - spread_de_gb
+      - spread_de_jp
+      - spread_us_ch
+      - carry_eur
+      - carry_jpy
+      - carry_gbp
+      - carry_aud
+      - carry_cad
+      - carry_nzd
+      - carry_eurgbp
+      - carry_eurjpy
+      - carry_chf
+      - carry_spot_forward
+      - yield_curve_slope
+      - corr_break_gold_DXY
+    execution_cost:
+      always_on: false
+      epoch_unfreeze: 2
+      features:
+      - spread_pips
+      - spread_zscore
+      - spread_percentile
+      - spread_widening_5m
+      - spread_widening_20m
+      - cost_to_atr
+      - expected_latency_ms
+    higher_timeframe:
+      always_on: false
+      epoch_unfreeze: 20
+      features:
+      - ret_5m
+      - rsi_5m
+      - atr_5m
+      - trend_slope_5m
+      - distance_to_vwap_5m
+      - volatility_regime_5m
+      - ret_15m
+      - rsi_15m
+      - atr_15m
+      - trend_slope_15m
+      - distance_to_vwap_15m
+      - volatility_regime_15m
+      - ret_1h
+      - rsi_1h
+      - atr_1h
+      - trend_slope_1h
+      - distance_to_vwap_1h
+      - volatility_regime_1h
+    # label_quality: DISABLED — features not yet implemented (see CODEBASE_HEALTH_AUDIT.md WIRE-001)
+    # label_quality:
+    #   always_on: false
+    #   epoch_unfreeze: 6
+    #   features:
+    #   - rolling_hit_rate_240
+    #   - rolling_label_sharpe_240
+    #   - recent_loss_cluster_30
+    #   - label_confidence_prior_240
+    #   - rolling_false_breakout_rate_240
+    macro:
+      always_on: false
+      epoch_unfreeze: 12
+      features:
+      - cot_net_hf
+      - cot_net_comm
+      - cot_extreme
+      - sentiment_raw
+      - sentiment_decayed
+      - fb_0
+      - fb_1
+      - fb_2
+      - fb_3
+      - fb_4
+      - fb_5
+      - fb_6
+      - fb_7
+      - fb_7
+    news:
+      always_on: false
+      epoch_unfreeze: 10
+      features:
+      - eco_surprise
+      - eco_revision
+      - news_ok
+      - pre_news
+      - post_news
+      - buzz
+      - cat_central_bank
+      - cat_inflation
+      - cat_labor
+      - cat_growth
+      - cat_geopolitical
+      - cat_commentary
+    market_regime:
+      always_on: false
+      epoch_unfreeze: 16
+      features:
+      - realized_vol_regime
+      - trend_quality
+    microstructure:
+      always_on: true
+      epoch_unfreeze: 0
+      features:
+      - ofi
+      - ofi_z
+      - ofi_l2
+      - kyles_lambda
+      - amihud_illiq
+      - realized_spread
+      - vpin
+    momentum:
+      always_on: true
+      epoch_unfreeze: 0
+      features:
+      - yield_momentum_5d
+      - yield_momentum_20d
+      - cot_hf_mom_4w
+    session:
+      always_on: true
+      epoch_unfreeze: 0
+      features:
+      - time_sin
+      - time_cos
+      - day_sin
+      - day_cos
+      - london_ny
+    volatility:
+      always_on: false
+      epoch_unfreeze: 4
+      features:
+      - vol_of_vol
+      - volatility_regime
+      - hurst_exponent
+      - noise_to_signal_60
+      - trailing_volatility_60
+  # ── Sequence-length schedule (bars per sample) ──────────────────────────
+  seq_schedule:
+  - epoch_start: 0
+    seq_len: 80
+# ── Data source, tick ingestion, and feature-pipeline config ────────────────
+data:
+  auto_rebuild_on_mismatch: true
+  chunk_size: 200000
+  corr_window: 20
+  corr_window_long: 60
+  dataset_build_workers: 2
+  end: '2025-12-31'
+  full_day_data: false
+  integrity_gate: true
+  momentum_window: 20
+  n_ticks: 20000000
+  pair: EURUSD
+  pair_align: inner
+  pair_embed_dim: 16
+  pairs:
+  - EURUSD
+  - USDJPY
+  - GBPUSD
+  parallel_window_workers: 1
+  real_data_window_days: 7
+  source: dukascopy
+  start: '2008-01-01'
+  use_cache: true
+  window_batch_days: 1
+# ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+direction_training:
+  label_smoothing: 0.05
+  max_pred_class_share: 0.8
+  min_pred_class_share: 0.05
+  min_recall: 0.001
+  min_true_class_share: 0.15
+  probe: true
+  probe_epochs: 2
+  probe_samples: 4096
+  use_mixup: true
+  use_volatility_sampler: true
+  warmup_epochs: 2
+# ── Knowledge distillation from a larger teacher model (disabled by default) ─
+distillation:
+  alpha: 0.5
+  enabled: false
+  student_model: haelt
+  teacher_ckpt: ''
+  teacher_model: mamba
+  temperature: 2.0
+# ── Diversity fine-tuning loss for ensemble members ────────────────────────
+diversity_loss:
+  same_role_mult: 2.0
+  weight: 0.1
+# ── Dukascopy / EODHD tick and cross-asset data download settings ───────────
+download:
+  check_missing_months: true
+  check_missing_scope: both
+  cross_asset: true
+  eodhd: false
+  eodhd_cross_asset: true
+  keep_going: true
+  ticks: true
+  verify: true
+  verify_fix: true
+  yearly: true
+# ── Distribution-drift detection (KS/PSI) for automated retraining triggers ─
+drift_detection:
+  auto_schedule: true
+  baseline_window_days: 90
+  enabled: true
+  ks_pvalue_threshold: 0.05
+  ks_stat_threshold: 0.05
+  live_window_days: 7
+  monitored_features:
+  - close
+  - log_ret_1
+  - log_ret_5
+  - atr_6
+  - atr_20
+  - rolling_vol_20
+  - ofi_20
+  psi_bins: 10
+  psi_threshold: 0.2
+  schedule_hours: 24
+# ── Ensemble: multi-member diversity fine-tuning + deployment ───────────────
+ensemble:
+  deploy: true
+  div_weight: 0.1
+  enabled: true
+  epochs: 10
+  explicit_diversity: true
+  member_dropout_jitter: 0.15
+  member_lr_jitter: 0.2
+  member_seed_offset: 997
+# ── Execution-model params: slippage estimation, latency budget ─────────────
+execution:
+  latency_baseline_ms: 50
+  slippage_liq_alpha: 0.3
+  slippage_spread_window: 120
+  slippage_vol_alpha: 0.5
+  slippage_vol_window: 120
+# ── Feature-ablation experiment config (specify groups or features to drop) ─
+feature_ablation:
+  drop_features: []
+  drop_groups: []
+  enabled: false
+  keep_groups: []
+  name: full_features
+# ── Feature cache: slow-changing columns (sentiment, COT, macro) ────────────
+feature_cache:
+  enabled: true
+  ofi_z_threshold: 2.0
+  regime_window: 60
+  slow_cols:
+  - sentiment_decayed
+  - eco_surprise
+  - hurst
+  - cot_net_hf
+# ── Feature store: on-disk registry with incremental materialization ────────
+feature_store:
+  auto_materialize: true
+  compression: zstd
+  data_root: features
+  default_strategy: eager_batch
+  enabled: true
+  incremental_lookback_bars: 100
+  job_queue:
+    enabled: false
+    max_workers: 2
+    poll_interval_sec: 60
+  registry_db: registry.db
+  root: data/feature_store
+# ── DataLoader worker and memory config (0 workers = main-process + thread prefetch) ─
+hardware:
+  num_workers: 0
+  persistent_workers: false
+  pin_memory: false
+  prefetch_factor: 4
+  profile: ''
+  thread_prefetch_batches: 4
+  val_num_workers: 0
+  val_prefetch_factor: 2
+# ── Model maturity stage (dev → paper → production) – gates promotion ──────
+maturity:
+  stage: paper
+# ── Primary model architecture (overridden by --model CLI flag) ──────────────
+model:
+  all_models: false
+  d_model: 256
+  dropout: 0.35
+  hidden_size: 256
+  name: haelt
+  nhead: 8
+  num_layers: 3
+# ── Live monitoring: drift gate, fail-open behaviour ────────────────────────
+monitoring:
+  drift_baseline_samples: 20000
+  drift_fail_open: false
+  drift_gate: false
+  drift_ks_pvalue_threshold: 0.05
+  drift_live_samples: 5000
+  drift_psi_threshold: 0.2
+# ── Multi-task loss: direction (CE) + return (Huber) + confidence (BCE) + Sharpe ─
+multitask:
+  class_balance_weight: 1.0
+  direction_weight_floor: 0.5
+  enabled: true
+  entropy_weight: 0.01
+  focal_gamma: 2.0
+  w_conf: 0.05
+  w_ret: 0.08
+# ── News/sentiment data sources (economic calendar, historical headlines) ───
+news:
+  economic_calendar_file: data/raw/eco_calendar/events.csv
+  historical_mode: full
+  historical_news_file: data/raw/news/historical_news_combined.parquet
+# ── Optuna hyper-parameter tuning: auto-load best config per model ──────────
+optuna:
+  auto_launch: false
+  auto_load: false
+  metric: val_loss
+# ── Filesystem paths for checkpoints and processed data ─────────────────────
+paths:
+  checkpoint_dir: checkpoints/forex_3pair_2008_2025_haelt
+  data_cache: ./data/processed
+# ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
+pretrain:
+  ablation: auto
+  ablation_models: tft,transformer,haelt
+  augmentations:
+    crop_ratio:
+    - 0.75
+    - 1.0
+    feature_drop_p: 0.2
+    jitter_std: 0.02
+    scaling_range:
+    - 0.85
+    - 1.15
+  batch: 256
+  blocks_per_epoch: auto
+  ema_decay: 0.996
+  enabled: true
+  epochs: 18
+  handoff_loss: 0.18
+  handoff_min_delta: 0.002
+  handoff_patience: 2
+  lr: 0.0001
+  mask_prob: 0.2
+  method: byol
+  min_epochs: 3
+  pred_dim: 128
+  projection_dim: 256
+  read_windows: 64
+  recon_hidden_dim: 512
+  regime_aware: true
+  sample_windows: 4096
+# ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
+quick:
+  enabled: false
+# ── Scheduled retraining: periodic re-train + auto-promote on drift ─────────
+retraining:
+  drift_feature_frac: 0.3
+  dry_run: false
+  enabled: true
+  extras:
+  - --epochs
+  - '40'
+  - --batch-size
+  - '128'
+  min_interval_days: 1
+  model_family: haelt
+  promote_on_complete: true
+  schedule_interval_days: 7
+# ── Risk management: Kelly sizing, drawdown halt, per-session position limits ─
+risk:
+  daily_loss_limit: 0.03
+  kelly_fraction: 0.25
+  max_drawdown_halt: 0.1
+  max_position_pct: 0.05
+  regime_scale:
+    ranging: 0.7
+    trending: 1.0
+    unknown: 0.3
+    volatile: 0.5
+  session_limits:
+    london:
+      max_lots: 2.0
+      max_open_trades: 6
+    ny:
+      max_lots: 2.0
+      max_open_trades: 6
+    asia:
+      max_lots: 1.0
+      max_open_trades: 3
+    "off":
+      max_lots: 0.0
+      max_open_trades: 0
+# ── Reinforcement learning (DQN / PPO) on top of supervised encoder ─────────
+rl:
+  algo: dqn
+  all_models: false
+  deploy: true
+  dqn:
+    batch: 64
+    eps_decay: 0.995
+    eps_end: 0.01
+    eps_start: 1.0
+    gamma: 0.99
+    lr: 0.0001
+    target_update: 100
+  enabled: true
+  encoder_obs: true
+  episode_len: 2048
+  episodes: 500
+  min_val_sharpe: -999.0
+  ppo:
+    gamma: 0.99
+    lr: 0.0003
+    n_steps: 2048
+  reward:
+    drawdown: 1.5
+    overtrade: 0.25
+    pnl: 1.0
+    tx_cost: 0.3
+  val_frac: 0.15
+# ── Trading strategy parameters ────────────────────────────────────────────
+strategy:
+  bar_freq: 1min
+  lookahead_bars: 30
+  mode: scalping
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+# ── Experiment tracking: W&B, run name, auto-tune ──────────────────────────
+tracking:
+  auto_tune: true
+  dry_tune: true
+  no_wandb: false
+  ollama_auto_tune: false
+  run_name: high-impact
+  wandb_project: forex-scaling-model
+# ── Supervised training hyper-parameters ───────────────────────────────────
+training:
+  amp: true
+  batch_size: 128
+  cross_asset_mode: auto
+  cross_asset_provider: auto
+  direction_weight: 0.75
+  early_stop_metric: sharpe
+  early_stop_min_delta: 0.01
+  epochs: 40
+  grad_accum_steps: 4
+  grad_clip: 0.75
+  label_method: rl_reward
+  label_smoothing: 0.05
+  loss: sharpe_huber
+  lr: 4.68e-06
+  lr_min_ratio: 0.08
+  lr_schedule: warmup_cosine
+  lr_warmup_epochs: 3
+  onecycle_max_lr_mult: 10.0
+  onecycle_pct_start: 0.1
+  patience: 6
+  resume: false
+  save_every: 5
+  seed: 1337
+  seq_len: 80
+  sharpe_annualization_factor: 325.0
+  sharpe_weight: 1.0
+  swa_enabled: true
+  swa_lr: 1.0e-05
+  swa_start_frac: 0.75
+  training_memory: true
+  use_mixup: true
+  use_volatility_sampler: true
+  val_split: 0.2
+  weight_decay: 0.001
+# ── Validation strategy: purged-embargo walk-forward ────────────────────────
+validation:
+  embargo_bars: 60
+  method: purged_embargo
+  min_train_size: 50000
+  n_splits: 7
+  purge_bars: 120
+# ── Walk-forward cross-validation ──────────────────────────────────────────
+walk_forward:
+  enabled: true
+  folds: 7
+# ── XGBoost baseline model config ──────────────────────────────────────────
+xgboost:
+  colsample_bytree: 0.8
+  early_stopping_rounds: 15
+  enabled: true
+  eval_metric: ''
+  feature_importance: true
+  feature_importance_top_n: 50
+  folds: 5
+  gamma: 0.1
+  learning_rate: 0.05
+  max_depth: 6
+  max_samples: 500000
+  min_child_weight: 3
+  n_estimators: 300
+  objective: ''
+  reg_alpha: 0.05
+  reg_lambda: 1.0
+  sequence_mode: temporal
+  subsample: 0.8
+  task: classification
+  tune: false
+  tune_trials: 20
+
+
+# ── CatBoost baseline model config ─────────────────────────────────────────
+catboost:
+  enabled: true
+  task: classification
+  sequence_mode: temporal
+  iterations: 300
+  depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bylevel: 0.8
+  l2_leaf_reg: 1.0
+  early_stopping_rounds: 15
+  folds: 5
+  tune: false
+  tune_trials: 20
+  max_samples: 500000

@@ -1,0 +1,434 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Added
+
+- **2026-07-03 — Economic Prior & News Category Features** (`features/feature_engineering_pl.py`): Wired `eco_prior` (prior economic reading) into `build()` via asof join, computing `eco_revision` (actual − prior) as a new feature. Wired `news_cats` (category one-hot flags: `cat_central_bank`, `cat_inflation`, `cat_labor`, `cat_growth`, `cat_geopolitical`, `cat_commentary`) via asof join. Both were accepted as parameters but previously ignored.
+
+- **2026-07-03 — Config Preflight Validation** (`training/config_validate.py`): Added range validation for critical hyperparameters (`lr`, `epochs`, `batch_size`, `patience`, `seq_len`), warmup-vs-epochs ratio check (catches warmup ≥ 50% of epochs), patience-vs-effective-training-epochs check (warns if early stopping can never trigger), model name validation against `SUPPORTED_SUPERVISED`, and loss function validation against known set.
+
+- **2026-07-03 — Yield Curve Slope Deduplication** (`features/feature_engineering_pl.py`): `yield_curve_slope` (from macro builder) and `us_2s10s_spread` (from cross-asset builder) are the same US10Y−US2Y calculation. Added bidirectional alias so both column names are always available regardless of which builder ran first.
+
+- **2026-07-03 — Cross-Asset Provider Failure Logging** (`data/cross_asset.py`): Added warning log when all providers fail for a cross-asset symbol, replacing silent `continue`.
+
+### Fixed
+
+- **2026-07-03 — TemperatureScaler.calibrate Broken** (`models/architectures.py`): `@torch.no_grad()` was wrapping the entire `calibrate()` method including the LBFGS optimizer, making temperature calibration a complete no-op (gradients never reached the optimizer). Fixed by scoping `torch.no_grad()` to only the inference loop; LBFGS optimization now receives gradients correctly.
+
+- **2026-07-03 — FinBERT `fb_*` Columns Overwritten** (`features/feature_engineering_pl.py`): Zero-filled `fb_*` placeholder columns were unconditionally created after `sentiment_tiers()` computed them, erasing actual FinBERT embeddings. Fixed to only create placeholders for columns not already present.
+
+- **2026-07-03 — `sanitize_frame` Clipped Prices to [-20, 20]** (`features/feature_engineering_pl.py`): All float columns including raw prices, volume, spread, and latency were clipped to `[-20, 20]`, destroying critical data. Added `_SANITIZE_NO_CLIP` exclusion set for core price/volume/spread/latency/COT columns.
+
+- **2026-07-03 — `liquidity_vacuum` Crash Without Bid/Ask** (`features/feature_engineering_pl.py`): `liquidity_vacuum()` expression crashed when `bid_close`/`ask_close` columns were absent. Added conditional check, falling back to zero-filled placeholder.
+
+- **2026-07-03 — Single-Pair Sentiment Pipeline Missing** (`training/train_gpu.py`): The single-pair dataset build path never initialized `SentimentPipeline`, silently dropping all FinBERT features. Added initialization and passing to the chunk processing function.
+
+- **2026-07-03 — COT Data Ignored in Feature Pipeline** (`features/feature_engineering_pl.py`): `add_cot_features()` was never called in `build()` despite COT data being loaded and passed as a parameter. Added the call with fallback zero-fill for `cot_net_hf`, `cot_net_comm`, `cot_hf_mom_4w`, `cot_extreme`.
+
+- **2026-07-03 — `live_engine.py` Import Error** (`trading/live_engine.py`): `run_pipeline` was imported from `data.fetch_oanda_sentiment` but the function is named `run_collector`. Fixed the import.
+
+- **2026-07-03 — `run_fast.yaml` Broken Probe** (`config/run_fast.yaml`): `lr_warmup_epochs: 8` with `epochs: 10` meant 80% of training was warmup; `patience: 10` could never trigger early stopping. Changed to warmup=2, patience=5.
+
+- **2026-07-03 — `run_ubuntu.yaml` Wrong Feature Cache Key** (`config/run_ubuntu.yaml`): `slow_cols` listed `cot_net` (legacy column) instead of `cot_net_hf` (the actual expensive COT feature), causing `cot_net_hf` to be recomputed on every trigger event.
+
+- **2026-07-03 — Cross-Asset Curriculum Defeated** (`config/run.yaml`): `cross_asset` feature group had `always_on: true` which made `epoch_unfreeze: 8` a no-op, bypassing progressive unfreezing. Changed to `always_on: false`.
+
+- **2026-07-03 — `run_ubuntu.yaml` Missing Feature Groups** (`config/run_ubuntu.yaml`): Missing `execution_cost`, `market_regime`, `higher_timeframe`, and `label_quality` feature groups, causing those features to be unmasked from epoch 0 instead of their intended curriculum schedule.
+
+- **2026-07-03 — `diversity_loss` YAML Keys Silently Ignored** (`training/train_gpu.py`): `diversity_loss.weight` and `diversity_loss.same_role_mult` had no `_YAML_MAP` entries, so YAML edits to these keys had zero effect. Added mappings.
+
+- **2026-07-03 — Backtest Stop/TP Hardcoded** (`scripts/backtest_model.py`): `--stop-pips` and `--take-pips` defaulted to hardcoded 15.0/30.0 instead of reading from `BACKTEST` config (12.0/18.0). Now reads from config.
+
+- **2026-07-03 — Normal-Mode `seq_len` Mismatch** (`config/strategy_profiles.py`): Normal strategy profile had `seq_len: 96` but models are trained at `seq_len: 60`, causing shape errors at inference. Aligned to 60.
+
+- **2026-07-03 — `nhead` Not Passed to EXPERTEncoder** (`training/train_gpu.py`): The builder lambda never passed `nhead`; EXPERT always used the constructor default (8) regardless of YAML/profile config. Now passes `args.nhead`.
+
+- **2026-07-03 — `dim_ff` Not Wired for iTransformer** (`training/train_gpu.py`): The iTransformer builder never passed `dim_ff`; feedforward dimension always defaulted to 256. Now passes the configured value.
+
+- **2026-07-03 — GNN `heads` Not Mapped Through Profile** (`training/train_gpu.py`): `_normalize_architecture_profile` didn't extract `heads` → `nhead` for GNN. Config/YAML changes to GNN heads had no effect. Added mapping.
+
+- **2026-07-03 — `build_model` Missing Aliases** (`models/architectures.py`): The introspection-based `build_model` factory silently dropped `num_layers` for HAELT (expects `n_layers`), `hidden_size` for HAELT (expects `lstm_hidden`), `num_layers` for TFT (expects `lstm_layers`), and `dim_feedforward` for iTransformer (expects `dim_ff`). Added comprehensive bidirectional alias mapping.
+
+- **2026-07-03 — Zarr Init Inconsistency** (`training/train_gpu.py`): `y_cls` was created with `shape=(0,)` + `append()` while `X`/`y`/`close`/`atr`/`spread` used actual shape + `[:]` assignment. Standardized to match. Added `pq_seq`/`diff_seq` None guards in initial-create and append paths (were only guarded in resume path).
+
+- **2026-07-03 — ThreadPoolExecutor Leak** (`training/train_gpu.py`): `ThreadPoolExecutor` for parallel tick loading was not used as a context manager; an exception during window processing would leak threads. Wrapped in `try/finally` with `shutdown()` in the finally block.
+
+- **2026-07-03 — `run_ubuntu.yaml` Config Drift** (`config/run_ubuntu.yaml`): Aligned dropout (0.1→0.25), loss function (`cross_entropy`→`sharpe_huber`), and warmup (8→3) to match the tuned `run.yaml` production values. Fixed stale "BYOL" comment on masked pretraining.
+
+- **2026-07-03 — `run_normal.yaml` Warmup** (`config/run_normal.yaml`): `lr_warmup_epochs: 8` → `3` to match the tuned value from `run.yaml`.
+
+- **2026-07-03 — Python 3.9 Compatibility** (`config/strategy_profiles.py`): `str | None` union syntax (PEP 604, Python 3.10+) → `Optional[str]` for backward compatibility.
+
+- **2026-07-03 — Dead `CrossAssetFeatures.ASSETS` Dict Removed** (`features/feature_engineering_pl.py`): Hardcoded synthetic asset parameters were never used by any caller after real data loading was implemented.
+
+- **2026-07-03 — Duplicate Sentiment Timestamp Cast Removed** (`features/feature_engineering_pl.py`): `sentiment` DataFrame was cast to `Datetime("ns", "UTC")` twice — once at the top of `build()` and again before joining. Removed the duplicate.
+
+- **2026-07-03 — `CROSS_ASSET` Related Pair References** (`config/settings.py`): `USDCAD` and `AUDUSD` were referenced as `related_pair` values but aren't in `DATA["pairs"]`. Changed to `"all"`.
+
+- **2026-07-03 — GNN Config Incomplete** (`config/models/gnn.yaml`, `config/models.py`): Added missing `node_features: 32`, `nhead: 4` to YAML; added `learning_rate` and `seq_len` to Python profile dict.
+
+- **2026-07-03 — HAELT `build_model` Halving Parity** (`models/architectures.py`): Added HAELT-specific `d_model`/`nhead`/`lstm_hidden` halving logic to the introspection-based `build_model` factory so that `smoke_test.py` produces the exact same model dimensions as `train_gpu.py`. Previously the two builders diverged, meaning smoke tests validated a model that was twice as wide as the one actually trained.
+
+- **2026-07-03 — Config Re-Exports** (`config/__init__.py`): Added re-exports of `TRAINING`, `PATHS`, `DATA`, `LABELING`, `PRETRAIN`, `RISK`, `MODELS`, and `FEATURE_MASK` so consumers can use `from config import TRAINING` instead of verbose `from config.settings import TRAINING`.
+
+- **2026-07-03 — Explicit `pretrain_loss` Key** (`config/settings.py`): Added `"pretrain_loss": "huber"` to `PRETRAIN` dict so the pretrain loss override is explicit configuration rather than a hidden swap buried inside `train_gpu.py`.
+
+- **2026-07-03 — Feature Mask Baseline Documented** (`config/feature_mask.py`): Added docstring clarifying that all-True is the intentional development baseline, and linked `fb_0..fb_7` projection dimensions to `SENTIMENT["finbert_proj_dim"]`.
+
+### Fixed
+
+- **2026-07-03 — HAELT `n_transformer_layers` Naming Inconsistency** (`config/models.py`, `training/train_gpu.py`): Python config used `n_transformer_layers` while YAML and constructor use `num_layers`/`n_layers`. Renamed to `num_layers` in Python config; updated `_normalize_architecture_profile` to accept both names for backward compatibility.
+
+- **2026-07-03 — TFT `attention_head_size` Naming Inconsistency** (`config/models.py`, `training/train_gpu.py`): Python config used `attention_head_size` while YAML and constructor use `nhead`/`heads`. Renamed to `nhead` in Python config; updated `_normalize_architecture_profile` to accept both names for backward compatibility.
+
+- **2026-07-03 — GNN Dead `correlation_threshold` Removed** (`config/models.py`, `models/architectures.py`): Removed dead `correlation_threshold: 0.3` from GNN config (never used; GNN learns adjacency via `adj_logits`). Cleaned stale reference in `GNNCrossAsset` docstring.
+
+### Changed
+
+- **2026-07-03 — Dead Config Annotated** (`config/settings.py`, `config/models.py`, `config/run.yaml`): Annotated `GOVERNANCE`, `ALERTS`, `VALIDATION` dicts as TODO/not-yet-integrated. Annotated Mamba `d_state`/`d_conv`/`expand` as reserved for full Mamba. Annotated EXPERT `use_conv_ffn`/`no_pos_encoding` as hardcoded design decisions. Annotated `onecycle_*` params as fallback-only. Added halving note to `haelt.yaml`.
+
+### Added (earlier 2026-07-03)
+
+- **2026-07-03 — Batch FinBERT Prefetch** (`features/finbert_sentiment.py`, `data/historical_news.py`, `training/train_gpu.py`): Added upfront headline cache-warming so the per-window loop never waits on model inference. `collect_headlines_for_range()` loads the full news parquet once via DuckDB, filters by pair currencies, and returns unique headline strings. `SentimentPipeline.prefetch_headlines()` pre-scores all uncached headlines in batches of 256 and flushes to disk. The multi-pair dataset builder calls prefetch before the window loop when `historical_news_mode=full`.
+
+- **2026-07-03 — Parallel Date Window Loading** (`training/train_gpu.py`, `config/run.yaml`): Added `--dataset-build-workers` CLI flag and `data.dataset_build_workers` YAML key (default `2`). The multi-pair window loop now uses a `ThreadPoolExecutor` with a look-ahead queue: while the current window builds features/labels, the next N windows' ticks are loading in parallel threads. Sequential appending to zarr is preserved.
+
+- **2026-07-03 — `real_data_window_days` YAML Mapping** (`training/train_gpu.py`, `config/run.yaml`): Wired `data.real_data_window_days` into the YAML-to-argparse config mapping. Set to `7` in `run.yaml` so the window size is controlled from config without needing `--real-data-window-days` on the CLI.
+
+### Fixed (earlier 2026-07-03)
+
+- **2026-07-03 — Cross-Asset Provider** (`config/run.yaml`): Changed `cross_asset_provider: yahoo` → `auto`. Yahoo-only skipped FRED bond yields (DE10Y, JP10Y, US2Y, etc.); `auto` tries Stooq → Yahoo → FRED → EODHD in order per asset, resolving all 25 series including G10 yields.
+
+- **2026-07-03 — Cross-Asset Merge Bug** (`features/feature_engineering_pl.py`): Changed `if k in merged:` guard to unconditional `merged[k] = v`. Real series from `load_cross_asset_panel()` (e.g. SILVER, NATGAS, YIELD_CURVE_SLOPE, international yields) were silently dropped if not present in the hardcoded synthetic `ASSETS` dict. Now all real data replaces or extends synthetic placeholders.
+
+- **2026-07-03 — MacroYieldFeatureBuilder Wired into Training** (`features/feature_engineering_pl.py`): `FeatureEngineer` now instantiates `MacroYieldFeatureBuilder` and calls `.build()` after `CrossAssetFeatures`, joining yield spreads (`spread_us_de`, `spread_us_jp`, etc.), carry signals (`carry_eur`, `carry_jpy`, etc.), yield momentum (`yield_momentum_5d/20d`), and `yield_curve_slope` — matching the curriculum feature group names in `run.yaml`. Previously only the live engine imported this builder; training produced different column names (`yield_spread_us_de_10y`).
+
+- **2026-07-03 — `gold_dxy_corr_break` → `corr_break_gold_DXY` Alias** (`features/feature_engineering_pl.py`): Added column alias after cross-asset build so the curriculum feature group `cross_asset` can reference `corr_break_gold_DXY` without a name mismatch. Also added zero-fill `carry_spot_forward` placeholder.
+
+- **2026-07-03 — Removed Debug Pipeline Logs** (`training/train_gpu.py`): Removed `[Debug] Pipeline run start/end` print statements that fired per window per pair, reducing log I/O during dataset builds.
+
+---
+
+## [2026-06-29] - Curriculum-Aware Optuna Tuning & Integrated Three-System Training
+
+### Added
+
+- **2026-06-29 - True Walk-Forward Out-Of-Sample Backtester** (`scripts/backtest_true_walk_forward.py`): Implemented a mathematically rigorous backtester that completely eliminates in-sample data leakage for walk-forward trained models. It loads the full dataset, precisely reconstructs the training fold boundaries, iteratively loads the optimal checkpoint for each era, and stitches the unseen validation predictions into a single, continuous 15+ year equity curve. This guarantees every trade taken during the backtest is strictly out-of-sample.
+
+- **2026-06-29 - Curriculum-Aware Optuna Tuning** (`scripts/optuna_tune.py`, `config/models.py`): Upgraded Optuna to tune the *shape and dynamics* of the curriculum instead of a flat static `seq_len`. Each trial now searches 8 curriculum parameters:
+  - `cur_seq_start` ΓÇö starting sequence length (20 / 30 / 45 depending on model)
+  - `cur_seq_ramp_epoch` ΓÇö epoch at which the sequence length begins growing (6 / 10 / 14 / 20)
+  - `cur_seq_target` ΓÇö the final sequence length ceiling (45 / 60 / 90 / 120)
+  - `cur_collapse_drop` ΓÇö how aggressively the Auto-Tuner stall fires (0.10 / 0.15 / 0.20 / 0.25)
+  - `cur_collapse_min_peak` ΓÇö minimum positive Sharpe peak required before stalling kicks in (0.15 / 0.25 / 0.35)
+  - `cur_advance_lr_mult` ΓÇö LR decay when advancing to harder market difficulty (0.75 / 0.85 / 0.95)
+  - `cur_collapse_lr_mult` ΓÇö LR decay when a Sharpe collapse is detected (0.70 / 0.80 / 0.90)
+  - `cur_stable_window` ΓÇö consecutive stable epochs needed before advancing difficulty (2 / 3 / 4)
+  
+  Optuna's chosen params are converted to a concrete 3-step `seq_schedule` (start ΓåÆ midpoint ΓåÆ target) and written into the per-trial YAML config so Curriculum Adaptation executes the schedule Optuna designed, while the Heuristic Auto-Tuner guards against collapse at runtime. This resolves the previous conflict where `curriculum.seq_schedule` overrode Optuna's `--seq-len` flag entirely. All three systems now work together: **Optuna designs ΓåÆ Curriculum executes ΓåÆ Auto-Tuner guards**.
+
+- **2026-06-29 - OPTUNA_MODEL_OVERRIDE Env Var Support** (`config/models.py`): Updated `architecture_config()` to read `OPTUNA_MODEL_OVERRIDE` from the environment and merge any JSON-encoded overrides on top of the base model config. This allows Optuna trial subprocesses to inject architecture-specific parameters (e.g. `n_transformer_layers`, `d_state`) that have no corresponding CLI flag in `train_gpu.py` without requiring temporary YAML config changes.
+
+### Fixed
+
+- **2026-06-29 - Promotion Gate Backtest Data Source** (`training/train_gpu.py`, `scripts/backtest_model.py`): Fixed the `[PromotionGate] Execution backtest failed: Not enough data` error caused by `run_execution_backtest` hardcoding `source="historic"`, which is not a valid source in `ForexDataManager`. The invalid source caused a fallback to synthetic data generation for the current date, producing 0 rows after the holdout date slice was applied. Added `data_source` argument to `run_execution_backtest` (defaulting to `"dukascopy"`) and propagated it from `train_gpu.py`'s `_run_promotion_gate` so the correct live data source is always used for holdout backtesting.
+
+- **2026-06-29 - LR Warmup / Patience Structural Bug** (`training/train_gpu.py`, `config/run.yaml`): Fixed a three-part structural misconfiguration where models were early-stopping *during* the LR warmup ramp, producing `BestEpoch=0` results (meaning the pretrained model was better than anything the fine-tuner managed):
+  1. **`lr_warmup_epochs: 8 ΓåÆ 3`** (`config/run.yaml`): With folds running only 5ΓÇô15 epochs, the 8-epoch warmup consumed the entire training budget before the LR ever reached its target value. Reduced to 3 so the peak LR is reached well before early-stop fires.
+  2. **`lr: 1.2e-5 ΓåÆ 2.5e-5`** (`config/run.yaml`): Warmup starts at `lr / 100`, so a low `lr` caused LRs of `~1e-7` during warmup ΓÇö too small to produce any gradient signal. Raised the peak to give the warmup ramp useful values from epoch 1 onward.
+  3. **`patience: 10 ΓåÆ 7`** (`config/run.yaml`): With warmup done at epoch 3, the effective patience budget is `patience ΓêÆ warmup_epochs`. Reduced from 10 to 7 to keep the effective post-warmup patience at 4 meaningful epochs.
+  4. **Warmup-gated patience counter** (`training/train_gpu.py`, line ~7988): Added a hard gate so `no_improve` only increments after `ep >= lr_warmup_epochs`. The patience counter previously ticked unconditionally from epoch 0, meaning the model could exhaust its entire patience budget while still in warmup and early-stop before the LR had any chance to stabilize.
+
+- **2026-06-29 - Auto-Tuner LR Decay Erased by Scheduler Bug** (`training/train_gpu.py`): Fixed a critical bug where the Auto-Tuner's manual LR adjustments (`param_group['lr'] *= multiplier`) upon curriculum stalls or advances were being completely erased within milliseconds. Because `warmup_cosine` uses PyTorch's `LambdaLR` (which computes the LR purely as a function of the global step count applied to `scheduler.base_lrs`), the very next batch's `scheduler.step()` would instantly overwrite the optimizer's active LR back to the scheduled value. Fixed by applying the Auto-Tuner's multiplier to `scheduler.base_lrs` as well, ensuring curriculum-driven LR changes persist through the step-based schedule.
+
+## [2026-06-21] - Execution-Aware Promotion & Dynamic Tuning
+
+
+### Added
+
+- **2026-06-27 - Optuna Deep Tuning Script** (`scripts/optuna_tune.py`): Expanded the dedicated Bayesian optimization workflow for neural architectures (TFT, HAELT, Transformer) into a stronger trainer-aligned tuner. It now uses Sharpe-aware or loss-aware checkpoint-history objectives, model-specific search spaces, hardware-safe batch-size constraints for 9 GB VRAM systems, training-control parameter search (`direction_weight_floor`, `focal_gamma`, `class_balance_weight`), cheap vs deep tuning modes, Optuna pruning from live training signals, ranked study reports under `logs/optuna/`, SQLite study databases stored under `logs/optuna/`, clean exported best-run YAML configs, and optional top-K confirmation reruns with fuller walk-forward CV.
+- **2026-06-27 - Promotion Gate Holdout Window And Backtest Diagnostics Fix** (`training/train_gpu.py`, `scripts/backtest_model.py`): Fixed promotion-gate execution backtests so the forward holdout window is derived from the training data date range instead of wall-clock run timestamps. This prevents promotion from accidentally backtesting against a near-empty current-date window. Also expanded backtest failure diagnostics to report requested dates, sequence length, accepted pair counts, base bar counts, and per-pair rejection reasons when the gate returns `Not enough data` or `No trades generated`.
+
+- **2026-06-27 - Dynamic Auto-Tuner Heuristics for Batch Size & Seq Len** (`training/train_gpu.py`): Expanded the `_auto_tune_next_run` logic to dynamically mutate `batch_size` and `seq_len` for the next architecture in the sweep based on the stability of the previous model. The system will now automatically increase batch size and decrease sequence length if it detects excessive curriculum stalls, or strictly increase sequence length if a model trains with perfect stability and no overfitting.
+
+- **2026-06-27 - Resume Routing And Pretrain Stability Fixes** (`training/train_gpu.py`): Added strict baseline-ablation completion checks so `--resume` no longer re-enters `baseline_tft` once all expected baseline fold checkpoints exist. Resume now prefers existing supervised fold checkpoints (for example `tft_fold5_last.pt`) over restarting pretraining, and all-model startup banners now print `Mode: ALL_MODELS` plus the active queue instead of the stale default `model.name`. Also capped regime-aware TSCL extreme-window oversampling during pretraining so it no longer tries to duplicate nearly the entire sampled block and crash with multi-gigabyte NumPy allocations.
+- **2026-06-26 - Non-Fatal W&B Logging** (`training/train_gpu.py`): Wrapped W&B metric and summary updates in best-effort helpers so a W&B service disconnect (`connection was forcibly closed by the remote host`) disables W&B logging for the run instead of crashing training. Local logs, TensorBoard, checkpoints, and JSON artifacts remain authoritative.
+- **2026-06-27 - Active Trainer Bug Sweep** (`training/train_gpu.py`): Finished the active all-model trainer path cleanup by replacing remaining direct W&B metric/summary calls with safe wrappers, removing the stale validation confidence-filter code path entirely, and wiring multitask anti-collapse YAML/CLI settings (`class_balance_weight`, `entropy_weight`, `direction_weight_floor`, `focal_gamma`) into the actual `MultiTaskLoss` used during training.
+- **2026-06-27 - All-Models Queue Recovery** (`training/train_gpu.py`): Restored the active all-model execution path so it no longer hard-excludes HAELT and TFT, added the missing `_parse_pretrain_ablation_models()` runtime helper, and restored `--models` plus `--pretrain-ablation-models` CLI filtering for targeted architecture runs and baseline-proof selection.
+- **2026-06-27 - Resume-Safe Pretrain Baseline Ablation** (`training/train_gpu.py`): Baseline/no-pretrain ablation is now permanently resume-aware across the trainer's active all-model path. Fresh runs train the baseline from scratch with `base_args.resume=False`; resume runs load completed baseline fold metrics from existing config artifacts and never resume `BASELINE_*` checkpoints. If baseline configs are incomplete during resume, baseline training is skipped instead of restarted, and final ablation reporting only runs when real baseline metrics are available.
+- **2026-06-26 - Transformer Pretraining Recipe Change** (`config/models.py`): Switched the Transformer model recipe from masked reconstruction pretraining to TSCL so the recipe matches the code's recommended `byol_or_tscl` family for generic long-range sequence models. This applies to the next fresh Transformer run.
+- **2026-06-26 - HAELT Pretraining Recipe Fix** (`config/models.py`): Switched HAELT from TSCL to masked reconstruction pretraining to match its recommended `masked_or_byol` family. This applies to the next fresh HAELT run.
+- **2026-06-25 - Stronger Direction-Head Anti-Collapse Loss** (`models/architectures.py`, `training/train_gpu.py`, `config/run.yaml`): Reworked the multitask loss so `y_conf` no longer erases direction learning on low path-quality samples. Direction CE now uses a configurable floor weight (`direction_weight_floor: 0.35`) while return/confidence losses still respect the original confidence weighting, and the direction head supports focal CE (`focal_gamma: 1.5`) to focus on hard sell/hold/buy examples. This replaces the too-weak entropy-only behavior that could still produce flat or negative fold Sharpe after the previous anti-collapse change.
+- **2026-06-24 - Direction-Head Anti-Collapse Training Fix** (`models/architectures.py`, `training/train_gpu.py`, `config/run.yaml`): Added configurable multitask direction-head class-prior balancing and entropy pressure to prevent all-buy/all-sell validation collapse while keeping the existing CE/return/confidence objective. Validation now records predicted and true sell/hold/buy class counts in epoch metrics, TensorBoard, and W&B so class collapse is visible immediately. Fixed the startup `NameError: MULTITASK is not defined` by using safe argparse defaults. After TensorBoard diagnostics showed the first weights were too weak, strengthened `config/run.yaml` to `class_balance_weight: 0.20` and `entropy_weight: 0.03`.
+- **2026-06-24 - Baseline/Main Training Artifact Separation** (`training/train_gpu.py`): Pretrain-ablation baseline proof runs now write under each model's `baseline/` subfolder instead of mixing `baseline_*` checkpoints beside the main pretrained model checkpoints. The main training path remains in the model folder for promotion, deployment, and downstream lookup compatibility.
+- **2026-06-24 - All-Models Training Banner Fix** (`training/train_gpu.py`): Fixed the startup banner so all-model recipe runs display `Mode: ALL_MODELS` plus the model queue instead of showing the default `model.name` (for example `MAMBA`) while the active phase is training another architecture such as TFT.
+- **2026-06-22 - Fresh Training Controls** (`training/train_gpu.py`, `config/run.yaml`): Added explicit `--no-resume` and `--no-training-memory` switches so clean baseline/fresh runs can bypass checkpoint resume and historical training-memory nudges. Set the main run config to `resume: false` so the default command starts from fresh weights unless resume is explicitly requested.
+- **2026-06-22 - Full Auto-Tune Setup** (`training/train_gpu.py`, `config/run.yaml`): Promoted auto-tuning from a late main-run heuristic into a config-controlled training phase artifact. `tracking.auto_tune`, `tracking.dry_tune`, and `tracking.ollama_auto_tune` are now YAML-driven; baseline pretrain-ablation runs write dry-run proposal JSON for proof without mutating config, while the final main run can still apply approved heuristic nudges.
+- **2026-06-22 - Auditable Training Memory** (`training/training_memory.py`, `training/train_gpu.py`, `tests/test_training_memory.py`): Routed startup training-memory nudges through proposal artifacts under `logs/auto_tune/` before any LR/dropout/patience/epoch changes are applied. If proposal writing fails, memory skips the nudge instead of silently mutating args. Walk-forward runs now update memory from merged fold history instead of only the last fold.
+- **2026-06-22 - Curriculum Sharpe-Stall Guard** (`training/train_gpu.py`): Fixed the adaptive curriculum stall logic so negative or weak Sharpe peaks no longer trigger "Sharpe collapsed" stalls. The curriculum now only freezes sequence length and reduces LR after a meaningful positive Sharpe peak (`>= 0.25`) drops by at least `0.15`.
+- **2026-06-22 - Improved Curriculum Adaptation** (`training/train_gpu.py`, `config/run.yaml`): Made curriculum progression explicitly validation-driven and configurable. Added `curriculum.adaptation` thresholds for stable-window advancement, minimum stable Sharpe, collapse detection, and LR multipliers. Training now logs active sequence length, difficulty stage, stalls, and richer transition events to TensorBoard/W&B and `training_control_report.json`.
+- **2026-06-22 - Clean Artifact Folder Names** (`training/train_gpu.py`, `training/training_memory.py`, `monitoring/discord_alerts.py`, `config/run.yaml`): Standardized future filesystem artifact names on lowercase slug paths. `tracking.run_name` is now `high-impact`, all-model checkpoints now use `checkpoints/forex_3pair_2008_2025_all_models`, and logs/TensorBoard/profile/auto-tune/training-memory artifact names use sanitized run/model slugs even if display names contain spaces.
+- **2026-06-23 - Self-Improving Training Memory Context** (`training/train_gpu.py`, `training/training_memory.py`, `tests/test_training_memory.py`): Expanded training history and memory updates with best-epoch context, including LR, sequence length, difficulty stage, curriculum stalls, and training-control warnings. This lets future training-memory suggestions learn from the curriculum state at the actual Sharpe peak instead of only storing the peak metric.
+- **2026-06-23 - Pair Readiness Drop-Reason Buckets** (`training/train_gpu.py`): Expanded `<cache>_pair_readiness_report.json` with `dropped_bars_by_reason`, `dropped_sequences_by_reason`, and `label_filter_counts`. The readiness gate now attributes low-quality drops to weekend/holiday, dead-bar, spread, ATR/volatility, news blackout, label filters, zero-feature windows, invalid direction labels, invalid reward labels, and path-quality filters.
+- **2026-06-23 - Diverse Model Recipes Runner** (`scripts/train_diverse_recipes.py`): Upgraded the diverse-recipes script from a basic same-settings loop into a production wrapper. It now runs controlled HAELT/Mamba/TFT recipes with distinct loss/sequence settings, isolated checkpoint folders, clean resume defaults, optional cache rebuild behavior, dry-run support, pass-through training args, and `diverse_recipe_manifest.json` summary output.
+- **2026-06-23 - Actual All-Models Training Selection** (`training/train_gpu.py`): Fixed `--all-models` so it no longer silently excludes HAELT and TFT. Added `--models transformer,expert` style filtering for targeted multi-model training through the main trainer.
+- **2026-06-23 - Actual Diverse Recipe Training Guard** (`training/train_gpu.py`, `scripts/train_diverse_recipes.py`): Added `--no-all-models` and wired it into every diverse recipe command so recipe runs train the selected architecture only, even when `config/run.yaml` has `model.all_models: true`.
+- **2026-06-23 - Model-Specific Recipes In All-Models Training** (`config/models.py`, `training/train_gpu.py`, `improvement_plan.md`): Added real per-architecture training recipes to the main all-model path. TFT, Transformer, HAELT, Mamba, GNN, and Expert now carry explicit recipe names, loss choices, early-stop metric, sequence length, learning rate, pretrain method, and pretrain epoch settings, while explicit CLI flags still override profile-managed fields.
+- **2026-06-23 - Selective Pretrain Baseline Proof** (`training/train_gpu.py`, `config/run.yaml`): Added `pretrain.ablation_models` and `--pretrain-ablation-models` so `pretrain_ablation: auto` only runs no-pretrain baseline proof for selected architectures. The default proof set is now TFT, Transformer, and HAELT; Mamba, GNN, and Expert train directly unless explicitly included.
+- **2026-06-23 - Same-Holdout Model Comparison And Feature Ablation Reports** (`training/train_gpu.py`, `config/run.yaml`): Added `model_comparison.json`, updated after each model's promotion-gate pass, to rank models on the shared forward holdout with validation and execution metrics in one place. Added config/CLI-controlled feature ablation masks plus per-model `*_feature_ablation_report.json` artifacts for controlled runs such as no-news, no-cross-asset, and price/vol-only.
+- **2026-06-23 - Production Readiness Reports And Verified ONNX Deployment** (`training/train_gpu.py`, `validation/promotion_gate.py`): Expanded pair-readiness reports with per-pair hourly coverage, missing-hour counts, and samples alongside existing drop-reason buckets. Tightened production deployment so checkpoints are promoted only after the candidate ONNX export and feature schema pass verification; deployment artifacts now record ONNX/schema verification details. The shared C++ ONNX deployment helper used by ensemble/RL exports now verifies ONNX/schema before atomic promotion as well.
+- **2026-06-23 - CUDA-Safe NumPy Conversion Fixes** (`scripts/backtest_model.py`, `scripts/compare_models.py`, `scripts/train_rl.py`, `models/rl_advanced.py`): Fixed tensor-to-NumPy conversions in backtest/comparison/RL helper paths by detaching and moving tensors to CPU first. This prevents CUDA runtime failures during promotion-gate backtests and model comparison runs.
+- **2026-06-23 - OANDA Removed From Active Training Path** (`training/train_gpu.py`, `scripts/run_feature_engineering.py`, `improvement_plan.md`): Removed the unused training-side OANDA ablation hook and stopped standalone feature generation from loading/passing OANDA sidecars. OANDA remains prototype-only until production sidecar storage, leakage/staleness checks, mock-data safety, and ablation proof are complete.
+- **Execution-Aware Promotion Gate** (`training/train_gpu.py`, `scripts/backtest_model.py`): Upgraded the simple label-proxy evaluation to a full execution-aware backtest during model promotion. The gate now computes realistic metrics (Sharpe, Profit Factor, Max Drawdown) utilizing real spread, slippage, fractional Kelly position sizing, and intra-bar Take Profit/Stop Loss interactions over the forward holdout window.
+- **Dynamic Confidence Threshold Tuning** (`scripts/tune_confidence_thresholds.py`, `training/train_gpu.py`): Created a post-training tuning hook to discover the optimal `min_confidence` gate based on validation predictions.
+
+- **SharpeProxyLoss Differentiability** (`training/train_gpu.py`): Fixed `SharpeProxyLoss` by replacing `torch.sign` with `torch.tanh`, making the signal fully differentiable so gradients properly flow through the annualized Sharpe metric.
+- **Loss Sample Weighting** (`models/architectures.py`, `training/train_gpu.py`): Rewrote regression losses (`HuberLoss`, `AsymmetricDirectionalLoss`, `SharpeProxyLoss`) to accept an explicit `weight` argument. Wired `no_trade_score` (via `y_conf`) into the loss calculation so that blackout/low-quality bars are natively down-weighted during gradient updates.
+- **Annualized Sharpe Gradient** (`training/train_gpu.py`): Scaled `SharpeProxyLoss` by the annualization factor so the optimizer operates on the true yearly-scale Sharpe metric, properly balancing it against the Huber baseline.
+- **Calmar Promotion Gate** (`validation/promotion_gate.py`): Added Calmar ratio thresholds (`min_calmar`) to the best-fold promotion gate so models with extreme drawdowns are rejected despite high absolute returns.
+- **Directional Label Smoothing** (`training/train_gpu.py`, `models/architectures.py`): Applied `label_smoothing=0.1` to the CrossEntropy classification loss on the directional head to mitigate overconfident probability clustering.
+- **Gradient Centralization** (`training/train_gpu.py`): Implemented a `GC_Optimizer` wrapper in the training loop that zeros out the mean of weight gradients, stabilizing training and allowing larger learning rates.
+- **Fractional Kelly Backtesting** (`scripts/backtest_model.py`): Bridged `kelly_criterion.py` into the backtester so that trade volume scaling perfectly mirrors the live trading engine's fractional Kelly logic.
+- **Regime-Conditional Confidence** (`scripts/backtest_model.py`): Implemented dynamic regime-conditional thresholding (e.g., lower confidence barrier during strong trends, stricter barrier during sideways markets).
+- **Profit Factor Logging** (`training/train_gpu.py`): Wired profit factor telemetry directly into validation loops and Weights & Biases tracking.
+
+- **Feature Curriculum Masking** (`config/run*.yaml`, `training/train_gpu.py`): Made the `feature_groups` curriculum functional rather than cosmetic by explicitly mapping schema names (`features: [...]`) to each curriculum group. Added `curriculum_mask` logic to `train_gpu.py` which actively zeros out specific feature columns matching the `epoch_unfreeze` schedule, ensuring complex signals are properly withheld during early training.
+- **Sharpe Annualization** (`config/run*.yaml`): Added `sharpe_annualization_factor: 325.0` (Γëê ΓêÜ(252 ├ù 420 bars/day)) so that `val_sharpe` is properly annualized during early stopping and checkpoint selection for 1-min scalping. Previously defaulting to `1.0` made the metric dimensionless and `early_stop_min_delta` meaningless.
+- **Increased `sharpe_weight`** (`config/run*.yaml`): Raised from `0.35 ΓåÆ 0.6` in `run.yaml` (and `0.2 ΓåÆ 0.6` in `run_ubuntu.yaml`). At the previous value the Huber base loss was numerically dwarfing the Sharpe signal, making `sharpe_huber` behave near-identically to plain Huber.
+- **Reduced `w_ret` (multitask)** (`config/run*.yaml`): Lowered return-regression auxiliary weight from `0.15 ΓåÆ 0.08`. The return head gradient was competing with the direction head's Sharpe objective, degrading risk-adjusted performance.
+- **TP/SL Ratio Update** (`config/run*.yaml`): Raised `profit_target_atr` from `1.5 ΓåÆ 1.8` and `stop_loss_atr` from `0.8 ΓåÆ 0.9`, achieving a **2:1 reward-to-risk ratio**. Extended `lookahead_bars` from `15 ΓåÆ 20` to give the TP barrier more room to be reached in 1-min scalping. Added `strategy:` block to `run_ubuntu.yaml` (previously missing, causing fallback to stale defaults). **Requires a full dataset cache rebuild** ΓÇö triggered automatically via `auto_rebuild_on_mismatch: true`.
+- **OANDA Sentiment Sidecar Integration** (`data/fetch_oanda_sentiment.py`, `features/feature_engineering_pl.py`, `training/train_gpu.py`): Hardened the OANDA integration into a production sidecar pipeline. Added a script to dump raw JSON snapshots and normalized features into daily Parquets, complete with explicit mock/source flags. Added strict backward-only `join_asof` guardrails during feature injection, and an ablation flag (`--oanda-ablation`) to evaluate performance impact against baseline neutral values. Expanded features with z-scores, staleness minutes, and position flips.
+- **OANDA Coverage Reporting** (`data/oanda_report.py`): Added a standalone script to generate `oanda_sentiment_report.json` to monitor API freshness, missing minutes, null-rates, and data usability status per pair.
+- **Adaptive Curriculum Wiring** (`training/train_gpu.py`, `config/run.yaml`): Updated feature-group masking to prefer the cache's ordered feature schema sidecar and made Sharpe-collapse stalls clear the stability window and freeze sequence growth instead of only updating an unused curriculum counter.
+- **Verifiable Checkpoint Metadata** (`training/train_gpu.py`): `_safe_save(..., metadata=...)` now writes atomic `.metadata.json` sidecars and verifies expected fields for best, periodic, and resume checkpoints, covering model name, feature count, sequence length, schema hash, epoch, and fold where available.
+- **Structured Pair Readiness Report** (`training/train_gpu.py`): Added `<cache>_pair_readiness_report.json` for single-pair and multi-pair cache builds, recording raw tick/schema checks, usable sequence counts, nonfinite rates, label distribution, difficulty distribution, spread/ATR summaries, timestamp inner-join loss, and final pass/warn/fail status before training starts.
+- **Pretraining Proof Artifacts** (`training/train_gpu.py`, `scripts/train.py`): Upgraded `pretrain_report.json` from a placeholder into a real diagnostic artifact with leakage-safe windows, method recommendation, quality-gate diagnostics, hard-example reuse count, checkpoint path, and supervised-transfer verification. `pretrain_ablation.json` now summarizes baseline vs pretrained folds, computes metric deltas, and records a verdict (`pretrain_helped`, `pretrain_hurt`, `mixed`, or `unknown`).
+- **Training Validation Confidence Gate Removal** (`training/train_gpu.py`, `config/run.yaml`): Removed the training-time validation confidence gate so validation accuracy and Sharpe are always computed over all validation predictions.
+- **2026-06-21 - Sharpe-Focused Feature Batch Rollback** (`features/feature_engineering_pl.py`, `training/train_gpu.py`, `config/feature_mask.py`): Removed the experimental spread-cost, market-regime, higher-timeframe, and trailing label-quality feature batch to restore the prior active training schema.
+- **2026-06-22 - Direction Target Training Fix** (`labeling/rl_reward_labeling.py`, `training/train_gpu.py`, `config/run.yaml`): Fixed zeroed validation accuracy/Sharpe for RL-reward runs by preserving the true `label` column in the aligned sidecar. Previously `y_cls` could fall back to `sign(reward)`, but RL reward is `max(reward_long, reward_short)` and is mostly non-negative, producing fake hold/long labels instead of real sell/hold/buy direction. Classification, class weights, and validation now prefer the true direction sidecar while cache `y` remains continuous reward for Sharpe/PnL. Old caches without `y_cls_source: labels.label` are rejected and rebuilt.
+
+### Fixed
+
+- **2026-06-22 - Multi-Pair Feature Schema Integrity** (`training/train_gpu.py`): Fixed multi-pair cache schema handling by preserving scaler feature names when fitting on NumPy arrays, writing full pair-prefixed feature schema sidecars for `P ├ù F` caches, matching curriculum groups across repeated per-pair feature names, and rejecting stale multi-pair caches that lack a valid schema.
+- **Curriculum Stall Loop** (`training/train_gpu.py`): Fixed the curriculum "Sharpe collapsed" logic to ignore low-Sharpe noise (< 0.25) so models do not prematurely trigger "Sharpe collapse" and freeze their curriculum advancement.
+- **Feature Schema Fallback** (`training/train_gpu.py`): Added a robust fallback to extract `feature_names_in_` directly from `scaler.npz` if the dataset's `_feature_schema.json` sidecar is missing, ensuring older dataset cache versions don't fail the curriculum mask.
+- **Multitask Temperature Calibration** (`models/architectures.py`, `training/train_gpu.py`): Fixed post-training calibration for `multitask + sharpe_huber` runs by calibrating the direction logits as classification output and using the return head only for regression calibration. This resolves the recurring `tensor a (3) must match tensor b (...)` calibration failure and allows calibrated checkpoints to be written.
+- **Training Memory Gate Accounting** (`training/training_memory.py`): Fixed training memory so passing promotion-gate checks are no longer counted as failures. Explicit failed gate markers are still recorded, preventing polluted future LR/dropout/patience recommendations.
+- **OANDA Sentiment Sidecar Safety** (`data/fetch_oanda_sentiment.py`, `features/feature_engineering_pl.py`, `training/train_gpu.py`, `data/oanda_report.py`, `scripts/run_feature_engineering.py`): Hardened OANDA order/position-book feature ingestion by refusing silent mock sidecar writes, accepting `timestamp`/`timestamp_utc`/`oanda_timestamp` sidecar schemas, preserving sidecar timestamps through training, adding stricter staleness and mock-data guardrails, preferring parquet sidecars over the legacy CSV path, and making coverage reports strict JSON with insufficient-snapshot failures instead of false `PASS` results.
+- **Global Logging Leak** (`training/train_gpu.py`, `monitoring/train_logger.py`): Fixed an issue where `_TRAIN_LOGGER` was being repeatedly instantiated and file handlers were not properly cleaned up (`removeHandler`), causing dangling file descriptors and misleading per-fold log file naming during cross-validation loops.
+- **C++ Execution Reversals** (`infrastructure/cpp_server/src/main.cpp`): Fixed `executionActionToUnits` so `OPEN_LONG` and `OPEN_SHORT` properly subtract `current_units` to execute full reversals rather than flattening positions.
+- **C++ Position Limits** (`infrastructure/cpp_server/src/main.cpp`): Added hard clamping to ensure RL scaling actions strictly honor `MAX_POSITION_UNITS` before order submission.
+- **C++ Entry Price Tracking** (`infrastructure/cpp_server/src/main.cpp`): Fixed a state corruption bug where partial scale-outs incorrectly reset the tracked entry price. It now only resets on full reversals or new entries.
+- **C++ Live Equity Tracking** (`infrastructure/cpp_server/src/main.cpp`): Fixed missing `tracked_equity` updates so the engine realistically realizes PnL on position reduction, matching the RL training environment.
+- **Transformer All-Models Resume** (`training/train_gpu.py`, `models/architectures.py`): Fixed `baseline_transformer` resume crashes in the all-models path by letting the multitask projection bind to the real post-wrapper hidden width, skipping uninitialized lazy parameters during parameter counting and feature unfreezing, and keeping crash-only transformer folders eligible for retry.
+
+## [2026-06-14] - Priority 1: Ensemble Integration
+
+### Added
+
+- **Ensemble Promotion Gate** (`training/train_gpu.py`): The `EnsembleMetaLearner` now runs through the reserved forward holdout promotion gate, capped at 200,000 bars.
+- **Ensemble vs Base Sharpe Comparison** (`training/train_gpu.py`): The pipeline compares ensemble forward Sharpe against the current deployed/base result before promoting the ensemble artifact.
+- **Ensemble ONNX Export** (`inference/onnx_inference.py`): Added ensemble export support that wraps the trained meta-learner and frozen base models into one C++-compatible 3-logit ONNX graph.
+- **Ensemble Manifest Artifact** (`training/train_gpu.py`, `scripts/train_ensemble_meta.py`): Ensemble meta-training now writes `ensemble_manifest.json` with base checkpoint provenance, artifact paths, schema details, and training history for deployment and audit checks.
+- **Automatic Training Run Folders** (`training/train_gpu.py`, `docs/STEP_BY_STEP.md`): Added `--auto-run-dir` and `--run-dir-root` so training can generate descriptive checkpoint folders from model, strategy, pairs, sequence length, folds, and RL/ensemble mode. Training writes `<run-dir>/run_info.json` and `<run-dir-root>/latest_run.json`; manifests and deployment records now include the resolved run directory.
+- **All-Models Resume Skip** (`training/train_gpu.py`, `docs/STEP_BY_STEP.md`): With `--all-models --resume`, training now checks each model subfolder and skips completed members while retrying models that only have crash artifacts. Added `--retrain-completed-models` to force reruns.
+- **Discord Ollama Training Q&A Bot** (`scripts/discord_ollama_bot.py`, `.env`, `docs/readmd.md`): Added a read-only Discord bot bridge for asking local Ollama about training status, latest results, logs, checkpoints, and config from a single allowed Discord channel. Added `.env` keys for `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, and `DISCORD_OLLAMA_CONTEXT_CHARS`. The bot redacts common secret patterns and does not auto-tune, auto-fix, restart jobs, or execute shell commands.
+
+### Changed
+
+- **Project Structure Plan** (`docs/PROJECT_STRUCTURE_IMPROVEMENT_PLAN.md`, `docs/FOLDER_STRUCTURE.md`, `scripts/check_project_structure.py`): Added a root cleanup and package-boundary plan covering patch/debug scripts, promotion artifacts, parity CSVs, archive consolidation, artifact locations, and import-safety checks. Tightened `.gitignore` guardrails and added a structure check script to prevent new root clutter.
+- **Project Improvement Plan**: Added an ensemble-readiness update checklist to `docs/PROJECT_IMPROVEMENT_PLAN.md`, covering training fixes, ensemble meta-training, ONNX export, Python live runtime, and when C++ runtime changes are actually needed.
+- **Setup Guide** (`SETUP.md`): Rewrote setup instructions for the current Python 3.11+ workflow, `.venv-gpu` repair, dependency install paths, training/test commands, ONNX export, Discord alerts, shadow mode, and C++ runtime setup.
+- **Project Improvement Plan**: Added pretraining improvement recommendations covering no-pretrain baselines, method-specific pretrain recipes, leakage-safe windows, pretrain reports, handoff gates, and hard-example reuse.
+- **Project Improvement Plan**: Added reinforcement-learning improvement recommendations focused on using RL as the execution/sizing layer, with risk gates, `rl_report.json`, reward diagnostics, anti-overtrading guardrails, and shadow-mode decision logging.
+- **Project Improvement Plan**: Added execution-quality recommendations covering spread/slippage filters, confidence-aware sizing, per-model/per-fold confidence-threshold tuning, live confidence guard wiring, `execution_report.json`, stop/exit logic, session rules, execution-policy comparison, and execution-adjusted promotion metrics.
+- **Project Improvement Plan**: Added an automation ladder for observation, safe auto-tuning, model selection, gated deployment, required automation artifacts, and high-risk settings that must remain proposal-only.
+- **Project Improvement Plan**: Added training-control recommendations covering model-specific training recipes, persistent training memory, overfitting detection, adaptive responses, and `training_control_report.json`.
+- **Project Improvement Plan**: Added pair-readiness recommendations covering pre-training pair gates, timestamp-based multi-pair alignment, cache sidecar checks, and curriculum difficulty sidecar repair.
+- **Codebase Bug Audit** (`docs/CODEBASE_BUG_AUDIT.md`): Added the 2026-06-12 review covering manifest/cache validation, difficulty curriculum, missing-pair handling, timestamp alignment, zarr resume, and pair-readiness reporting bugs.
+- **Pretraining Ablation (Priority 8)** (`training/train_gpu.py`, `config/run.yaml`): Added `auto` mode for `--pretrain-ablation`, automatically enabling baseline contrastive ablation for deep sequence models (`transformer`, `haelt`, `tcn`, `lstm`, `hybrid`) to measure pretraining benefits.
+
+### Fixed
+
+- **Baseline Ablation Weight Collision** (`training/train_gpu.py`): Fixed a critical bug where the `baseline_` model prefix was ignored during state dictionary saving, causing the ablation baseline to physically overwrite the pretrained main model's weights on disk (`[model]_best.pt`), which corrupted the final evaluation. 
+- **Dynamic Factory Dispatch Error** (`training/train_gpu.py`): Fixed the `build_model` factory to properly recognize `baseline_` architecture prefixes and dispatch them back to their standard core initializers.
+- **Ensemble/RL ONNX Deployment** (`training/train_gpu.py`, `inference/onnx_inference.py`, `infrastructure/cpp_server`, `config/run*.yaml`): Ensemble meta-learners and RL policies now export C++-compatible 3-logit ONNX graphs after successful training. RL also exports a native 10-action execution ONNX with `features` plus `agent_state` inputs, and the C++ server can optionally load it through `EXECUTION_MODEL_PATH` alongside the direction model. Optional `ensemble.deploy` and `rl.deploy` promotion copies the compatibility graph to `production_best.onnx`, writes the schema sidecar, and signals `reload_model.flag`.
+- **Legacy Ensemble Fallbacks** (`inference/pytorch_inference.py`, `scripts/backtest_model.py`): PyTorch live fallback and backtesting now read `ensemble_manifest.json` for base checkpoint provenance and schema alignment instead of relying only on guessed checkpoint layouts.
+- **Dataset Compilation Integrity** (`training/train_gpu.py`):
+  - Fixed `RuntimeError: Required pair(s) produced no usable sequences` by gracefully warning and skipping dataset chunks that yield zero usable ticks for a given pair (e.g., due to data quality drops or holidays), instead of crashing the entire multi-pair pipeline.
+  - Fixed `UnboundLocalError` by explicitly importing `json` where needed for saving CV summaries.
+  - Fixed `_validate_cache_integrity()` to properly read legacy string-based comma-separated lists of pairs.
+  - Rewrote manifest generation to explicitly create the `_manifest.json` sidecar for both Zarr and NPY caches, ensuring `pairs` is saved as a proper JSON array.
+  - Re-enabled difficulty curriculum by replacing the zero-fill stub with actual `_compute_difficulty_scores()`.
+  - Implemented timestamp-based `pair_align: inner` to rigorously synchronize market data across multiple pairs by DatetimeIndex, instead of blindly truncating arrays.
+  - Fixed Zarr resume logic so that chunks are correctly appended without attempting to recreate arrays, and removed magic numbers by reading `_resume.json` state.
+  - Corrected Pair Readiness `nan_pct` calculation by correctly using `shape[2]` (feature count) to find the total cell denominator.
+  - Fixed follow-up timestamp plumbing regressions by making `_build_chunk()` return a consistent tuple on empty chunks, removing an undefined `args` reference, and updating the single-pair caller for the new timestamp output.
+- **Test Stability** (`tests/test_training_smoke.py`): Fixed `AttributeError: 'Namespace' object has no attribute 'walk_forward_folds'` by correctly mocking cross-validation arguments in unit tests.
+- **Discord Alert Compatibility** (`monitoring/discord_alerts.py`): Removed the duplicate deploy-failure method and restored backward-compatible `send_retrain()` and `send_promotion()` aliases.
+- **Deployment Artifact Isolation** (`training/train_gpu.py`): Reset deployment path variables for each model so `deployment.json` cannot inherit stale ONNX, reload flag, or production checkpoint paths from a previous model in the same run.
+
+---
+
+## [2026-06-11] - Priority 3 & 4: Observability & Dataset Fingerprinting
+
+### Added
+- **Dataset Fingerprinting** (`training/train_gpu.py`): Implemented strict cache integrity checks using `_manifest.json` sidecars to detect parameter/configuration drift before loading a cached dataset.
+- **Feature Schema Versioning** (`training/train_gpu.py`, `trading/live_engine.py`): The training process now saves the exact feature order into `_feature_schema.json` and `.schema.json` upon ONNX export. The live trading engine will now instantly crash (`FATAL` error) if live features do not exactly match the trained schema.
+- **Pair Readiness Gate & Quality Reports** (`training/train_gpu.py`): The training pipeline now logs dropped bars, NaNs, and sequence counts, and runs a pre-training readiness gate that enforces NaN thresholds (<1%) to prevent wasting GPU time on garbage data.
+- **Cache Mismatch Refusal (P4)** (`training/train_gpu.py`): If the runtime arguments don't strictly match the dataset manifest, the cache is rejected. Introduced `--auto-rebuild-on-mismatch` to transparently handle rebuilds, and `--ignore-manifest` as an escape hatch.
+- **Discord Artifact Paths (P3)** (`monitoring/discord_alerts.py`): Added clickable `file:///` paths for ONNX models, schemas, log files, and `fold_selection.json` to Discord embeds to make artifact inspection easier.
+- **Granular Rate-Limiting (P3)** (`monitoring/discord_alerts.py`): Fixed rate limiting to use a unique `rate_key` per model/fold instead of a global `alert_type`, ensuring all folds in a multi-model run successfully trigger an alert.
+
+---
+
+## [2026-06-11] - Priority 5: Model Training Improvements
+
+### Added
+
+- **Model Cards** (`training/train_gpu.py`): Ensured `[model_name]_model_card.json` is generated reliably at the end of training, tracking architecture, features count, pairs, and final performance.
+- **Training Control Report & Overfitting Warnings** (`training/train_gpu.py`): The pipeline now checks the gap between training and validation loss (`train_val_gap`) at the end of each run. It creates `[model]_training_control_report.json` and flags `overfitting_warnings` if Sharpe collapses significantly or the validation gap is > 0.05.
+- **Stability-Aware Fold Scoring** (`training/train_gpu.py`): Extended the stability score to directly penalize high `train_val_gap` by applying a `train_val_gap_penalty` scaled to the generalization gap, meaning heavily overfit models are effectively blocked.
+- **Challenger vs. Production Gate** (`training/train_gpu.py`): At the promotion step, if an existing `deployment.json` is found in the target directory, the new model's stability score must be significantly better than the deployed model's score, otherwise it is rejected. Bypassable via the new `--force-promotion` flag.
+- **Diverse Model Recipes Script** (`scripts/train_diverse_recipes.py`): Added an orchestration script to sequentially train completely different neural architectures (`haelt`, `mamba`, `tft`) and compare their validation scores for easy meta-analysis.
+
+---
+
+## [2026-06-11] - Priority 7: Robust Testing Suite
+
+### Added
+
+- **Config Validation Test** (`tests/test_config.py`): Validates that `config/run.yaml` parses successfully with `yaml.safe_load`, checks required top-level sections (`data`, `model`, `training`, `paths`, `execution`), and verifies that `checkpoint_dir` resolves properly.
+- **End-to-End Smoke Test** (`tests/test_smoke.py`): Runs `train_gpu.py` in a fresh subprocess with `--data-source synthetic`, `--epochs 2`, and `--force-rebuild`. Validates that training, evaluation, and promotion complete successfully, then checks for `train_summary.json`, `deployment.json`, and `manifest.json`.
+
+### Fixed
+
+- **Test Artifact Integrity** (`tests/test_promotion_artifacts.py`): Updated assertions to match the current `fold_selection.json` schema using `selected_fold`.
+- **Zarr Appends on Rebuild** (`training/train_gpu.py`): Fixed a rebuild bug where `_resume_zarr=False` could bypass secondary-array creation on non-initial chunks, causing `FileNotFoundError` or `KeyError: atr`.
+
+---
+
+## [2026-06-11] - Priority 2: Separate Artifact Files And Deployment Transaction State
+
+### Added
+
+- **`train_summary.json`** (`training/train_gpu.py`): Added a per-model training summary artifact written after `supervised_train`. It stores training metrics only and stays separate from `manifest.json`.
+- **`deployment.json`** (`training/train_gpu.py`): Added a per-model deployment transaction artifact written after every promotion attempt. It records gate status, source checkpoint, production checkpoint, previous checkpoint, ONNX status, reload flag status, deploy status, deploy error, failed step, and deployment timestamp.
+- **`CRITICAL_ALERT_TYPES`** (`monitoring/discord_alerts.py`): Added alert types that bypass normal rate limiting: `circuit_breaker`, `production_deploy_failed`, `promotion_gate_failed`, and `model_demoted`.
+- **`send_promotion_gate_failed()`** (`monitoring/discord_alerts.py`): Added a typed alias for promotion-gate failure alerts.
+- **`send_production_deploy_failed()`** (`monitoring/discord_alerts.py`): Added a force-sent deploy failure alert so failed production deployment cannot be suppressed by cooldown.
+
+### Changed
+
+- **`fold_selection.json`** (`training/train_gpu.py`): Switched to atomic `_safe_save_json` writes and enriched the schema with `selected_fold`, secondary metric fields, generalization gap, candidate count, source checkpoint, selection timestamp, and per-candidate tie-breaker data.
+- **Promotion Gate Alert Naming** (`training/train_gpu.py`, `monitoring/discord_alerts.py`): Updated the promotion-gate failure path to use `send_promotion_gate_failed()` while keeping the older `send_gate_failed()` delegate for compatibility.
+- **Rate Limiting** (`monitoring/discord_alerts.py`): Critical alerts now bypass the cooldown window.
+
+### Artifact File Map
+
+Per-model artifacts are written under `<checkpoint_dir>/<model>/`:
+
+| File | Written By | Purpose |
+|---|---|---|
+| `train_summary.json` | After `supervised_train` | Pure training metrics |
+| `fold_selection.json` | After `_promote_best_fold` | CV fold ranking and selected fold |
+| `promotion_gate.json` | After `_evaluate_forward_gate` | Gate pass/fail decision |
+| `deployment.json` | After deploy block | Full deployment transaction record |
+| `manifest.json` | After model training loop | High-level run summary |
+
+---
+
+## [2026-06-11] - Priority 0 And 1: Correctness, Trust, And Self-Improving Training
+
+### Added
+
+- **`_safe_save_json` helper** (`training/train_gpu.py`): Added atomic JSON writes using `tempfile.mkstemp` and `os.replace`. Used for critical JSON artifacts including `promotion_gate.json`, `manifest.json`, `fold_selection.json`, and `production_best.schema.json`.
+- **Atomic ONNX Export** (`training/train_gpu.py`): ONNX export now writes to a temporary file before replacing the canonical production path.
+- **Atomic `reload_model.flag`** (`training/train_gpu.py`): Hot-reload signals are now written atomically.
+- **Richer `manifest.json`** (`training/train_gpu.py`): Manifest generation now includes richer run, checkpoint, promotion, deployment, and git metadata.
+- **`production_deploy_failed` Alert** (`monitoring/discord_alerts.py`): Added an alert for production deployment failures.
+- **Deploy Result Tracking** (`training/train_gpu.py`): Added deployment status tracking used by manifests and deployment artifacts.
+- **3-Level Best-Fold Tie-Breaker** (`training/train_gpu.py`): Fold selection now considers the primary metric, a secondary metric, and generalization gap.
+- **Fold Selection Alerting** (`training/train_gpu.py`, `monitoring/discord_alerts.py`): `_promote_best_fold()` can send a `fold_selected` Discord alert after selecting the best fold.
+- **Run Start Time Capture** (`training/train_gpu.py`): Captures run start time at the beginning of `main()`.
+- **Training Memory** (`training/training_memory.py`): Added persistent training memory stored in `logs/training_memory.json`. It tracks best model metrics, epoch patterns, failure counts, Sharpe history, and per-model summaries.
+- **Hard Example Mining** (`training/hard_example_miner.py`): Added validation hard-sample mining for confident-wrong predictions and missed large-reward windows.
+- **Sharpe Collapse Heuristic** (`training/train_gpu.py`): `_auto_tune_next_run()` can detect early validation Sharpe collapse and propose conservative LR/patience changes.
+- **Auditable Auto-Tune Proposals** (`training/train_gpu.py`): Auto-tune now writes structured proposal JSON under `logs/auto_tune/`.
+- **Training Memory Wiring** (`training/train_gpu.py`): Training memory is loaded at startup, applied conservatively, updated after training, and saved atomically.
+- **Hard Example Miner Wiring** (`training/train_gpu.py`): Hard-example mining runs after single-split supervised training when validation prediction artifacts are available.
+
+### Changed
+
+- **Discord Alert Names** (`monitoring/discord_alerts.py`): Added or renamed training and promotion alerts to match pipeline phases: `training_started`, `fold_selected`, `promotion_gate_passed`, `promotion_gate_failed`, `production_deploy_completed`, and `production_deploy_failed`.
+- **Discord Helper Methods** (`monitoring/discord_alerts.py`): Added typed helpers including `send_training_started()`, `send_fold_selected()`, `send_promotion_gate_passed()`, `send_promotion_gate_failed()`, `send_production_deploy_completed()`, and `send_production_deploy_failed()`.
+- **Auto-Tune Write Guard** (`training/train_gpu.py`): Config mutation is guarded so high-risk fields are not silently changed.
+- **Best-Fold History Tracking** (`training/train_gpu.py`): `_promote_best_fold()` now reads fold history data to compute generalization gaps.
+
+---
+
+## [2026-06-10] - Checkpoint Integrity And Better Artifacts
+
+### Added
+
+- **Semantic Alerting And Observability** (`monitoring/discord_alerts.py`): Added structured Discord alert types for training, promotion, deployment, demotion, drift, retrain, and backtest events.
+- **Model Cards** (`training/train_gpu.py`): Training now writes `<model_name>_model_card.json` with architecture, feature, data-window, validation, and promotion metadata.
+- **Dataset Manifests And Schema Versioning** (`training/train_gpu.py`): Training validates cache integrity and writes feature-schema metadata next to production ONNX exports.
+- **Adaptive Curriculum** (`training/train_gpu.py`): Added `_curr_ep` driven curriculum progression and Sharpe-collapse stalling.
+- **Auditable Auto-Tuning** (`training/train_gpu.py`): Added `--dry-tune` and structured auto-tune proposal files.
+- **Promotion Artifact Tests** (`tests/test_promotion_artifacts.py`): Added tests for `_promote_best_fold()` and `_atomic_copy()`, including nested checkpoint paths and tie-breakers.
+- **`_safe_save` Checkpoint Validation** (`training/train_gpu.py`): Added an atomic `torch.save()` wrapper that verifies checkpoint size and loadability before replacing the target file.
+- **Enhanced Best-Fold Promotion** (`training/train_gpu.py`): Best-fold promotion supports nested checkpoint directories, tie-breakers, and `fold_selection.json`.
+- **Promotion And Run Artifacts** (`training/train_gpu.py`): Added `promotion_gate.json`, `deployment.json`, and `manifest.json` artifacts.
+
+### Changed
+
+- **Deploy Alert Context** (`monitoring/discord_alerts.py`): Production deployment alerts can include ONNX and schema references.
+- **Promotion Schema Details** (`training/train_gpu.py`): Promotion artifacts include model and checkpoint context for downstream deployment.
+- **XGBoost Zarr Support** (`training/train_xgboost.py`): XGBoost training can read modern Zarr dataset caches.
+- **Dataset Timeframe** (`config/run.yaml`): Training data bounds were set to `2008-01-01` through `2025-12-31`.
+- **XGBoost Baseline Config** (`training/train_xgboost.py`): XGBoost training accepts `--config config/run.yaml`, resolves its data cache from config, supports `--cache-path`, and records metadata in a sidecar.
+- **XGBoost Cache Window Guard** (`training/train_xgboost.py`): Config-driven XGBoost runs validate the processed cache date window unless an explicit cache path is supplied.
+- **C++ Server Configuration** (`infrastructure/cpp_server`): Replaced hardcoded runtime values with environment-driven OANDA credentials, instrument, model path, paper/live mode, shadow mode, and risk limits.
+- **Diagnostics Calls** (`training/train_gpu.py`): Standardized diagnostics usage across trainers.
+- **Governance Gating** (`training/train_gpu.py`): Moved global maturity/governance gating into promotion logic.
+- **Time-Series Augmentation Signatures** (`models/contrastive.py`, `training/train_gpu.py`): Synchronized augmenter signatures to handle epochs and regimes consistently.
+
+### Fixed
+
+- **Test Suite Repairs** (`tests/test_models.py`, `tests/test_inference_consistency.py`, `tests/test_all.py`): Updated tests for Polars dataframe migration and expanded RL action semantics.
+- **Pretraining Trainer Bugs** (`models/contrastive.py`): Fixed undefined pretraining variables and aligned trainer return signatures.
+- **Polars `is_empty` Regression** (`data/data_ingestion.py`): Fixed a pandas/Polars mismatch before type conversion.
+- **Training Pair Defaults** (`config/settings.py`): Aligned default pairs with the active three-pair setup: `EURUSD`, `GBPUSD`, and `USDJPY`.
+- **PyTorch Inference Initialization** (`inference/pytorch_inference.py`): Aligned checkpoint directory and checkpoint path handling.
+- **Model Class Size Mismatch** (`models/architectures.py`, inference paths): Enforced `num_classes` parameterization.
+- **Execution Action Fallbacks** (`backtesting/backtest.py`): Filled missing signal actions with `ScalingAction.HOLD`.
+- **Missing Scaling Enums** (`backtesting/backtest.py`): Added `SCALE_IN_100` and `SCALE_OUT_100`.
+- **System Test Integrity** (`tests/test_system.py`): Updated ingestion mocks for Polars inner joins.
+- **NaN Storm Prevention** (`models/architectures.py`): Added lower-bound variance clamps before square roots in cross-asset rolling correlations.
+- **Data Quality Filtering** (`data/data_ingestion.py`): Added filtering for weekend bars, fixed holidays, and zero-volume dead bars.
+
+---
+
+## [Earlier / Carried Forward]
+
+### Added
+
+- **C++ Risk Management** (`infrastructure/cpp_server`): Added `RiskManager` support for fat-finger checks, stale data checks, and drawdown circuit breakers.
+- **C++ Runtime Hardening** (`infrastructure/cpp_server`): Added ONNX startup metadata discovery, environment-driven runtime configuration, JSONL shadow journaling, and partial-feature fail-fast behavior guarded by `ALLOW_PARTIAL_FEATURES`.
+- **Model Comparison Report** (`scripts/compare_models.py`): Expanded comparison reporting for XGBoost, deep models, latency, confidence, fold stability, and baseline checks.
+- **Time-Aware Fold Governance**: Added documentation and reporting fields for purged/embargoed folds, fold stability, pass rate, train-validation gap, and suspiciously smooth validation.
+- **Ablation Checklist** (`docs/MODEL_SETTINGS.md`): Added supervised ablation requirements.
+- **Pretraining Metrics** (`training/train_gpu.py`, contrastive trainers): Added alignment, uniformity, handoff, and representation-quality checks.
+- **Regime Oversampling** (`training/train_gpu.py`): Added dynamic oversampling for extreme regime windows.
+- **Curriculum And Regime Augmentations** (`models/contrastive.py`): Added curriculum scaling and regime-aware augmentation behavior.
+- **Backtest Safety Metrics** (`backtesting/backtest.py`): Added OHLC validation and safer report generation.
+- **Backtest Reporting** (`backtesting/backtest.py`): Added Sortino Ratio, Long Win Rate, and Short Win Rate.
+- **Action Semantics** (`backtesting/backtest.py`): Added `ScalingAction` for robust signal execution mapping.
+- **Risk Integrity** (`backtesting/backtest.py`): Added maximum drawdown circuit breaker and strict position-limit clamping.
+- **Execution Modeling** (`backtesting/backtest.py`): Added clamped market-impact spread estimation.
+- **RL Action Expansion** (`models/rl_agents.py`): Expanded the trading environment to the 10-class `ScalingAction` state space.
+- **RL Replay Weighting** (`models/rl_agents.py`): Added inverse-frequency weighted sampling for rare scaling events.

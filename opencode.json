@@ -1,0 +1,9 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "forex-scaling": {
+      "description": "Forex scaling model v5 — tick-to-trade ML pipeline with RL, multi-pair architectures, and production promotion gates.",
+      "mode": "subagent"
+    }
+  }
+}

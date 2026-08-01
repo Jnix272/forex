@@ -1,0 +1,83 @@
+# Normal trading profile.
+# Use this when you want slower intraday/swing-style training instead of scalping.
+
+strategy:
+  mode: normal
+  bar_freq: 1h
+  lookahead_bars: 24
+  profit_target_atr: 2.5
+  stop_loss_atr: 1.5
+
+data:
+  source: dukascopy
+  pair: EURUSD
+  pairs:
+    - EURUSD
+    - USDJPY
+    - GBPUSD
+  pair_embed_dim: 16
+  pair_align: inner
+  start: "2008-01-01"
+  end: "2025-12-31"
+  full_day_data: true
+  n_ticks: 20_000_000
+  chunk_size: 250_000
+  use_cache: false
+  integrity_gate: true
+  auto_rebuild_on_mismatch: true
+
+news:
+  historical_mode: full
+  historical_news_file: data/raw/news/historical_news_combined.parquet
+  economic_calendar_file: data/raw/eco_calendar/events.csv
+
+model:
+  name: haelt
+  all_models: false
+  hidden_size: 256
+  d_model: 256
+  nhead: 8
+  num_layers: 3
+  dropout: 0.25
+
+training:
+  epochs: 40
+  batch_size: 256
+  lr: 0.00005
+  lr_schedule: warmup_cosine
+  lr_warmup_epochs: 3
+  lr_min_ratio: 0.08
+  seed: 1337
+  resume: false
+  seq_len: 96
+  patience: 10
+  val_split: 0.2
+  loss: sharpe_huber
+  direction_weight: 0.75
+  sharpe_weight: 0.35
+  label_method: rl_reward
+  early_stop_metric: sharpe
+  early_stop_min_delta: 0.01
+  cross_asset_mode: auto
+  cross_asset_provider: auto
+
+backtest:
+  execution_delay_bars: 1
+
+walk_forward:
+  enabled: true
+  folds: 5
+
+multitask:
+  enabled: true
+  w_ret: 0.15
+  w_conf: 0.05
+
+pretrain:
+  enabled: true
+
+rl:
+  enabled: true
+paths:
+  checkpoint_dir: checkpoints/forex_3pair_2008_2025_normal
+  data_cache: data/processed

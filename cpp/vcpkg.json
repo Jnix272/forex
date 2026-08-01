@@ -1,0 +1,9 @@
+{
+  "name": "forex-scaling-runtime",
+  "version": "1.0.0",
+  "dependencies": [
+    "cppzmq",
+    "nlohmann-json",
+    "onnxruntime"
+  ]
+}

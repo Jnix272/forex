@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forex-scaling-model"
+version = "6.5.0"
+description = "Tick-to-trade forex research and training pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "backtesting*",
+    "config*",
+    "data*",
+    "features*",
+    "inference*",
+    "infrastructure*",
+    "labeling*",
+    "models*",
+    "monitoring*",
+    "pretrain*",
+    "risk*",
+    "sizing*",
+    "trading*",
+    "training*",
+    "validation*",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "slow: longer-running regression or integration coverage",
+    "gpu: tests that require CUDA/GPU support",
+]

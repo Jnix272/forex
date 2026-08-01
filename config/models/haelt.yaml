@@ -1,0 +1,16 @@
+# Production overrides for HAELT (LSTM + Transformer hybrid).
+# Merge with config/run.yaml or use as --config for single-model training.
+#
+# NOTE: train_gpu.py halves d_model and nhead for the HAELT builder to balance
+# LSTM and Transformer branch widths. Actual model dims: d_model=128, nhead=4.
+# hidden_size maps to lstm_hidden via profile normalization (lstm_hidden = hidden_size/2 = 128).
+model:
+  name: haelt
+  d_model: 256
+  nhead: 8
+  num_layers: 3
+  hidden_size: 256
+  dropout: 0.25
+training:
+  lr: 3.0e-4
+  seq_len: 60
