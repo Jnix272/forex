@@ -1,3 +1,65 @@
+---
+
+## Session — 2026-08-03 17:05 UTC
+**Summary:** Removed the EODHD (Paid API) cross-asset panel fetching logic due to the missing API key causing failures. Cleaned up corrupt local cache files, ran a successful test of yfinance, and recompiled the script to verify syntax. Also started the 18-year Cross Asset Panel download using the free Yahoo/FRED fallback.
+
+**Files changed:**
+- `scripts/download_data.py`: Sliced out `download_eodhd_cross_asset()` and its function call to prevent the `EODHD_API_KEY not set` failure block and stop it from short-circuiting the script.
+- `data/processed/cross_asset/*.csv`: (Deleted) Removed corrupt cache files from July 31st that contained only 3 days of data and broke the incremental fetching window.
+
+
+## Session — 2026-08-03 16:33 UTC
+**Summary:** Removed unused OANDA retail sentiment integration from the feature engineering pipeline at user request.
+
+**Files changed:**
+- `scripts/run_feature_engineering.py`: Removed all logic for locating, loading, concatenating, and filtering `data/raw/oanda_sentiment.csv` and `data/oanda_sentiment/`.
+- `features/feature_engineering_pl.py`: Removed the unused `oanda_data` keyword argument from the `FeatureEngineer.build()` method signature to streamline the API.
+
+## Session — 2026-08-03 13:30 UTC
+**Summary:** Successfully debugged and executed the end-to-end ML pipeline. Resolved cascading bugs across feature engineering, training orchestration, and schema configurations. The HAELT transformer successfully trained on 10 pairs and saved the best weights.
+
+**Files changed:**
+- `config/config_schema.py`: Added missing `hurst_mean_rev` field to `LiveRiskSchema` to prevent Pydantic validation crashes during feature engineering.
+- `features/feature_engineering_pl.py`: Fixed `FeatureEngineer.build()` signature to accept `oanda_data`. Modified `multi_level_obi` to default to simulated OHLC proxy (`use_real_l2=False`) since Dukascopy lacks L2 depth data.
+- `scripts/run_feature_engineering.py`: Fixed Polars datetime string parsing for historical news timestamps containing `T` and `Z` characters.
+- `scripts/run_pipeline.py`: Fixed argument routing so `--skip-news` isn't incorrectly passed to `train.py` orchestrator.
+- `training/train_gpu.py`: Corrected broken `try/except` indentation causing a `SyntaxError` at line 10,155.
+- `training/train_xgboost.py`: Disabled WANDB logging automatically if the API key environment variable is not present.
+
+**Bugs fixed:**
+- **CRITICAL**: HAELT Training Module crash (`SyntaxError: expected an indented block`)
+- **CRITICAL**: Pydantic `LiveRiskSchema` unexpected keyword argument crash in `run_feature_engineering.py`.
+- **CRITICAL**: Polars timestamp conversion error on mixed `T`/`Z` date formats.
+- **HIGH**: FeatureEngineer `build()` unexpected `oanda_data` keyword crash.
+- **HIGH**: Missing L2 orderbook (`bid_sz_01`) error during OBI calculation on OHLCV data.
+- **LOW**: WANDB usage error crash during XGBoost baseline phase.
+
+
+## Commit `9a3f868` — 2026-08-03 00:44 UTC
+**Author:** jamie  
+**Message:** Fix data pipeline: timezone leakage, OOM, zero-division, and O(N*M) bottlenecks
+
+**Files changed:**
+```
+backtesting/backtest.py
+config/config_schema.py
+config/run.yaml
+config/settings.py
+data/databento_loader.py
+data/economic_calendar.py
+data/historical_news.py
+docs/FIXES_APPLIED.md
+docs/SESSION_REPORT.md
+execution/broker_bridge.py
+execution/realism.py
+features/feature_engineering_pl.py
+labeling/rl_reward_labeling.py
+labeling/triple_barrier_labeling.py
+scripts/run_feature_engineering.py
+smoke_test.out
+training/train_gpu.py
+```
+
 ## [2026-08-01] - Config Preflight & Economic Lookahead Fix
 
 ### Summary
