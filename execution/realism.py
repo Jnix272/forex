@@ -126,7 +126,9 @@ def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_
                              execution_delay_bars: int = 1, pair: str = "EURUSD",
                              fill_model: Optional[EmpiricalFillModel] = None,
                              edge_margin_pips: float = .25, rejection_penalty_pips: float = 1.0,
-                             latency_col: str | None = None, no_trade_col: str | None = None) -> pd.DataFrame:
+                             latency_col: str | None = None, no_trade_col: str | None = None,
+                             profit_target_atr: float = 1.5, stop_loss_atr: float = 1.0,
+                             no_trade_threshold: float = 0.67) -> pd.DataFrame:
     """Generate long/hold/short utilities using delayed executable prices."""
     b = bars.reindex(features.index).ffill()
     n = len(b); delay = max(1, int(execution_delay_bars)); horizon = max(1, int(lookahead_bars))
@@ -145,7 +147,7 @@ def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_
         ss = model.sample(timestamp=features.index[i], pair=pair, side="short", spread_pips=spread[i], volatility_ratio=vol_ratio, latency_ms=latency[i])
         el = q["ask_open"][entry_i] + ls.slippage_pips * pip_size
         es = q["bid_open"][entry_i] - ss.slippage_pips * pip_size
-        tp_dist, sl_dist = 1.5 * atr[i], atr[i]
+        tp_dist, sl_dist = profit_target_atr * atr[i], stop_loss_atr * atr[i]
         pl, ml, _ = _path_pnl("long", el, entry_i, end, q, el + tp_dist, el - sl_dist, pip_size)
         ps, ms, _ = _path_pnl("short", es, entry_i, end, q, es - tp_dist, es + sl_dist, pip_size)
         long_u[i] = -rejection_penalty_pips if ls.rejected else (pl - ls.commission_pips) * ls.fill_fraction
@@ -161,7 +163,7 @@ def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_
     # Abstain unless the winning trade beats hold by a configurable uncertainty margin.
     choice[(best < edge_margin_pips) | ~valid] = 1
     if no_trade_col and no_trade_col in features:
-        choice[features[no_trade_col].fillna(0).to_numpy(float) > .67] = 1
+        choice[features[no_trade_col].fillna(0).to_numpy(float) > no_trade_threshold] = 1
     label = np.array([-1, 0, 1], dtype=np.int8)[choice]
     optimal = np.array(["short", "hold", "long"], dtype=object)[choice]
     out = pd.DataFrame({"reward_long": long_u, "reward_short": short_u, "utility_long": long_u,

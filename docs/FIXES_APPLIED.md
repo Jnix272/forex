@@ -236,3 +236,25 @@ Rewrote `features/lookahead_guard.py` with:
 | 6 dead imports in `scale_model.py` | Removed by ruff | `training/scale_model.py` |
 | Dead imports in `retraining/pipeline.py` | Removed by ruff | `retraining/pipeline.py` |
 | All test file dead imports | Removed by ruff | `tests/*.py` |
+
+---
+
+## Dynamic Configuration Updates
+
+Source: Dynamic Configuration Audit
+
+| ID | Issue | Fix | File(s) |
+|----|-------|-----|---------|
+| CFG-001 | Triple-barrier labels hardcoded to 1.5/1.0 ATR (conflicts with `run.yaml`) | Parameterized to read defaults from `settings.LABELING` config | `labeling/triple_barrier_labeling.py` |
+| CFG-002 | Execution realism TP/SL hardcoded to 1.5/1.0 ATR | Made configurable via function parameters to match actual strategy limits | `execution/realism.py` |
+| CFG-003 | Pip size hardcoded using `"JPY" in symbol` | Added `PIP_SIZES` config dictionary and `get_pip_size()` lookup function | `config/settings.py` |
+| CFG-004 | Feature indicator windows hardcoded in Polars code | Added `features:` configuration block to YAML (9 indicators) | `config/run.yaml` |
+| CFG-005 | Spread clamp limits hardcoded (0.5 to 50 pips) | Parameterized in backtest constructor and added to `run.yaml` | `backtesting/backtest.py`, `config/run.yaml` |
+| CFG-006 | Pip value, VaR confidence, and VaR limit hardcoded | Added `var_confidence`, `var_max_pct`, and `pip_value` to `risk:` config | `config/run.yaml`, `risk/execution.py` |
+| CFG-007 | No-trade confidence threshold hardcoded to >0.67 | Added `no_trade_threshold` parameter | `execution/realism.py` |
+| CFG-008 | Asset pip sizes missing from external YAML config | Added `pip_sizes:` block to yaml to allow external overrides | `config/run.yaml` |
+| CFG-009 | Data quality chunk rejection thresholds hardcoded | Added `max_bad_frac` and `max_zero_frac` to `training:` config block | `config/run.yaml` |
+| CFG-010 | Mixed ISO timestamps causing crashes in feature generation | Fixed date string parsing using `.str.slice()` and `.str.replace()` | `data/historical_news.py` |
+| CFG-011 | RL reward labeling regimes using hardcoded 1.5 TP base | Updated `compute_rl_reward_labels_regime` to pull from `LABELING` | `labeling/rl_reward_labeling.py` |
+| CFG-012 | `LABEL_REGIME` hardcoding 1.5/1.0 multipliers | Rewrote config dictionary to evaluate dynamically against `LABELING` multipliers | `config/settings.py` |
+| CFG-013 | Polars feature generator hardcoded indicator windows | Removed `[6, 20, 60]` lists in `FeatureEngineer` and mapped to `run.yaml` `features:` | `features/feature_engineering_pl.py` |

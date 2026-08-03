@@ -314,7 +314,8 @@ def _run_barrier_scan(
             warnings.warn(f"[TBM] Numba scan failed ({ex}); using sequential scan.")
             return (
                 *_scan_outcomes_sequential(
-                    close,
+                    exit_long_path,
+                    exit_short_path,
                     entry_long,
                     entry_short,
                     atr,
@@ -349,10 +350,10 @@ def compute_triple_barrier_labels(
     bars: pd.DataFrame,
     features: pd.DataFrame,
     atr_col: str = "atr_6",
-    vertical_bars: int = 10,
-    profit_atr_mult: float = 1.5,
-    stop_atr_mult: float = 1.0,
-    pip_size: float = 0.0001,
+    vertical_bars: Optional[int] = None,
+    profit_atr_mult: Optional[float] = None,
+    stop_atr_mult: Optional[float] = None,
+    pip_size: Optional[float] = None,
     execution_delay_bars: int = 1,
     use_numba: Optional[bool] = None,
     parallel: Optional[bool] = None,
@@ -367,6 +368,14 @@ def compute_triple_barrier_labels(
     a larger default pip size when ``pip_size`` is left at the default).
     """
     cfg = _default_labeling()
+    if vertical_bars is None:
+        vertical_bars = int(cfg.get("lookahead_bars", 20))
+    if profit_atr_mult is None:
+        profit_atr_mult = float(cfg.get("profit_target_atr", 1.8))
+    if stop_atr_mult is None:
+        stop_atr_mult = float(cfg.get("stop_loss_atr", 0.9))
+    if pip_size is None:
+        pip_size = float(cfg.get("pip_size", 0.0001))
     if use_numba is None:
         use_numba = bool(cfg.get("tbm_numba", True))
     if parallel is None:

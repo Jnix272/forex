@@ -102,6 +102,8 @@ def compute_rl_reward_labels(
         if "ask_close" in aligned.columns and "bid_close" in aligned.columns:
             entry_long = aligned["ask_close"].forward_fill().fill_null(0.0).to_numpy().astype(np.float32)
             entry_short = aligned["bid_close"].forward_fill().fill_null(0.0).to_numpy().astype(np.float32)
+            exit_long_path = entry_short.copy()  # bid
+            exit_short_path = entry_long.copy()  # ask
         else:
             spread_vals = (
                 aligned["spread_pips"].fill_null(0.5).to_numpy().astype(np.float32)
@@ -110,6 +112,8 @@ def compute_rl_reward_labels(
             spread_half = spread_vals * pip_size / 2
             entry_long = close + spread_half
             entry_short = close - spread_half
+            exit_long_path = close - spread_half
+            exit_short_path = close + spread_half
         atr = (
             aligned[atr_col].fill_null(0.0005).to_numpy().astype(np.float32)
             if atr_col in aligned.columns else np.full(len(close), 0.0005, dtype=np.float32)
@@ -122,10 +126,14 @@ def compute_rl_reward_labels(
         if "ask_close" in bars.columns:
             entry_long  = bars["ask_close"].reindex(features.index).ffill().values.astype(np.float32)
             entry_short = bars["bid_close"].reindex(features.index).ffill().values.astype(np.float32)
+            exit_long_path = entry_short.copy()
+            exit_short_path = entry_long.copy()
         else:
             spread_half  = features["spread_pips"].values.astype(np.float32) * pip_size / 2
             entry_long   = close + spread_half
             entry_short  = close - spread_half
+            exit_long_path = close - spread_half
+            exit_short_path = close + spread_half
         atr = features[atr_col].values.astype(np.float32) if atr_col in features.columns else np.full(len(close), 0.0005, dtype=np.float32)
     valid_market = (
         np.isfinite(close) & np.isfinite(entry_long) & np.isfinite(entry_short)
@@ -135,6 +143,8 @@ def compute_rl_reward_labels(
     close = np.nan_to_num(close, nan=0.0, posinf=0.0, neginf=0.0)
     entry_long = np.nan_to_num(entry_long, nan=0.0, posinf=0.0, neginf=0.0)
     entry_short = np.nan_to_num(entry_short, nan=0.0, posinf=0.0, neginf=0.0)
+    exit_long_path = np.nan_to_num(exit_long_path, nan=0.0, posinf=0.0, neginf=0.0)
+    exit_short_path = np.nan_to_num(exit_short_path, nan=0.0, posinf=0.0, neginf=0.0)
     atr = np.nan_to_num(atr, nan=0.0005, posinf=0.0005, neginf=0.0005)
     tx_cost_pips * pip_size
     n = len(close)
@@ -155,23 +165,26 @@ def compute_rl_reward_labels(
 
         # Simulate forward path
         horizon = close[entry_i+1 : entry_i+1+lookahead_bars]
+        horizon_l = exit_long_path[entry_i+1 : entry_i+1+lookahead_bars]
+        horizon_s = exit_short_path[entry_i+1 : entry_i+1+lookahead_bars]
+        
         if not np.isfinite(horizon).all() or not valid_market[entry_i + 1 : entry_i + 1 + len(horizon)].all():
             continue
 
         # Long
         pnl_l = None
-        for p in horizon:
+        for p in horizon_l:
             if p >= tp_l:   pnl_l = (tp_l - el) / pip_size;  break
             elif p <= sl_l: pnl_l = (sl_l - el) / pip_size;  break
-        if pnl_l is None:   pnl_l = (horizon[-1] - el) / pip_size
+        if pnl_l is None:   pnl_l = (horizon_l[-1] - el) / pip_size
         reward_long[i]  = pnl_l - tx_cost_pips
 
         # Short
         pnl_s = None
-        for p in horizon:
+        for p in horizon_s:
             if p <= tp_s:   pnl_s = (es - tp_s) / pip_size; break
             elif p >= sl_s: pnl_s = (es - sl_s) / pip_size; break
-        if pnl_s is None:   pnl_s = (es - horizon[-1]) / pip_size
+        if pnl_s is None:   pnl_s = (es - horizon_s[-1]) / pip_size
         reward_short[i] = pnl_s - tx_cost_pips
 
     # Combined label — pick the best (most profitable) direction
@@ -262,6 +275,8 @@ def compute_rl_reward_labels_regime(
     features:          pd.DataFrame,
     atr_col:           str   = "atr_6",
     lookahead_bars:    int   = 10,
+    profit_atr_mult:   Optional[float] = None,
+    stop_atr_mult:     Optional[float] = None,
     pip_size:          float = 0.0001,
     session_col:       Optional[str] = None,
     regime_col:        Optional[str] = None,
@@ -309,6 +324,16 @@ def compute_rl_reward_labels_regime(
         _vol_alpha = 0.5; _liq_alpha = 0.3
         _vol_win   = 120; _spr_win   = 120
         _lat_base  = float(latency_baseline_ms)
+
+    try:
+        from config.settings import LABELING as _LBL
+    except Exception:
+        _LBL = {}
+    
+    if profit_atr_mult is None:
+        profit_atr_mult = float(_LBL.get("profit_target_atr", 1.8))
+    if stop_atr_mult is None:
+        stop_atr_mult = float(_LBL.get("stop_loss_atr", 0.9))
 
     close = bars["close"].reindex(features.index).ffill().values.astype(np.float64)
     if "ask_close" in bars.columns:
@@ -394,23 +419,22 @@ def compute_rl_reward_labels_regime(
         if _use_regime_col:
             rv = str(regime_vals[entry_i]).lower()
             if "high_vol" in rv or "volatile" in rv:
-                cfg = barrier_scale.get("high_vol", {"tp_atr_mult": 2.0, "sl_atr_mult": 1.5, "horizon_mult": 0.7})
+                cfg = barrier_scale.get("high_vol", {"tp_atr_mult": profit_atr_mult * 1.33, "sl_atr_mult": stop_atr_mult * 1.66, "horizon_mult": 0.7})
             elif "mean_rev" in rv or "ranging" in rv:
                 # Mean reversion: tighter barriers, shorter horizon — trades resolve quickly
-                cfg = barrier_scale.get("low_vol",  {"tp_atr_mult": 1.0, "sl_atr_mult": 0.8, "horizon_mult": 0.8})
+                cfg = barrier_scale.get("mean_rev",  {"tp_atr_mult": profit_atr_mult * 0.66, "sl_atr_mult": stop_atr_mult * 0.88, "horizon_mult": 0.8})
             elif "trending" in rv:
-                # Trending: wider TP, standard SL, longer horizon to let trend run
-                cfg = barrier_scale.get("normal",   {"tp_atr_mult": 2.0, "sl_atr_mult": 1.0, "horizon_mult": 1.3})
+                cfg = barrier_scale.get("trending", {"tp_atr_mult": profit_atr_mult * 1.33, "sl_atr_mult": stop_atr_mult * 1.33, "horizon_mult": 1.5})
             else:
-                cfg = barrier_scale.get("normal",   {"tp_atr_mult": 1.5, "sl_atr_mult": 1.0, "horizon_mult": 1.0})
+                cfg = barrier_scale.get("normal",   {"tp_atr_mult": profit_atr_mult, "sl_atr_mult": stop_atr_mult, "horizon_mult": 1.0})
         else:
             # ATR-quantile fallback
             if v >= vol_q_hi[entry_i]:
-                cfg = barrier_scale.get("high_vol", {"tp_atr_mult": 2.0, "sl_atr_mult": 1.5, "horizon_mult": 0.7})
+                cfg = barrier_scale.get("high_vol", {"tp_atr_mult": profit_atr_mult * 1.33, "sl_atr_mult": stop_atr_mult * 1.66, "horizon_mult": 0.7})
             elif v <= vol_q_lo[entry_i]:
-                cfg = barrier_scale.get("low_vol",  {"tp_atr_mult": 1.0, "sl_atr_mult": 0.8, "horizon_mult": 1.3})
+                cfg = barrier_scale.get("low_vol",  {"tp_atr_mult": profit_atr_mult * 0.66, "sl_atr_mult": stop_atr_mult * 0.88, "horizon_mult": 1.3})
             else:
-                cfg = barrier_scale.get("normal",   {"tp_atr_mult": 1.5, "sl_atr_mult": 1.0, "horizon_mult": 1.0})
+                cfg = barrier_scale.get("normal",   {"tp_atr_mult": profit_atr_mult, "sl_atr_mult": stop_atr_mult, "horizon_mult": 1.0})
 
         tp_mult  = float(cfg["tp_atr_mult"])
         sl_mult  = float(cfg["sl_atr_mult"])

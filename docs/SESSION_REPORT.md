@@ -1,3 +1,74 @@
+## [2026-08-01] - Config Preflight & Economic Lookahead Fix
+
+### Summary
+Implemented Pydantic/dataclass schema for configuration preflight validation in `config_schema.py` to ensure `LIVE_RISK`, `TRAINING`, and `SIZING` parameters fail fast on misconfiguration. Also resolved the economic calendar look-ahead bias by enforcing a 1-minute time difference check on the surprise feature instead of simply using a pandas shift.
+
+### Files Edited
+- `config/settings.py` — Appended config preflight validation at the end of the file to crash early on misconfiguration.
+- `data/economic_calendar.py` — Removed `shift(1)` and modified the loop condition to apply economic surprises only when `delta_bk >= 1.0` (1-minute lag), effectively resolving instantaneous latencyless parsing.
+
+### Files Added
+- `config/config_schema.py` — Created schemas to enforce type and range boundaries on settings (e.g. `kelly_fraction`, `max_drawdown_halt`).
+
+### Bugs Fixed
+- **Issue 4 (Config Preflight Validation)**: Missing configuration schema and validation at startup, potentially leading to catastrophic run-time failures.
+- **Issue 6 (Economic Event Lookahead)**: Economic surprise was parsed with look-ahead bias without accounting for gaps, now enforced strictly 1-minute post-event.
+
+---
+
+## [2026-08-01] - Dataset & Pipeline Improvements Execution
+
+### Summary
+Successfully executed the 10 Critical/High priority issues identified in the pipeline audit reports.
+
+### Files Modified
+- `labeling/triple_barrier_labeling.py` & `labeling/rl_reward_labeling.py`: Fixed DS-001 by implementing spread-adjusted exit barriers (using `bid` for long exits and `ask` for short exits) instead of mid-price.
+- `features/feature_engineering_pl.py`: Fixed DS-005 by implementing `.build_chunked()` to prevent OOM errors, and fixed ISSUE-002 by dynamically calculating pip value from exchange rates instead of static approximations. (ISSUE-003 FinBERT PCA was verified to already exist).
+- `training/train_gpu.py`: Fixed DS-002 by prepending 14 days of historical overlap to data chunks before feature generation to eliminate EMA look-ahead bias at split boundaries.
+- `data/databento_loader.py` & `config/settings.py` & `data/historical_news.py` & `execution/broker_bridge.py`: Integrated subagent fixes for DS-003, ISSUE-005, DS-004, ISSUE-004, and ISSUE-001 (MetaTrader5 BrokerBridge implementation).
+
+---
+
+## Manual Update — 2026-08-01 23:05 UTC
+**Author:** Antigravity (AI)
+**Branch:** main
+**Note:** Executed user requested fixes:
+- **ISSUE-001**: Implemented `BrokerBridge` in `execution/broker_bridge.py` using `MetaTrader5` package for `connect`, `execute_order`, `modify_order`, `close_position`, and `get_positions`.
+- **DS-003**: Enforced explicit UTC timezone mapping `dt.replace_time_zone("UTC")` immediately after scanning Parquet files in `data/databento_loader.py`.
+- **DS-004 & ISSUE-004**: Removed bag-of-words fallback `_POSITIVE_WORDS`, `_NEGATIVE_WORDS`, and `_sentiment_score` from `data/historical_news.py`.
+- **ISSUE-005**: Upgraded session boundaries in `config/settings.py` to use `zoneinfo` tz-aware boundaries and local times that respect DST.
+
+
+## Manual Update — 2026-08-02 03:01 UTC
+**Author:** jamie  
+**Branch:** main (ac224f7)  
+**Note:** Removed hardcoded feature windows [6, 20, 60] in feature_engineering_pl.py and mapped them directly to run.yaml.
+
+---
+
+## Manual Update — 2026-08-02 02:58 UTC
+**Author:** jamie  
+**Branch:** main (ac224f7)  
+**Note:** Removed final hardcoded TP/SL defaults in rl_reward_labeling.py and settings.py LABEL_REGIME so they dynamically pull from LABELING config. Smoke test passed successfully.
+
+---
+
+## Manual Update — 2026-08-02 02:48 UTC
+**Author:** jamie  
+**Branch:** main (ac224f7)  
+**Note:** Dynamic config audit: Fixed 10 hardcoded values across 5 files. Added PIP_SIZES lookup table and get_pip_size() to settings.py. Made triple-barrier labels read defaults from LABELING config. Made realism.py TP/SL + no-trade threshold configurable. Made backtest spread clamp configurable. Added features, pip_sizes blocks to run.yaml. Added var_confidence, var_max_pct, pip_value to risk config. Added max_bad_frac, max_zero_frac to training config. Fixed timestamp parsing bug in historical_news.py.
+
+---
+
+## Commit `ac224f7` — 2026-08-01 21:12 UTC
+**Author:** jamie  
+**Message:** Initial commit of forex ML trading pipeline.
+
+**Files changed:**
+```
+
+```
+
 ---
 
 ## 2026-08-01 20:43 UTC

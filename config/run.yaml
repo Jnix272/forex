@@ -5,8 +5,10 @@ backtest:
   commission_per_lot: 3.5
   execution_delay_bars: 1
   lots: 0.1
+  max_spread_clamp: 0.0050
   mc_sims: 500
   min_confidence: 0.45
+  min_spread_clamp: 0.00005
   slippage_pips: 0.7
   stop_pips: 12.0
   take_profit_pips: 18.0
@@ -216,6 +218,25 @@ data:
   start: '2008-01-01'
   use_cache: true
   window_batch_days: 1
+# ── Feature indicator windows (overrides settings.FEATURE_SCALES) ───────────
+features:
+  atr_windows: [6, 20, 60]
+  chop_window: 14
+  corr_window: 60
+  momentum_windows: [5, 20, 60]
+  ofi_windows: [5, 20, 60]
+  regime_window: 240
+  vol_windows: [6, 20, 60]
+  volatility_window: 120
+  vwap_window: 60
+# ── Per-asset pip resolution (overrides settings.PIP_SIZES) ─────────────────
+pip_sizes:
+  BTC: 1.0
+  ETH: 0.01
+  JPY: 0.01
+  XAG: 0.001
+  XAU: 0.1
+  default: 0.0001
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
 direction_training:
   label_smoothing: 0.05
@@ -427,6 +448,7 @@ risk:
   kelly_fraction: 0.25
   max_drawdown_halt: 0.1
   max_position_pct: 0.05
+  pip_value: 10.0
   regime_scale:
     ranging: 0.7
     trending: 1.0
@@ -445,6 +467,8 @@ risk:
     "off":
       max_lots: 0.0
       max_open_trades: 0
+  var_confidence: 0.99
+  var_max_pct: 0.02
 # ── Reinforcement learning (DQN / PPO) on top of supervised encoder ─────────
 rl:
   algo: dqn
@@ -507,6 +531,8 @@ training:
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
   lr_warmup_epochs: 3
+  max_bad_frac: 0.05
+  max_zero_frac: 0.80
   onecycle_max_lr_mult: 10.0
   onecycle_pct_start: 0.1
   patience: 6

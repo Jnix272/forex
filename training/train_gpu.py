@@ -4183,6 +4183,7 @@ def _build_chunk(
     scaler:      StandardScaler,
     seq_len:     int,
     chunk_idx:   int,
+    win_start:   str = None,
     label_method: str = "rl_reward",
     target_col: str = "label",
     execution_delay_bars: int = 1,
@@ -4309,6 +4310,13 @@ def _build_chunk(
     
     # Cast back to Pandas to retain downstream compatibility with labels
     F_pd = F.to_pandas().set_index("timestamp_utc")
+    
+    if win_start:
+        import pandas as pd
+        ws_dt = pd.to_datetime(win_start, utc=True)
+        F_pd = F_pd[F_pd.index >= ws_dt]
+        bars_pd = bars_pd[bars_pd.index >= ws_dt]
+        
     feats = F_pd
     if "news_ok" in feats.columns:
         news_no_trade = (1.0 - feats["news_ok"].astype(float)).clip(0.0, 1.0)
@@ -4565,7 +4573,8 @@ def _build_multipair_chunk(
     scalers:      dict,
     seq_len:      int,
     chunk_idx:    int,
-    label_method: str,
+    win_start:    str = None,
+    label_method: str = "rl_reward",
     target_col:   str = "label",
     execution_delay_bars: int = 1,
     bar_freq: str = "1min",
@@ -4605,7 +4614,7 @@ def _build_multipair_chunk(
 
     for pair, ticks in pair_ticks.items():
         chunk_result = _build_chunk(
-            ticks, fe, scalers[pair], seq_len, chunk_idx, label_method,
+            ticks, fe, scalers[pair], seq_len, chunk_idx, win_start=win_start, label_method=label_method,
             target_col=target_col,
             execution_delay_bars=execution_delay_bars,
             bar_freq=bar_freq,
@@ -5226,12 +5235,16 @@ def _build_multipair_dataset(
 
         def _load_window_ticks(win_start, win_end):
             """Load ticks for all pairs in a single date window."""
+            import pandas as pd
+            ws_dt = pd.to_datetime(win_start, utc=True) - pd.Timedelta(days=14)
+            ws_str = ws_dt.strftime("%Y-%m-%d")
+            
             ticks = {}
             for p in pairs:
                 ticks[p] = mgr.load(
                     pair         = p,
                     source       = args.data_source,
-                    start        = win_start,
+                    start        = ws_str,
                     end          = win_end,
                     session_only = not getattr(args, "full_day_data", False),
                 )
@@ -5379,7 +5392,7 @@ def _build_multipair_dataset(
                     X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = (
                         _build_multipair_chunk(
                         pair_ticks, fe, scalers, args.seq_len,
-                        window_idx, args.label_method,
+                        window_idx, win_start=win_start, label_method=args.label_method,
                         target_col=_cache_target_col(args),
                         execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
                         bar_freq=str(getattr(args, "bar_freq", "1min")),
@@ -10138,8 +10151,16 @@ def supervised_train(
             core.load_state_dict(torch.load(best_path, map_location=device))
             cal_model = TemperatureScaler(core).to(device)
             calibrate_as_classification = bool(classification or multitask)
+        # Use tune_idx to prevent calibration leakage if available
+        if getattr(args, "_tune_eval_idx", None) is not None:
+            cal_ds = ZarrStreamDataset(cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask)
+            cal_dl = DataLoader(cal_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+            cal_model.calibrate(cal_dl, device, classification=calibrate_as_classification)
+        else:
+            print("[Warning] No tune_idx found. Calibrating on val_dl (Data Leakage Risk!).")
             cal_model.calibrate(val_dl, device, classification=calibrate_as_classification)
-            cal_path = ckpt_dir / f"{model_name}{fold_suffix}_calibrated.pt"
+
+        cal_path = ckpt_dir / f"{model_name}{fold_suffix}_calibrated.pt"
             _safe_save({"model_state": core.state_dict(),
                         "temperature": cal_model.temperature.item(),
                         "classification": calibrate_as_classification}, cal_path)
@@ -12729,6 +12750,10 @@ def _auto_tune_next_run(
     log_dir.mkdir(parents=True, exist_ok=True)
     safe_run_name = _slug_part(run_name, max_len=180)
 
+    # Use versioned config path instead of overwriting run.yaml
+    ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    versioned_cfg_path = cfg_path.parent / f"run_{ts_str}.yaml"
+
     prop_file = log_dir / f"{safe_run_name}_proposal.json"
 
 
@@ -13059,13 +13084,14 @@ def _auto_tune_next_run(
         print("\n[Auto-Tune] No hyperparameter changes recommended. "
               f"Proposal written -> {prop_file}")
 
-    # ΓöÇΓöÇ write back to config (live mode only) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── write back to config (live mode only) ──────────────────────────
     if not dry_tune and not _auto_tune_quarantined and data is not None and proposals:
         try:
             yaml_io = YAML()
             yaml_io.preserve_quotes = True
-            with open(cfg_path, "w", encoding="utf-8") as f:
+            with open(versioned_cfg_path, "w", encoding="utf-8") as f:
                 yaml_io.dump(data, f)
+            print(f"[Auto-Tune] Wrote tuned config -> {versioned_cfg_path}")
         except Exception as e:
             print(f"[Auto-Tune] Failed to write back config: {e}")
 

@@ -100,6 +100,8 @@ class ForexScalingBacktest:
         daily_volume_lots: float = 500.0,
         apply_market_impact: bool = True,
         max_drawdown_limit: float = 0.20,
+        min_spread_clamp: float = 0.00005,
+        max_spread_clamp: float = 0.0050,
     ):
         """
         Parameters
@@ -148,6 +150,8 @@ class ForexScalingBacktest:
         self.daily_volume_lots = daily_volume_lots
         self.apply_market_impact = apply_market_impact
         self.max_drawdown_limit = max_drawdown_limit
+        self.min_spread_clamp = min_spread_clamp
+        self.max_spread_clamp = max_spread_clamp
 
         # State
         self.position: float = 0.0         # Current net lots
@@ -190,7 +194,7 @@ class ForexScalingBacktest:
             spread = row.get("spread_avg", row.get("ask_close", row.get("close", 1.0))
                              - row.get("bid_close", row.get("close", 1.0) - 0.0001))
             # Clamp spread between 0.5 pips and 50 pips to avoid extreme impact values
-            spread = min(max(float(spread), 0.00005), 0.0050)
+            spread = min(max(float(spread), self.min_spread_clamp), self.max_spread_clamp)
             impact_fraction = spread * np.sqrt(abs(lots) / max(self.daily_volume_lots, 1.0))
             price += direction * impact_fraction
 
@@ -453,15 +457,21 @@ class ForexScalingBacktest:
         # (which only updates on trade close), to avoid artificially deflating std
         mtm_col = "total_value" if "total_value" in self.results_df.columns else "equity"
         returns = self.results_df[mtm_col].pct_change().dropna()
+        # Assume ~2% annual risk-free rate
+        rf_annual = 0.02
+        rf_per_bar = rf_annual / (252 * 24 * 60)
+        excess_returns = returns - rf_per_bar
+        
         sharpe = 0.0
         sortino = 0.0
         ann_factor = np.sqrt(252 * 24 * 60)  # 1-min bars
-        if len(returns) > 1 and returns.std(ddof=1) > 1e-12:
-            sharpe = (returns.mean() / returns.std(ddof=1)) * ann_factor
+        
+        if len(excess_returns) > 1 and excess_returns.std(ddof=1) > 1e-12:
+            sharpe = (excess_returns.mean() / excess_returns.std(ddof=1)) * ann_factor
 
-        downside_returns = returns[returns < 0]
+        downside_returns = excess_returns[excess_returns < 0]
         if len(downside_returns) > 1 and downside_returns.std(ddof=1) > 1e-12:
-            sortino = (returns.mean() / downside_returns.std(ddof=1)) * ann_factor
+            sortino = (excess_returns.mean() / downside_returns.std(ddof=1)) * ann_factor
 
         equity_arr = self.results_df["total_value"].values
         rolling_max = np.maximum.accumulate(equity_arr)

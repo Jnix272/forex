@@ -155,13 +155,14 @@ def run_pipeline():
             print("Running Feature Engineering Pipeline...")
             engineer = FeatureEngineer()
             
-            processed = engineer.build(
+            processed = engineer.build_chunked(
                 bars=bars,
                 cross_asset=cross_asset_dict,
                 sentiment=sentiment_df,
                 eco_act=eco_act,
                 eco_fc=eco_fc,
-                oanda_data=oanda_df
+                oanda_data=oanda_df,
+                chunk_size=50_000
             )
             
             # Save the result

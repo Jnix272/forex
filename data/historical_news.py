@@ -52,14 +52,6 @@ def _eco_numeric_expr(col: str) -> pl.Expr:
 _DEFAULT_NEWS_FILE = Path(__file__).resolve().parent / "raw" / "news" / "historical_news_combined.parquet"
 _DEFAULT_CAL_FILE = Path(__file__).resolve().parent / "raw" / "eco_calendar" / "events.csv"
 
-_POSITIVE_WORDS = {
-    "beat", "beats", "bullish", "growth", "hawkish", "strong", "surge", "upbeat",
-    "higher", "improves", "improved", "expands", "rally", "optimism",
-}
-_NEGATIVE_WORDS = {
-    "miss", "misses", "bearish", "recession", "dovish", "weak", "slump", "lower",
-    "falls", "fall", "contracts", "risk", "crisis", "concern", "inflation",
-}
 _GLOBAL_CURRENCIES = {"", "ALL", "GLOBAL", "G10", "WORLD", "MARKET", "MARKETS"}
 
 NEWS_CATEGORIES = [
@@ -171,15 +163,6 @@ def _normalise_columns(df: pl.DataFrame) -> pl.DataFrame:
     return out
 
 
-def _sentiment_score(text: str) -> float:
-    words = {w.strip(".,;:!?()[]{}\"'").lower() for w in str(text).split()}
-    if not words:
-        return 0.0
-    pos = len(words & _POSITIVE_WORDS)
-    neg = len(words & _NEGATIVE_WORDS)
-    return float(np.clip((pos - neg) / max(pos + neg, 1), -1.0, 1.0))
-
-
 def _filter_relevant(df: pl.DataFrame, start, end, pair: str) -> pl.DataFrame:
     if (len(df) == 0) or "timestamp_utc" not in df.columns:
         return pl.DataFrame()
@@ -233,7 +216,7 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
                 if start_ts and end_ts:
                     s_str = start_ts.strftime('%Y-%m-%d %H:%M:%S')
                     e_str = end_ts.strftime('%Y-%m-%d %H:%M:%S')
-                    query = f"SELECT * FROM read_csv_auto('{str(p)}', ignore_errors=true) WHERE timestamp_utc >= '{s_str}' AND timestamp_utc <= '{e_str}'"
+                    query = f"SELECT * FROM read_csv_auto('{str(p)}', ignore_errors=true) WHERE TRY_CAST(timestamp_utc AS TIMESTAMP) >= '{s_str}' AND TRY_CAST(timestamp_utc AS TIMESTAMP) <= '{e_str}'"
                 else:
                     query = f"SELECT * FROM read_csv_auto('{str(p)}', ignore_errors=true)"
                 df_slice = con.execute(query).pl()
@@ -242,9 +225,13 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
                     frames.append(_normalise_columns(df_slice))
             except Exception:
                 # Fallback to standard read if duckdb fails
-                frames.append(_normalise_columns(_read_table(p)))
+                s_str_pass = start_ts.strftime('%Y-%m-%d %H:%M:%S') if start_ts else None
+                e_str_pass = end_ts.strftime('%Y-%m-%d %H:%M:%S') if end_ts else None
+                frames.append(_normalise_columns(_read_table(p, start=s_str_pass, end=e_str_pass)))
         else:
-            frames.append(_normalise_columns(_read_table(p)))
+            s_str_pass = start_ts.strftime('%Y-%m-%d %H:%M:%S') if start_ts else None
+            e_str_pass = end_ts.strftime('%Y-%m-%d %H:%M:%S') if end_ts else None
+            frames.append(_normalise_columns(_read_table(p, start=s_str_pass, end=e_str_pass)))
             
     frames = [f for f in frames if not (len(f) == 0)]
     if not frames:
@@ -252,7 +239,8 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
     df = pl.concat(frames, how="diagonal_relaxed")
     if "timestamp_utc" in df.columns:
         df = df.with_columns(
-            pl.col("timestamp_utc").cast(pl.Utf8, strict=False).str.to_datetime(time_zone="UTC")
+            pl.col("timestamp_utc").cast(pl.Utf8, strict=False)
+            .str.to_datetime(time_unit="us", time_zone="UTC", strict=False)
         ).drop_nulls("timestamp_utc")
     return df
 

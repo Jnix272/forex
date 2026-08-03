@@ -9,6 +9,11 @@ import os
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional
+from datetime import time
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 
 # Load .env from project root so WANDB_API_KEY, MLFLOW_TRACKING_URI, etc.
@@ -460,6 +465,31 @@ LABELING = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PIP SIZES — per-asset pip resolution lookup
+# ─────────────────────────────────────────────────────────────────────────────
+PIP_SIZES = {
+    "default": 0.0001,
+    "JPY":     0.01,     # All JPY pairs (USDJPY, EURJPY, GBPJPY, etc.)
+    "XAU":     0.1,      # Gold
+    "XAG":     0.001,    # Silver
+    "BTC":     1.0,      # Bitcoin
+    "ETH":     0.01,     # Ethereum
+}
+
+def get_pip_size(pair: str) -> float:
+    """Look up pip size for a currency pair. Checks quote currency first, then base."""
+    pair_upper = str(pair).upper().replace("/", "").replace("_", "")
+    # Check quote currency (last 3 chars)
+    quote = pair_upper[-3:] if len(pair_upper) >= 6 else pair_upper
+    if quote in PIP_SIZES:
+        return PIP_SIZES[quote]
+    # Check base currency (first 3 chars)
+    base = pair_upper[:3] if len(pair_upper) >= 6 else ""
+    if base in PIP_SIZES:
+        return PIP_SIZES[base]
+    return PIP_SIZES["default"]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SIZING + SCALING STRATEGY (BOTH COMBINED)
 # ─────────────────────────────────────────────────────────────────────────────
 SIZING = {
@@ -745,14 +775,13 @@ LIVE_RISK = {
     # max_open_trades counts independent open position tickets/legs. Scale-in
     # and scale-out actions modify lots on an existing ticket and are governed
     # by max_lots plus execution-cost controls.
-    # PIPE-005: Session windows now use timezone names for DST-aware boundaries.
-    # The hours_utc field is the winter (non-DST) default. At runtime, use
-    # get_session_hours() from trading/session_utils.py to get correct UTC offsets.
+    # PIPE-005 / ISSUE-005: Session windows now use zoneinfo tz-aware boundaries
+    # that respect DST, defined by local open and close times.
     "session_limits": {
-        "asia":   {"max_lots": 1.0, "max_open_trades": 3, "hours_utc": (0,  9),  "tz": "Asia/Tokyo"},
-        "london": {"max_lots": 3.0, "max_open_trades": 5, "hours_utc": (7,  16), "tz": "Europe/London"},
-        "ny":     {"max_lots": 3.0, "max_open_trades": 5, "hours_utc": (12, 21), "tz": "America/New_York"},
-        "off":    {"max_lots": 0.5, "max_open_trades": 1, "hours_utc": (21, 24), "tz": None},
+        "asia":   {"max_lots": 1.0, "max_open_trades": 3, "hours_local": (time(9, 0), time(18, 0)),  "tz": ZoneInfo("Asia/Tokyo")},
+        "london": {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(8, 0), time(16, 30)), "tz": ZoneInfo("Europe/London")},
+        "ny":     {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(9, 30), time(16, 0)), "tz": ZoneInfo("America/New_York")},
+        "off":    {"max_lots": 0.5, "max_open_trades": 1, "hours_local": (time(18, 0), time(8, 0)), "tz": None},
     },
 
     # ── ATR stop parameters (mirrors RISK) ────────────────────────────────────
@@ -808,11 +837,11 @@ NO_TRADE = {
 LABEL_REGIME = {
     # Triple-barrier multipliers per regime
     "barrier_scale": {
-        "high_vol":  {"tp_atr_mult": 2.0, "sl_atr_mult": 1.5, "horizon_mult": 0.7},
-        "normal":    {"tp_atr_mult": 1.5, "sl_atr_mult": 1.0, "horizon_mult": 1.0},
-        "low_vol":   {"tp_atr_mult": 1.0, "sl_atr_mult": 0.8, "horizon_mult": 1.3},
-        "mean_rev":  {"tp_atr_mult": 1.0, "sl_atr_mult": 0.75,"horizon_mult": 0.5},
-        "trending":  {"tp_atr_mult": 2.0, "sl_atr_mult": 1.2, "horizon_mult": 1.5},
+        "high_vol":  {"tp_atr_mult": LABELING["profit_target_atr"] * 1.33, "sl_atr_mult": LABELING["stop_loss_atr"] * 1.66, "horizon_mult": 0.7},
+        "normal":    {"tp_atr_mult": LABELING["profit_target_atr"], "sl_atr_mult": LABELING["stop_loss_atr"], "horizon_mult": 1.0},
+        "low_vol":   {"tp_atr_mult": LABELING["profit_target_atr"] * 0.66, "sl_atr_mult": LABELING["stop_loss_atr"] * 0.88, "horizon_mult": 1.3},
+        "mean_rev":  {"tp_atr_mult": LABELING["profit_target_atr"] * 0.66, "sl_atr_mult": LABELING["stop_loss_atr"] * 0.88, "horizon_mult": 0.5},
+        "trending":  {"tp_atr_mult": LABELING["profit_target_atr"] * 1.33, "sl_atr_mult": LABELING["stop_loss_atr"] * 1.33, "horizon_mult": 1.5},
     },
     # Vol regime boundaries (rolling vol percentiles)
     "high_vol_pct": 0.75,
@@ -889,3 +918,16 @@ EXECUTION = {
     "slippage_vol_window":    120,      # bars for rolling median ATR
     "slippage_spread_window": 120,      # bars for rolling median spread
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG PREFLIGHT VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from config.config_schema import TrainingSchema, SizingSchema, LiveRiskSchema
+    
+    # Parse dictionaries into validated models at runtime
+    _ = TrainingSchema(**TRAINING)
+    _ = SizingSchema(**SIZING)
+    _ = LiveRiskSchema(**LIVE_RISK)
+except ImportError:
+    pass

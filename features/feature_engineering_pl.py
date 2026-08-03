@@ -290,17 +290,22 @@ def position_limit_flags(
       Approximated as $7.0 (conservative) since exact rate isn't available at feature time.
     """
     pair_upper = str(pair).upper()
+    
+    # Calculate exact pip value in account currency (assuming USD account)
     if "JPY" in pair_upper:
-        pip_value_est = 7.0  # 100000 * 0.01 / ~143 ≈ $7.0
+        # 1 pip = 0.01 JPY. Value in USD = (100,000 * 0.01) / USDJPY rate
+        pip_value = 1000.0 / pl.col("close")
     elif pair_upper.endswith("USD"):
-        pip_value_est = 10.0  # direct USD quote
+        # 1 pip = 0.0001 USD. Value in USD = 100,000 * 0.0001 = $10.0
+        pip_value = pl.lit(10.0)
     elif pair_upper.startswith("USD"):
-        pip_value_est = 8.0  # approximate for crosses where USD is base
+        # USD is base (e.g. USDCAD). Value in USD = (100,000 * 0.0001) / USDCAD rate
+        pip_value = 10.0 / pl.col("close")
     else:
-        pip_value_est = 9.0  # cross pairs (EURGBP, etc.) — approximate
+        # Cross pair (e.g. EURGBP). Approximation unless we fetch USD rate.
+        pip_value = pl.lit(9.0)
 
     risk_budget = pl.lit(max_pos_pct)
-    pip_value = pl.lit(pip_value_est)
     pip_mult = 10000.0 if "JPY" not in pair_upper else 100.0
 
     max_pos = risk_budget / (pl.col(atr_col) * pip_value * pip_mult)
@@ -1432,6 +1437,23 @@ class FeatureEngineer:
         self.rsi_p=rsi_period; self.mf=macd_fast; self.ms=macd_slow; self.msig=macd_signal
         self.bb_w=bb_window; self.bb_s=bb_std; self.lags=lag_windows
         self.vm=vol_mult; self.nb=news_buf; self.dl=decay_lam; self.fb=fb_dim
+        
+        try:
+            import yaml
+            with open("config/run.yaml") as f:
+                yaml_fs = yaml.safe_load(f).get("features", {})
+        except Exception:
+            yaml_fs = {}
+        try:
+            from config.settings import FEATURE_SCALES as FS
+        except ImportError:
+            FS = {}
+            
+        self.atr_ws = yaml_fs.get("atr_windows", FS.get("atr_windows", [self.atr_w, 20, 60]))
+        self.vol_ws = yaml_fs.get("vol_windows", FS.get("vol_windows", [6, 20, 60]))
+        self.ofi_ws = yaml_fs.get("ofi_windows", FS.get("ofi_windows", [5, 20, 60]))
+        self.mom_ws = yaml_fs.get("momentum_windows", FS.get("momentum_windows", [5, 20, 60]))
+        self.lags = yaml_fs.get("momentum_windows", FS.get("momentum_windows", lag_windows))
         self.ca=CrossAssetFeatures(
             corr_window=ca_corr_window,
             regime_window=ca_regime_window,
@@ -1543,8 +1565,8 @@ class FeatureEngineer:
             [order_book_imbalance_proxy()] +
             trade_arrival_rate(self.tar_w) +
             [order_flow_imbalance(self.ofi_w)] +
-            [average_true_range(w) for w in [self.atr_w, 20, 60]] +
-            [rolling_volatility(w) for w in [6, 20, 60]] +
+            [average_true_range(w) for w in self.atr_ws] +
+            [rolling_volatility(w) for w in self.vol_ws] +
             bollinger_bands(self.bb_w, self.bb_s) +
             [rsi(self.rsi_p)] +
             macd(self.mf, self.ms, self.msig) +

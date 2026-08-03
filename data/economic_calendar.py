@@ -267,43 +267,53 @@ class EcoCalendarFeatureBuilder:
 
         events["datetime"].values            # numpy datetime64
         pd.Timedelta(minutes=self.buffer_min)
-        bar_times  = pd.DatetimeIndex(bars.index)
-
-        # Vectorised: distance from each bar to nearest future event
-        for i, bt in enumerate(bar_times):
-            future = events[events["datetime"] > bt]["datetime"]
-            past   = events[events["datetime"] <= bt]["datetime"]
-
-            delta_fwd = 1440.0
-            delta_bk  = 1440.0
-
-            if len(future):
-                delta_fwd = (future.iloc[0] - bt).total_seconds() / 60
-                out.iloc[i, out.columns.get_loc("eco_minutes_to_next")] = float(
-                    np.clip(delta_fwd, 0, 1440))
-
-            if len(past):
-                last_ev   = past.iloc[-1]
-                delta_bk  = (bt - last_ev).total_seconds() / 60
-                out.iloc[i, out.columns.get_loc("eco_minutes_since_last")] = float(
-                    np.clip(delta_bk, 0, 1440))
-
-                # Surprise: find the event row
-                ev_row = events[events["datetime"] == last_ev].iloc[-1]
-                prior  = float(ev_row["prior"])
-                if abs(prior) > 1e-9:
-                    surprise = (float(ev_row["actual"]) - float(ev_row["forecast"])) / abs(prior)
-                    out.iloc[i, out.columns.get_loc("eco_surprise_norm")] = float(
-                        np.clip(surprise, -5, 5))
-
-            # Release flag (true if within news_buffer_minutes of PAST or FUTURE event)
-            if delta_bk <= self.buffer_min or delta_fwd <= self.buffer_min:
-                out.iloc[i, out.columns.get_loc("eco_release_flag")] = 1.0
-
-        # Shift surprise by 1 bar to prevent look-ahead: model cannot act on a
-        # release until the bar AFTER publication (data feed + parsing latency)
-        out["eco_surprise_norm"] = out["eco_surprise_norm"].shift(1).fillna(0.0)
-
+        bars_df = pd.DataFrame({"bar_dt": bars.index})
+        events_df = events.sort_values("datetime").copy()
+        
+        # Backward merge to find the LAST event
+        past = pd.merge_asof(
+            bars_df, 
+            events_df, 
+            left_on="bar_dt", 
+            right_on="datetime", 
+            direction="backward"
+        )
+        
+        # Forward merge to find the NEXT event
+        future = pd.merge_asof(
+            bars_df, 
+            events_df, 
+            left_on="bar_dt", 
+            right_on="datetime", 
+            direction="forward",
+            allow_exact_matches=False
+        )
+        
+        # Calculate deltas
+        delta_bk = (bars_df["bar_dt"] - past["datetime"]).dt.total_seconds() / 60.0
+        delta_fwd = (future["datetime"] - bars_df["bar_dt"]).dt.total_seconds() / 60.0
+        
+        # Fill missing with 1440.0
+        delta_bk = delta_bk.fillna(1440.0).clip(0, 1440.0)
+        delta_fwd = delta_fwd.fillna(1440.0).clip(0, 1440.0)
+        
+        out["eco_minutes_since_last"] = delta_bk.values
+        out["eco_minutes_to_next"] = delta_fwd.values
+        
+        # Surprise calculation (DS-005/Issue 6: enforcing 1-min latency)
+        prior = past["prior"].fillna(0.0).astype(float)
+        actual = past["actual"].astype(float)
+        forecast = past["forecast"].astype(float)
+        
+        surprise = (actual - forecast) / prior.where(prior.abs() > 1e-9, np.nan)
+        surprise = surprise.where(delta_bk >= 1.0, 0.0)
+        surprise = surprise.fillna(0.0).clip(-5.0, 5.0)
+        out["eco_surprise_norm"] = surprise.values
+        
+        # Release flag (true if within news_buffer_minutes of PAST or FUTURE event)
+        flag_mask = (delta_bk <= self.buffer_min) | (delta_fwd <= self.buffer_min)
+        out["eco_release_flag"] = flag_mask.astype(float).values
+        
         return out
 
 

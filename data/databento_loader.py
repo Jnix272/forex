@@ -36,11 +36,9 @@ class DatabentoLoader:
 
         # DS-003: enforce UTC timezone on timestamp column before filtering
         # to prevent silent misalignment between naive and aware datetimes
-        ts_dtype = schema[ts_col]
-        if hasattr(ts_dtype, "time_zone") and ts_dtype.time_zone is None:
-            lazy_df = lazy_df.with_columns(
-                pl.col(ts_col).dt.replace_time_zone("UTC")
-            )
+        lazy_df = lazy_df.with_columns(
+            pl.col(ts_col).cast(pl.Datetime("ns")).dt.replace_time_zone("UTC")
+        )
         
         if start:
             from datetime import datetime, timezone
@@ -68,6 +66,7 @@ class DatabentoLoader:
 
             if pair in self.INVERT_PAIRS:
                 # Spot = 1 / CME. Bid/ask are inverted.
+                out_lazy = out_lazy.filter((pl.col("bid") > 1e-12) & (pl.col("ask") > 1e-12))
                 out_lazy = out_lazy.with_columns([
                     (1.0 / pl.col("ask")).alias("real_bid"),
                     (1.0 / pl.col("bid")).alias("real_ask")
