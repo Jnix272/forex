@@ -61,12 +61,25 @@ def main() -> int:
     if command == "backtest":
         return _run_script("run_backtest.py", passthrough)
     if command == "all":
-        for script in ("download_all.py", "build_features.py", "train.py", "run_backtest.py"):
+        # Separate download-specific arguments from general/train arguments
+        download_args = []
+        train_args = []
+        for arg in passthrough:
+            if arg in ("--skip-news", "--skip-prices", "--skip-cot", "--skip-eco", "--dry-run"):
+                download_args.append(arg)
+            else:
+                download_args.append(arg)
+                train_args.append(arg)
+                
+        # The correct script name is run_feature_engineering.py
+        for script in ("download_all.py", "run_feature_engineering.py", "train.py", "run_backtest.py"):
             script_path = _ROOT / "scripts" / script
             if not script_path.exists():
                 print(f"[pipeline] Skipping {script} (not found)", flush=True)
                 continue
-            rc = _run_script(script, passthrough)
+                
+            script_passthrough = download_args if script == "download_all.py" else train_args
+            rc = _run_script(script, script_passthrough)
             if rc != 0:
                 print(f"[pipeline] Stage {script} failed with code {rc}", flush=True)
                 return rc

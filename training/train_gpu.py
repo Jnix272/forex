@@ -171,6 +171,10 @@ def _normalize_pretrain_method(method: str) -> str:
 from monitoring.drift_gate import run_drift_gate
 from validation.mlflow_logger import MLflowModelLogger
 
+# Advanced Training Mechanics
+from training.ewc import ElasticWeightConsolidation, apply_ewc_loss
+from training.memory_management import PrioritizedDataLoader
+from training.adversarial_generator import AdversarialGenerator
 try:
     from models.ensemble import EnsembleMetaLearner, train_meta_learner
     ENSEMBLE = True
@@ -924,6 +928,21 @@ def parse_args():
                     help="Metric used for curriculum progression gating. 'train_loss' (default) "
                          "prevents val set leakage into curriculum decisions (SYS-005). "
                          "'val_sharpe' restores legacy behavior.")
+    p.add_argument(
+        "--curriculum-manager",
+        action="store_true",
+        default=False,
+        help="Enable the unified CurriculumManager (difficulty + self-paced + "
+             "loss-weighted + adaptive) as an extra per-epoch sample filter "
+             "(Improvement #4). Default: off (existing curriculum unchanged).",
+    )
+    p.add_argument(
+        "--curriculum-manager-mode",
+        type=str,
+        default="combined",
+        choices=["difficulty", "self_paced", "loss_weighting", "adaptive", "combined"],
+        help="CurriculumManager combination mode used with --curriculum-manager.",
+    )
     p.add_argument("--amp",    action="store_true", default=False,
                    help="Enable AMP (automatic mixed precision) for faster training. Disabled by default to avoid NaNs.")
     p.add_argument("--no-amp", action="store_true", default=False,
@@ -1112,6 +1131,14 @@ def parse_args():
         action="store_true",
         help="Use regime-aware TSCL: same-regime positives + cross-regime hard negatives",
     )
+    p.add_argument(
+        "--use-multi-task-pretrainer",
+        action="store_true",
+        default=False,
+        help="Pretrain with the multi-task pretrainer (contrastive + masked recon + "
+             "forecast + domain adaptation) from pretrain/multi_task.py instead of the "
+             "built-in single-objective trainer (Improvement #3).",
+    )
     p.add_argument("--pretrain-lr", type=float, default=float(PRETRAIN.get("pretrain_lr", 1e-4)),
                    help="Pretrain optimizer learning rate")
     p.add_argument("--pretrain-batch", type=int, default=int(PRETRAIN.get("pretrain_batch", 256)),
@@ -1216,6 +1243,9 @@ def parse_args():
     p.add_argument("--rl-episode-len", type=int, default=2048,
                    help="A-H1: bars per RL episode (sub-window sampled at a random offset "
                         "each reset). 0 = full series each episode.")
+    p.add_argument("--off-policy-rewards", action="store_true", default=False,
+                   help="Re-estimate RL episode rewards with IPS / doubly-robust "
+                        "estimators (Improvement #5) during training.")
     p.add_argument("--rl-encoder-obs", dest="rl_encoder_obs",
                    action=argparse.BooleanOptionalAction, default=True,
                    help="A-C3: use the frozen supervised encoder embedding as the RL "
@@ -1381,6 +1411,15 @@ def parse_args():
         help="Number of walk-forward folds (default: TRAINING['walk_forward_folds'])",
     )
     p.add_argument(
+        "--cv-strategy",
+        type=str,
+        default="legacy",
+        choices=["legacy", "walk_forward", "comb", "online"],
+        help="CV split strategy when --walk-forward-cv is on (Improvement #11): "
+             "legacy = original walk_forward_splits (default); walk_forward = "
+             "WalkForwardCV; comb = combinatorial purged CV; online = rolling window.",
+    )
+    p.add_argument(
         "--early-stop-metric",
         type=str,
         default=None,
@@ -1411,6 +1450,25 @@ def parse_args():
                    help="Weight of distillation loss relative to supervised loss")
     p.add_argument("--distill-temperature", type=float, default=2.0,
                    help="Temperature for distillation (if applicable)")
+
+    # Advanced Training Mechanics (Phase 2)
+    p.add_argument("--enable-ewc", action="store_true",
+                   help="Enable Elastic Weight Consolidation to prevent catastrophic forgetting.")
+    p.add_argument("--ewc-lambda", type=float, default=1000.0,
+                   help="EWC penalty weight (default: 1000.0).")
+    
+    p.add_argument("--enable-per", action="store_true",
+                   help="Enable Prioritized Experience Replay (PER).")
+    
+    p.add_argument("--enable-adversarial", action="store_true",
+                   help="Enable Adversarial Market Generation (synthetic flash crashes/spread blowouts).")
+    p.add_argument("--adversarial-prob", type=float, default=0.01,
+                   help="Probability of injecting an adversarial shock per batch (default: 0.01).")
+
+    # -- Risk engine (Improvement #1) — optional live/dry-run enforcement config --
+    p.add_argument("--risk-config", type=str, default=None, metavar="PATH",
+                   help="JSON/YAML file with a RiskEngine config (keys mirror "
+                        "config/settings.RISK) for live/dry-run enforcement during training.")
 
     # -- Pre-parse to find --config, then apply YAML defaults before full parse --
     pre, _ = p.parse_known_args()
@@ -1498,6 +1556,35 @@ def parse_args():
         args.model_profile = False
     args._cli_profile_overrides = _collect_cli_profile_overrides()
     _sync_runtime_config(args)
+
+    # -- Risk engine (Improvement #1): optional live/dry-run enforcement config. --
+    if getattr(args, "risk_config", None):
+        try:
+            from pathlib import Path as _Path
+            import json as _json
+            rc_path = _Path(args.risk_config)
+            if rc_path.is_file():
+                text = rc_path.read_text()
+                if rc_path.suffix.lower() in (".yaml", ".yml"):
+                    import yaml as _yaml
+                    rc_data = _yaml.safe_load(text) or {}
+                else:
+                    rc_data = _json.loads(text)
+            elif args.risk_config.strip().startswith("{"):
+                rc_data = _json.loads(args.risk_config)
+            else:
+                rc_data = {}
+            from risk.risk_engine import RiskConfig, RiskEngine
+            cfg = RiskConfig.from_dict(rc_data or {})
+            args.risk_engine = RiskEngine(equity=float(getattr(args, "risk_equity", 10_000.0)), cfg=cfg)
+            print(f"[Risk] Loaded risk config from {args.risk_config} | max_notional=${cfg.max_notional_usd:,.0f} "
+                  f"pos_cap={cfg.max_position_pct:.2%} dd_halt={cfg.max_drawdown_halt:.0%} "
+                  f"var={cfg.var_confidence:.0%}")
+        except Exception as e:
+            print(f"[Risk] Failed to load --risk-config {args.risk_config}: {e}")
+            args.risk_engine = None
+    else:
+        args.risk_engine = None
     return args
 
 
@@ -6683,6 +6770,66 @@ def walk_forward_splits(n_samples: int, n_folds: int, embargo: int, purge: int =
     return out
 
 
+def _build_cv_splits(model_args, n_samples: int) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], str]:
+    """
+    Build CV splits for supervised training (Improvement #11 wiring).
+
+    ``--cv-strategy``:
+      legacy       -> original walk_forward_splits (default, unchanged behavior)
+      walk_forward -> validation.cv.WalkForwardCV (purged/embargoed expanding window)
+      comb         -> validation.cv.CombCV (combinatorial purged CV)
+      online       -> validation.cv.OnlineCV (rolling window)
+
+    Returns (splits, strategy_label) where each split is (train_idx, val_idx).
+    Any failure falls back to the legacy walk-forward splits.
+    """
+    strategy = str(getattr(model_args, "cv_strategy", "legacy") or "legacy").lower()
+    _embargo = _embargo_bars(model_args)
+    _purge = _purge_bars(model_args)
+    _method = _validation_method(model_args)
+    _n_folds = max(1, int(getattr(model_args, "walk_forward_folds", 1) or 1))
+
+    def _legacy():
+        return walk_forward_splits(n_samples, _n_folds, _embargo, _purge, _method)
+
+    if strategy == "legacy":
+        return _legacy(), "legacy"
+
+    try:
+        from validation.cv import CombCV, OnlineCV, WalkForwardCV
+        X = np.zeros((max(n_samples, 1), 1))
+        if strategy == "walk_forward":
+            cv = WalkForwardCV(
+                n_splits=_n_folds,
+                initial_train_size=0.6,
+                purge=_purge,
+                embargo=_embargo,
+            )
+        elif strategy == "comb":
+            n_groups = max(4, min(int(getattr(model_args, "cv_n_groups", 10)), max(4, n_samples // 500)))
+            cv = CombCV(n_groups=n_groups, test_groups=2, purge=_purge, embargo=_embargo)
+        elif strategy == "online":
+            cv = OnlineCV(
+                initial_train=0.6,
+                window=max(50, n_samples // 20),
+                step=max(50, n_samples // 20),
+                purge=_purge,
+            )
+        else:
+            raise ValueError(f"Unknown cv strategy: {strategy}")
+        splits = [
+            (np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64))
+            for tr, va in cv.split(X)
+            if len(tr) >= 100 and len(va) >= 10
+        ]
+        if not splits:
+            raise RuntimeError(f"{strategy} produced no usable folds")
+        return splits, strategy
+    except Exception as exc:
+        print(f"[CV] strategy={strategy} unavailable ({exc}); falling back to legacy walk-forward")
+        return _legacy(), "legacy"
+
+
 def _load_diff_array(cache_path: str, n_samples: int) -> Optional[np.ndarray]:
     """
     B: Load the full per-sample difficulty array (uint8) from cache.
@@ -7930,6 +8077,9 @@ def train_epoch(
     distill_weight: float = 0.5,
     direction_only: bool = False,
     online_miner=None,     # Optional[OnlineHardExampleMiner] for per-sample tracking
+    adversarial_gen=None,  # Optional[AdversarialGenerator]
+    ewc_module=None,       # Optional[ElasticWeightConsolidation]
+    ewc_lambda: float=1000.0,
 ):
     """
     One training epoch.
@@ -7968,6 +8118,11 @@ def train_epoch(
             if _mask is not None:
                 xb = xb * _mask
 
+            if adversarial_gen is not None:
+                # Apply synthetic flash crashes, spread blowouts, and sentiment shocks
+                with torch.no_grad():
+                    xb = adversarial_gen(xb)
+
             if use_amp and device.type == "cuda":
                 with autocast("cuda", dtype=amp_dtype):
                     pred = model(xb)
@@ -8000,10 +8155,20 @@ def train_epoch(
                             pass
                         finally:
                             try:
-                                del _batch_idx, per_sample
+                                del _batch_idx_cpu, per_sample
                             except Exception:
                                 pass
                     # ────────────────────────────────────────────────────────
+
+                    # ── Prioritized Experience Replay (PER) ─────────────────
+                    if hasattr(loader, "update_priorities") and _batch_idx is not None:
+                        try:
+                            # Use unscaled loss for priority
+                            loader.update_priorities(_batch_idx, loss.detach())
+                        except Exception:
+                            pass
+                    # ────────────────────────────────────────────────────────
+
                     if teacher_model is not None:
                         with torch.no_grad():
                             t_pred = teacher_model(xb)
@@ -8013,9 +8178,11 @@ def train_epoch(
                         else:
                             p_out = pred
                             t_out = t_pred if not isinstance(t_pred, tuple) else t_pred[0]
-                        kd_loss = torch.nn.functional.mse_loss(p_out, t_out)
                         loss = (1.0 - distill_weight) * loss + distill_weight * kd_loss
                         
+                    if ewc_module is not None:
+                        loss = apply_ewc_loss(loss, ewc_module, ewc_lambda)
+
                     loss = loss / accum_steps   # scale for accumulation
 
                 if not torch.isfinite(loss):
@@ -8083,6 +8250,9 @@ def train_epoch(
                         opt.zero_grad(set_to_none=True)
                         if scheduler is not None: scheduler.step()
             else:
+                if adversarial_gen is not None:
+                    with torch.no_grad():
+                        xb = adversarial_gen(xb)
                 pred = model(xb)
                 loss = _compute_loss(
                     pred, crit, yb, classification,
@@ -8100,6 +8270,15 @@ def train_epoch(
                         t_out = t_pred if not isinstance(t_pred, tuple) else t_pred[0]
                     kd_loss = torch.nn.functional.mse_loss(p_out, t_out)
                     loss = (1.0 - distill_weight) * loss + distill_weight * kd_loss
+
+                if hasattr(loader, "update_priorities") and _batch_idx is not None:
+                    try:
+                        loader.update_priorities(_batch_idx, loss.detach())
+                    except Exception:
+                        pass
+
+                if ewc_module is not None:
+                    loss = apply_ewc_loss(loss, ewc_module, ewc_lambda)
 
                 loss = loss / accum_steps
 
@@ -8793,9 +8972,15 @@ def supervised_train(
     default_pin = (os.name != "nt")
     pin_mem = default_pin if getattr(args, "pin_memory", None) is None else bool(args.pin_memory)
 
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False,
-                          num_workers=nw, pin_memory=pin_mem, persistent_workers=use_persistent,
-                          prefetch_factor=pf)
+    if getattr(args, "enable_per", False):
+        train_dl = PrioritizedDataLoader(train_ds, batch_size=args.batch_size, 
+                                         num_workers=nw, pin_memory=pin_mem, 
+                                         persistent_workers=use_persistent, prefetch_factor=pf)
+    else:
+        train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False,
+                              num_workers=nw, pin_memory=pin_mem, persistent_workers=use_persistent,
+                              prefetch_factor=pf)
+
     _bn_train_dl = train_dl   # full-distribution loader for SWA BN update (never filtered)
     # On Windows, DataLoader worker processes crash unexpectedly during validation
     # after many training epochs (memory pressure kills subprocesses silently).
@@ -9433,6 +9618,26 @@ def supervised_train(
             print(f"[Train] Warning: could not save crash checkpoint: {_cs_exc}")
 
     epoch_bar = _pbar(range(start_ep, args.epochs), desc=f"Train {model_name.upper()}", unit="ep") if _rich_display is None else range(start_ep, args.epochs)
+    
+    # -- Advanced Training Mechanics: EWC & Adversarial --
+    _ewc = None
+    if getattr(args, "enable_ewc", False) and start_ep > 0:
+        # We only compute EWC if we are resuming from a previous trained state
+        try:
+            print(f"[EWC] Computing Fisher Information Matrix (max 1000 samples)...")
+            _ewc = ElasticWeightConsolidation(model, train_ds, device, max_samples=1000)
+            print(f"[EWC] Initialized successfully. Fisher diagonal locked.")
+        except Exception as e:
+            print(f"[EWC] Failed to initialize EWC: {e}")
+            
+    _adversarial = None
+    if getattr(args, "enable_adversarial", False):
+        try:
+            print(f"[Adversarial] Initializing Adversarial Market Generator (prob={getattr(args, 'adversarial_prob', 0.01)})")
+            _adversarial = AdversarialGenerator(probability=getattr(args, "adversarial_prob", 0.01))
+            print(f"[Adversarial] Initialized successfully.")
+        except Exception as e:
+            print(f"[Adversarial] Failed to initialize: {e}")
 
     # Restore curriculum runtime state from resume checkpoint (preferred) or history tail.
     _v_sh_history: list = list(history.get("val_sharpe", []))
@@ -9456,6 +9661,30 @@ def supervised_train(
               f"diff_stage={_active_diff_stage} stalls={_curriculum_stalls} frozen={_seq_frozen}")
     elif _curriculum_stalls > 0:
         _seq_frozen = True
+
+    # -- Unified CurriculumManager (Improvement #4) ---------------------------
+    # Opt-in extra curriculum layer. Mirrors n_samples on the *train* fold so
+    # difficulty scores line up with the samples this fold actually trains on.
+    _curriculum_mgr = None
+    if getattr(args, "curriculum_manager", False):
+        try:
+            from training.curriculum import create_curriculum_manager
+            _cm_n = len(train_idx)
+            _cm_diff = None
+            if _diff_arr is not None and len(_diff_arr) == n_samples:
+                _cm_diff = np.asarray(_diff_arr[train_idx], dtype=float)
+            _curriculum_mgr = create_curriculum_manager(
+                mode=str(getattr(args, "curriculum_manager_mode", "combined") or "combined"),
+                n_samples=_cm_n,
+                difficulty_scores=_cm_diff,
+                total_epochs=max(1, int(args.epochs)),
+                seed=int(getattr(args, "seed", 1337)),
+            )
+            print(f"[CurriculumManager] Enabled (mode={getattr(args, 'curriculum_manager_mode', 'combined')}) "
+                  f"over {_cm_n:,} train samples")
+        except Exception as _cm_exc:
+            _curriculum_mgr = None
+            print(f"[CurriculumManager] Disabled ({_cm_exc})")
 
     for ep in epoch_bar:
         if _TRAIN_LOGGER is not None:
@@ -9568,6 +9797,28 @@ def supervised_train(
         # Reset frozen features if difficulty stage increased
         # -- B: Difficulty curriculum ΓÇö rebuild dataloader with filtered indices --
         ep_train_idx = _apply_difficulty_filter(train_idx, ep)
+        # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
+        if _curriculum_mgr is not None:
+            try:
+                _cm_info = _curriculum_mgr.update(ep, losses=None)
+                _cm_mask = _curriculum_mgr.get_inclusion_mask()
+                if len(_cm_mask) == len(ep_train_idx) and float(_cm_mask.mean()) < 0.999:
+                    _ep_cm_idx = ep_train_idx[_cm_mask]
+                    if len(_ep_cm_idx) >= 50:
+                        ep_train_idx = _ep_cm_idx
+                        _log_info(
+                            f"[CurriculumManager] Epoch {ep+1}: included "
+                            f"{len(ep_train_idx):,}/{len(_cm_mask):,} samples "
+                            f"({float(_cm_mask.mean()):.0%})"
+                        )
+                history.setdefault("curriculum_manager_state", []).append({
+                    "epoch": ep,
+                    "mode": getattr(args, "curriculum_manager_mode", "combined"),
+                    "inclusion_rate": float(_cm_mask.mean()) if len(_cm_mask) else 1.0,
+                    "weights_mean": float(np.asarray(_cm_info.get("weights", np.ones(1))).mean()),
+                })
+            except Exception as _cm_exc:
+                _log_warn(f"[CurriculumManager] Epoch {ep+1} update failed: {_cm_exc}")
         _direction_warmup_active = bool(
             use_direction_targets
             and multitask
@@ -9645,6 +9896,9 @@ def supervised_train(
                 distill_weight=distill_weight,
                 direction_only=_direction_warmup_active,
                 online_miner=_online_miner,
+                adversarial_gen=_adversarial,
+                ewc_module=_ewc,
+                ewc_lambda=getattr(args, "ewc_lambda", 1000.0),
             )
         except Exception as _epoch_exc:
             _log_error(f"[Train] Epoch {ep+1} failed for {model_name}", _epoch_exc)
@@ -10151,16 +10405,16 @@ def supervised_train(
             core.load_state_dict(torch.load(best_path, map_location=device))
             cal_model = TemperatureScaler(core).to(device)
             calibrate_as_classification = bool(classification or multitask)
-        # Use tune_idx to prevent calibration leakage if available
-        if getattr(args, "_tune_eval_idx", None) is not None:
-            cal_ds = ZarrStreamDataset(cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask)
-            cal_dl = DataLoader(cal_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
-            cal_model.calibrate(cal_dl, device, classification=calibrate_as_classification)
-        else:
-            print("[Warning] No tune_idx found. Calibrating on val_dl (Data Leakage Risk!).")
-            cal_model.calibrate(val_dl, device, classification=calibrate_as_classification)
-
-        cal_path = ckpt_dir / f"{model_name}{fold_suffix}_calibrated.pt"
+            # Use tune_idx to prevent calibration leakage if available
+            if getattr(args, "_tune_eval_idx", None) is not None:
+                cal_ds = ZarrStreamDataset(cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask)
+                cal_dl = DataLoader(cal_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+                cal_model.calibrate(cal_dl, device, classification=calibrate_as_classification)
+            else:
+                print("[Warning] No tune_idx found. Calibrating on val_dl (Data Leakage Risk!).")
+                cal_model.calibrate(val_dl, device, classification=calibrate_as_classification)
+    
+            cal_path = ckpt_dir / f"{model_name}{fold_suffix}_calibrated.pt"
             _safe_save({"model_state": core.state_dict(),
                         "temperature": cal_model.temperature.item(),
                         "classification": calibrate_as_classification}, cal_path)
@@ -10445,6 +10699,68 @@ def _pretrain_ablation_verdict(baseline: dict, pretrained: dict) -> tuple[str, d
     return verdict, deltas
 
 
+def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
+    """
+    Pretrain the model backbone with the multi-task pretrainer (Improvement #3).
+
+    Samples one window block (already loaded by the caller), runs contrastive +
+    masked-recon + forecast + optional domain-adaptation pretraining via
+    ``pretrain_multi_task``, copies compatible encoder weights into the model
+    backbone, and saves a ``model_state`` checkpoint at ``ckpt`` so the standard
+    supervised-transfer path can load it.
+    """
+    from pretrain.multi_task import pretrain_multi_task
+
+    _epochs = max(1, int(getattr(args, "pretrain_epochs", 30) or 30))
+    _bs = max(4, min(int(getattr(args, "pretrain_batch", 256) or 256), int(n_features) * args.seq_len, 2048))
+    _bs = max(4, _bs // 8 * 8) if _bs > 8 else _bs
+    print(f"[Pretrain] Multi-task pretrainer (Improvement #3) | epochs={_epochs} "
+          f"batch={_bs} windows={len(windows)}")
+
+    try:
+        trainer, history = pretrain_multi_task(
+            windows,
+            seq_len=args.seq_len,
+            n_features=n_features,
+            epochs=_epochs,
+            batch_size=_bs,
+            device=device,
+            silent=False,
+        )
+    except Exception as exc:
+        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to "
+              f"built-in pretrain.")
+        return None
+
+    target = model.backbone if hasattr(model, "backbone") else model
+    if hasattr(target, "module"):
+        target = target.module
+    _enc_state = trainer.encoder.state_dict()
+    try:
+        _missing, _unexpected = target.load_state_dict(_enc_state, strict=False)
+        _frac = 1.0 - (len(_missing) / max(1, len(_enc_state)))
+        print(f"[Pretrain] Multi-task encoder → backbone | loaded={_frac:.0%} "
+              f"missing={len(_missing)} unexpected={len(_unexpected)}")
+    except Exception as exc:
+        print(f"[Pretrain] Encoder copy skipped ({exc}).")
+
+    Path(ckpt).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model_state": _enc_state, "method": "multi_task"}, ckpt)
+    print(f"[Pretrain] Saved multi-task encoder checkpoint → {ckpt}")
+
+    try:
+        _update_pretrain_report(args, {
+            "status": "completed",
+            "method": "multi_task",
+            "epochs": int(_epochs),
+            "checkpoint_path": str(ckpt),
+            "final_loss": float(history.get("loss", 0.0)) if isinstance(history, dict) else 0.0,
+        })
+    except Exception:
+        pass
+    return model
+
+
 def run_pretrain(model, cache_path, n_features, args, device, run=None):
     _method = _normalize_pretrain_method(
         str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
@@ -10568,6 +10884,18 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     windows, y_sample = _sample_pretrain_block()
 
     print(f"[Pretrain] Sampled {len(windows):,} windows | shape {windows.shape[1:]}")
+
+    if getattr(args, "use_multi_task_pretrainer", False):
+        _ckpt_path = str(Path(args.checkpoint_dir) / "contrastive_encoder.pt")
+        if getattr(args, "resume", False) and os.path.exists(_ckpt_path):
+            print(f"[Pretrain] Resume: loading existing multi-task encoder {Path(_ckpt_path).name}")
+            return model
+        _mt_model = _run_multi_task_pretrain(
+            model, windows, _ckpt_path, n_features, args, device,
+        )
+        if _mt_model is not None:
+            return _mt_model
+        print("[Pretrain] Multi-task pretrainer unavailable; continuing with built-in trainer.")
 
     ckpt   = str(Path(args.checkpoint_dir) / f"contrastive_encoder{'_regime' if use_regime else ''}.pt")
     _holdout_n = _promotion_holdout_n(_source_n_total, args)
@@ -11608,7 +11936,17 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     returns = train_agent(
         agent, train_env, n_episodes=args.rl_episodes, agent_type=_algo,
         curriculum=_rl_curriculum,
+        off_policy_rewards=bool(getattr(args, "off_policy_rewards", False)),
     )
+
+    if bool(getattr(args, "off_policy_rewards", False)):
+        _op_est = getattr(agent, "off_policy_estimates", None)
+        if _op_est:
+            _dr = [e["dr_value"] for e in _op_est]
+            _ips = [e["ips_value"] for e in _op_est]
+            print(f"[RL] Off-policy rewards (Improvement #5): "
+                  f"mean DR value={np.mean(_dr):.4f} | mean IPS value={np.mean(_ips):.4f} "
+                  f"over {len(_op_est)} episodes")
 
     if val_n > 0:
         val_env = _build_rl_env(cache_path, train_start + val_start, val_n, n_features, args, device)
@@ -14128,13 +14466,9 @@ def main():
             print(f"[Holdout] Reserved last {_holdout_n:,} bars for promotion gate "
                   f"(CV uses 0:{_cv_n:,})")
         if model_args.walk_forward_cv:
-            _embargo = _embargo_bars(model_args)   # A-H3: seq_len + lookahead + delay
-            _purge = _purge_bars(model_args)
-            _method = _validation_method(model_args)
-            splits = walk_forward_splits(
-                _cv_n, model_args.walk_forward_folds, _embargo, _purge, _method,
-            )
-            print(f"[WalkForward] {len(splits)} folds | embargo={_embargo} purge={_purge} method={_method}")
+            splits, _cv_strategy = _build_cv_splits(model_args, _cv_n)
+            print(f"[CV] strategy={_cv_strategy} | {len(splits)} folds "
+                  f"| embargo={_embargo_bars(model_args)} purge={_purge_bars(model_args)}")
             cv_hist: list[dict] = []
             _start_fold = 0
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))

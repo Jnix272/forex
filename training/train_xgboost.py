@@ -34,7 +34,8 @@ from config.settings import PATHS
 
 try:
     import wandb
-    WANDB = True
+    import os
+    WANDB = bool(os.environ.get("WANDB_API_KEY"))
 except ImportError:
     WANDB = False
 

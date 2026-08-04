@@ -188,11 +188,19 @@ def _parse_bi5_hour(raw_bytes: bytes, dt_hour: datetime, pair: str) -> pd.DataFr
     epoch_ms = int(dt_hour.timestamp() * 1000) + ms_offsets
     idx = pd.to_datetime(epoch_ms, unit="ms", utc=True)
 
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "bid":    bid,
         "ask":    ask,
         "volume": vol,
     }, index=idx)
+    
+    # DS-006: Sanitize the raw bi5 dataframe so we don't hit infinite retry loops 
+    # during validation due to duplicate timestamps or zero/inverted spreads.
+    df = df[~df.index.duplicated(keep="last")]
+    df = df[df["ask"] > df["bid"]]
+    df = df[(df.index >= dt_hour) & (df.index < dt_hour + pd.Timedelta(hours=1))]
+    
+    return df
 
 
 def _run_dukascopy_async(coro):

@@ -563,15 +563,30 @@ class MonteCarloBacktest:
         """
         Run Monte Carlo simulation.
         Returns statistics including confidence intervals.
-        """
-        sharpes = []; drawdowns = []; tot_returns = []
-        n = len(trade_returns)
 
-        for _ in range(self.n_sim):
-            if method == "shuffle":
-                sim = self.rng.permutation(trade_returns)
-            else:
-                sim = self.rng.choice(trade_returns, size=n, replace=True)
+        Facade over evaluation.monte_carlo (Improvement #3): the ``bootstrap``
+        path resamples through the canonical block-bootstrap index generator
+        (block_length=1 reproduces the historical i.i.d. bootstrap), while the
+        ``shuffle`` path keeps its permutation semantics. The legacy result
+        schema is preserved so existing callers keep working.
+        """
+        from evaluation.monte_carlo import block_bootstrap_indices
+
+        arr = np.asarray(trade_returns, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        n = len(arr)
+        sharpes = []; drawdowns = []; tot_returns = []
+
+        if method == "bootstrap":
+            idx = block_bootstrap_indices(
+                n, block_length=1, n_bootstraps=self.n_sim,
+                seed=int(self.rng.integers(0, 2 ** 31 - 1)),
+            )
+            sims = (arr[row] for row in idx)
+        else:
+            sims = (self.rng.permutation(arr) for _ in range(self.n_sim))
+
+        for sim in sims:
 
             cum     = np.cumprod(1 + sim)
             total_r = float(cum[-1] - 1)

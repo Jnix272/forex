@@ -36,7 +36,7 @@ def run_pipeline():
             try:
                 # If it's loaded as String due to complex format, force conversion first
                 if macro_df.schema["timestamp_utc"] == pl.String:
-                    macro_df = macro_df.with_columns(pl.col("timestamp_utc").str.to_datetime(time_unit="ns", time_zone="UTC"))
+                    macro_df = macro_df.with_columns(pl.col("timestamp_utc").str.replace(" UTC", "").str.replace("T", " ").str.replace("Z", "").str.to_datetime(time_unit="ns", time_zone="UTC"))
                 else:
                     macro_df = macro_df.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             except Exception as e:
@@ -53,7 +53,7 @@ def run_pipeline():
         if "timestamp_utc" in news_df.columns:
             try:
                 if news_df.schema["timestamp_utc"] == pl.String:
-                    news_df = news_df.with_columns(pl.col("timestamp_utc").str.to_datetime(time_unit="ns", time_zone="UTC"))
+                    news_df = news_df.with_columns(pl.col("timestamp_utc").str.replace(" UTC", "").str.replace("T", " ").str.replace("Z", "").str.to_datetime(time_unit="ns", time_zone="UTC"))
                 else:
                     news_df = news_df.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             except Exception as e:
@@ -61,16 +61,6 @@ def run_pipeline():
     else:
         news_df = None
 
-    print("Loading OANDA data...")
-    oanda_sidecar_dir = Path("data/oanda_sentiment")
-    oanda_files = list(oanda_sidecar_dir.glob("*.parquet")) if oanda_sidecar_dir.exists() else []
-    oanda_path = "data/raw/oanda_sentiment.csv"
-    if oanda_files:
-        oanda_master_df = pl.concat([pl.read_parquet(path) for path in oanda_files])
-    elif os.path.exists(oanda_path):
-        oanda_master_df = pl.read_csv(oanda_path, ignore_errors=True)
-    else:
-        oanda_master_df = None
 
     out_dir = Path("data/processed")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -143,13 +133,6 @@ def run_pipeline():
                 else:
                     sentiment_df = news_df
 
-            # Filter OANDA data
-            oanda_df = None
-            if oanda_master_df is not None:
-                # Convert standard pair (e.g., EURUSD) to OANDA format (EUR_USD)
-                oanda_pair = f"{pair[:3]}_{pair[3:]}"
-                if "instrument" in oanda_master_df.columns:
-                    oanda_df = oanda_master_df.filter(pl.col("instrument") == oanda_pair)
 
             # Run Feature Engineering
             print("Running Feature Engineering Pipeline...")
@@ -161,7 +144,6 @@ def run_pipeline():
                 sentiment=sentiment_df,
                 eco_act=eco_act,
                 eco_fc=eco_fc,
-                oanda_data=oanda_df,
                 chunk_size=50_000
             )
             

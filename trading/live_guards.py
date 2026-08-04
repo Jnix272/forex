@@ -236,6 +236,61 @@ class DisagreementGate:
         return GuardResult(False, details={"action": int(action), "fast": fast_action, "slow": slow_action, "confidence": confidence})
 
 
+class NoTradeZoneGate:
+    """
+    Learned/heuristic no-trade gate (Improvement #7).
+
+    Blocks orders when the feature frame carries a ``no_trade_score`` at or
+    above ``threshold`` (0-1, 1 = strong no-trade signal). Falls back to the
+    offline heuristic scorer when the column is absent, so the gate works on
+    raw feature frames too. Disabled by default to preserve existing behavior.
+    """
+
+    def __init__(self, *, threshold: float = 0.70, enabled: bool = False):
+        self.threshold = float(threshold)
+        self.enabled = bool(enabled)
+
+    def check(self, features: Any) -> GuardResult:
+        if not self.enabled:
+            return GuardResult(False, "no_trade_disabled", {"enabled": False})
+        score = None
+        if "no_trade_score" in features.columns:
+            try:
+                if _is_polars_frame(features):
+                    score = float(features.select(pl.col("no_trade_score").tail(1)).item())
+                else:
+                    score = float(pd.to_numeric(features["no_trade_score"], errors="coerce").iloc[-1])
+            except Exception:
+                score = None
+        if score is None:
+            score = self._heuristic(features)
+        if score is None:
+            return GuardResult(False, "no_trade_unavailable", {"score": None})
+        if score >= self.threshold:
+            return GuardResult(True, "no_trade_zone", {"no_trade_score": float(score), "threshold": self.threshold}, size_multiplier=0.0, confidence_threshold=1.0)
+        return GuardResult(False, "no_trade_ok", {"no_trade_score": float(score)})
+
+    @staticmethod
+    def _heuristic(features: Any) -> Optional[float]:
+        try:
+            from features.no_trade_zones import compute_heuristic_no_trade_score
+            cols = ["atr_6", "spread_pips", "adx_14", "rsi_14"]
+            if _is_polars_frame(features):
+                present = [c for c in cols if c in features.columns]
+                if not present:
+                    return None
+                pdf = features.select(present).to_pandas()
+            else:
+                present = [c for c in cols if c in features.columns]
+                if not present:
+                    return None
+                pdf = features[present]
+            vals = compute_heuristic_no_trade_score(pdf)
+            return float(vals[-1]) if len(vals) else None
+        except Exception:
+            return None
+
+
 class TradeJournal:
     def __init__(self, path: str | Path):
         self.path = Path(path)

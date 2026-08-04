@@ -147,26 +147,49 @@ def merge_massive_datasets(
         currency_re = _regex_from_terms(CURRENCY_TERMS).replace("'", "''")
         currency_context_re = _regex_from_terms(CURRENCY_CONTEXT_TERMS).replace("'", "''")
         negative_re = _regex_from_terms(GENERAL_NEWS_EXCLUDE_TERMS).replace("'", "''")
+        # GDELT bulk exports often have blank headlines but valid URL + tone.
+        # Keep those rows; apply FX/macro headline filter only when a headline exists.
         relevance_filter = f"""
                   AND (
-                        regexp_matches(
-                            lower(coalesce(headline, '') || ' ' || coalesce(event_type, '') || ' ' || coalesce(source, '')),
-                            '{positive_re}'
-                        )
+                        lower(coalesce(source, '')) LIKE '%gdelt%'
                         OR (
-                            regexp_matches(lower(coalesce(headline, '')), '{currency_re}')
-                            AND regexp_matches(lower(coalesce(headline, '')), '{currency_context_re}')
+                            length(trim(coalesce(headline, ''))) > 0
+                            AND (
+                                regexp_matches(
+                                    lower(coalesce(headline, '') || ' ' || coalesce(event_type, '') || ' ' || coalesce(source, '')),
+                                    '{positive_re}'
+                                )
+                                OR (
+                                    regexp_matches(lower(coalesce(headline, '')), '{currency_re}')
+                                    AND regexp_matches(lower(coalesce(headline, '')), '{currency_context_re}')
+                                )
+                            )
+                            AND NOT regexp_matches(lower(coalesce(headline, '')), '{negative_re}')
                         )
-                  )
-                  AND NOT regexp_matches(lower(coalesce(headline, '')), '{negative_re}')"""
+                  )"""
     for f in existing_files:
         q = f"""SELECT
-                    timestamp_utc, event_type, currency, impact, headline, 
+                    timestamp_utc, event_type, currency, impact,
+                    CASE
+                        WHEN length(trim(coalesce(headline, ''))) > 0 THEN headline
+                        ELSE regexp_replace(coalesce(url, ''), 'https?://[^/]+/', '')
+                    END AS headline,
                     actual, forecast, source, url, sentiment_score,
-                    TRY_CAST(SUBSTRING(timestamp_utc, 1, 4) AS INTEGER) as part_year
+                    TRY_CAST(SUBSTRING(timestamp_utc, 1, 4) AS INTEGER) as part_year,
+                    -- Dedupe key: use URL when headline is blank (GDELT bulk)
+                    CASE
+                        WHEN length(trim(coalesce(headline, ''))) > 0 THEN headline
+                        ELSE coalesce(url, '')
+                    END AS dedupe_key
                 FROM {_news_relation(f)}
                 WHERE timestamp_utc IS NOT NULL
-                  AND headline IS NOT NULL
+                  AND (
+                        length(trim(coalesce(headline, ''))) > 0
+                        OR (
+                            length(trim(coalesce(url, ''))) > 0
+                            AND lower(coalesce(source, '')) LIKE '%gdelt%'
+                        )
+                  )
                   AND upper(coalesce(currency, '')) IN ({_sql_list(currencies)})
                   {relevance_filter}"""
         queries.append(q)
@@ -179,7 +202,7 @@ def merge_massive_datasets(
                 ANY_VALUE(event_type) as event_type,
                 ANY_VALUE(currency) as currency,
                 ANY_VALUE(impact) as impact,
-                headline,
+                ANY_VALUE(headline) as headline,
                 ANY_VALUE(actual) as actual,
                 ANY_VALUE(forecast) as forecast,
                 ANY_VALUE(source) as source,
@@ -187,7 +210,7 @@ def merge_massive_datasets(
                 ANY_VALUE(sentiment_score) as sentiment_score
             FROM ({union_query})
             WHERE part_year >= {int(start_year)} AND part_year <= {int(end_year)}
-            GROUP BY timestamp_utc, headline
+            GROUP BY timestamp_utc, dedupe_key
             ORDER BY timestamp_utc
         ) TO '{tmp_output}' (FORMAT PARQUET, COMPRESSION 'ZSTD');
     """)

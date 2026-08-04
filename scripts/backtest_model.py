@@ -128,6 +128,16 @@ def parse_args():
     p.add_argument("--walk-forward", action="store_true")
     p.add_argument("--wf-window-days", type=int, default=7)
     p.add_argument("--wf-step-days", type=int, default=7)
+    p.add_argument("--meta-labeling", action="store_true", default=False,
+                   help="Train a meta-labeler (Improvement #6) per walk-forward window and filter signals by P(profitable).")
+    p.add_argument("--meta-prob-threshold", type=float, default=0.55,
+                   help="Meta-labeler probability threshold for taking a trade.")
+    p.add_argument("--meta-min-samples", type=int, default=50,
+                   help="Minimum trade samples required before meta-labeler training.")
+    p.add_argument("--execution-engine", default="legacy", choices=["legacy", "advanced"],
+                   help="Execution model (Improvement #7): legacy = fixed slippage; "
+                        "advanced = latency + adverse-selection overlay that adjusts "
+                        "effective slippage per window.")
     args = p.parse_args()
     prof = strategy_profile(args.strategy_mode)
     if args.bar_freq is None:
@@ -197,6 +207,61 @@ def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tens
             o = torch.stack([-s, torch.zeros_like(s), s], dim=1)
         outs.append(o.detach().cpu())
     return torch.cat(outs, dim=0)
+
+
+def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls: np.ndarray, seq_len: int):
+    """
+    Train a meta-labeler (Improvement #6) on the current window and return
+    (meta_ok_mask, meta_labeler). ``meta_ok_mask`` is aligned to ``cls``
+    (rows ``seq_len..len(X)``): True = meta-model says the trade is likely
+    profitable. Returns (None, None) when training is impossible.
+    """
+    try:
+        from labeling.triple_barrier_meta import MetaLabeler, MetaLabelConfig
+        from labeling.triple_barrier_labeling import compute_triple_barrier_labels
+
+        cls = np.asarray(cls)
+        n_pred = len(cls)
+        # Direction per predicted bar: cls==2 buy(+1), cls==0 sell(-1), else hold(0)
+        dirn = np.zeros(n_pred, dtype=float)
+        dirn[cls == 2] = 1.0
+        dirn[cls == 0] = -1.0
+
+        labels_df = compute_triple_barrier_labels(
+            bars=base_bars,
+            features=X,
+            vertical_bars=int(getattr(args, "seq_len", 60) or 20),
+            profit_atr_mult=float(getattr(args, "take_pips", 18.0) or 1.8),
+            stop_atr_mult=float(getattr(args, "stop_pips", 12.0) or 0.9),
+            pip_size=PIP_SIZES.get(str(args.pair).upper(), 0.0001),
+            execution_delay_bars=max(1, int(getattr(args, "execution_delay_bars", 1))),
+        )
+        if labels_df is None or labels_df.empty:
+            log("[Meta] no TBM labels available; meta-labeling disabled")
+            return None, None
+
+        # Full-length primary direction (predicted rows only), aligned by index
+        pred_idx = X.index[seq_len:seq_len + n_pred]
+        full_dirn = pd.Series(0.0, index=X.index)
+        full_dirn.loc[pred_idx] = dirn
+        full_labels = labels_df["label"].reindex(X.index).fillna(0.0).to_numpy(dtype=float)
+
+        cfg = MetaLabelConfig(
+            min_meta_samples=int(getattr(args, "meta_min_samples", 50)),
+            meta_train_frac=0.7,
+            meta_prob_threshold=float(getattr(args, "meta_prob_threshold", 0.55)),
+            meta_features=[],
+        )
+        meta = MetaLabeler(cfg)
+        meta.fit(full_dirn.to_numpy(dtype=float), full_labels, None)
+        if not getattr(meta, "_is_fitted", False):
+            log("[Meta] not enough trade samples; meta-labeling disabled")
+            return None, None
+        mask = meta.should_trade(dirn, None)
+        return mask, meta
+    except Exception as e:
+        log(f"[Meta] meta-labeling disabled: {e}")
+        return None, None
 
 
 def _load_json_sidecar(ckpt: Path) -> dict:
@@ -285,6 +350,61 @@ def _load_ensemble_model(ckpt: Path, n_features: int, seq_len: int, device: torc
     em.load_state_dict(_checkpoint_state_dict(estate), strict=False)
     em.eval()
     return em
+
+
+def _advanced_execution_overlay(args, base_bars, signals):
+    """
+    Estimate effective execution slippage using the advanced execution models
+    (Improvement #7 wiring). Returns (effective_slippage_pips, meta_dict).
+
+    ``legacy`` (default) returns the baseline --slippage-pips unchanged.
+    ``advanced`` overlays latency + adverse-selection (toxicity) on the baseline
+    so backtests price fills closer to real-world execution conditions.
+    """
+    engine = str(getattr(args, "execution_engine", "legacy") or "legacy").lower()
+    if engine == "legacy":
+        return float(args.slippage_pips), {}
+
+    try:
+        from backtesting.execution import AdverseSelectionModel, LatencyModel
+        asm = AdverseSelectionModel()
+        lat = LatencyModel()
+        base = float(args.slippage_pips)
+        costs = []
+        closes = np.asarray(base_bars["close"].values, dtype=float)
+        n = len(closes)
+        for s in signals:
+            i = base_bars.index.get_indexer([s["timestamp"]])[0]
+            lo = max(0, i - 20)
+            window = closes[lo:i + 1]
+            if len(window) >= 3 and np.ptp(window) > 0:
+                vol = float(np.std(np.diff(window) / window[1:]))
+            else:
+                vol = 0.001
+            spread = float(np.abs(np.diff(closes[max(0, i - 1):i + 1])).max() or 0.0002)
+            spread = max(spread, 0.0001)
+            tox = asm.compute_toxicity_score(
+                queue_position=10, max_queue=1000, spread=spread, volatility=vol,
+            )
+            latency_us = lat.sample_md_to_order_latency()
+            latency_pips = min(0.5, latency_us / 1e6 * 100.0)
+            costs.append(base * (1.0 + tox) + latency_pips)
+        mean_eff = float(np.mean(costs)) if costs else base
+        meta = {
+            "execution_engine": "advanced",
+            "baseline_slippage_pips": round(base, 4),
+            "mean_effective_slippage_pips": round(mean_eff, 4),
+            "mean_toxicity": round(float(np.mean([
+                asm.compute_toxicity_score(queue_position=10, max_queue=1000,
+                                           spread=0.0002, volatility=0.001)
+                for _ in range(16)
+            ])), 4),
+            "overlay_applied_to_n_signals": int(len(signals)),
+        }
+        return mean_eff, meta
+    except Exception as exc:
+        print(f"[Exec] advanced execution overlay unavailable ({exc}); using legacy slippage.")
+        return float(args.slippage_pips), {}
 
 
 def run_backtest():
@@ -378,6 +498,10 @@ def run_backtest():
             logits = _batched_logits(model, x_t, seq_len, args.inference_batch_size)
             probs = torch.softmax(logits, dim=-1).numpy()
         cls, conf = probs.argmax(axis=1), probs.max(axis=1)
+        meta_ok = None
+        meta_labeler = None
+        if args.meta_labeling and len(cls) >= 30:
+            meta_ok, meta_labeler = _build_meta_labeler_mask(args, base_bars, X, cls, seq_len)
         if len(conf):
             log(
                 f"[Signals] confidence min/median/max = "
@@ -402,6 +526,8 @@ def run_backtest():
             if conf[off] < adj_min_conf:
                 continue
             if i - last_signal_i < max(1, int(args.min_gap_bars)):
+                continue
+            if meta_ok is not None and not bool(meta_ok[off]):
                 continue
             price = float(base_bars["close"].iloc[i])
             if c == 0:
@@ -465,12 +591,15 @@ def run_backtest():
             continue
 
         sig_df = pd.DataFrame(signals).set_index("timestamp")
+        eff_slippage, exec_meta = _advanced_execution_overlay(args, base_bars, signals)
+        if exec_meta:
+            log(f"[Exec] {exec_meta}")
         bt = ForexScalingBacktest(
             bars=base_bars.iloc[seq_len:],
             signals=sig_df,
             initial_equity=args.equity,
             commission_per_lot=args.commission_per_lot,
-            slippage_pips=args.slippage_pips,
+            slippage_pips=eff_slippage,
             pip_size=pip_size,
             execution_delay_bars=max(1, int(args.execution_delay_bars)),
         )
@@ -511,7 +640,7 @@ def run_backtest():
         out_dir.mkdir(parents=True, exist_ok=True)
         bt.get_trade_log().to_csv(out_dir / f"{args.model}_{stamp}_trades.csv")
         bt.results_df.to_csv(out_dir / f"{args.model}_{stamp}_equity.csv")
-        (out_dir / f"{args.model}_{stamp}_summary.json").write_text(json.dumps({"model": args.model, "checkpoint": str(ckpt), "start": ws, "end": we, "metrics": metrics, "monte_carlo": mc}, indent=2, default=str), encoding="utf-8")
+        (out_dir / f"{args.model}_{stamp}_summary.json").write_text(json.dumps({"model": args.model, "checkpoint": str(ckpt), "start": ws, "end": we, "metrics": metrics, "monte_carlo": mc, "execution": exec_meta}, indent=2, default=str), encoding="utf-8")
 
     if wf_rows:
         wf_df = pd.DataFrame(wf_rows)

@@ -205,4 +205,35 @@ class TestFeatureEngineerBuild:
         pd_bars = pd_bars.set_index("timestamp_utc")
         out = fe.build(pd_bars)
         assert isinstance(out, pl.DataFrame)
+
+    def test_build_default_has_no_no_trade_score(self, sample_bars):
+        from features.feature_engineering_pl import FeatureEngineer
+        fe = FeatureEngineer()
+        out = fe.build(sample_bars)
+        assert "no_trade_score" not in out.columns
+
+    def test_build_no_trade_zones_enabled(self, sample_bars):
+        from features.feature_engineering_pl import FeatureEngineer
+        fe = FeatureEngineer(enable_no_trade_zones=True)
+        out = fe.build(sample_bars)
+        assert "no_trade_score" in out.columns
+        assert out["no_trade_score"].drop_nulls().len() == len(out)
+        assert out["no_trade_score"].to_numpy().min() >= 0.0
+        assert out["no_trade_score"].to_numpy().max() <= 1.0
+
+    def test_build_quality_gate_enabled(self, sample_bars):
+        from features.feature_engineering_pl import FeatureEngineer
+        fe = FeatureEngineer(enable_quality_gate=True)
+        out = fe.build(sample_bars)
+        assert isinstance(out, pl.DataFrame)
+        assert len(out) > 0
+        assert hasattr(fe, "quality_report")
+        assert "feature" in fe.quality_report.columns
+
+    def test_build_both_flags_combined(self, sample_bars):
+        from features.feature_engineering_pl import FeatureEngineer
+        fe = FeatureEngineer(enable_no_trade_zones=True, enable_quality_gate=True)
+        out = fe.build(sample_bars)
+        assert "no_trade_score" in out.columns
+        assert hasattr(fe, "quality_report")
         assert len(out) > 0

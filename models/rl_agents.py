@@ -691,6 +691,43 @@ def evaluate_agent(
     return returns, env.summary()
 
 
+def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int) -> Optional[dict]:
+    """
+    Re-estimate an episode's rewards with IPS / doubly-robust estimators
+    (Improvement #5) using the agent's current policy as the behavior policy.
+    Returns a dict (or None when the agent exposes no logits, e.g. DQN).
+    """
+    try:
+        from labeling.off_policy_rewards import compute_off_policy_rewards
+        import torch as _torch
+
+        if not hasattr(agent, "net") or not hasattr(agent.net, "actor"):
+            return None
+        obs_t = _torch.tensor(np.asarray(obs_list, dtype=float), dtype=_torch.float32,
+                              device=getattr(agent, "device", "cpu"))
+        with _torch.no_grad():
+            h = agent.net.backbone(obs_t) if hasattr(agent.net, "backbone") else obs_t
+            logits = agent.net.actor(h)
+            if hasattr(logits, "cpu"):
+                logits = logits.cpu().numpy()
+        df = compute_off_policy_rewards(
+            actions=np.asarray(actions, dtype=int),
+            rewards=np.asarray(rewards, dtype=float),
+            behavior_logits=logits,
+            target_probs=np.full((len(actions), logits.shape[1]), 1.0 / logits.shape[1]),
+            seed=int(episode),
+        )
+        last = df.tail(1).to_dicts()[0]
+        return {
+            "episode": int(episode),
+            "ips_value": float(last["ipw_value"]),
+            "dr_value": float(last["dr_value"]),
+            "n_steps": int(len(actions)),
+        }
+    except Exception:
+        return None
+
+
 def train_agent(
     agent,
     env: ForexTradingEnv,
@@ -700,9 +737,19 @@ def train_agent(
     curriculum = None,
     reward_normalizer: Optional[Any] = None,
     reward_sharpe: Optional[Any] = None,
+    off_policy_rewards: bool = False,
 ) -> list:
-    """Generic training loop for PPO or DQN."""
+    """Generic training loop for PPO or DQN.
+
+    ``off_policy_rewards`` (Improvement #5): when enabled, per-episode
+    (actions, rewards, behavior_logits) are logged for PPO agents and
+    re-estimated with IPS / doubly-robust estimators. Estimates are stored on
+    ``agent.off_policy_estimates`` (list of dicts) so the return signature is
+    unchanged.
+    """
     returns = []
+    if off_policy_rewards:
+        agent.off_policy_estimates = []
     avg_atr = float(np.mean(env.atr)) if len(env.atr) > 0 else 0.0005
     for ep in range(n_episodes):
         valid_starts = None
@@ -717,6 +764,7 @@ def train_agent(
         ep_reward = 0.0
         if reward_sharpe is not None:
             reward_sharpe.reset_episode()
+        _op_obs, _op_act, _op_rew = [], [], []
         while not env.done:
             if agent_type == "ppo":
                 mask = env.action_mask()
@@ -726,6 +774,10 @@ def train_agent(
                     reward = reward_sharpe(info.get("pnl", 0.0), tx_cost=0.0, equity=info.get("equity", 1.0))
                 if reward_normalizer is not None:
                     reward = reward_normalizer(reward)
+                if off_policy_rewards:
+                    _op_obs.append(np.asarray(obs, dtype=float))
+                    _op_act.append(int(action))
+                    _op_rew.append(float(reward))
                 agent.store(obs, action, reward, done, log_prob, value, mask=mask)
                 ep_reward += reward; obs = next_obs
                 if len(agent.buffer) >= n_steps_ppo:
@@ -751,6 +803,10 @@ def train_agent(
             agent.update(last_value=0.0)
         if agent_type != "ppo" and hasattr(agent, "decay_epsilon"):
             agent.decay_epsilon()
+        if off_policy_rewards and _op_act:
+            _estimate = _estimate_off_policy_rewards(agent, _op_obs, _op_act, _op_rew, ep)
+            if _estimate is not None:
+                agent.off_policy_estimates.append(_estimate)
 
         summary = env.summary()
         returns.append(summary["total_return_pct"])

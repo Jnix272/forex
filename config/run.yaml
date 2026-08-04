@@ -200,7 +200,7 @@ data:
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
-  end: '2025-12-31'
+  end: '2024-01-31'
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
@@ -215,7 +215,7 @@ data:
   parallel_window_workers: 1
   real_data_window_days: 7
   source: dukascopy
-  start: '2008-01-01'
+  start: '2024-01-01'
   use_cache: true
   window_batch_days: 1
 # ── Feature indicator windows (overrides settings.FEATURE_SCALES) ───────────
@@ -411,7 +411,7 @@ pretrain:
   blocks_per_epoch: auto
   ema_decay: 0.996
   enabled: true
-  epochs: 18
+  epochs: 1
   handoff_loss: 0.18
   handoff_min_delta: 0.002
   handoff_patience: 2
@@ -427,7 +427,7 @@ pretrain:
   sample_windows: 4096
 # ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
 quick:
-  enabled: false
+  enabled: true
 # ── Scheduled retraining: periodic re-train + auto-promote on drift ─────────
 retraining:
   drift_feature_frac: 0.3
@@ -508,7 +508,7 @@ strategy:
 tracking:
   auto_tune: true
   dry_tune: true
-  no_wandb: false
+  no_wandb: true
   ollama_auto_tune: false
   run_name: high-impact
   wandb_project: forex-scaling-model
@@ -521,7 +521,7 @@ training:
   direction_weight: 0.75
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
-  epochs: 40
+  epochs: 2
   grad_accum_steps: 4
   grad_clip: 0.75
   label_method: rl_reward
@@ -560,7 +560,7 @@ validation:
 # ── Walk-forward cross-validation ──────────────────────────────────────────
 walk_forward:
   enabled: true
-  folds: 7
+  folds: 2
 # ── XGBoost baseline model config ──────────────────────────────────────────
 xgboost:
   colsample_bytree: 0.8

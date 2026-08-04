@@ -68,18 +68,24 @@ class MonteCarloBacktest:
         -------
         dict with Sharpe and max_drawdown at [5th, median, 95th] percentiles
         """
-        rng = np.random.default_rng(self.seed)
+        from evaluation.monte_carlo import block_bootstrap_indices
+
         trade_pnls = np.asarray(trade_pnls, dtype=np.float64)
         trade_pnls = trade_pnls[np.isfinite(trade_pnls)]
         n = len(trade_pnls)
         if n < 2:
             return self._empty_result(n, "Need at least 2 closed trades for Monte Carlo")
 
+        # Facade: resample via evaluation.monte_carlo (Improvement #3).
+        # block_length=1 reduces the block bootstrap to the historical
+        # i.i.d. bootstrap-with-replacement over trades.
+        idx = block_bootstrap_indices(n, block_length=1, n_bootstraps=self.n_sims, seed=self.seed)
+
         sharpes = np.zeros(self.n_sims)
         max_dds = np.zeros(self.n_sims)
 
         for i in range(self.n_sims):
-            pnl = rng.choice(trade_pnls, size=n, replace=True)
+            pnl = trade_pnls[idx[i]]
 
             # Cumulative equity
             eq   = self.equity + np.cumsum(pnl)

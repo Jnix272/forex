@@ -63,6 +63,11 @@ def parse_args():
                         help="Epochs for top-K confirmation. 0 = mode default.")
     parser.add_argument("--study-name", type=str, default="",
                         help="Optional explicit Optuna study name.")
+    parser.add_argument("--hpo-scheduler", type=str, default="tpe",
+                        choices=["tpe", "pbt", "bohb", "asha"],
+                        help="HPO strategy (Improvement #12): tpe=default; "
+                             "asha=successive halving; bohb=BO+hyperband; "
+                             "pbt=population-based evolutionary.")
     parser.add_argument("--curriculum-only", action="store_true",
                         help="Search curriculum shape + adaptation thresholds only; "
                              "keep model/training hyperparams from config/run.yaml.")
@@ -584,6 +589,7 @@ def _build_trial_config(
     cfg["optuna"]["model"] = str(args.model)
     cfg["optuna"]["metric"] = str(getattr(args, "metric", DEFAULT_METRIC))
     cfg["optuna"]["curriculum_only"] = bool(getattr(args, "curriculum_only", False))
+    cfg["optuna"]["hpo_scheduler"] = str(getattr(args, "hpo_scheduler", "tpe") or "tpe")
     cfg["optuna"]["auto_load"] = True
     cfg["optuna"]["auto_launch"] = bool(
         getattr(args, "auto", False) or getattr(args, "launch_training", False)
@@ -1020,12 +1026,24 @@ def main():
     study_db_path = ARTIFACT_DIR / f"{_safe_slug(args.study_name)}.db"
     storage = f"sqlite:///{study_db_path.as_posix()}"
 
+    from training.hpo import build_optuna_search
+    hpo_scheduler = str(getattr(args, "hpo_scheduler", "tpe") or "tpe").lower()
+    sampler, pruner = build_optuna_search(
+        hpo_scheduler,
+        seed=42,
+        min_resource=2,
+        max_resource=max(int(args.epochs), 2),
+    )
+    print(f"[Optuna] HPO scheduler={hpo_scheduler} sampler={type(sampler).__name__} "
+          f"pruner={type(pruner).__name__}")
+
     study = optuna.create_study(
         study_name=args.study_name,
         storage=storage,
         direction="minimize",
         load_if_exists=True,
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=2),
+        sampler=sampler,
+        pruner=pruner,
     )
 
     search_scope = "curriculum-only" if args.curriculum_only else "architecture + curriculum"

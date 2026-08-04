@@ -92,7 +92,7 @@ def amihud_illiquidity(window: int = 20) -> pl.Expr:
     return ((ret / (vol_n + 1e-9)).rolling_mean(window) * 1e4).alias("amihud_illiq")
 
 
-def multi_level_obi(n_levels: int = 5, use_real_l2: bool = True) -> list[pl.Expr]:
+def multi_level_obi(n_levels: int = 5, use_real_l2: bool = False) -> list[pl.Expr]:
     """Multi-level Order Book Imbalance.
 
     DS-009: When real L2 bid/ask size columns (bid_sz_01..N, ask_sz_01..N) are
@@ -1038,8 +1038,47 @@ class CrossAssetFeatures:
         
         if exprs:
             F = F.with_columns(exprs)
-            
+
+        # PCA/ICA common-factor model + Granger causality + lead-lag network
+        try:
+            F = self._cross_asset_factors(F)
+        except Exception as e:
+            print(f"[CrossAssetFeatures] WARNING: factor model failed: {e}")
+
         return F.fill_null(strategy="forward").fill_null(strategy="backward").fill_null(0.0)
+
+    def _cross_asset_factors(self, F: pl.DataFrame) -> pl.DataFrame:
+        """Append cross-asset PCA/ICA factors, Granger and lead-lag features.
+
+        Uses the ``{asset}_ret`` columns computed above plus the primary pair's
+        own returns (``forex_ret``) as a ``PRIMARY`` series. Requires at least
+        two assets; otherwise returns F unchanged.
+        """
+        import pandas as pd
+        from features.cross_asset_factors import build_cross_asset_factors
+
+        ret_cols = [c for c in F.columns if c.endswith("_ret") and c not in ("forex_ret",)]
+        if "forex_ret" in F.columns:
+            ret_cols = ret_cols + ["forex_ret"]
+        if len(ret_cols) < 2:
+            return F
+
+        panel = pd.DataFrame(
+            {c[:-4]: F[c].to_numpy() for c in ret_cols},
+            index=range(len(F)),
+        )
+        fact = build_cross_asset_factors(
+            panel,
+            n_factors=3, method="pca",
+            factor_window=120, factor_step=20,
+            maxlag=1, granger_window=120, granger_step=20,
+            max_lag=5, leadlag_window=120, leadlag_step=20,
+            min_abs_corr=0.05,
+        )
+        new_cols = [c for c in fact.columns if c not in F.columns]
+        if new_cols:
+            F = pl.concat([F, fact.select(new_cols)], how="horizontal_extend")
+        return F
 
     def _synthetic(self, bars: pl.DataFrame) -> dict:
         # Deprecated: synthetic data generation replaced by real external assets.
@@ -1432,7 +1471,7 @@ class FeatureEngineer:
                  macd_fast=12,macd_slow=26,macd_signal=9,bb_window=20,bb_std=2.0,
                  lag_windows=[5,20,60],vol_mult=3.0,news_buf=2,decay_lam=0.1,fb_dim=8,
                  ca_corr_window=60,ca_regime_window=240,ca_lags=(1,5,15),
-                 enable_regime_gate=True):
+                 enable_regime_gate=True, enable_quality_gate=False, enable_no_trade_zones=False):
         self.atr_w=atr_window; self.ofi_w=ofi_window; self.tar_w=tar_window
         self.rsi_p=rsi_period; self.mf=macd_fast; self.ms=macd_slow; self.msig=macd_signal
         self.bb_w=bb_window; self.bb_s=bb_std; self.lags=lag_windows
@@ -1460,6 +1499,8 @@ class FeatureEngineer:
             lags=ca_lags,
         )
         self.enable_regime_gate = bool(enable_regime_gate)
+        self.enable_quality_gate = bool(enable_quality_gate)
+        self.enable_no_trade_zones = bool(enable_no_trade_zones)
         self.regime_gate = RegimeGateClassifier()
         try:
             from features.macro_features import MacroYieldFeatureBuilder
@@ -1650,7 +1691,17 @@ class FeatureEngineer:
         
         # HMM Regime Detection + CPD (Regime Detection Upgrade)
         existing = set(F.columns)
-        F = F.with_columns(hmm_regime_probs(3, 60))
+        try:
+            from features.regime_detection import detect_regimes_polars
+            _reg = detect_regimes_polars(
+                F, close_col="close", n_states=3, window=60,
+                hurst_window=120, fractal_window=60, step=5,
+            )
+            F = F.with_columns(_reg)
+        except Exception:
+            # Fall back to the legacy volatility-tercile bucket expressions if
+            # hmmlearn is unavailable.
+            F = F.with_columns(hmm_regime_probs(3, 60))
         F = F.with_columns(cpd_ret("close", 60))
         F = F.with_columns(regime_persistence(20))
         
@@ -1784,6 +1835,24 @@ class FeatureEngineer:
                 pl.lit(0.0).alias("sentiment_decayed"),
                 *[pl.lit(0.0).alias(f"fb_{i}") for i in range(self.fb)]
             ])
+
+        # Multi-modal sentiment fusion (Improvement #3): news + social + COT,
+        # topic modeling and financial NER. Requires raw events with a text column.
+        if sentiment is not None and any(c in sentiment.columns for c in ("text", "headline")):
+            try:
+                from features.sentiment_fusion import add_sentiment_features
+                _tcol = "text" if "text" in sentiment.columns else "headline"
+                _ev = sentiment.rename({_tcol: "text"}) if _tcol != "text" else sentiment
+                _keep = [c for c in ("timestamp_utc", "source", "text", "sentiment") if c in _ev.columns]
+                F = add_sentiment_features(
+                    F, _ev.select(_keep),
+                    time_col="timestamp_utc",
+                    lam=float(self.dl) if self.dl else 0.05,
+                    dt_sec=3600.0,
+                    n_topics=4,
+                )
+            except Exception as e:
+                print(f"[FeatureEngineering] WARNING: multi-modal sentiment failed: {e}")
             
         if eco_act is not None:
             eco_act = eco_act.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
@@ -1885,5 +1954,33 @@ class FeatureEngineer:
         # Restore the caller's timestamp precision so feats can be joined back to bars.
         if "timestamp_utc" in F.columns and _ts_dtype is not None:
             F = F.with_columns(pl.col("timestamp_utc").cast(_ts_dtype))
+
+        # No-trade zones (Improvement #7): heuristic no-trade score column.
+        # Consumed downstream by labeling (no_trade_col) and live trading gates.
+        if self.enable_no_trade_zones:
+            try:
+                import pandas as _pd
+                from features.no_trade_zones import compute_heuristic_no_trade_score
+                _nt_cols = [c for c in ("atr_6", "spread_pips", "adx_14", "rsi_14") if c in F.columns]
+                _nt_pd = F.select(_nt_cols).to_pandas()
+                F = F.with_columns(pl.Series("no_trade_score", compute_heuristic_no_trade_score(_nt_pd)))
+                print(f"[Features] No-trade zones enabled: added 'no_trade_score' column")
+            except Exception as _e:
+                print(f"[Features] WARNING: no-trade zones failed: {_e}")
+
+        # Feature quality monitor (Improvement #4): PSI/IV/leakage report + optional gate.
+        if self.enable_quality_gate:
+            try:
+                from features.feature_quality_monitor import feature_quality_monitor, filter_features
+                self.quality_report = feature_quality_monitor(F)
+                _n_severe = int((self.quality_report["psi_level"] == "severe").sum())
+                _n_leaky = int(self.quality_report["leak_flag"].sum())
+                print(f"[Features] Quality monitor: {len(self.quality_report)} features | "
+                      f"{_n_severe} severe-drift | {_n_leaky} leaky")
+                F, _rep, _dropped = filter_features(F, drop_leaky=True, drop_severe_drift=True)
+                if _dropped:
+                    print(f"[Features] Quality gate dropped {len(_dropped)} features: {sorted(_dropped)[:10]}...")
+            except Exception as _e:
+                print(f"[Features] WARNING: feature quality monitor failed: {_e}")
 
         return sanitize_frame(F, fill_value=0.0, context="FeatureEngineer.build")

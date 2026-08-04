@@ -8,6 +8,9 @@ version = "6.5.0"
 description = "Tick-to-trade forex research and training pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "optuna>=4.9.0",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -15,9 +18,12 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+    "audit*",
     "backtesting*",
     "config*",
     "data*",
+    "drift*",
+    "evaluation*",
     "features*",
     "inference*",
     "infrastructure*",

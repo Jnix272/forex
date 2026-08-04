@@ -35,6 +35,7 @@ class LiveRiskSchema:
     regime_scale: RegimeScale
     corr_crisis_threshold: float
     hurst_trending: float
+    hurst_mean_rev: float
 
     def __post_init__(self):
         if not (0 < self.kelly_fraction < 1.0):

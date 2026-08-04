@@ -103,6 +103,7 @@ get_latest_headlines = _LazySymbol("data.news_feed", "get_latest_headlines")
 from trading.live_actions import LiveAction, model_class_to_live_action
 DisagreementGate = _LazySymbol("trading.live_guards", "DisagreementGate")
 EconomicCalendarGuard = _LazySymbol("trading.live_guards", "EconomicCalendarGuard")
+NoTradeZoneGate = _LazySymbol("trading.live_guards", "NoTradeZoneGate")
 RegimeRouter = _LazySymbol("trading.live_guards", "RegimeRouter")
 SpreadVolatilityGuard = _LazySymbol("trading.live_guards", "SpreadVolatilityGuard")
 TradeJournal = _LazySymbol("trading.live_guards", "TradeJournal")
@@ -707,6 +708,8 @@ class LiveTradingEngine:
         bar_freq: str = "1min",
         inference_meta: Optional[dict] = None,
         stop_loss_atr: float = 1.5,
+        no_trade_gate_enabled: bool = False,
+        no_trade_threshold: float = 0.70,
     ):
         self.broker = broker
         self.pair = str(pair).upper()
@@ -768,6 +771,7 @@ class LiveTradingEngine:
         self.spread_vol_guard = SpreadVolatilityGuard(max_spread_pips=max_spread_pips)
         self.regime_router = RegimeRouter()
         self.disagreement_gate = DisagreementGate(min_confidence=guard_min_confidence)
+        self.no_trade_zone_gate = NoTradeZoneGate(threshold=no_trade_threshold, enabled=no_trade_gate_enabled)
         journal = journal_path or str(self.log_dir / f"trade_journal_{self.pair.lower()}.jsonl")
         self.trade_journal = TradeJournal(journal)
 
@@ -1086,6 +1090,11 @@ class LiveTradingEngine:
         )
         if disagreement_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": disagreement_result.reason})
+            return
+
+        no_trade_result = self.no_trade_zone_gate.check(features)
+        if no_trade_result.blocked:
+            self.trade_journal.record({"event": "blocked", "reason": no_trade_result.reason})
             return
 
         safety = self.safety.allow_order(

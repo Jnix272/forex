@@ -515,6 +515,15 @@ RISK = {
     "breakeven_at_r":       0.5,
     "max_drawdown_halt":    0.10,
     "daily_loss_limit":     0.03,
+    # ── RiskEngine (risk/risk_engine.py) pre-trade / post-trade limits ─────
+    "max_notional_usd":            250_000.0,
+    "max_order_freq_per_min":      10,
+    "max_instrument_concentration": 0.50,
+    "var_confidence":              0.99,
+    "var_window":                  500,
+    "cvar_multiplier":             1.5,
+    "gap_move_threshold":          0.02,
+    "require_approval_on_flatten": False,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -672,6 +681,13 @@ MACRO_DATA = {
     "ollama_model": "mistral",
     "bad_tick_z_thresh": 8.0,
     "bad_tick_window": 60,
+    # PIPE-010: MAD-based robust tick cleaning (robust to non-Gaussian FX returns).
+    "bad_tick_mad_z_thresh": 6.0,       # z = 0.6745*(x-median)/MAD above which a tick is an outlier
+    "bad_tick_spread_ratio": 8.0,       # flag ticks whose spread > N x rolling median spread
+    "bad_tick_spread_window": 120,      # rolling window for the median spread baseline
+    # Gap detection / interpolation policy for bar frames.
+    "gap_policy": "drop",               # "drop" | "ffill" | "interpolate"
+    "gap_max_minutes": 5,               # only consider gaps up to this size for ffill/interpolate
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

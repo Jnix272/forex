@@ -1,7 +1,61 @@
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+
 from trading.live_engine import LiveSafetyConfig, LiveSafetyGate, PaperBroker
 from validation.promotion_gate import GateConfig, PromotionGate
+
+
+def _feat_frame(**overrides) -> pd.DataFrame:
+    n = 300
+    rng = np.random.default_rng(0)
+    close = 1.10 + np.cumsum(rng.normal(0, 0.0005, n))
+    data = {
+        "atr_6": np.abs(np.diff(np.concatenate([[close[0]], close]))),
+        "spread_pips": np.full(n, 0.8),
+        "adx_14": np.full(n, 12.0),
+        "rsi_14": np.full(n, 50.0),
+        "ret_5": rng.normal(0, 0.001, n),
+    }
+    for k, v in overrides.items():
+        if isinstance(v, (int, float)):
+            data[k] = np.full(n, float(v))
+    return pd.DataFrame(data)
+
+
+def test_no_trade_gate_disabled_by_default():
+    from trading.live_guards import NoTradeZoneGate
+    gate = NoTradeZoneGate()
+    res = gate.check(_feat_frame())
+    assert not res.blocked
+    assert res.reason == "no_trade_disabled"
+
+
+def test_no_trade_gate_blocks_high_score():
+    from trading.live_guards import NoTradeZoneGate
+    gate = NoTradeZoneGate(threshold=0.5, enabled=True)
+    df = _feat_frame(no_trade_score=0.95)
+    res = gate.check(df)
+    assert res.blocked
+    assert res.reason == "no_trade_zone"
+
+
+def test_no_trade_gate_allows_low_score():
+    from trading.live_guards import NoTradeZoneGate
+    gate = NoTradeZoneGate(threshold=0.5, enabled=True)
+    df = _feat_frame(no_trade_score=0.1)
+    res = gate.check(df)
+    assert not res.blocked
+
+
+def test_no_trade_gate_heuristic_fallback():
+    from trading.live_guards import NoTradeZoneGate
+    gate = NoTradeZoneGate(threshold=0.5, enabled=True)
+    df = _feat_frame()
+    res = gate.check(df)
+    # No no_trade_score column -> heuristic path; must not raise
+    assert res.reason in ("no_trade_ok", "no_trade_zone", "no_trade_unavailable")
 
 
 def test_live_safety_blocks_wide_spread():
