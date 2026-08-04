@@ -21,7 +21,7 @@ def generate_synthetic_2008():
         for i in range(5):
             print(f"Generating batch {i+1}/5...")
             resp = requests.post("http://localhost:11434/api/generate", json={
-                "model": "phi3:latest",
+                "model": "gemma4:e2b",
                 "prompt": prompt,
                 "stream": False,
                 "format": "json"

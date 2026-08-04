@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -8,10 +9,9 @@ import requests
 
 # Configuration
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "phi3:latest"
+MODEL_NAME = "gemma4:e2b"
 PROMPT_TEMPLATE = """Rewrite the following financial news headline in 3 different ways.
-Return ONLY the 3 variations separated by newlines.
-Do not include bullet points, numbers, or introductory text.
+Return ONLY a JSON list of 3 strings. Do not include any other text.
 Keep the factual meaning and sentiment identical.
 
 Headline: "{headline}"
@@ -28,8 +28,9 @@ def generate_variations(row: dict) -> list[dict]:
         "stream": False,
         "options": {
             "temperature": 0.7,
-            "num_predict": 100
-        }
+            "num_predict": 200
+        },
+        "format": "json"
     }
     
     variations = []
@@ -39,8 +40,17 @@ def generate_variations(row: dict) -> list[dict]:
             data = resp.json()
             response_text = data.get("response", "").strip()
             
-            # Parse the output into separate lines, ignore empty lines
-            lines = [line.strip("- *1234567890.") for line in response_text.split("\n") if line.strip()]
+            # Parse the output as JSON
+            try:
+                parsed = json.loads(response_text)
+                if isinstance(parsed, list):
+                    lines = parsed
+                elif isinstance(parsed, dict):
+                    lines = next((v for v in parsed.values() if isinstance(v, list)), [])
+                else:
+                    lines = []
+            except json.JSONDecodeError:
+                lines = []
             
             # We only keep up to 3 variations
             for line in lines[:3]:
@@ -86,7 +96,7 @@ def main():
     con = duckdb.connect()
     
     query = f"""
-        SELECT * FROM read_csv_auto('{str(news_file)}', ignore_errors=true)
+        SELECT * FROM read_parquet('{str(news_file)}')
         WHERE timestamp_utc >= '{args.start}' AND timestamp_utc <= '{args.end}'
         AND headline IS NOT NULL
     """
