@@ -4,7 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **2026-08-04 — Training cache / loop perf**: Polars-first `_build_chunk` (no feature-matrix Polars↔Pandas round-trip; HTF stays Polars). Zarr feature tensor `X` stored as **FP16**; labels/market sidecars FP32. `build_adamw()` uses fused CUDA AdamW (apex fallback) in supervised loop + DivFT. Linux Zarr default **Blosc lz4@1** (`default_zarr_compression` / `run_ubuntu.yaml`); non-Linux keeps zstd@3; CLI `--zarr-cname auto`. Rebuild caches for FP16 + lz4. Tests: `tests/test_zarr_prefetch.py`, `tests/test_fused_adamw.py`, `tests/test_model_full_data_flow.py`.
+
+### Fixed
+
+- **2026-08-04 — Sharpe proxy softsign + KD student YAML**: `SharpeProxyLoss` and multitask Sharpe use softsign (`x/(1+|x|)`) instead of `tanh` so confident predictions keep usable gradients. `_apply_yaml_config` maps `distillation.student_model` → `--model` when distillation is enabled. Tests: `tests/test_gpu_losses.py`. Audit: [`docs/TRAINING_PIPELINE_AUDIT.md`](docs/TRAINING_PIPELINE_AUDIT.md) modules 26–36.
+
+- **2026-08-04 — settings↔YAML curriculum schedule drift**: Synced `settings.CURRICULUM` stubs to active `config/run.yaml` (`epoch_unfreeze` / `always_on` for all groups, `seq_schedule`, `difficulty_schedule`, chunk early-stop). Added `difficulty_spread_threshold_hard` to `run.yaml` / `run_ubuntu.yaml`. New `audit_settings_yaml_curriculum_drift()` fails `validate_run_config` on shared-group / schedule / scalar mismatches; warns in `supervised_loop`. Tests: `tests/test_curriculum_audit.py`.
+
+- **2026-08-04 — Config / curriculum mismatches B–D**: Fixed `config/run.yaml` `strategy.profit_target_atr` / `stop_loss_atr` illegal 3-space indent (YAML was unparseable; `_apply_yaml_config` previously swallowed the error and ran on hardcoded defaults). YAML parse failures now raise `RuntimeError`. Added `config/curriculum_audit.py` + warnings for curriculum features missing from schema, overlapping group membership, FEATURE_MASK orphans, and missing RL market spread columns; wired into `supervised_loop` and `validate_run_config`. Tests: `tests/test_curriculum_audit.py`.
+
 ### Added
+
+- **2026-08-04 — Dataset feature-schema gate**: During dataset build, `audit_built_dataset_schema()` checks the locked feature columns against curriculum groups + required market roles (close/ATR). Missing curriculum features fail the build when `--integrity-gate` / `--feature-schema-gate` is on (fail-fast on first chunk + again when writing `*_feature_schema.json`). Writes `*_feature_schema_audit.json`. CLI: `--feature-schema-gate` / `--no-feature-schema-gate`.
+
+- **2026-08-04 — Docs consolidation**: Living docs are `docs/README.md`, `CONTINUE.md`, `CONFIG_CONSISTENCY.md`, `IMPROVEMENT_PLAN.md`, `NEWS_DATA_GUIDE.md`, `SESSION_REPORT.md`. Historical `*_AUDIT_REPORT.md` / `FIXES_APPLIED.md` moved to `docs/archive/`. Folded `TRAIN_GPU_SPLIT.md` into `CONTINUE.md`. Root `improvement_plan.md` is a stub pointing at `docs/IMPROVEMENT_PLAN.md`.
+
+- **2026-08-04 — Multi-part settings↔YAML mismatch audit**: New `config/config_mismatch_audit.py` compares shared keys by section (`training`, `backtest`, `rl`, …). Critical keys (`seq_len`, `loss`, `sharpe_annualization_factor`, `atr_stop_mult`, `reward.overtrade`) fail closed; other shared drift warns. Also checks resolved `args` vs YAML (silent load failures). Wired into `validate_run_config` and the dataset build gate as parts `settings_yaml` / `args_yaml`. Synced critical `settings.py` values to `run.yaml`. Operator guide: `docs/CONFIG_CONSISTENCY.md`; `docs/CONTINUE.md` rewritten as a short current tracker.
+
+- **2026-08-04 — Audit P3 tooling + train_gpu split**: Wired ruff + pyright smoke gates. Split `training/train_gpu.py` into focused modules with back-compat re-exports (`gpu_losses`, `gpu_cache_io`, `gpu_datasets`, `direction_control`, `dataset_builder`, `supervised_loop`, `gpu_cli`, `cv_splits`, `pretrain_runner`, `rl_runner`, `cache_integrity`, `model_factory`, `post_train`, `gpu_device`, `feature_ablation`). Tracker: `docs/CONTINUE.md` (train_gpu split section). `train_gpu.py` now ~2.2k lines (was ~15.5k, −85%).
 
 - **2026-08-04 — Production Wiring of Improvement Modules (opt-in CLI flags, behavior-preserving)**: Wired previously standalone improvement modules into production entry points as opt-in, default-off flags so existing behavior is preserved:
   - **Feature quality gate** (Improvement: `features/feature_quality_monitor.py`): `FeatureEngineer.__init__` gains `enable_quality_gate`; `build()` runs the `feature_quality_monitor` gate and `filter_features` drops constant/leaky/drifted columns.
@@ -66,6 +86,28 @@ All notable changes to this project will be documented in this file.
 - **2026-07-03 — Cross-Asset Provider Failure Logging** (`data/cross_asset.py`): Added warning log when all providers fail for a cross-asset symbol, replacing silent `continue`.
 
 ### Fixed
+
+- **2026-08-04 — Live safety + remaining correctness** (follow-on to full audit):
+  - **Silent PaperBroker fallback** (`trading/live_engine.py`): real brokers no longer silently degrade to paper; require `--allow-paper-fallback` (or `--broker paper`). Multi-pair path matches.
+  - **RiskEngine on live path**: default `RiskEngine` constructed per engine; `check_order` before entries, `update_equity` / circuit-breaker flatten, `new_day()` at UTC day boundary; `--risk-config` CLI.
+  - **ATR stop-loss wired**: `stop_loss_atr × ATR` flatten when adverse move hits; journaled as `atr_stop`.
+  - **OANDA `get_account` empty bypass**: raises on failure/zero equity so the equity-failure counter can halt after 5 misses (empty `{}` no longer looks like success).
+  - **JPY pip scale** (`config.settings.price_to_pips`, `LiveSafetyGate`, `SpreadVolatilityGuard`): spread checks use pair pip size (USDJPY 0.01) instead of hard-coded `×10000`.
+  - **HMM look-ahead** (`features/regime_detection.py`): causal vol + warm-start HMM fit on prefix + 1-bar lagged posteriors (no full-series fit).
+  - **Eco point-in-time** (`features/feature_engineering_pl.py`): join eco on `available_time` (default event+1min) via `join_asof` backward.
+
+- **2026-08-04 — Full audit P0/P1 + training correctness** (see `docs/archive/FULL_AUDIT_REPORT.md`):
+  - **`sanitize_array` empty-string crash** (`infrastructure/numerics.py`): coerce non-numeric / `''` via `pd.to_numeric(..., errors="coerce")` instead of raising on Dukascopy mixed columns; blocks real-data training no longer.
+  - **`sanitize_frame` price clipping** (`infrastructure/numerics.py`): align with feature pipeline — skip bid/ask/mid/OHLCV/spread/COT columns from the default `[-20, 20]` clip (fixes USDJPY-style price destruction when labeling uses the numerics path).
+  - **OANDA position netting** (`trading/live_engine.py`): `net = long_u - abs(short_u)` so short units reported as positive magnitude are not double-counted.
+  - **`clean_bad_ticks` spike survival** (`data/data_ingestion.py`): lag-1 rolling reference + null-safe outlier / spread masks so MAD/Z detectors actually replace spikes (null `spread_outlier` previously short-circuited the condition).
+  - **RegimeCV purge** (`validation/cv.py`): global temporal purge so train samples within `purge` of any val index are dropped (cross-regime adjacency leakage).
+  - **CombCV purge/embargo** (`validation/cv.py`): ban train samples in `[t0-purge, t1+purge+embargo)` around each test block.
+  - **Broken test collection**: `tests/test_system.py` dropped stale `settings.MODELS` import; `tests/test_streaming_pipeline.py` rewritten for current Bytewax API; `MarketTick.to_dict()` added.
+  - **Quick-mode direction gates** (`training/train_gpu.py`): disable direction probe + ignore preflight / soft-continue class-balance gates on short real windows so e2e smoke can finish.
+  - **`sidecar` UnboundLocalError** (`training/train_gpu.py`): always init `sidecar = None`; reuse logger sidecar across walk-forward folds.
+  - **Chunk feature schema lock** (`training/train_gpu.py`): reset `_FIRST_CHUNK_COLS` per cache build; same-columns/different-order → reindex instead of opaque raise.
+  - **Training model hardening** (`models/architectures.py`, `models/ensemble.py`, `training/train_gpu.py`, `features/feature_engineering_pl.py`): Xavier/small-head init on more arches; pre-norm + grad checkpointing; `MultiTaskLoss(label_smoothing=...)`; unwrap `_orig_mod` on save/load; update both best-sharpe and best-val-loss trackers; fail hard on empty train/val splits; pass `pair=` into `position_limit_flags`; remove dead `diversity_loss` under `no_grad`.
 
 - **2026-07-03 — TemperatureScaler.calibrate Broken** (`models/architectures.py`): `@torch.no_grad()` was wrapping the entire `calibrate()` method including the LBFGS optimizer, making temperature calibration a complete no-op (gradients never reached the optimizer). Fixed by scoping `torch.no_grad()` to only the inference loop; LBFGS optimization now receives gradients correctly.
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import polars as pl
-import pytest
 from statsmodels.tsa.stattools import grangercausalitytests
 
 from features.cross_asset_factors import (

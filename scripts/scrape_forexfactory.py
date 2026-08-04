@@ -35,7 +35,7 @@ import csv
 import random
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -223,7 +223,7 @@ def _is_specific_time(time_str: str) -> bool:
 
 def _parse_ff_time(
     date_str: str, time_str: str, week_year: int, week_str: str, tz_name: str
-) -> Optional[datetime]:
+) -> datetime | None:
     """Convert a ForexFactory date/time row into a UTC datetime.
 
     ``date_str`` looks like "Mon Jan 1"; ``time_str`` like "8:30am",
@@ -272,8 +272,8 @@ def _parse_ff_time(
     try:
         local = naive.replace(tzinfo=_get_zone(tz_name))
     except ZoneInfoNotFoundError:
-        local = naive.replace(tzinfo=timezone.utc)
-    return local.astimezone(timezone.utc)
+        local = naive.replace(tzinfo=UTC)
+    return local.astimezone(UTC)
 
 
 # ── Value cleaning ------------------------------------------------------------
@@ -338,7 +338,7 @@ def _fetch_week_html(url: str, *, sleep_s: float, retries: int, timeout: int = 2
             resp = _SESSION.get(url, headers=headers, timeout=timeout)
             resp.raise_for_status()
             return resp.text
-        except Exception as exc:  # noqa: BLE001 - retry any transient failure
+        except Exception as exc:
             last_error = str(exc)
             if attempt >= attempts:
                 break
@@ -423,7 +423,7 @@ def parse_week_html(html: str, week_str: str, *, tz_name: str) -> list[dict]:
                 "source": "forexfactory",
                 "url": url,
             })
-        except Exception as exc:  # noqa: BLE001 - one bad row never kills the week
+        except Exception as exc:
             print(f"    [FF] WARN skipping malformed row in {week_str}: {exc}", flush=True)
             continue
 
@@ -516,7 +516,7 @@ def main() -> int:
             added = writer.append(rows)
             total_new += added
             print(f"  [{i}/{len(weeks)}] {week_str} -> {len(rows)} events (+{added} new)", flush=True)
-        except Exception as exc:  # noqa: BLE001 - record + continue, never abort run
+        except Exception as exc:
             print(f"  [{i}/{len(weeks)}] {week_str} -> ERROR: {exc}", flush=True)
             failures.append({"week": week_str, "url": _week_url(week_str), "reason": str(exc)})
 

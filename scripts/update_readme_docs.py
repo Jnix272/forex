@@ -1,6 +1,6 @@
 import re
 
-with open("README.md", "r", encoding="utf-8") as f:
+with open("README.md", encoding="utf-8") as f:
     content = f.read()
 
 # The huge changelog paragraph looks like:
@@ -16,7 +16,7 @@ def format_changelog_paragraph(text):
             # Replace "**Version X.Y** " with "\n### Version X.Y\n- "
             # and split sentences. But it's easier to just use regex on the whole paragraph.
             p = line
-            
+
             # Split by "**Version "
             parts = re.split(r'\*\*(Version \d+\.\d+)\*\*', p)
             new_p = ""
@@ -28,10 +28,10 @@ def format_changelog_paragraph(text):
                 if desc_bullets.startswith("-"):
                     desc_bullets = desc_bullets[1:].strip()
                 new_p += f"\n### {version}\n- {desc_bullets}\n"
-            
+
             lines[i] = new_p.strip()
             break
-            
+
     return '\n'.join(lines)
 
 content = format_changelog_paragraph(content)

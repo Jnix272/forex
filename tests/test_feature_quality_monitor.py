@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
-import pytest
 
 from features.feature_quality_monitor import (
     feature_quality_monitor,
@@ -17,7 +16,6 @@ from features.feature_quality_monitor import (
     stability_index_series,
     woe_iv,
 )
-
 
 # ---------------------------------------------------------------------------
 # PSI

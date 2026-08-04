@@ -16,11 +16,11 @@ don't account for execution lag and real transaction costs. This engine
 enforces realistic execution at every step.
 """
 
-import numpy as np
-import pandas as pd
-from typing import Optional, List
 from dataclasses import dataclass, field
 from enum import IntEnum
+
+import numpy as np
+import pandas as pd
 
 
 class ScalingAction(IntEnum):
@@ -50,16 +50,16 @@ class Trade:
     direction: int           # +1 = long, -1 = short
     stop_loss: float
     take_profit: float
-    exit_time: Optional[pd.Timestamp] = None
-    exit_price: Optional[float] = None
-    exit_lots: Optional[float] = None
+    exit_time: pd.Timestamp | None = None
+    exit_price: float | None = None
+    exit_lots: float | None = None
     pnl_pips: float = 0.0
     gross_pnl_usd: float = 0.0
     pnl_usd: float = 0.0
     commission: float = 0.0
     slippage_pips: float = 0.0
     exit_reason: str = ""    # 'stop_loss', 'take_profit', 'signal', 'scale_out', 'eod'
-    scale_additions: List[dict] = field(default_factory=list)
+    scale_additions: list[dict] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,11 +161,11 @@ class ForexScalingBacktest:
         self.holding_bars: int = 0
 
         # Records
-        self.trades: List[Trade] = []
-        self.equity_curve: List[float] = []
-        self.daily_pnl: List[float] = []
+        self.trades: list[Trade] = []
+        self.equity_curve: list[float] = []
+        self.daily_pnl: list[float] = []
         self._trade_counter: int = 0
-        self._open_trade: Optional[Trade] = None
+        self._open_trade: Trade | None = None
 
     # ── Price helpers ────────────────────────────────────────────────────────
 
@@ -211,7 +211,7 @@ class ForexScalingBacktest:
         """Open a new position."""
         if lots > self.max_lots:
             lots = self.max_lots
-            
+
         exec_price = self._get_execution_price(idx, direction, lots)
         cost = self._compute_cost(lots)
         self.equity -= cost
@@ -423,7 +423,7 @@ class ForexScalingBacktest:
                 "drawdown": drawdown,
                 "holding_bars": self.holding_bars,
             })
-            
+
             # Risk Integrity: Max Drawdown Circuit Breaker
             if drawdown > self.max_drawdown_limit:
                 print(f"[Backtest] Max drawdown circuit breaker triggered at {ts}: {drawdown:.2%} (Limit: {self.max_drawdown_limit:.2%})")
@@ -461,11 +461,11 @@ class ForexScalingBacktest:
         rf_annual = 0.02
         rf_per_bar = rf_annual / (252 * 24 * 60)
         excess_returns = returns - rf_per_bar
-        
+
         sharpe = 0.0
         sortino = 0.0
         ann_factor = np.sqrt(252 * 24 * 60)  # 1-min bars
-        
+
         if len(excess_returns) > 1 and excess_returns.std(ddof=1) > 1e-12:
             sharpe = (excess_returns.mean() / excess_returns.std(ddof=1)) * ann_factor
 
@@ -482,7 +482,7 @@ class ForexScalingBacktest:
             (t.exit_time - t.entry_time).total_seconds() / 60
             if t.exit_time else 0 for t in self.trades
         ])
-        
+
         long_trades = [t for t in self.trades if t.direction > 0]
         short_trades = [t for t in self.trades if t.direction < 0]
         long_wins = [t for t in long_trades if t.pnl_usd > 0]
@@ -560,15 +560,16 @@ class ForexScalingBacktest:
     def generate_tear_sheet(self):
         """Generate pyfolio tear sheet safely without crashing on bad runs."""
         try:
-            import pyfolio as pf
             import warnings
-            
+
+            import pyfolio as pf
+
             if not hasattr(self, "results_df") or self.results_df.empty:
                 print("WARNING: No results to generate tear sheet.")
                 return
-                
+
             returns = self.results_df["equity"].pct_change().dropna()
-            
+
             # Metrics Check: Warn on NaN or 0 variance
             if len(returns) < 2:
                 print("WARNING: Not enough return data points to generate tear sheet.")
@@ -576,7 +577,7 @@ class ForexScalingBacktest:
             if returns.std() == 0 or returns.isna().any():
                 print("WARNING: Returns have 0 variance or NaN values. Tear sheet aborted.")
                 return
-                
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 pf.create_simple_tear_sheet(returns)
@@ -595,7 +596,7 @@ if __name__ == "__main__":
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
-    from data.data_ingestion import load_or_generate, ForexDataPipeline
+    from data.data_ingestion import ForexDataPipeline, load_or_generate
 
     ticks = load_or_generate(n_rows=20_000)
     pipeline = ForexDataPipeline(bar_freq="5min")
@@ -605,7 +606,7 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
     signals = pd.DataFrame(index=bars.index)
     signals["action"] = rng.choice(
-        [ScalingAction.HOLD, ScalingAction.OPEN_LONG, ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL], 
+        [ScalingAction.HOLD, ScalingAction.OPEN_LONG, ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL],
         size=len(bars), p=[0.7, 0.1, 0.1, 0.1]
     )
     signals["lots"] = 0.1

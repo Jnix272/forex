@@ -4,10 +4,10 @@ This test runs the main model training pipeline (train_gpu.py) over real downloa
 and logs the entire output to a file.
 """
 
-import os
-import sys
-import subprocess
 import logging
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 

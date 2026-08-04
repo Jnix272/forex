@@ -33,13 +33,13 @@ import math
 import os
 import shutil
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Deque, Dict, List, Optional
 
 import numpy as np
 
 from config.settings import active_checkpoint_dir
+
 
 def _get_checkpoint_paths():
     run_dir = active_checkpoint_dir()
@@ -125,13 +125,13 @@ class _RollingWindow:
     """Efficient rolling window for Sharpe and win rate computation."""
 
     def __init__(self, maxlen: int = 300, trades_per_year: float = 252 * 50):
-        self._pnls:    Deque[float] = deque(maxlen=maxlen)
-        self._wins:    Deque[bool]  = deque(maxlen=maxlen)
-        self._equitys: Deque[float] = deque(maxlen=maxlen)
+        self._pnls:    deque[float] = deque(maxlen=maxlen)
+        self._wins:    deque[bool]  = deque(maxlen=maxlen)
+        self._equitys: deque[float] = deque(maxlen=maxlen)
         self._win_count = 0
         self._ann_factor = math.sqrt(trades_per_year)
 
-    def add_trade(self, pnl: float, equity: Optional[float] = None):
+    def add_trade(self, pnl: float, equity: float | None = None):
         if self._wins.maxlen and len(self._wins) == self._wins.maxlen:
             self._win_count -= int(self._wins[0])
         self._pnls.append(pnl)
@@ -236,7 +236,7 @@ class DemotionMonitor:
         if self._ph.add(-pnl):   # negative PnL = increasing loss trend
             self._ph_fired = True
 
-    def on_bar(self, equity: float) -> Optional[Dict]:
+    def on_bar(self, equity: float) -> dict | None:
         """
         Call every bar. Returns None normally, or a DemotionAlert dict
         if a de-promotion should be triggered.
@@ -255,7 +255,7 @@ class DemotionMonitor:
             return self._fire_demotion(triggers, equity)
         return None
 
-    def status(self) -> Dict:
+    def status(self) -> dict:
         """Current rolling performance status."""
         return {
             "n_trades":     self._window.n_trades,
@@ -278,7 +278,7 @@ class DemotionMonitor:
 
     # ── internal ────────────────────────────────────────────────────────────
 
-    def _check_triggers(self) -> List[str]:
+    def _check_triggers(self) -> list[str]:
         """Returns list of trigger reasons, empty if no demotion needed."""
         triggers = []
         sr = self._window.sharpe
@@ -299,13 +299,14 @@ class DemotionMonitor:
             self._ph_fired = False
         return triggers
 
-    def _fire_demotion(self, triggers: List[str], equity: float) -> Dict:
+    def _fire_demotion(self, triggers: list[str], equity: float) -> dict:
         """Execute demotion and return alert dict."""
         self._demoted = True
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
 
         # Signal retrain
-        RUN_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = active_checkpoint_dir()
+        run_dir.mkdir(parents=True, exist_ok=True)
         prod, prev, needs_retrain = _get_checkpoint_paths()
         needs_retrain.write_text(f"Demotion at {timestamp}\n" +
                                  "\n".join(triggers))
@@ -342,7 +343,7 @@ class DemotionMonitor:
         self._log_demotion(alert)
         return alert
 
-    def _log_demotion(self, alert: Dict):
+    def _log_demotion(self, alert: dict):
         try:
             from validation.mlflow_logger import MLflowModelLogger
             logger = MLflowModelLogger(verbose=False)
@@ -354,9 +355,9 @@ class DemotionMonitor:
             )
         except Exception:
             import json as _json
-            log_dir = RUN_CHECKPOINT_DIR.parent / "logs" / "demotions"
+            log_dir = active_checkpoint_dir().parent / "logs" / "demotions"
             log_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             with open(log_dir / f"demotion_{ts}.json", "w") as f:
                 _json.dump(alert, f, indent=2, default=str)
 

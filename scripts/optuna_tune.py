@@ -11,8 +11,6 @@ import optuna
 import torch
 import yaml
 
-
-
 ARTIFACT_DIR = Path("logs/optuna")
 OPTUNA_CONFIG_DIR = Path("config/optuna")   # isolated folder for all trial + best configs
 BEST_CONFIG_DIR = OPTUNA_CONFIG_DIR         # kept for compat with helpers that reference it
@@ -824,12 +822,12 @@ def _launch_training_run(args) -> int:
         "--no-auto-tune",
     ]
 
-    print(f"\n[Optuna] Launching full training run...")
+    print("\n[Optuna] Launching full training run...")
     print(f"[Optuna] Executing: {' '.join(cmd)}")
     result = subprocess.run(cmd)
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, cmd)
-    print(f"[Optuna] Full training finished successfully (exit 0).")
+    print("[Optuna] Full training finished successfully (exit 0).")
     return int(result.returncode)
 
 

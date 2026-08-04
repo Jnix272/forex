@@ -40,7 +40,7 @@ Usage:
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 warnings.filterwarnings("ignore")
 
@@ -79,11 +79,14 @@ def probabilistic_sharpe_ratio(
     sr_benchmark: float,
     n_obs:        int,
     skewness:     float = 0.0,
-    kurtosis:     float = 3.0,
+    kurtosis:     float = 5.0,
 ) -> float:
     """
     P(SR* > SR_benchmark) using Bailey & de Prado (2012).
     Corrects for non-normality of returns.
+
+    Default kurtosis is 5.0 (FX-typical leptokurtosis), not 3.0 (Gaussian).
+    Understating kurtosis makes PSR look better than it is for fat-tailed FX.
 
     Returns a probability in [0, 1].
     Typical threshold: PSR > 0.95 (95% confident true Sharpe beats benchmark).
@@ -115,7 +118,7 @@ def deflated_sharpe_ratio(
     sr_trials:   int,
     n_obs:       int,
     skewness:    float = 0.0,
-    kurtosis:    float = 3.0,
+    kurtosis:    float = 5.0,
 ) -> float:
     """
     Deflated Sharpe Ratio from Bailey & de Prado (2014).
@@ -141,7 +144,7 @@ class PromotionGate:
     All 7 gates must pass (or their override is set) for `promoted=True`.
     """
 
-    def __init__(self, config: Optional[GateConfig] = None):
+    def __init__(self, config: GateConfig | None = None):
         self.cfg = config or GateConfig()
 
     def evaluate(
@@ -150,21 +153,21 @@ class PromotionGate:
         profit_factor:        float,
         max_drawdown:         float,
         n_trades:             int,
-        regime_pnl:           Optional[Dict[str, float]] = None,
-        gross_pnl:            Optional[float] = None,
+        regime_pnl:           dict[str, float] | None = None,
+        gross_pnl:            float | None = None,
         transaction_costs:    float = 0.0,
         n_obs:                int   = 1000,
         n_backtest_trials:    int   = 1,
         backtest_sharpe_std:  float = 0.0,
         skewness:             float = 0.0,
-        kurtosis:             float = 3.0,
+        kurtosis:             float = 5.0,
         emergency_retrain:    bool  = False,
         # K: Capital efficiency inputs
-        turnover_rate:        Optional[float] = None,  # trades per day (or fraction of bars traded)
-        avg_latency_ms:       Optional[float] = None,  # average model inference + broker RTT in ms
+        turnover_rate:        float | None = None,  # trades per day (or fraction of bars traded)
+        avg_latency_ms:       float | None = None,  # average model inference + broker RTT in ms
         val_logits:           Optional["np.ndarray"] = None, # (Optional) logits for conformal
         val_labels:           Optional["np.ndarray"] = None, # (Optional) labels for conformal
-    ) -> Dict:
+    ) -> dict:
         """
         Evaluate all promotion gates.
 
@@ -212,8 +215,8 @@ class PromotionGate:
             }
 
         min_sr = self.cfg.min_sharpe_emergency if emergency_retrain else self.cfg.min_sharpe
-        gates:   Dict[str, bool]  = {}
-        details: Dict[str, float] = {}
+        gates:   dict[str, bool]  = {}
+        details: dict[str, float] = {}
 
         # 1. Sharpe
         gates["sharpe_ok"]     = sharpe >= min_sr
@@ -272,8 +275,13 @@ class PromotionGate:
             details["dsr"]   = dsr
             details["min_dsr"] = self.cfg.min_dsr
         else:
-            gates["dsr_ok"]  = True   # skipped when not in strict mode
-            details["dsr"]   = -1.0
+            gates["dsr_ok"] = True   # skipped when not in strict mode
+            details["dsr"] = -1.0
+            details["dsr_skipped"] = True
+            print(
+                "[PromotionGate] WARN: dsr_ok skipped "
+                "(strict_psr off or n_backtest_trials<=1) — gate treated as pass"
+            )
 
         # Sharpe stability gate: reject models whose walk-forward Sharpe is
         # highly variable (low confidence that OOS performance will persist).
@@ -286,6 +294,11 @@ class PromotionGate:
         else:
             gates["sharpe_stability_ok"] = True
             details["backtest_sharpe_std"] = 0.0
+            details["sharpe_stability_skipped"] = True
+            print(
+                "[PromotionGate] WARN: sharpe_stability_ok skipped "
+                "(need backtest_sharpe_std>0 and n_backtest_trials>1) — gate treated as pass"
+            )
 
         # ── K: Capital efficiency metrics ──────────────────────────────────
         # These three ratios predict live survivability better than raw Sharpe.
@@ -305,7 +318,12 @@ class PromotionGate:
             details["sharpe_per_turnover"]  = sharpe_per_turnover
         else:
             gates["efficiency_turnover_ok"] = True   # skipped
-            details["sharpe_per_turnover"]  = -1.0
+            details["sharpe_per_turnover"] = -1.0
+            details["efficiency_turnover_skipped"] = True
+            print(
+                "[PromotionGate] WARN: efficiency_turnover_ok skipped "
+                "(turnover_rate unavailable) — gate treated as pass"
+            )
 
         # K2: Sharpe / max_drawdown — Calmar-flavoured ratio.
         # Penalises models that achieve Sharpe through concentration or
@@ -334,12 +352,17 @@ class PromotionGate:
             details["sharpe_per_latency"]  = sharpe_per_latency
         else:
             gates["efficiency_latency_ok"] = True   # skipped
-            details["sharpe_per_latency"]  = -1.0
+            details["sharpe_per_latency"] = -1.0
+            details["efficiency_latency_skipped"] = True
+            print(
+                "[PromotionGate] WARN: efficiency_latency_ok skipped "
+                "(avg_latency_ms unavailable) — gate treated as pass"
+            )
 
         # ── Final decision ─────────────────────────────────────────────────
         promoted = all(gates.values())
         reasons  = [f"{k}: {'✓' if v else '✗'}" for k, v in gates.items()]
-        
+
         if val_logits is not None and val_labels is not None:
             cp_info = self.compute_conformal_coverage(val_logits, val_labels)
             details["cp_coverage"] = cp_info["coverage"]
@@ -367,10 +390,10 @@ class PromotionGate:
         regime_labels: "list[str]" = None,
         tx_costs:      "list[float]" = None,
         annualization: float = 252.0,
-        n_bars:        Optional[int] = None,   # total bars in backtest (for turnover calc)
-        avg_latency_ms: Optional[float] = None,
+        n_bars:        int | None = None,   # total bars in backtest (for turnover calc)
+        avg_latency_ms: float | None = None,
         **kwargs,
-    ) -> Dict:
+    ) -> dict:
         """
         Convenience wrapper — compute metrics from raw trade data.
 
@@ -409,10 +432,10 @@ class PromotionGate:
             max_dd = 0.0
 
         # Regime concentration
-        regime_pnl: Optional[Dict[str, float]] = None
+        regime_pnl: dict[str, float] | None = None
         if regime_labels and len(regime_labels) == len(pnls):
             from collections import defaultdict
-            rp: Dict[str, float] = defaultdict(float)
+            rp: dict[str, float] = defaultdict(float)
             for label, pnl in zip(regime_labels, pnls):
                 rp[label] += pnl
             total = sum(abs(v) for v in rp.values()) + 1e-9
@@ -425,7 +448,7 @@ class PromotionGate:
 
         # K1: turnover rate = trades per day
         # n_bars assumed to be 1-min bars; 1440 bars per day
-        turnover_rate: Optional[float] = None
+        turnover_rate: float | None = None
         if n_bars and n_bars > 0:
             bars_per_day  = 1440.0   # 1-minute bars
             trading_days  = n_bars / bars_per_day
@@ -452,7 +475,7 @@ class PromotionGate:
         thresholds: "list[float] | None" = None,
         annualization: float = 252.0,
         min_trades: int = 30,
-    ) -> Dict:
+    ) -> dict:
         """Sweep confidence thresholds to find the one maximising Sharpe.
 
         For each threshold, keep only trades whose confidence >= threshold,
@@ -498,7 +521,7 @@ class PromotionGate:
             "sweeps": sweeps,
         }
 
-    def compute_conformal_coverage(self, val_logits: "np.ndarray", val_labels: "np.ndarray", alpha: float = 0.10) -> Dict:
+    def compute_conformal_coverage(self, val_logits: "np.ndarray", val_labels: "np.ndarray", alpha: float = 0.10) -> dict:
         """
         Computes nonconformity scores: `score[i] = 1 - softmax(logits[i])[true_label[i]]`
         Calibration: finds the (1-alpha) quantile of scores on the calibration set
@@ -508,19 +531,19 @@ class PromotionGate:
         # softmax
         exp_l = np.exp(val_logits - np.max(val_logits, axis=-1, keepdims=True))
         probs = exp_l / np.sum(exp_l, axis=-1, keepdims=True)
-        
+
         n = len(val_labels)
         scores = 1.0 - probs[np.arange(n), val_labels]
-        
+
         # Empirical (1-alpha) quantile
         threshold = float(np.quantile(scores, 1.0 - alpha))
-        
+
         # Prediction sets: all classes j where 1 - probs[j] <= threshold
         sets = (1.0 - probs) <= threshold
-        
+
         coverage = float(np.mean(sets[np.arange(n), val_labels]))
         avg_set_size = float(np.mean(np.sum(sets, axis=-1)))
-        
+
         return {
             "coverage": coverage,
             "threshold": threshold,
@@ -531,10 +554,10 @@ class PromotionGate:
 # ── threshold tuning I/O ─────────────────────────────────────────────────────
 
 def write_threshold_tuning_json(
-    sweep_result: Dict,
+    sweep_result: dict,
     path: str,
     model_name: str = "unknown",
-    extra_meta: Optional[Dict] = None,
+    extra_meta: dict | None = None,
 ) -> bool:
     """Persist the output of PromotionGate.sweep_confidence_threshold to JSON.
 
@@ -565,10 +588,10 @@ def write_threshold_tuning_json(
 
 
 def rank_models(
-    results: "list[Dict]",
+    results: "list[dict]",
     model_names: "list[str]" = None,
     primary: str = "sharpe_per_drawdown",
-) -> "list[Dict]":
+) -> "list[dict]":
     """
     K: Rank a list of PromotionGate.evaluate() results by capital efficiency.
 

@@ -1,12 +1,8 @@
 import torch
 import torch.nn as nn
 
-from models.ensemble import (
-    EnsembleMetaLearner,
-    EnsembleRiskFilter,
-    train_meta_learner,
-    _base_pred_to_batch_vector
-)
+from models.ensemble import EnsembleMetaLearner, EnsembleRiskFilter, _base_pred_to_batch_vector, train_meta_learner
+
 
 class MockModelSingle(nn.Module):
     def forward(self, x):
@@ -70,7 +66,7 @@ def test_ensemble_meta_learner_forward():
     x = torch.randn(B, T, F)
     models = [MockModelSingle(), MockModelTuple(), MockModelMultitask()]
     ensemble = EnsembleMetaLearner(base_models=models, context_dim=16, hidden=32)
-    
+
     output, weights = ensemble(x)
     assert output.shape == (B,)
     assert weights.shape == (B, 3)
@@ -82,7 +78,7 @@ def test_ensemble_model_weights_summary():
     x = torch.randn(B, T, F)
     models = [MockModelSingle(), MockModelTuple()]
     ensemble = EnsembleMetaLearner(base_models=models, base_names=["m1", "m2"])
-    
+
     summary = ensemble.model_weights_summary(x)
     assert isinstance(summary, dict)
     assert "m1" in summary and "m2" in summary
@@ -92,19 +88,19 @@ def test_ensemble_model_weights_summary():
 def test_ensemble_diversity_loss():
     models = [MockModelSingle(), MockModelSingle()]
     ensemble = EnsembleMetaLearner(base_models=models)
-    
+
     # Create artificial predictions
     B = 10
     # Perfect positive correlation
     preds_pos = torch.randn(B, 1).repeat(1, 2)
     div_pos = ensemble.diversity_loss(preds_pos)
     assert torch.allclose(div_pos, torch.tensor(1.0), atol=1e-4)
-    
+
     # Perfect negative correlation
     preds_neg = torch.cat([preds_pos[:, 0:1], -preds_pos[:, 0:1]], dim=1)
     div_neg = ensemble.diversity_loss(preds_neg)
     assert torch.allclose(div_neg, torch.tensor(-1.0), atol=1e-4)
-    
+
     # Zero correlation (orthogonal) - random large vectors
     B_large = 10000
     preds_rand = torch.randn(B_large, 2)
@@ -116,7 +112,7 @@ def test_ensemble_predict_with_disagreement():
     x = torch.randn(B, T, F)
     models = [MockModelSingle(), MockModelSingle()]
     ensemble = EnsembleMetaLearner(base_models=models)
-    
+
     output, disagreement = ensemble.predict_with_disagreement(x)
     assert output.shape == (B,)
     assert disagreement.shape == (B,)
@@ -125,7 +121,7 @@ def test_ensemble_predict_with_disagreement():
 def test_train_meta_learner(tmp_path):
     B, T, F = 16, 5, 4
     n_batches = 3
-    
+
     class DummyDataset(torch.utils.data.Dataset):
         def __len__(self):
             return B * n_batches
@@ -133,12 +129,12 @@ def test_train_meta_learner(tmp_path):
             return torch.randn(T, F), torch.randn(1).squeeze()
 
     loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=B)
-    
+
     models = [MockModelSingle(), MockModelSingle()]
     ensemble = EnsembleMetaLearner(base_models=models)
-    
+
     ckpt_path = tmp_path / "meta_ckpt.pt"
-    
+
     history = train_meta_learner(
         meta=ensemble,
         loader=loader,
@@ -149,7 +145,7 @@ def test_train_meta_learner(tmp_path):
         verbose=False,
         checkpoint_path=str(ckpt_path)
     )
-    
+
     assert len(history) == 2
     assert ckpt_path.exists()
     assert ckpt_path.with_name("meta_ckpt_latest.pt").exists()

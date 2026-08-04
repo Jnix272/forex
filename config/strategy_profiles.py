@@ -5,7 +5,6 @@ for inference-time behavior (tighter stops, faster exits for scalping; wider
 parameters for normal/swing).
 """
 
-from typing import Optional
 
 STRATEGY_PROFILES = {
     "scalping": {
@@ -33,7 +32,7 @@ STRATEGY_PROFILES = {
 }
 
 
-def strategy_profile(name: Optional[str] = None) -> dict:
+def strategy_profile(name: str | None = None) -> dict:
     """Return a copy of a named strategy profile, defaulting to scalping."""
     key = str(name or "scalping").strip().lower()
     if key not in STRATEGY_PROFILES:

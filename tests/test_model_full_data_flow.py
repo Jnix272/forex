@@ -11,15 +11,14 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
 
 from data.data_ingestion import generate_synthetic_tick_data
 from data.sources import _enforce_schema
 from features.feature_engineering import FeatureEngineer
 from models.architectures import MODEL_REGISTRY
 from training.train_gpu import _build_chunk, build_model
-
 
 SEQ_LEN = 60
 FULL_TEST_SAMPLES = 160
@@ -112,11 +111,15 @@ def _args(seq_len: int, n_features: int) -> argparse.Namespace:
 
 @pytest.fixture(scope="module")
 def prepared_sequences():
+    import training.train_gpu as _tg
+    _tg._FIRST_CHUNK_COLS = None  # isolate from other test modules
+
     ticks, pair, source = _load_ticks_real_or_synthetic()
     fe = FeatureEngineer()
     scaler = StandardScaler()
 
     def build_chunk_for(test_ticks):
+        _tg._FIRST_CHUNK_COLS = None
         return _build_chunk(
             ticks_chunk=test_ticks,
             fe=fe,
@@ -129,7 +132,7 @@ def prepared_sequences():
 
     chunk = build_chunk_for(ticks)
     X_seq, y_seq, diff_seq, pq_seq = chunk[:4]
-    n_features = chunk[-1]
+    n_features = chunk.n_features
 
     if len(X_seq) < FULL_TEST_SAMPLES and source == "real":
         ticks = generate_synthetic_tick_data(
@@ -142,7 +145,7 @@ def prepared_sequences():
         scaler = StandardScaler()
         chunk = build_chunk_for(ticks)
         X_seq, y_seq, diff_seq, pq_seq = chunk[:4]
-        n_features = chunk[-1]
+        n_features = chunk.n_features
 
     assert len(X_seq) >= FULL_TEST_SAMPLES, (
         f"Need at least {FULL_TEST_SAMPLES} sequences for the full model test, "

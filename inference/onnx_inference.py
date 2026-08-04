@@ -27,15 +27,18 @@ Requirements:
     (do NOT have onnxruntime and onnxruntime-directml installed at the same time)
 """
 
-import time
 import argparse
 import sys
+import time
 from collections import deque
-from types import SimpleNamespace
 from pathlib import Path
-from typing import Optional
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -70,7 +73,7 @@ def _read_training_config(ckpt_path: Path, model_name: str) -> dict:
     return {}
 
 
-def _infer_features_from_state(state: dict) -> Optional[int]:
+def _infer_features_from_state(state: dict) -> int | None:
     for k, v in state.items():
         shape = getattr(v, "shape", None)
         if shape is None or len(shape) < 2:
@@ -375,9 +378,9 @@ def export_to_onnx(
     checkpoint_path: str,
     model_name: str,
     seq_len: int,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     opset: int = 17,
-    n_features: Optional[int] = None,
+    n_features: int | None = None,
 ) -> str:
     """
     Load a trained .pt checkpoint and export to ONNX.
@@ -506,13 +509,15 @@ def export_ensemble_to_onnx(
     checkpoint_dir: str,
     seq_len: int,
     n_features: int,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     opset: int = 17,
     device: str = "cpu",
 ) -> str:
     """Export EnsembleMetaLearner as one C++-compatible 3-logit ONNX graph."""
     import json
+
     import torch
+
     from models.ensemble import EnsembleMetaLearner
     from scripts.train_ensemble_meta import load_base_model, resolve_checkpoint
 
@@ -581,14 +586,16 @@ def export_rl_to_onnx(
     model_name: str,
     seq_len: int,
     n_features: int,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     opset: int = 17,
     algo: str = "dqn",
     device: str = "cpu",
 ) -> str:
     """Export frozen supervised encoder + RL policy as a 3-logit ONNX graph."""
     import json
+
     import torch
+
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent
@@ -669,14 +676,16 @@ def export_rl_execution_to_onnx(
     model_name: str,
     seq_len: int,
     n_features: int,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     opset: int = 17,
     algo: str = "dqn",
     device: str = "cpu",
 ) -> str:
     """Export frozen supervised encoder + RL policy as native 10-action execution ONNX."""
     import json
+
     import torch
+
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent

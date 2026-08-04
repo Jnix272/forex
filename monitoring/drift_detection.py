@@ -12,14 +12,12 @@ Multi-method drift detection integrated with the Feature Store:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from data.feature_store import FeatureStore
-
 
 try:
     from scipy import stats as _sp_stats
@@ -88,13 +86,13 @@ class DriftResult:
     live_std: float
     n_baseline: int
     n_live: int
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass
 class DriftReport:
     """Aggregate drift report across features."""
-    feature_results: List[DriftResult]
+    feature_results: list[DriftResult]
     psi_max: float
     ks_min_pvalue: float
     ks_max_stat: float
@@ -104,7 +102,7 @@ class DriftReport:
     drift_detected: bool
     baseline_time: str
     live_time: str
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -137,7 +135,7 @@ def _safe_psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float
     return psi if np.isfinite(psi) else 0.0
 
 
-def _ks_2samp(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
+def _ks_2samp(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     """Kolmogorov-Smirnov test with guard for small samples."""
     a = a[np.isfinite(a)]
     b = b[np.isfinite(b)]
@@ -217,8 +215,8 @@ def check_feature_drift(
 
 
 def run_drift_check(
-    baseline_data: Dict[str, np.ndarray],
-    live_data: Dict[str, np.ndarray],
+    baseline_data: dict[str, np.ndarray],
+    live_data: dict[str, np.ndarray],
     baseline_time: str = "",
     live_time: str = "",
     psi_bins: int = 10,
@@ -330,7 +328,7 @@ class DriftTracker:
 
     def check_from_store(
         self,
-        feature_names: List[str],
+        feature_names: list[str],
         baseline_start: datetime,
         baseline_end: datetime,
         live_start: datetime,
@@ -376,7 +374,7 @@ class DriftTracker:
         """Write drift results to SQLite."""
         import sqlite3
         with sqlite3.connect(self.store.db_path) as conn:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             for r in report.feature_results:
                 conn.execute("""
                     INSERT INTO drift_checks
@@ -405,7 +403,7 @@ class DriftTracker:
 
     def get_recent_checks(
         self, feature_name: str = None, limit: int = 20
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Get recent drift check history for a feature."""
         import sqlite3
         with sqlite3.connect(self.store.db_path) as conn:
@@ -422,7 +420,7 @@ class DriftTracker:
                 """, (limit,)).fetchall()
             return [dict(r) for r in rows]
 
-    def get_active_alerts(self, unacknowledged_only: bool = True) -> List[Dict]:
+    def get_active_alerts(self, unacknowledged_only: bool = True) -> list[dict]:
         """Get active drift alerts."""
         import sqlite3
         with sqlite3.connect(self.store.db_path) as conn:
@@ -452,7 +450,7 @@ class DriftTracker:
                 (alert_id,)
             )
 
-    def get_drift_summary(self, since: datetime = None) -> Dict:
+    def get_drift_summary(self, since: datetime = None) -> dict:
         """Get summary statistics of recent drift activity."""
         import sqlite3
         with sqlite3.connect(self.store.db_path) as conn:
@@ -498,18 +496,18 @@ class DriftTracker:
 
 def schedule_drift_check(
     store: FeatureStore,
-    feature_names: List[str],
+    feature_names: list[str],
     baseline_window_days: int = 90,
     live_window_days: int = 7,
-    as_of: Optional[datetime] = None,
+    as_of: datetime | None = None,
 ) -> DriftReport:
     """
     Convenience: run drift check using time-windowed data from FeatureStore.
     Baseline = last N days, Live = last M days (with gap from baseline).
     """
-    now = as_of or datetime.now(timezone.utc)
+    now = as_of or datetime.now(UTC)
     if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     live_end = now
     live_start = now - timedelta(days=live_window_days)
     baseline_end = live_start - timedelta(days=1)  # gap to avoid overlap
@@ -528,7 +526,7 @@ def schedule_drift_check(
 
 def drift_check_from_cache(
     cache_path: str,
-    feature_names: List[str],
+    feature_names: list[str],
     baseline_samples: int = DEFAULT_WINDOW_BASELINE,
     live_samples: int = DEFAULT_WINDOW_LIVE,
     psi_bins: int = 10,

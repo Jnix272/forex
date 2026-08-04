@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-
 DASHBOARD_FILE = Path(__file__).resolve().parent.parent / "api" / "dashboard.py"
 
 

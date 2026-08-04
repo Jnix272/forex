@@ -9,21 +9,18 @@ from __future__ import annotations
 import json
 import time
 import warnings
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
-import polars as pl
 
 try:
     import bytewax
-    from bytewax.dataflow import Dataflow
     import bytewax.operators as op
     import bytewax.operators.windowing as wop
-    from bytewax.testing import TestingSource
+    from bytewax.dataflow import Dataflow
     from bytewax.inputs import DynamicSource, StatelessSourcePartition
+    from bytewax.testing import TestingSource
     BYTEWAX_AVAILABLE = True
 except ImportError:
     BYTEWAX_AVAILABLE = False
@@ -62,18 +59,21 @@ class MarketTick:
     ask: float
     bid_size: float = 0.0
     ask_size: float = 0.0
-    trade_price: Optional[float] = None
-    trade_size: Optional[float] = None
-    trade_side: Optional[str] = None
+    trade_price: float | None = None
+    trade_size: float | None = None
+    trade_side: str | None = None
     exchange: str = "unknown"
-    
+
     @property
     def mid_price(self) -> float:
         return (self.bid + self.ask) / 2.0
-    
+
     @property
     def spread(self) -> float:
         return self.ask - self.bid
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if v is not None}
 
 @dataclass
 class ComputedFeatures:
@@ -82,28 +82,28 @@ class ComputedFeatures:
     window_end: int
     tick_count: int = 0
     trade_count: int = 0
-    sma_20: Optional[float] = None
-    ema_20: Optional[float] = None
-    rsi_14: Optional[float] = None
-    atr_14: Optional[float] = None
-    macd_line: Optional[float] = None
-    macd_signal: Optional[float] = None
-    macd_hist: Optional[float] = None
-    bollinger_upper: Optional[float] = None
-    bollinger_lower: Optional[float] = None
-    spread_mean: Optional[float] = None
-    spread_std: Optional[float] = None
-    ofi: Optional[float] = None
-    vpin: Optional[float] = None
-    trade_imbalance: Optional[float] = None
-    carry_factor: Optional[float] = None
+    sma_20: float | None = None
+    ema_20: float | None = None
+    rsi_14: float | None = None
+    atr_14: float | None = None
+    macd_line: float | None = None
+    macd_signal: float | None = None
+    macd_hist: float | None = None
+    bollinger_upper: float | None = None
+    bollinger_lower: float | None = None
+    spread_mean: float | None = None
+    spread_std: float | None = None
+    ofi: float | None = None
+    vpin: float | None = None
+    trade_imbalance: float | None = None
+    carry_factor: float | None = None
     regime: str = "neutral"
     computed_at: int = field(default_factory=lambda: int(time.time_ns()))
-    
+
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
 
-def parse_tick(event: Dict) -> MarketTick:
+def parse_tick(event: dict) -> MarketTick:
     return MarketTick(
         symbol=event["symbol"],
         timestamp=event["timestamp"],
@@ -117,10 +117,10 @@ def parse_tick(event: Dict) -> MarketTick:
         exchange=event.get("exchange", "unknown"),
     )
 
-def tick_to_keyed(tick: MarketTick) -> Tuple[str, MarketTick]:
+def tick_to_keyed(tick: MarketTick) -> tuple[str, MarketTick]:
     return (tick.symbol, tick)
 
-def _accumulate_ticks(state: Optional[List[MarketTick]], tick: MarketTick) -> List[MarketTick]:
+def _accumulate_ticks(state: list[MarketTick] | None, tick: MarketTick) -> list[MarketTick]:
     if state is None:
         state = []
     state.append(tick)
@@ -129,13 +129,13 @@ def _accumulate_ticks(state: Optional[List[MarketTick]], tick: MarketTick) -> Li
 def _finalize_window_features(item) -> ComputedFeatures:
     key, (window_metadata, ticks) = item
     symbol = key
-    
+
     if not ticks:
         return ComputedFeatures(symbol=symbol, window_start=0, window_end=0)
-        
+
     prices = [t.mid_price for t in ticks]
     spreads = [t.spread for t in ticks]
-    
+
     return ComputedFeatures(
         symbol=symbol,
         window_start=0,
@@ -161,8 +161,8 @@ if BYTEWAX_AVAILABLE:
             except ImportError:
                 warnings.warn("confluent_kafka not installed. TickSource will yield no data.")
                 self.consumer = None
-        
-        def next_batch(self) -> List[MarketTick]:
+
+        def next_batch(self) -> list[MarketTick]:
             if not self.consumer:
                 return []
             msgs = self.consumer.consume(num_messages=100, timeout=0.1)
@@ -173,7 +173,7 @@ if BYTEWAX_AVAILABLE:
                 try:
                     payload = json.loads(msg.value().decode('utf-8'))
                     batch.append(parse_tick(payload))
-                except Exception as e:
+                except Exception:
                     pass
             return batch
         def close(self):
@@ -187,31 +187,31 @@ if BYTEWAX_AVAILABLE:
 
 def build_feature_pipeline(config: StreamConfig) -> Dataflow:
     flow = Dataflow("streaming_pipeline")
-    
+
     if not BYTEWAX_AVAILABLE:
         return flow
-        
+
     stream = op.input("ticks", flow, DynamicTickSource(config))
     keyed_stream = op.key_on("key_by_symbol", stream, lambda t: t.symbol)
-    
+
     clock = wop.SystemClock()
     windower = wop.TumblingWindower(
         length=timedelta(seconds=config.window_size_sec),
-        align_to=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        align_to=datetime(2023, 1, 1, tzinfo=UTC),
     )
-    
+
     windowed = wop.collect_window("accumulate_ticks", keyed_stream, clock, windower)
     features = op.map("finalize_window", windowed.down, _finalize_window_features)
     # Output to console
     def print_features(step_id, f):
         print(f"Computed features: {f.symbol} | SMA20: {f.sma_20:.5f} | Spread: {f.spread_mean:.5f}")
-    
+
     op.inspect("print_output", features, print_features)
     return flow
 
 def create_test_dataflow(config: StreamConfig) -> Dataflow:
     flow = Dataflow("test_pipeline")
-    
+
     def generate_ticks():
         rng = np.random.default_rng(42)
         symbols = ["EURUSD", "GBPUSD", "USDJPY"]
@@ -226,25 +226,25 @@ def create_test_dataflow(config: StreamConfig) -> Dataflow:
                 bid=price - spread/2,
                 ask=price + spread/2,
             )
-            
+
     stream = op.input("ticks", flow, TestingSource(generate_ticks()))
     keyed_stream = op.key_on("key_by_symbol", stream, lambda t: t.symbol)
-    
+
     clock = wop.EventClock(
-        ts_getter=lambda x: datetime.fromtimestamp(x.timestamp / 1e9, tz=timezone.utc),
+        ts_getter=lambda x: datetime.fromtimestamp(x.timestamp / 1e9, tz=UTC),
         wait_for_system_duration=timedelta(seconds=0),
     )
     windower = wop.TumblingWindower(
         length=timedelta(seconds=5),
-        align_to=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        align_to=datetime(2023, 1, 1, tzinfo=UTC),
     )
-    
+
     windowed = wop.collect_window("accumulate_ticks", keyed_stream, clock, windower)
     features = op.map("finalize_window", windowed.down, _finalize_window_features)
-    
+
     def print_features(step_id, f):
         print(f"Test Pipeline Computed features: {f.symbol} | SMA20: {f.sma_20:.5f} | Spread: {f.spread_mean:.5f}")
-    
+
     op.inspect("print_output", features, print_features)
     return flow
 

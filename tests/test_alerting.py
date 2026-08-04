@@ -5,25 +5,23 @@ dedup, rate limiting, escalation, runbooks, and drift/risk integration.
 from __future__ import annotations
 
 import json
-import os
-import time
 
 import pytest
 
 from monitoring.alerting import (
-    AlertManager,
-    InMemoryChannel,
-    FileChannel,
-    ConsoleChannel,
-    SMTPChannel,
-    SlackWebhookChannel,
-    Runbook,
-    register_runbook,
-    notify_drift_event,
-    notify_risk_violation,
+    CRITICAL,
     INFO,
     WARNING,
-    CRITICAL,
+    AlertManager,
+    ConsoleChannel,
+    FileChannel,
+    InMemoryChannel,
+    Runbook,
+    SlackWebhookChannel,
+    SMTPChannel,
+    notify_drift_event,
+    notify_risk_violation,
+    register_runbook,
 )
 
 
@@ -83,7 +81,7 @@ def test_smtp_channel_no_host_fails():
 
 
 def test_channel_accepts_severity():
-    from monitoring.alerting import Channel, WARNING, INFO, CRITICAL
+    from monitoring.alerting import CRITICAL, INFO, WARNING, Channel
     ch = Channel()
     ch.severity_min = WARNING
     assert ch.accepts(CRITICAL)

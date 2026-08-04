@@ -11,9 +11,8 @@ Every live trading decision is logged to a date-partitioned JSONL file for:
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +23,12 @@ class ExecutionLogger:
     def __init__(self, log_dir: str = "logs/execution"):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._current_date: Optional[str] = None
-        self._file_path: Optional[Path] = None
+        self._current_date: str | None = None
+        self._file_path: Path | None = None
 
     @property
     def audit_file(self) -> Path:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        today = datetime.now(UTC).strftime("%Y%m%d")
         if today != self._current_date:
             self._current_date = today
             self._file_path = self.log_dir / f"audit_{today}.jsonl"
@@ -109,7 +108,7 @@ class ExecutionLogger:
         """Mark trade as a hard example for the retraining pipeline."""
         hard_path = self.log_dir / "hard_examples.jsonl"
         record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "order_id": order_id,
             "pnl_pips": pnl_pips,
             "hit_sl": hit_sl,
@@ -121,7 +120,7 @@ class ExecutionLogger:
             logger.warning(f"[ExecutionLogger] Could not write hard example: {e}")
 
     def _write(self, record: dict):
-        record["ts"] = datetime.now(timezone.utc).isoformat()
+        record["ts"] = datetime.now(UTC).isoformat()
         try:
             with open(self.audit_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")

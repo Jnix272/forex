@@ -1,5 +1,5 @@
-import sys
 import argparse
+import sys
 from pathlib import Path
 
 # Add the project root to sys.path
@@ -7,6 +7,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from inference.onnx_inference import export_to_onnx as _export_to_onnx
+
 
 def export_to_onnx(
     checkpoint_path: str,
@@ -36,13 +37,13 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len", type=int, default=60)
     parser.add_argument("--n-feat", type=int, default=None)
     parser.add_argument("--opset", type=int, default=17)
-    
+
     args = parser.parse_args()
-    
+
     # Ensure the output directory exists
     output_dir = Path(args.output).parent
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     export_to_onnx(
         args.checkpoint,
         args.model_name,

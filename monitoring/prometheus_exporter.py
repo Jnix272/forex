@@ -40,7 +40,6 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
 
 import numpy as np
 
@@ -82,22 +81,20 @@ class ForexPrometheusExporter:
         self._session_start  = time.time()
 
         # Rolling windows for computed metrics
-        self._pnls:    Deque[float]    = deque(maxlen=200)
-        self._wins:    Deque[bool]     = deque(maxlen=100)
+        self._pnls:    deque[float]    = deque(maxlen=200)
+        self._wins:    deque[bool]     = deque(maxlen=100)
         self._win_count = 0
-        self._trade_ts: Deque[float]   = deque(maxlen=200)  # timestamps
+        self._trade_ts: deque[float]   = deque(maxlen=200)  # timestamps
 
         self._available = False
         self._metrics   = {}
-        self._server_thread: Optional[threading.Thread] = None
+        self._server_thread: threading.Thread | None = None
 
         self._init_prometheus()
 
     def _init_prometheus(self):
         try:
-            from prometheus_client import (
-                Gauge, Counter, Histogram, start_http_server
-            )
+            from prometheus_client import Counter, Gauge, Histogram, start_http_server
             self._prom_start_server = start_http_server
 
             self._g_equity     = Gauge("forex_equity",          "Account equity (USD)")
@@ -250,4 +247,4 @@ if __name__ == "__main__":
 
     print(f"\nSnapshot: {exp.snapshot()}")
     print("OK ✓")
-    print(f"Metrics available at http://localhost:8001/metrics (if prometheus_client installed)")
+    print("Metrics available at http://localhost:8001/metrics (if prometheus_client installed)")

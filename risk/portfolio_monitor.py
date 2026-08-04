@@ -8,9 +8,9 @@ RiskEngine.position/exposure snapshots and feed the alerting entry point.
 
 from __future__ import annotations
 
-import numpy as np
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+
+import numpy as np
 
 try:
     from config.settings import LIVE_RISK as _LR
@@ -19,7 +19,7 @@ except ImportError:
 
 
 # Liquidity tiers by average daily volume (lots/day). Tier 1 is the deepest.
-DEFAULT_LIQUIDITY_TIERS: Dict[str, int] = {
+DEFAULT_LIQUIDITY_TIERS: dict[str, int] = {
     "EURUSD": 1, "GBPUSD": 1, "USDJPY": 1,
     "AUDUSD": 2, "USDCAD": 2, "USDCHF": 2,
     "NZDUSD": 2, "EURGBP": 2, "EURJPY": 3,
@@ -32,8 +32,8 @@ DEFAULT_LIQUIDITY_TIERS: Dict[str, int] = {
 @dataclass
 class ExposureSnapshot:
     """Snapshot of positions + returns history used for aggregation."""
-    positions: Dict[str, Dict]                    # pair -> {lots, entry_price, direction}
-    returns: Optional[Dict[str, np.ndarray]] = None  # pair -> return series (optional)
+    positions: dict[str, dict]                    # pair -> {lots, entry_price, direction}
+    returns: dict[str, np.ndarray] | None = None  # pair -> return series (optional)
 
 
 class PortfolioMonitor:
@@ -42,7 +42,7 @@ class PortfolioMonitor:
 
     def __init__(
         self,
-        liquidity_tiers: Optional[Dict[str, int]] = None,
+        liquidity_tiers: dict[str, int] | None = None,
         corr_threshold: float = 0.60,
         liquidity_penalty: float = 0.5,
     ):
@@ -54,11 +54,11 @@ class PortfolioMonitor:
 
     # ── exposure aggregation ──────────────────────────────────────────────
 
-    def aggregate_exposure(self, positions: Dict[str, Dict]) -> Dict:
+    def aggregate_exposure(self, positions: dict[str, dict]) -> dict:
         """Total / net notional exposure by pair and currency."""
         total_lots = 0.0
-        by_pair: Dict[str, float] = {}
-        by_currency: Dict[str, float] = {}
+        by_pair: dict[str, float] = {}
+        by_currency: dict[str, float] = {}
         notional_usd = 0.0
         for pair, pos in positions.items():
             lots = abs(float(pos.get("lots", 0.0)))
@@ -80,9 +80,9 @@ class PortfolioMonitor:
             "n_pairs": len([p for p in positions if abs(float(positions[p].get("lots", 0.0))) > 1e-9]),
         }
 
-    def liquidity_exposure(self, positions: Dict[str, Dict]) -> Dict:
+    def liquidity_exposure(self, positions: dict[str, dict]) -> dict:
         """Lots split by liquidity tier, plus illiquid exposure penalty."""
-        tier_lots: Dict[int, float] = {}
+        tier_lots: dict[int, float] = {}
         for pair, pos in positions.items():
             lots = abs(float(pos.get("lots", 0.0)))
             tier = self.liquidity_tiers.get(pair.upper(), 4)
@@ -97,13 +97,13 @@ class PortfolioMonitor:
             "liquidity_adjusted_lots": round(total - self.liquidity_penalty * illiquid, 4),
         }
 
-    def correlation_exposure(self, positions: Dict[str, Dict], returns: Dict[str, np.ndarray]) -> Dict:
+    def correlation_exposure(self, positions: dict[str, dict], returns: dict[str, np.ndarray]) -> dict:
         """Correlation-aware exposure: identifies pairs whose returns are highly
         correlated (same-direction risk concentration) and flags net directional
         exposure in the correlated cluster."""
         pairs = [p for p, pos in positions.items() if abs(float(pos.get("lots", 0.0))) > 1e-9]
-        rows: List[np.ndarray] = []
-        valid: List[str] = []
+        rows: list[np.ndarray] = []
+        valid: list[str] = []
         min_len = None
         for p in pairs:
             r = returns.get(p)
@@ -132,7 +132,7 @@ class PortfolioMonitor:
         avg_corr = float(tri_values.mean()) if tri_values.size else 0.0
 
         # Greedy clustering on high-corr edges
-        clusters: List[List[str]] = []
+        clusters: list[list[str]] = []
         for a, b, _ in edges:
             merged = False
             for cl in clusters:
@@ -160,9 +160,9 @@ class PortfolioMonitor:
 
     def report(
         self,
-        positions: Dict[str, Dict],
-        returns: Optional[Dict[str, np.ndarray]] = None,
-    ) -> Dict:
+        positions: dict[str, dict],
+        returns: dict[str, np.ndarray] | None = None,
+    ) -> dict:
         """Full portfolio risk report (exposure + liquidity + correlation)."""
         report = {
             "exposure": self.aggregate_exposure(positions),

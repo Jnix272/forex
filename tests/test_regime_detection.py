@@ -7,7 +7,7 @@ Hurst exponents (R/S and DFA), and Higuchi fractal dimension.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -23,7 +23,6 @@ from features.regime_detection import (
     vol_regime_probs_polars,
     vol_regime_quantile_probs,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hurst exponents
@@ -135,7 +134,7 @@ def _make_bars(n: int = 3000) -> pl.DataFrame:
         rng.normal(-0.0003, 0.0005, n - 2 * (n // 3)),
     ])
     close = 100 * np.exp(np.cumsum(ret))
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
     ts = pl.datetime_range(
         start=start, end=start + timedelta(hours=3 * n), interval="90m",
         time_zone="UTC", eager=True,

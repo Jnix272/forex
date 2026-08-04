@@ -5,11 +5,12 @@ trigger evaluation, and orchestrator lifecycle.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from data.feature_store import FeatureStore
 from retraining.orchestrator import (
     ModelRegistry,
     ModelStatus,
@@ -18,8 +19,6 @@ from retraining.orchestrator import (
     RetrainReason,
     check_promotion_gates,
 )
-from data.feature_store import FeatureStore
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -231,7 +230,7 @@ class TestRetrainOrchestrator:
         orch = self._orch(tmp_store, tmp_path)
         orch.registry.register("haelt", "initial", "/tmp/ckpt")
         orch.registry.update_status("haelt", 1, ModelStatus.PROMOTED)
-        orch.registry.get_version("haelt", 1).promoted_at = datetime.now(timezone.utc).isoformat()
+        orch.registry.get_version("haelt", 1).promoted_at = datetime.now(UTC).isoformat()
         should, reason, ctx = orch.should_retrain("haelt")
         assert not should
 
@@ -265,7 +264,7 @@ class TestRetrainOrchestrator:
         orch = self._orch(tmp_store, tmp_path)
         orch.registry.register("haelt", "initial", "/tmp/ckpt")
         orch.registry.update_status("haelt", 1, ModelStatus.PROMOTED)
-        orch.registry.get_version("haelt", 1).promoted_at = datetime.now(timezone.utc).isoformat()
+        orch.registry.get_version("haelt", 1).promoted_at = datetime.now(UTC).isoformat()
         result = orch.check_and_retrain("haelt")
         assert not result["should_retrain"]
 

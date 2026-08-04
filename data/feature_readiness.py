@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
 class DataFeatureGateConfig:
-    expected_seq_len: Optional[int] = None
-    expected_schema_hash: Optional[str] = None
-    expected_feature_count: Optional[int] = None
+    expected_seq_len: int | None = None
+    expected_schema_hash: str | None = None
+    expected_feature_count: int | None = None
     max_feature_nan_rate: float = 0.05
     max_label_class_share: float = 0.80
     max_missing_bars_per_pair: int = 0
@@ -28,7 +29,7 @@ def feature_schema_hash(ordered_features: Iterable[str]) -> str:
     return hashlib.sha256(",".join(str(x) for x in ordered_features).encode("utf-8")).hexdigest()
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -49,7 +50,7 @@ def _max_numeric_leaf(data: Any) -> float:
         return 0.0
 
 
-def _pair_rows(report: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+def _pair_rows(report: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     if "pairs" in report and isinstance(report["pairs"], Mapping):
         return {str(k): v for k, v in report["pairs"].items() if isinstance(v, Mapping)}
     return {str(k): v for k, v in report.items() if isinstance(v, Mapping)}
@@ -58,13 +59,13 @@ def _pair_rows(report: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
 def validate_data_feature_readiness(
     artifact_dir: str | Path,
     config: DataFeatureGateConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate Priority 4 data/features before training starts."""
     cfg = config or DataFeatureGateConfig()
     root = Path(artifact_dir)
     reasons = []
-    gates: Dict[str, bool] = {}
-    artifacts: Dict[str, str] = {}
+    gates: dict[str, bool] = {}
+    artifacts: dict[str, str] = {}
 
     paths = {
         "dataset_manifest": root / "dataset_manifest.json",
@@ -72,7 +73,7 @@ def validate_data_feature_readiness(
         "data_quality_report": root / "data_quality_report.json",
         "pair_readiness_report": root / "pair_readiness_report.json",
     }
-    docs: Dict[str, Dict[str, Any]] = {}
+    docs: dict[str, dict[str, Any]] = {}
     for name, path in paths.items():
         artifacts[f"{name}.json"] = str(path)
         gates[f"{name}_present"] = path.exists()
@@ -182,7 +183,7 @@ def write_data_feature_readiness_report(
     artifact_dir: str | Path,
     output_path: str | Path | None = None,
     config: DataFeatureGateConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate data/features and write `priority4_data_feature_report.json`."""
     report = validate_data_feature_readiness(artifact_dir, config=config)
     out = Path(output_path) if output_path else Path(artifact_dir) / "priority4_data_feature_report.json"

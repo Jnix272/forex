@@ -7,9 +7,10 @@ data; it validates and reports the plan used by those heavier paths.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class WindowLoadingConfig:
     max_safe_workers: int = 4
 
 
-def unique_headlines(headlines: Iterable[str]) -> List[str]:
+def unique_headlines(headlines: Iterable[str]) -> list[str]:
     seen = set()
     out = []
     for headline in headlines:
@@ -37,7 +38,7 @@ def unique_headlines(headlines: Iterable[str]) -> List[str]:
 def build_finbert_prefetch_batches(
     headlines: Iterable[str],
     batch_size: int = 256,
-) -> List[List[str]]:
+) -> list[list[str]]:
     """Return unique headline batches for upfront sentiment prefetch."""
     if batch_size <= 0:
         raise ValueError("finbert batch_size must be > 0")
@@ -48,7 +49,7 @@ def build_finbert_prefetch_batches(
 def group_date_windows(
     windows: Sequence[Any],
     window_batch_days: int = 1,
-) -> List[List[Any]]:
+) -> list[list[Any]]:
     """Group consecutive date windows while preserving chronological order."""
     if window_batch_days <= 0:
         raise ValueError("window_batch_days must be > 0")
@@ -59,11 +60,11 @@ def build_window_loading_report(
     windows: Sequence[Any],
     headlines: Iterable[str],
     config: WindowLoadingConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a validation/report object for prefetch and parallel window loading."""
     cfg = config or WindowLoadingConfig()
     reasons = []
-    gates: Dict[str, bool] = {}
+    gates: dict[str, bool] = {}
 
     gates["real_data_window_days_ok"] = cfg.real_data_window_days > 0
     if not gates["real_data_window_days_ok"]:
@@ -130,7 +131,7 @@ def write_window_loading_report(
     headlines: Iterable[str],
     output_path: str | Path,
     config: WindowLoadingConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     report = build_window_loading_report(windows, headlines, config=config)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)

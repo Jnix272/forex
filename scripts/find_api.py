@@ -1,5 +1,7 @@
-from playwright.sync_api import sync_playwright
 import time
+
+from playwright.sync_api import sync_playwright
+
 
 def main():
     with sync_playwright() as p:
@@ -8,7 +10,7 @@ def main():
         page = context.new_page()
 
         print("Listening for API requests...")
-        
+
         def handle_response(response):
             # We are looking for the infinite scroll endpoint
             if response.request.resource_type in ["fetch", "xhr", "document"]:
@@ -17,14 +19,14 @@ def main():
                     print(f"[{response.status}] {url}")
 
         page.on("response", handle_response)
-        
+
         page.goto("https://www.forexlive.com/", wait_until="networkidle")
-        
+
         print("Scrolling down to trigger infinite scroll...")
         for i in range(3):
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(3)
-            
+
         print("Done.")
         browser.close()
 

@@ -33,15 +33,15 @@ Usage:
 import json
 import os
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
-    import urllib.request
     import urllib.error
+    import urllib.request
     REQUESTS_AVAILABLE = False
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -49,7 +49,7 @@ USER_ID     = os.getenv("DISCORD_USER_ID", "")
 
 # ── alert definitions ────────────────────────────────────────────────────────
 
-ALERT_CONFIG: Dict[str, Dict[str, Any]] = {
+ALERT_CONFIG: dict[str, dict[str, Any]] = {
     "circuit_breaker": {
         "emoji":       "🔴",
         "title":       "Circuit Breaker Triggered",
@@ -168,18 +168,18 @@ class DiscordAlerter:
 
     def __init__(
         self,
-        webhook_url:     Optional[str] = None,
+        webhook_url:     str | None = None,
         min_interval_s:  float = 300.0,  # 5-minute cooldown per alert type
         environment:     str   = "production",
         verbose:         bool  = True,
-        user_id:         Optional[str] = None,
+        user_id:         str | None = None,
     ):
         self._url         = webhook_url or WEBHOOK_URL
         self._user_id     = user_id or USER_ID
         self._min_ivl     = min_interval_s
         self._env         = environment
         self._verbose     = verbose
-        self._last_sent:  Dict[str, float] = {}   # alert_type → timestamp
+        self._last_sent:  dict[str, float] = {}   # alert_type → timestamp
 
         if not self._url:
             print("[Discord] No webhook URL set — alerts will only print to console. "
@@ -190,11 +190,11 @@ class DiscordAlerter:
     def send(
         self,
         alert_type: str,
-        fields:     Optional[Dict[str, str]] = None,
+        fields:     dict[str, str] | None = None,
         force:      bool = False,
         ping_user:  bool = False,
-        image_path: Optional[str] = None,
-        rate_key:   Optional[str] = None,
+        image_path: str | None = None,
+        rate_key:   str | None = None,
     ) -> bool:
         """
         Send a Discord alert embed.
@@ -221,13 +221,13 @@ class DiscordAlerter:
                 return False
 
         cfg       = ALERT_CONFIG[alert_type]
-        timestamp = datetime.now(timezone.utc).isoformat()
-        
+        timestamp = datetime.now(UTC).isoformat()
+
         # Add content ping if requested
         content = f"<@{self._user_id}>" if ping_user and self._user_id else ""
-        
+
         embed     = self._build_embed(cfg, fields or {}, timestamp)
-        
+
         if image_path and os.path.exists(image_path) and REQUESTS_AVAILABLE:
             embed["embeds"][0]["image"] = {"url": f"attachment://{os.path.basename(image_path)}"}
 
@@ -357,7 +357,7 @@ class DiscordAlerter:
 
     # ── internal ────────────────────────────────────────────────────────────
 
-    def _build_embed(self, cfg: dict, fields: Dict[str, str],
+    def _build_embed(self, cfg: dict, fields: dict[str, str],
                      timestamp: str) -> dict:
         embed_fields = [
             {"name": k, "value": v, "inline": True}
@@ -404,10 +404,10 @@ class DiscordAlerter:
             print(f"{sep}")
         return True
 
-    def _post_webhook(self, payload: dict, image_path: Optional[str] = None) -> bool:
+    def _post_webhook(self, payload: dict, image_path: str | None = None) -> bool:
         if not self._url:
             return False
-            
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -444,7 +444,7 @@ class DiscordAlerter:
                 with urllib.request.urlopen(req, timeout=10):
                     pass
                 return True
-                
+
         except Exception as e:
             if not REQUESTS_AVAILABLE and isinstance(e, urllib.error.HTTPError): # type: ignore
                 body_snippet = e.read().decode(errors="replace")[:200]

@@ -12,7 +12,7 @@ config/settings.py (no manual steps in training).
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -27,7 +27,7 @@ except ImportError:
     prange = range  # type: ignore
 
 
-def _default_labeling() -> Dict[str, Any]:
+def _default_labeling() -> dict[str, Any]:
     try:
         from config.settings import LABELING as L
         return L
@@ -46,7 +46,7 @@ def _scan_outcomes_sequential(
     execution_delay_bars: int = 0,
     bid: np.ndarray = None,
     ask: np.ndarray = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Reference implementation (single-threaded). Used for tests and fallback.
 
     DS-001: When bid/ask arrays are provided, long exits are evaluated at bid
@@ -266,7 +266,7 @@ def _run_barrier_scan(
     execution_delay_bars: int = 0,
     bid: np.ndarray = None,
     ask: np.ndarray = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     """
     Returns (lo, tl, so, ts) each length n_valid, and backend tag for logging.
     DS-001: bid/ask used for realistic exit pricing when available.
@@ -350,14 +350,14 @@ def compute_triple_barrier_labels(
     bars: pd.DataFrame,
     features: pd.DataFrame,
     atr_col: str = "atr_6",
-    vertical_bars: Optional[int] = None,
-    profit_atr_mult: Optional[float] = None,
-    stop_atr_mult: Optional[float] = None,
-    pip_size: Optional[float] = None,
+    vertical_bars: int | None = None,
+    profit_atr_mult: float | None = None,
+    stop_atr_mult: float | None = None,
+    pip_size: float | None = None,
     execution_delay_bars: int = 1,
-    use_numba: Optional[bool] = None,
-    parallel: Optional[bool] = None,
-    pair: Optional[str] = None,
+    use_numba: bool | None = None,
+    parallel: bool | None = None,
+    pair: str | None = None,
 ) -> pd.DataFrame:
     """
     Per-bar triple-barrier outcomes; combined directional label.

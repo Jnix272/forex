@@ -16,7 +16,7 @@ Two metrics:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 
@@ -127,7 +127,7 @@ def compute_drift_report(
     ks_pvalue_threshold: float = float(MONITORING.get("ks_pvalue_threshold", 0.05)),
     ks_statistic_threshold: float = _DEFAULT_KS_STATISTIC_THRESHOLD,
     top_k_features: int = 20,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Compute a drift report comparing baseline vs recent feature windows.
 
@@ -172,7 +172,7 @@ def compute_drift_report(
     ks_max_stat    = float(np.nanmax(ks_stats)) if _HAS_SCIPY else 0.0
 
     psi_rank = np.argsort(-psi_vals)
-    top_features: List[Dict[str, float]] = []
+    top_features: list[dict[str, float]] = []
     for idx in psi_rank[: max(1, int(top_k_features))]:
         top_features.append({
             "feature_idx": int(idx),
@@ -181,7 +181,7 @@ def compute_drift_report(
             "ks_stat":     float(ks_stats[idx]) if _HAS_SCIPY else 0.0,
         })
 
-    reasons: List[str] = []
+    reasons: list[str] = []
     if not np.isfinite(psi_max):
         psi_max = 0.0  # safety — should not happen after _safe_psi hardening
     psi_drift = psi_max > float(psi_threshold)
@@ -214,8 +214,8 @@ def compute_drift_report(
         "drift_detected": drift_detected,
         "cache_path":     str(cache_path),
         "n_total":        int(n_total),
-        "baseline_rows":  int(len(x_base)),
-        "live_rows":      int(len(x_live)),
+        "baseline_rows":  len(x_base),
+        "live_rows":      len(x_live),
         "n_features_checked": int(n_feats),
         "psi_threshold":          float(psi_threshold),
         "ks_pvalue_threshold":    float(ks_pvalue_threshold),
@@ -235,7 +235,7 @@ def run_drift_gate(
     psi_threshold: float,
     ks_pvalue_threshold: float,
     ks_statistic_threshold: float = _DEFAULT_KS_STATISTIC_THRESHOLD,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run drift check and return report dict."""
     return compute_drift_report(
         cache_path=cache_path,

@@ -5,8 +5,9 @@ A blazing-fast vectorized backtesting engine leveraging CuPy/JAX to simulate
 trading strategies across millions of ticks instantly on the GPU.
 """
 
-import numpy as np
 import logging
+
+import numpy as np
 
 try:
     import cupy as cp
@@ -31,7 +32,7 @@ class GPUBacktester:
         # Transfer data to GPU
         d_prices = self.xp.array(prices)
         d_signals = self.xp.array(signals)
-        
+
         # Calculate returns: return[i] = (price[i+1] - price[i]) / price[i]
         d_returns = self.xp.diff(d_prices) / d_prices[:-1]
 
@@ -42,17 +43,17 @@ class GPUBacktester:
 
         # Strategy returns
         d_strat_returns = d_positions * d_returns
-        
+
         # Incorporate spread costs whenever position changes
         d_trades = self.xp.abs(self.xp.diff(d_positions, prepend=0))
         d_costs = d_trades * (spread / d_prices[1:-1])
-        
+
         # Net returns
         d_net_returns = d_strat_returns - d_costs
-        
+
         # Calculate equity curve
         d_equity = self.xp.cumprod(1 + d_net_returns)
-        
+
         # Transfer results back to CPU
         return {
             "total_return": float((d_equity[-1] - 1) * 100) if len(d_equity) > 0 else 0.0,

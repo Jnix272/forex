@@ -3,60 +3,89 @@
 The helpers here are standard-library only. They validate the artifacts that
 prove a training run used a known recipe, tracked control decisions, produced a
 model card, and did not end in an obvious overfit/collapse state.
+
+``ARCHITECTURE_RECIPES`` is derived from ``config.models`` (plus tabular
+baselines), not a hardcoded parallel catalogue.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any
 
+from config.models import BENCHMARK_BASELINES, MODELS, SUPPORTED_SUPERVISED
 
-ARCHITECTURE_RECIPES: Dict[str, Dict[str, Any]] = {
-    "haelt": {
-        "role": "primary",
-        "preferred_losses": ("sharpe_huber", "directional_huber"),
-        "preferred_seq_lens": (60, 80, 120),
-        "notes": "Conservative primary candidate with rich temporal context.",
-    },
-    "mamba": {
-        "role": "low_latency",
-        "preferred_losses": ("directional_huber", "sharpe_huber"),
-        "preferred_seq_lens": (30, 45, 60),
-        "notes": "Fast reaction candidate; useful for latency-bound paths.",
-    },
-    "tft": {
-        "role": "context_interpretable",
-        "preferred_losses": ("cross_entropy", "multitask", "directional_huber"),
-        "preferred_seq_lens": (60, 120),
-        "notes": "Context-heavy candidate for regime and interpretable features.",
-    },
-    "gnn": {
-        "role": "cross_asset",
-        "preferred_losses": ("sharpe_huber", "directional_huber"),
-        "preferred_seq_lens": (60, 120),
-        "notes": "Cross-pair/cross-asset specialist.",
-    },
-    "expert": {
-        "role": "specialist",
-        "preferred_losses": ("directional_huber", "cross_entropy"),
-        "preferred_seq_lens": (30, 60),
-        "notes": "Regime/session/confirmation specialist.",
-    },
-    "transformer": {
-        "role": "long_range_baseline",
-        "preferred_losses": ("sharpe_huber", "cross_entropy"),
-        "preferred_seq_lens": (60, 120),
-        "notes": "Generic long-range sequence baseline.",
-    },
-    "xgboost": {
-        "role": "tabular_baseline",
-        "preferred_losses": ("tabular",),
-        "preferred_seq_lens": (1,),
-        "notes": "Last-bar tabular baseline.",
-    },
+# Loss preferences are training-policy overlays (not architecture hyperparams).
+_RECIPE_LOSS_OVERLAY: dict[str, tuple[str, ...]] = {
+    "haelt": ("sharpe_huber", "directional_huber"),
+    "mamba": ("directional_huber", "sharpe_huber"),
+    "tft": ("cross_entropy", "multitask", "directional_huber"),
+    "gnn": ("sharpe_huber", "directional_huber"),
+    "expert": ("directional_huber", "cross_entropy"),
+    "transformer": ("sharpe_huber", "cross_entropy"),
+    "xgboost": ("tabular",),
+    "catboost": ("tabular",),
 }
+
+_ROLE_FROM_DECISION: dict[str, str] = {
+    "flagship_production_candidate": "primary",
+    "long_sequence_efficiency": "low_latency",
+    "interpretability_exogenous": "context_interpretable",
+    "cross_asset_structure": "cross_asset",
+    "specialist_ablation": "specialist",
+    "generic_long_range_baseline": "long_range_baseline",
+    "non_deep_baseline": "tabular_baseline",
+}
+
+
+def _seq_lens_from_cfg(cfg: Mapping[str, Any]) -> tuple[int, ...]:
+    base = int(cfg.get("seq_len", 60) or 60)
+    # Offer a short / base / long triad around the configured seq_len.
+    short = max(1, base // 2)
+    long = max(base, int(base * 1.5))
+    return tuple(sorted({short, base, long}))
+
+
+def _build_architecture_recipes() -> dict[str, dict[str, Any]]:
+    recipes: dict[str, dict[str, Any]] = {}
+    for name, cfg in MODELS.items():
+        if name not in SUPPORTED_SUPERVISED and name not in MODELS:
+            continue
+        decision = str(cfg.get("decision_role", "unknown"))
+        recipes[name] = {
+            "role": _ROLE_FROM_DECISION.get(decision, decision),
+            "preferred_losses": _RECIPE_LOSS_OVERLAY.get(
+                name, ("directional_huber", "sharpe_huber"),
+            ),
+            "preferred_seq_lens": _seq_lens_from_cfg(cfg),
+            "notes": str(cfg.get("default_use") or cfg.get("use_when") or ""),
+            "source": "config.models.MODELS",
+        }
+    for name, cfg in BENCHMARK_BASELINES.items():
+        decision = str(cfg.get("decision_role", "non_deep_baseline"))
+        recipes[name] = {
+            "role": _ROLE_FROM_DECISION.get(decision, "tabular_baseline"),
+            "preferred_losses": _RECIPE_LOSS_OVERLAY.get(name, ("tabular",)),
+            "preferred_seq_lens": (1, int(cfg.get("seq_len", 60) or 60)),
+            "notes": str(cfg.get("default_use") or cfg.get("use_when") or ""),
+            "source": "config.models.BENCHMARK_BASELINES",
+        }
+    # CatBoost is shelled alongside XGB but may not live in BENCHMARK_BASELINES.
+    if "catboost" not in recipes:
+        recipes["catboost"] = {
+            "role": "tabular_baseline",
+            "preferred_losses": ("tabular",),
+            "preferred_seq_lens": (1, 60),
+            "notes": "CatBoost tabular baseline; trained via train_catboost.py shell.",
+            "source": "derived",
+        }
+    return recipes
+
+
+ARCHITECTURE_RECIPES: dict[str, dict[str, Any]] = _build_architecture_recipes()
 
 
 @dataclass(frozen=True)
@@ -67,12 +96,12 @@ class ModelTrainingAuditConfig:
     require_best_epoch_restored: bool = True
     max_overfit_signals: int = 2
     max_train_val_gap: float = 0.35
-    min_best_val_sharpe: Optional[float] = None
+    min_best_val_sharpe: float | None = None
     require_pretrain_ablation_when_present: bool = True
     allowed_pretrain_verdicts: tuple[str, ...] = ("pretrain_helped", "mixed", "unknown")
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -80,7 +109,7 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _first_existing(root: Path, names: Iterable[str]) -> Optional[Path]:
+def _first_existing(root: Path, names: Iterable[str]) -> Path | None:
     for name in names:
         path = root / name
         if path.exists():
@@ -135,13 +164,13 @@ def _control_overfit_signals(control: Mapping[str, Any]) -> list:
 def validate_model_training_package(
     artifact_dir: str | Path,
     config: ModelTrainingAuditConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate Priority 5 training artifacts for one model/run directory."""
     cfg = config or ModelTrainingAuditConfig()
     root = Path(artifact_dir)
     reasons = []
-    gates: Dict[str, bool] = {}
-    artifacts: Dict[str, str] = {}
+    gates: dict[str, bool] = {}
+    artifacts: dict[str, str] = {}
 
     model_card_path = _first_existing(root, ("model_card.json", f"{root.name}_model_card.json"))
     control_path = _first_existing(root, ("training_control_report.json", f"{root.name}_training_control_report.json"))
@@ -154,7 +183,7 @@ def validate_model_training_package(
         "train_summary": train_summary_path if train_summary_path.exists() else None,
         "pretrain_ablation": pretrain_ablation_path if pretrain_ablation_path.exists() else None,
     }
-    docs: Dict[str, Dict[str, Any]] = {}
+    docs: dict[str, dict[str, Any]] = {}
     for name, path in paths.items():
         artifacts[f"{name}.json"] = str(path) if path else ""
         if path is None:
@@ -268,7 +297,7 @@ def write_model_training_audit_report(
     artifact_dir: str | Path,
     output_path: str | Path | None = None,
     config: ModelTrainingAuditConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate training artifacts and write `priority5_model_training_report.json`."""
     report = validate_model_training_package(artifact_dir, config=config)
     out = Path(output_path) if output_path else Path(artifact_dir) / "priority5_model_training_report.json"

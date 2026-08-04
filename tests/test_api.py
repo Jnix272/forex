@@ -11,9 +11,11 @@ Do not hardcode test results.
 """
 
 from __future__ import annotations
-import pytest
+
 from pathlib import Path
+
 import numpy as np
+import pytest
 
 # Attempt to import the application and FastAPI TestClient
 try:
@@ -393,7 +395,7 @@ def test_scenario_walk_forward(client):
 def test_scenario_rl_vs_xgboost(client):
     """4. Check performance comparison between RL and XGBoost models."""
     returns = [0.001, -0.002, 0.003, -0.001, 0.002] * 5
-    
+
     payload_rl = {
         "win_prob": 0.58,
         "win_loss_ratio": 1.5,
@@ -405,7 +407,7 @@ def test_scenario_rl_vs_xgboost(client):
         "max_position_pct": 1.0,
         "pip_risk": 10000.0
     }
-    
+
     payload_xgb = payload_rl.copy()
     payload_xgb["win_prob"] = 0.52
 
@@ -435,7 +437,7 @@ def test_scenario_live_sizing_regimes(client):
         hurst=0.65
     )
     assert res_trend["regime"] == "trending"
-    
+
     sizer_mr = RegimePositionSizer(base_kelly=0.25, hurst_mean_rev=0.40, mean_rev_penalty=0.75)
     res_mr = sizer_mr.size(
         equity=10000.0,
@@ -473,7 +475,7 @@ def test_non_finite_returns_filtering(client):
         headers={"Content-Type": "application/json"}
     )
     assert response_vol.status_code == 400
-    
+
     payload_sizing = {
         "win_prob": 0.55,
         "win_loss_ratio": 1.5,

@@ -13,7 +13,6 @@ Handles:
 
 import warnings
 from pathlib import Path
-from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -90,7 +89,7 @@ def generate_synthetic_tick_data(
         "spread": np.round(ask - bid, 5),
         "pair": pair,
     })
-    
+
     # Ensure UTC timezone
     df = df.with_columns(pl.col("timestamp_utc").dt.replace_time_zone("UTC"))
     return df
@@ -102,8 +101,8 @@ def generate_synthetic_tick_data(
 
 def load_tick_data(
     filepath: str,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    start: str | None = None,
+    end: str | None = None,
 ) -> pl.DataFrame:
     """
     Load tick data from CSV or Parquet into a Polars DataFrame.
@@ -122,8 +121,8 @@ def load_tick_data(
 
 def _load_tick_data_frame(
     path: Path,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    start: str | None = None,
+    end: str | None = None,
 ) -> pl.DataFrame:
     """
     Load tick data natively with Polars using lazy scanning so filters are
@@ -147,7 +146,7 @@ def _load_tick_data_frame(
     return lf.collect()
 
 
-def _filter_lazy_by_time(lf, start: Optional[str] = None, end: Optional[str] = None):
+def _filter_lazy_by_time(lf, start: str | None = None, end: str | None = None):
     """Apply a UTC date-range filter on a lazy frame's timestamp column."""
     ts_col = None
     for col in lf.columns:
@@ -191,23 +190,28 @@ def clean_bad_ticks(
     if "spread" not in df.columns:
         df = df.with_columns((pl.col("ask") - pl.col("bid")).clip(lower_bound=0.0).alias("spread"))
 
-    # Add rolling stats
+    # Reference stats exclude the current tick so a spike cannot inflate mean/std/MAD
+    # and nullify the detector (double rolling window previously left mad_z null until
+    # ~2*window, and null spread_outlier short-circuited True | null → null).
+    min_ref = max(1, window // 2)
+    min_spread = max(1, spread_window // 2)
     df = df.with_columns([
-        pl.col("mid").rolling_mean(window_size=window, min_samples=window).alias("rolling_mean"),
-        pl.col("mid").rolling_std(window_size=window, min_samples=window).alias("rolling_std"),
-        pl.col("mid").rolling_median(window_size=window).alias("rolling_median"),
+        pl.col("mid").shift(1).rolling_mean(window_size=window, min_samples=min_ref).alias("rolling_mean"),
+        pl.col("mid").shift(1).rolling_std(window_size=window, min_samples=min_ref).alias("rolling_std"),
+        pl.col("mid").shift(1).rolling_median(window_size=window, min_samples=min_ref).alias("rolling_median"),
     ])
 
-    # Z-score
+    # Z-score vs lag-1 window
     df = df.with_columns(
         ((pl.col("mid") - pl.col("rolling_mean")) / (pl.col("rolling_std") + 1e-9)).abs().alias("z_score")
     )
 
     # MAD z-score: z = 0.6745 * (x - median) / MAD  (MAD ~ 0.6745*sigma for Gaussian)
-    # MAD is computed vectorized as the rolling median of |x - rolling_median(x)|.
+    # Scale from historical |mid - median| (shifted) so the spike itself is not in MAD.
     df = df.with_columns(
-        ((pl.col("mid") - pl.col("rolling_median")).abs()
-         .rolling_median(window_size=window).alias("mad_scale"))
+        (pl.col("mid").shift(1) - pl.col("rolling_median")).abs()
+        .rolling_median(window_size=window, min_samples=min_ref)
+        .alias("mad_scale")
     )
     df = df.with_columns(
         (0.6745 * (pl.col("mid") - pl.col("rolling_median")) / (pl.col("mad_scale") + 1e-9)).abs().alias("mad_z_score")
@@ -215,15 +219,21 @@ def clean_bad_ticks(
 
     # Spread sanity: flag ticks whose spread exceeds N x rolling median spread
     df = df.with_columns(
-        pl.col("spread").rolling_median(window_size=spread_window).alias("rolling_med_spread")
+        pl.col("spread").shift(1).rolling_median(window_size=spread_window, min_samples=min_spread)
+        .alias("rolling_med_spread")
     )
     df = df.with_columns(
-        (pl.col("spread") > pl.col("rolling_med_spread") * spread_ratio).alias("spread_outlier")
+        (pl.col("spread") > pl.col("rolling_med_spread") * spread_ratio)
+        .fill_null(False)
+        .alias("spread_outlier")
     )
 
     outliers_cond = (
-        ((pl.col("z_score") > z_thresh) | (pl.col("mad_z_score") > mad_z_thresh)) &
-        ~pl.col("spread_outlier")  # don't replace legit wide-spread (news) ticks
+        (
+            (pl.col("z_score") > z_thresh).fill_null(False)
+            | (pl.col("mad_z_score") > mad_z_thresh).fill_null(False)
+        )
+        & ~pl.col("spread_outlier")  # don't replace legit wide-spread (news) ticks
     )
     outlier_count = df.filter(outliers_cond).shape[0]
 
@@ -268,14 +278,14 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
         if col in df.columns:
             time_col = col
             break
-            
+
     if time_col:
         df = df.rename({time_col: "timestamp_utc"})
-        
+
         # Make sure it's datetime and localized
         if df.schema["timestamp_utc"] == pl.Utf8:
             df = df.with_columns(pl.col("timestamp_utc").str.to_datetime())
-            
+
         # Ensure timezone is UTC
         if df.schema["timestamp_utc"].time_zone is None:
             df = df.with_columns(pl.col("timestamp_utc").dt.replace_time_zone("UTC"))
@@ -323,7 +333,7 @@ def resample_to_bars(df: pl.DataFrame, freq: str = "1min") -> pl.DataFrame:
     """
     if isinstance(df, pd.DataFrame):
         df = pl.from_pandas(df)
-        
+
     if (len(df) == 0):
         return pl.DataFrame()
 
@@ -726,10 +736,10 @@ def fracDiff_FFD(series: pl.Series, d: float = 0.4, thres: float = 1e-5) -> pl.S
     """
     w = _get_weights_ffd(d, thres)
     width = len(w) - 1
-    
+
     if width >= len(series):
         return pl.Series(series.name, [None] * len(series), dtype=pl.Float64)
-        
+
     res_values = np.convolve(series.to_numpy(), w, mode='valid')
     # Pad with NaNs at the beginning to maintain original length
     padded = np.concatenate([np.full(width, np.nan), res_values])
@@ -892,7 +902,7 @@ class ForexDataPipeline:
                 pl.when(in_window).then(pl.lit(name)).otherwise(pl.col(col_name)).alias(col_name)
             )
 
-        drop_cols = [f"_local_{n}" for n in local_cols.keys()]
+        drop_cols = [f"_local_{n}" for n in local_cols]
         result = base.drop(["_ts"] + drop_cols).rename({col_name: "session_label"})
 
         if self.add_session_label:
@@ -903,7 +913,7 @@ class ForexDataPipeline:
         self,
         bars: pl.DataFrame,
         train_ratio: float = 0.7,
-    ) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
         split_idx = int(len(bars) * train_ratio)
         return bars.slice(0, split_idx), bars.slice(split_idx)
 
@@ -913,13 +923,13 @@ class ForexDataPipeline:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_or_generate(
-    filepath: Optional[str] = None,
+    filepath: str | None = None,
     n_rows: int = 50_000,
     *,
-    source: Optional[str] = None,
-    pair: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    source: str | None = None,
+    pair: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
 ) -> pl.DataFrame:
     """
     Load real tick data or generate synthetic data.
@@ -940,7 +950,7 @@ def load_or_generate(
                 return df_pl
         except Exception as e:
             print(f"[DataLoader] {_source} failed for {_pair}: {e} — falling back to synthetic data")
-        
+
         base_prices = {
             "EURUSD": 1.0850, "GBPUSD": 1.2700, "USDJPY": 148.50,
             "AUDUSD": 0.6550, "USDCAD": 1.3600, "USDCHF": 0.8950,
@@ -965,9 +975,15 @@ def load_or_generate(
 
 if __name__ == "__main__":
     from data.data_ingestion import (
-        load_or_generate, ForexDataPipeline,
-        resample_to_tick_bars, resample_to_volume_bars, resample_to_dollar_bars,
-        detect_bar_gaps, fill_gaps, detect_tick_sampling, clean_bad_ticks,
+        ForexDataPipeline,
+        clean_bad_ticks,
+        detect_bar_gaps,
+        detect_tick_sampling,
+        fill_gaps,
+        load_or_generate,
+        resample_to_dollar_bars,
+        resample_to_tick_bars,
+        resample_to_volume_bars,
     )
 
     ticks = load_or_generate(n_rows=10_000)

@@ -8,16 +8,16 @@ Each materializer handles a specific feature type (price, volatility, microstruc
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
 
 import numpy as np
 import polars as pl
 
-from data.feature_store import FeatureStore
 from data.feature_definitions import (
-    FeatureSpec, FeatureSource, MaterializationStrategy,
+    FeatureSource,
+    FeatureSpec,
+    MaterializationStrategy,
 )
-
+from data.feature_store import FeatureStore
 
 # ════════════════════════════════════════════════════════════════════════════
 # BASE MATERIALIZER
@@ -31,7 +31,7 @@ class BaseMaterializer:
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         """Compute feature values from raw bars. Returns DataFrame with timestamp_utc + feature column."""
         raise NotImplementedError
 
@@ -63,7 +63,7 @@ class PriceMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         bars = bars.sort("timestamp_utc")
 
         if spec.name == "close":
@@ -106,7 +106,7 @@ class VolatilityMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         bars = bars.sort("timestamp_utc")
 
         window = spec.params.get("window", 20)
@@ -169,7 +169,7 @@ class MicrostructureMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         bars = bars.sort("timestamp_utc")
 
         if spec.name == "ofi_20":
@@ -220,7 +220,7 @@ class SessionMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         bars = bars.sort("timestamp_utc")
 
         if spec.name == "hour_sin":
@@ -291,7 +291,7 @@ class MacroMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         bars = bars.sort("timestamp_utc")
 
         if spec.name == "yield_2y10y":
@@ -323,7 +323,7 @@ class DefaultMaterializer(BaseMaterializer):
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         return None
 
 
@@ -358,7 +358,7 @@ def _fractal_dimension(return_expr: pl.Expr, window: int = 30) -> pl.Expr:
 # MATERIALIZER DISPATCH
 # ════════════════════════════════════════════════════════════════════════════
 
-MATERIALIZER_MAP: Dict[str, BaseMaterializer] = {}
+MATERIALIZER_MAP: dict[str, BaseMaterializer] = {}
 
 
 def get_materializer(spec: FeatureSpec, store: FeatureStore) -> BaseMaterializer:
@@ -393,7 +393,7 @@ def materialize_feature(
     start: datetime,
     end: datetime,
     spec: FeatureSpec = None,
-) -> Optional[pl.DataFrame]:
+) -> pl.DataFrame | None:
     """Compute and store a single feature given raw bars."""
     if spec is None:
         spec = store.get_feature(feature_name)
@@ -417,11 +417,11 @@ def materialize_feature(
 
 def materialize_feature_set(
     store: FeatureStore,
-    feature_names: List[str],
+    feature_names: list[str],
     bars: pl.DataFrame,
     start: datetime,
     end: datetime,
-) -> Dict[str, pl.DataFrame]:
+) -> dict[str, pl.DataFrame]:
     """Materialize a set of features (with dependency resolution)."""
     names = store.registry.resolve_dependencies(feature_names)
     results = {}
@@ -445,8 +445,8 @@ def run_full_materialization(
     bars: pl.DataFrame,
     start: datetime,
     end: datetime,
-    feature_names: Optional[List[str]] = None,
-) -> Dict[str, pl.DataFrame]:
+    feature_names: list[str] | None = None,
+) -> dict[str, pl.DataFrame]:
     """
     Full featured pipeline: compute all (or specified) features for the given bar range
     and store them.

@@ -1,0 +1,36 @@
+{
+  "include": [
+    "audit",
+    "risk",
+    "evaluation",
+    "drift",
+    "validation",
+    "sizing",
+    "config"
+  ],
+  "exclude": [
+    ".venv",
+    "**/__pycache__",
+    "data",
+    "logs",
+    "checkpoints",
+    "training/train_gpu.py"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "reportPrivateImportUsage": false,
+  "reportAttributeAccessIssue": "warning",
+  "reportArgumentType": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalOperand": "warning",
+  "reportCallIssue": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportIndexIssue": "warning",
+  "reportOperatorIssue": "warning",
+  "reportAssignmentType": "warning",
+  "reportReturnType": "warning",
+  "reportIncompatibleMethodOverride": "warning"
+}

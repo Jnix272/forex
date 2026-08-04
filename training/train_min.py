@@ -16,7 +16,6 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 
@@ -29,14 +28,14 @@ except Exception as e:  # pragma: no cover
 
 
 # Reuse the proven plumbing (cache load/build, datasets, model factory, loss helpers).
-from training.train_gpu import (  # noqa: E402
+from training.train_gpu import (
+    ZarrStreamDataset,
+    build_criterion,
     build_dataset_chunked,
     build_model,
-    build_criterion,
+    parse_args,
     train_epoch,
     validate_epoch,
-    ZarrStreamDataset,
-    parse_args,
 )
 
 
@@ -51,7 +50,7 @@ def _device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _amp_config(dev: torch.device, use_amp: bool) -> Tuple[bool, torch.dtype, torch.amp.GradScaler]:
+def _amp_config(dev: torch.device, use_amp: bool) -> tuple[bool, torch.dtype, torch.amp.GradScaler]:
     if not use_amp or dev.type != "cuda":
         return False, torch.float32, torch.amp.GradScaler(enabled=False)
 
@@ -62,7 +61,7 @@ def _amp_config(dev: torch.device, use_amp: bool) -> Tuple[bool, torch.dtype, to
     return True, amp_dtype, scaler
 
 
-def _make_loaders(args, cache_path: str, n_samples: int) -> Tuple[DataLoader, DataLoader, np.ndarray, np.ndarray]:
+def _make_loaders(args, cache_path: str, n_samples: int) -> tuple[DataLoader, DataLoader, np.ndarray, np.ndarray]:
     split = int(n_samples * (1.0 - float(args.val_split)))
     train_idx = np.arange(0, split, dtype=np.int64)
     val_idx = np.arange(split, n_samples, dtype=np.int64)
@@ -181,8 +180,8 @@ def main() -> int:
             device=dev,
             classification=classification,
             pbar=None,
-            amp=use_amp,
-            amp_dtype=amp_dtype,
+            amp=False,
+            amp_dtype=torch.float32,
         )
 
         metric = sharpe if higher_is_better else va_loss

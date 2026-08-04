@@ -5,14 +5,14 @@ Defaults aligned with `training/train_gpu.py` builders and `models/architectures
 Edit here to change per-architecture specs; `settings.MODELS` re-exports this dict.
 """
 
-from typing import Any, Dict, FrozenSet
+from typing import Any
 
 # Keys accepted by train_gpu --model and build_model()
-SUPPORTED_SUPERVISED: FrozenSet[str] = frozenset(
+SUPPORTED_SUPERVISED: frozenset[str] = frozenset(
     {"tft", "transformer", "haelt", "mamba", "gnn", "expert"}
 )
 
-BENCHMARK_BASELINES: Dict[str, Dict[str, Any]] = {
+BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
     "xgboost": {
         "decision_role": "non_deep_baseline",
         "use_when": "Official non-deep benchmark every deep model must beat.",
@@ -34,7 +34,7 @@ BENCHMARK_BASELINES: Dict[str, Dict[str, Any]] = {
     }
 }
 
-MODELS: Dict[str, Dict[str, Any]] = {
+MODELS: dict[str, dict[str, Any]] = {
     "tft": {
         "decision_role": "interpretability_exogenous",
         "use_when": "Need feature importance, interpretability, and many exogenous inputs.",
@@ -119,7 +119,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def architecture_config(name: str) -> Dict[str, Any]:
+def architecture_config(name: str) -> dict[str, Any]:
     """Return hyperparameter dict for a supervised architecture key."""
     key = name.lower().strip()
     if key not in MODELS:

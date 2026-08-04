@@ -7,8 +7,9 @@ mathematically prove whether the RL policy outperforms the supervised baseline.
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
+
 
 class RLReporter:
     def __init__(self, checkpoint_dir: str):
@@ -33,9 +34,9 @@ class RLReporter:
         """
         Compiles all critical reinforcement learning metrics and writes them to rl_report.json.
         """
-        
+
         report_data = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "timestamp_utc": datetime.now(UTC).isoformat(),
             "configuration": {
                 "algorithm": algorithm.upper(),
                 "observation_mode": observation_mode
@@ -61,16 +62,16 @@ class RLReporter:
                 "comparison_vs_supervised_baseline": comparison_vs_supervised
             }
         }
-        
+
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         report_path = self.checkpoint_dir / "rl_report.json"
-        
+
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report_data, f, indent=2)
-            
+
         self.logger.info(f"RL Report generated successfully at {report_path}")
-        
+
         if rl_best_updated:
             self.logger.info(f"SUCCESS: The RL Policy ({algorithm}) crushed the supervised baseline and was promoted!")
         else:
-            self.logger.warning(f"REJECTED: The RL Policy failed to beat the supervised baseline. Discarding weights.")
+            self.logger.warning("REJECTED: The RL Policy failed to beat the supervised baseline. Discarding weights.")

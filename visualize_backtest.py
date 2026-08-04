@@ -6,11 +6,13 @@ Generates an interactive HTML dashboard with synchronized subplots and performan
 """
 
 from __future__ import annotations
-import sys
-import json
+
 import argparse
+import json
+import sys
 from datetime import datetime
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -51,12 +53,12 @@ def load_real_backtest_logs(model: str) -> tuple[pd.DataFrame, pd.DataFrame, dic
     backtest_dir = Path("logs/backtests")
     if not backtest_dir.exists():
         return None
-    
+
     # Match files matching the model name
     trades_files = sorted(list(backtest_dir.glob(f"{model}_*_trades.csv")), reverse=True)
     equity_files = sorted(list(backtest_dir.glob(f"{model}_*_equity.csv")), reverse=True)
     summary_files = sorted(list(backtest_dir.glob(f"{model}_*_summary.json")), reverse=True)
-    
+
     if trades_files and equity_files:
         try:
             trades_df = pd.read_csv(trades_files[0])
@@ -67,7 +69,7 @@ def load_real_backtest_logs(model: str) -> tuple[pd.DataFrame, pd.DataFrame, dic
                     trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
             if 'timestamp' in equity_df.columns:
                 equity_df = equity_df.set_index(pd.to_datetime(equity_df['timestamp']))
-                
+
             summary = {}
             if summary_files:
                 try:
@@ -77,7 +79,7 @@ def load_real_backtest_logs(model: str) -> tuple[pd.DataFrame, pd.DataFrame, dic
             return trades_df, equity_df, summary
         except Exception as e:
             print(f"Warning: Failed to parse CSV logs: {e}")
-            
+
     return None
 
 def load_zarr_dataset(model: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -92,7 +94,7 @@ def load_zarr_dataset(model: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] |
     processed_dir = Path("data/processed")
     if processed_dir.exists():
         candidates.extend(list(processed_dir.glob("*.zarr")))
-        
+
     for p in candidates:
         if p.exists():
             try:
@@ -124,14 +126,14 @@ def run_simulated_backtest(close: np.ndarray, atr: np.ndarray, spread: np.ndarra
     bars["spread_avg"] = spread
     bars["bid_close"] = close - 0.5 * spread
     bars["ask_close"] = close + 0.5 * spread
-    
+
     # 2. Build mock crossover strategy signals
     signals = pd.DataFrame(index=bars.index)
     signals["action"] = 0.0
     signals["lots"] = 0.1
     signals["stop_loss"] = 0.0
     signals["take_profit"] = 0.0
-    
+
     # Generate smoothed predictions (like momentum score)
     close_ser = pd.Series(close)
     ma_fast = close_ser.rolling(12).mean()
@@ -139,12 +141,12 @@ def run_simulated_backtest(close: np.ndarray, atr: np.ndarray, spread: np.ndarra
     diff = ma_fast - ma_slow
     std = diff.rolling(50).std().fillna(1e-5)
     pred_curve = (diff / std).clip(-2.0, 2.0).values
-    
+
     last_sig = -100
     for i in range(50, len(close)):
         if i - last_sig < 30:  # Gap limit
             continue
-        
+
         # Cross above 1.0 -> BUY
         if pred_curve[i] > 1.0 and pred_curve[i-1] <= 1.0:
             signals.iloc[i, signals.columns.get_loc("action")] = 1 # OPEN_LONG
@@ -157,7 +159,7 @@ def run_simulated_backtest(close: np.ndarray, atr: np.ndarray, spread: np.ndarra
             signals.iloc[i, signals.columns.get_loc("stop_loss")] = close[i] + 1.5 * atr[i]
             signals.iloc[i, signals.columns.get_loc("take_profit")] = close[i] - 2.0 * atr[i]
             last_sig = i
-            
+
     # 3. Run backtester
     if ForexScalingBacktest is not None:
         bt = ForexScalingBacktest(
@@ -175,7 +177,7 @@ def run_simulated_backtest(close: np.ndarray, atr: np.ndarray, spread: np.ndarra
         results_df["total_value"] = initial_equity
         results_df["drawdown"] = 0.0
         trades_df = pd.DataFrame()
-        
+
     return bars, results_df, trades_df, pred_curve
 
 def generate_fully_synthetic_data(initial_equity: float = 10000.0) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray]:
@@ -192,7 +194,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
     """Construct Plotly subplots figure and export it as HTML div string."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-    
+
     # 3-row layout: price, prediction curve, equity & drawdown
     fig = make_subplots(
         rows=3, cols=1,
@@ -200,7 +202,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         vertical_spacing=0.06,
         row_width=[0.24, 0.20, 0.56] # row 3, row 2, row 1 from bottom to top
     )
-    
+
     # Row 1: Close Price
     fig.add_trace(
         go.Scatter(
@@ -212,12 +214,12 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         ),
         row=1, col=1
     )
-    
+
     # Add trades on Price Chart
     if not trades_df.empty:
         longs = trades_df[trades_df["direction"] == "Long"]
         shorts = trades_df[trades_df["direction"] == "Short"]
-        
+
         # Long entries (Up green triangles)
         fig.add_trace(
             go.Scatter(
@@ -230,7 +232,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
             ),
             row=1, col=1
         )
-        
+
         # Short entries (Down red triangles)
         fig.add_trace(
             go.Scatter(
@@ -243,7 +245,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
             ),
             row=1, col=1
         )
-        
+
         # Take Profit exits
         tp_exits = trades_df[trades_df["exit_reason"].str.contains("tp|profit|take_profit", case=False, na=False)]
         fig.add_trace(
@@ -257,7 +259,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
             ),
             row=1, col=1
         )
-        
+
         # Stop Loss exits
         sl_exits = trades_df[trades_df["exit_reason"].str.contains("stop|loss", case=False, na=False)]
         fig.add_trace(
@@ -271,7 +273,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
             ),
             row=1, col=1
         )
-        
+
         # Connecting lines
         for _, t in trades_df.iterrows():
             if pd.notna(t["exit_time"]):
@@ -287,7 +289,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
                     ),
                     row=1, col=1
                 )
-                
+
     # Row 2: Prediction Curve
     fig.add_trace(
         go.Scatter(
@@ -299,11 +301,11 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         ),
         row=2, col=1
     )
-    
+
     # Confidence bounds
     fig.add_shape(type="line", x0=bars.index[0], x1=bars.index[-1], y0=min_confidence, y1=min_confidence, line=dict(color="#ff9100", width=1.2, dash="dash"), row=2, col=1)
     fig.add_shape(type="line", x0=bars.index[0], x1=bars.index[-1], y0=-min_confidence, y1=-min_confidence, line=dict(color="#ff9100", width=1.2, dash="dash"), row=2, col=1)
-    
+
     # Row 3: Equity Curve
     fig.add_trace(
         go.Scatter(
@@ -317,7 +319,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         ),
         row=3, col=1
     )
-    
+
     # Shaded Drawdown
     fig.add_trace(
         go.Scatter(
@@ -331,7 +333,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         ),
         row=3, col=1
     )
-    
+
     # Update styling
     fig.update_layout(
         template="plotly_dark",
@@ -351,7 +353,7 @@ def build_plotly_chart(bars: pd.DataFrame, results_df: pd.DataFrame, trades_df: 
         xaxis3=dict(title="Date/Time", showgrid=True, gridcolor="#263238"),
         yaxis3=dict(title="USD / % Drawdown", showgrid=True, gridcolor="#263238"),
     )
-    
+
     return fig.to_html(include_plotlyjs=True, full_html=False)
 
 def build_dashboard_html(model: str, chart_div: str, metrics: dict) -> str:
@@ -362,10 +364,10 @@ def build_dashboard_html(model: str, chart_div: str, metrics: dict) -> str:
     max_dd = metrics.get("max_drawdown_pct", metrics.get("max_drawdown", 0.0) * 100 if "max_drawdown" in metrics else 0.0)
     win_rate = metrics.get("win_rate_pct", metrics.get("win_rate", 0.0) * 100 if "win_rate" in metrics else 0.0)
     trades = int(metrics.get("n_trades", 0))
-    
+
     ret_color = "#00e676" if ret_pct >= 0 else "#ff1744"
     pnl_color = "#00e676" if pnl >= 0 else "#ff1744"
-    
+
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -477,23 +479,23 @@ def main():
                         help="Model to visualize (xgboost, ensemble, or rl)")
     parser.add_argument("--output", required=True, help="Path to write the output HTML file")
     parser.add_argument("--input-metrics", default=None, help="Path to JSON file containing custom metrics")
-    
+
     try:
         args = parser.parse_args()
     except SystemExit as e:
         # Gracefully print error to sys.stderr so gating tests can verify error output
         sys.stderr.write(f"Error: Missing or invalid command arguments: {e}\n")
         sys.exit(2)
-        
+
     model = args.model.lower()
     output_path = Path(args.output)
-    
+
     # 1. Try to load custom metrics
     custom_metrics = load_custom_metrics(args.input_metrics)
-    
+
     # 2. Try to load recent CSV logs
     logs_data = load_real_backtest_logs(model)
-    
+
     if logs_data is not None:
         print(f"Detected existing backtest logs for model {model}.")
         trades_df, equity_df, summary = logs_data
@@ -505,7 +507,7 @@ def main():
         else:
             # Reconstruct dummy close matching the equity curve shapes
             bars['close'] = 1.0850 * (equity_df['total_value'] / equity_df['total_value'].iloc[0])
-            
+
         predictions = np.zeros(len(bars))
         if 'confidence' in equity_df.columns:
             predictions = equity_df['confidence'].values
@@ -516,7 +518,7 @@ def main():
                     bars.loc[t['entry_time'], 'confidence'] = t['confidence']
             bars['confidence'] = bars.get('confidence', pd.Series(0.0, index=bars.index)).ffill().fillna(0.0)
             predictions = bars['confidence'].values
-            
+
         metrics = custom_metrics or summary.get("metrics") or {
             "total_return_pct": (equity_df["total_value"].iloc[-1] / equity_df["total_value"].iloc[0] - 1) * 100,
             "net_pnl_usd": equity_df["total_value"].iloc[-1] - equity_df["total_value"].iloc[0],
@@ -529,13 +531,13 @@ def main():
         # 3. Fallback: try Zarr or generate synthetic
         zarr_data = load_zarr_dataset(model)
         if zarr_data is not None:
-            print(f"No CSV backtest logs found. Running simulated strategy on Zarr dataset close prices.")
+            print("No CSV backtest logs found. Running simulated strategy on Zarr dataset close prices.")
             close, atr, spread = zarr_data
             bars, equity_df, trades_df, predictions = run_simulated_backtest(close, atr, spread)
         else:
-            print(f"No Zarr cache or logs found. Generating fully synthetic price and trade records.")
+            print("No Zarr cache or logs found. Generating fully synthetic price and trade records.")
             bars, equity_df, trades_df, predictions = generate_fully_synthetic_data()
-            
+
         # Calculate performance statistics from simulation
         total_pnl = equity_df["total_value"].iloc[-1] - equity_df["total_value"].iloc[0]
         total_ret = (equity_df["total_value"].iloc[-1] / equity_df["total_value"].iloc[0] - 1) * 100
@@ -543,7 +545,7 @@ def main():
         n_trades = len(trades_df)
         wins = trades_df[trades_df["pnl_usd"] > 0] if not trades_df.empty else pd.DataFrame()
         win_rate = (len(wins) / n_trades * 100) if n_trades > 0 else 0.0
-        
+
         metrics = custom_metrics or {
             "total_return_pct": total_ret,
             "net_pnl_usd": total_pnl,
@@ -552,11 +554,11 @@ def main():
             "win_rate_pct": win_rate,
             "n_trades": n_trades
         }
-        
+
     # Build components
     chart_div = build_plotly_chart(bars, equity_df, trades_df, predictions, min_confidence=0.45, model=model)
     dashboard_html = build_dashboard_html(model, chart_div, metrics)
-    
+
     # Write output file
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(dashboard_html, encoding="utf-8")

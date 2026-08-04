@@ -18,9 +18,8 @@ import argparse
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-
 
 DEFAULT_PAIRS = [
     "EURUSD",
@@ -119,7 +118,7 @@ def shell_join(parts: list[str]) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    today = datetime.now(tz=timezone.utc).date().isoformat()
+    today = datetime.now(tz=UTC).date().isoformat()
     p = argparse.ArgumentParser(
         description="Scrape historical forex news in resumable training windows.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

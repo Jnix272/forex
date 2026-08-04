@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from unittest.mock import patch
+
 from training.train_gpu import main
+
 
 def _mock_args(tmp_path: Path) -> argparse.Namespace:
     return argparse.Namespace(
@@ -42,6 +44,8 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
 
 
         cache_integrity_gate=False,
+        integrity_gate=False,
+        feature_schema_gate=False,
         force_rebuild=False,
         data_quality_check=False,
         pretrain_ablation=False,
@@ -94,11 +98,11 @@ def test_mini_supervised_smoke_test(mock_supervised, mock_parse_args, tmp_path):
     """Test that main() correctly routes to supervised_train when mode='supervised'."""
     args = _mock_args(tmp_path)
     mock_parse_args.return_value = args
-    
+
     mock_supervised.return_value = ({}, 1.0)
     # Run main
     main()
-    
+
     # Ensure supervised_train was called with the right arguments
     mock_supervised.assert_called_once()
     called_args, called_kwargs = mock_supervised.call_args
@@ -114,18 +118,18 @@ def test_mock_reject_promotion_test(mock_supervised, mock_promote, mock_parse_ar
     args = _mock_args(tmp_path)
     args.walk_forward_cv = True
     mock_parse_args.return_value = args
-    
+
     # Let's mock supervised_train to return a bad metric
     # supervised_train returns the metric value, e.g. val_loss = 100.0
     mock_supervised.return_value = ({}, 100.0)
-    
+
     # And maybe _promote_best_fold raises an error or returns False?
     # Actually, promotion only checks if cv_hist has good metrics.
     # main() just calls _promote_best_fold(run_name, checkpoint_dir, cv_hist, early_stop_metric).
-    
+
     # We will just run it and see if promote_best_fold is called.
     main()
-    
+
     # Actually main() calls _promote_best_fold for the 1 fold run if cv_hist is constructed.
     # Since mock_supervised returns 100.0, the cv_hist will have {"fold": 0, "best_metric": 100.0}
     mock_promote.assert_called_once()
@@ -141,12 +145,12 @@ def test_mock_pass_promotion_test(mock_supervised, mock_promote, mock_parse_args
     args = _mock_args(tmp_path)
     args.walk_forward_cv = True
     mock_parse_args.return_value = args
-    
+
     # Good val_loss
     mock_supervised.return_value = ({}, 0.5)
-    
+
     main()
-    
+
     mock_promote.assert_called_once()
     called_args, called_kwargs = mock_promote.call_args
     cv_hist = called_args[2]

@@ -6,8 +6,9 @@ dropped bars into specific reasons, failing the build if a pair is unusable.
 """
 
 import json
-from pathlib import Path
 import logging
+from pathlib import Path
+
 
 class PairReadinessGate:
     def __init__(self, output_dir: str):
@@ -19,10 +20,10 @@ class PairReadinessGate:
                  raw_ticks: int, duplicates: int, dropped_buckets: dict,
                  valid_sequences: int, spreads: dict, atrs: dict, missing_columns: list):
         """Adds a pair to the readiness report, evaluating its pass/fail status."""
-        
+
         status = "pass"
         fail_reason = ""
-        
+
         if valid_sequences == 0:
             status = "fail"
             fail_reason = "Zero usable sequences after filtering."
@@ -32,7 +33,7 @@ class PairReadinessGate:
         elif dropped_buckets.get("nan_rate", 0) > 0.3:
             status = "warn"
             fail_reason = "High NaN rate (>30%)."
-            
+
         self.reports[pair] = {
             "metadata": {"source": source, "start": start, "end": end, "freq": freq},
             "raw_ticks": raw_ticks,
@@ -44,22 +45,22 @@ class PairReadinessGate:
             "status": status,
             "fail_reason": fail_reason
         }
-        
+
     def execute_gate(self) -> bool:
         """Writes the report and fails training if any pair failed."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         report_path = self.output_dir / "pair_readiness_report.json"
-        
+
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(self.reports, f, indent=2)
-            
+
         failures = [p for p, data in self.reports.items() if data["status"] == "fail"]
-        
+
         if failures:
             self.logger.error(f"Pair Readiness Gate FAILED for: {failures}")
             for p in failures:
                 self.logger.error(f"  {p}: {self.reports[p]['fail_reason']}")
             raise RuntimeError("One or more required pairs failed readiness checks. Halting training.")
-            
+
         self.logger.info("All pairs passed readiness gate.")
         return True

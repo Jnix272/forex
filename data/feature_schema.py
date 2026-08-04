@@ -7,8 +7,9 @@ catastrophic column-swaps during live trading.
 
 import hashlib
 import json
-from pathlib import Path
 import logging
+from pathlib import Path
+
 
 class FeatureSchemaEnforcer:
     def __init__(self, output_dir: str):
@@ -23,29 +24,29 @@ class FeatureSchemaEnforcer:
     def export_schema(self, ordered_features: list[str], filename: str = "production_schema.json"):
         """Exports the exact ordered list of features and its hash."""
         schema_hash = self.generate_hash(ordered_features)
-        
+
         schema_data = {
             "schema_hash": schema_hash,
             "feature_count": len(ordered_features),
             "ordered_features": ordered_features
         }
-        
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         schema_path = self.output_dir / filename
         with open(schema_path, "w", encoding="utf-8") as f:
             json.dump(schema_data, f, indent=2)
-            
+
         self.logger.info(f"Exported feature schema (Hash: {schema_hash[:8]}...)")
         return schema_hash
 
     def enforce_live_schema(self, expected_hash: str, live_features: list[str]):
         """Intercepts a live data feed and fails fast if the features are misaligned."""
         live_hash = self.generate_hash(live_features)
-        
+
         if live_hash != expected_hash:
             self.logger.error("FATAL: Live inference feature schema does NOT match training schema.")
             self.logger.error(f"Expected Hash: {expected_hash}")
             self.logger.error(f"Live Hash: {live_hash}")
             raise RuntimeError("Live feature order mismatch. Halting execution to prevent bad trades.")
-            
+
         self.logger.info("Live schema matches training schema perfectly.")

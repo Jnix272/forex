@@ -199,7 +199,7 @@ def main() -> int:
         train_cmd.extend(["--distill-weight", str(args.distill_weight)])
     if args.distill_temperature != 2.0:
         train_cmd.extend(["--distill-temperature", str(args.distill_temperature)])
-        
+
     if args.quick:
         train_cmd.append("--quick-mode")
     if args.pretrain:
@@ -235,36 +235,36 @@ def main() -> int:
         res_no_pt = subprocess.run(cmd_no_pt, cwd=str(_ROOT))
         if res_no_pt.returncode != 0:
             return int(res_no_pt.returncode)
-            
+
         # Extract metrics
         ckpt_dir = _ROOT / "checkpoints"  # Fallback
         if "training" in cfg and "checkpoint_dir" in cfg["training"]:
             ckpt_dir = _ROOT / cfg["training"]["checkpoint_dir"]
-            
+
         model_name = cfg.get("model", {}).get("name", "haelt")
         summary_path = ckpt_dir / model_name / "train_summary.json"
-        
+
         summary_no_pt = {}
         if summary_path.exists():
-            with open(summary_path, "r") as f:
+            with open(summary_path) as f:
                 summary_no_pt = json.load(f)
-                
+
         print("\n" + "=" * 66)
         print("  [Ablation] Pass 2/2: With Pretrain")
         print("=" * 66 + "\n")
         cmd_pt = [x for x in train_cmd if x != "--ablate-pretrain"]
         if "--pretrain" not in cmd_pt:
             cmd_pt.append("--pretrain")
-            
+
         res_pt = subprocess.run(cmd_pt, cwd=str(_ROOT))
         if res_pt.returncode != 0:
             return int(res_pt.returncode)
-            
+
         summary_pt = {}
         if summary_path.exists():
-            with open(summary_path, "r") as f:
+            with open(summary_path) as f:
                 summary_pt = json.load(f)
-                
+
         val_sharpe_diff = (summary_pt.get("best_val_sharpe") or 0) - (summary_no_pt.get("best_val_sharpe") or 0)
         val_loss_diff = (summary_pt.get("best_val_loss") or 0) - (summary_no_pt.get("best_val_loss") or 0)
         gen_gap_diff = (summary_pt.get("gen_gap_final") or 0) - (summary_no_pt.get("gen_gap_final") or 0)
@@ -293,11 +293,11 @@ def main() -> int:
                 "gen_gap_diff": gen_gap_diff,
             }
         }
-        
+
         ablation_file = ckpt_dir / model_name / "pretrain_ablation.json"
         with open(ablation_file, "w") as f:
             json.dump(ablation_results, f, indent=2)
-            
+
         print(f"\n[Ablation] Complete. Saved results to {ablation_file}")
         return 0
     else:

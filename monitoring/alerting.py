@@ -25,15 +25,17 @@ Behaviour:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import smtplib
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
 
 INFO = "info"
 WARNING = "warning"
@@ -44,13 +46,13 @@ try:
     import requests
     _REQUESTS = True
 except ImportError:  # pragma: no cover
-    import urllib.request
     import urllib.error
+    import urllib.request
     _REQUESTS = False
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _timestamp() -> float:
@@ -66,10 +68,10 @@ class Runbook:
     alert_type: str
     title: str
     severity: str = INFO
-    channels: List[str] = field(default_factory=list)
-    remediation: List[str] = field(default_factory=list)
+    channels: list[str] = field(default_factory=list)
+    remediation: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "alert_type": self.alert_type,
             "title": self.title,
@@ -79,7 +81,7 @@ class Runbook:
         }
 
 
-RUNBOOKS: Dict[str, Runbook] = {
+RUNBOOKS: dict[str, Runbook] = {
     "risk_violation": Runbook(
         alert_type="risk_violation", title="Risk limit breached",
         severity=CRITICAL, channels=["discord", "slack", "email", "console", "file"],
@@ -150,7 +152,7 @@ class Channel:
     name = "base"
     severity_min: str = INFO
 
-    def send(self, alert: Dict[str, Any]) -> bool:  # pragma: no cover - abstract
+    def send(self, alert: dict[str, Any]) -> bool:  # pragma: no cover - abstract
         raise NotImplementedError
 
     def accepts(self, severity: str) -> bool:
@@ -161,7 +163,7 @@ class ConsoleChannel(Channel):
     name = "console"
     severity_min = INFO
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         print(f"[alert:{alert['severity'].upper()}] {alert['title']}: {alert['message']}")
         if alert.get("runbook", {}).get("remediation"):
             for step in alert["runbook"]["remediation"]:
@@ -173,11 +175,11 @@ class FileChannel(Channel):
     name = "file"
     severity_min = INFO
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path or os.getenv("ALERT_LOG_FILE", "logs/alerts.log")
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         import json
         try:
             with open(self.path, "a", encoding="utf-8") as f:
@@ -193,15 +195,15 @@ class InMemoryChannel(Channel):
     severity_min = INFO
 
     def __init__(self) -> None:
-        self.alerts: List[Dict[str, Any]] = []
+        self.alerts: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         with self._lock:
             self.alerts.append(dict(alert))
         return True
 
-    def last(self) -> Optional[Dict[str, Any]]:
+    def last(self) -> dict[str, Any] | None:
         with self._lock:
             return self.alerts[-1] if self.alerts else None
 
@@ -221,7 +223,7 @@ class DiscordWebhookChannel(Channel):
         except Exception:  # pragma: no cover
             self._alerter = None
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         if self._alerter is None:
             return False
         try:
@@ -235,10 +237,10 @@ class SlackWebhookChannel(Channel):
     name = "slack"
     severity_min = WARNING
 
-    def __init__(self, webhook_url: Optional[str] = None):
+    def __init__(self, webhook_url: str | None = None):
         self.webhook_url = webhook_url or os.getenv("SLACK_WEBHOOK_URL", "")
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         if not self.webhook_url:
             return False
         payload = {"text": f"[{alert['severity'].upper()}] {alert['title']}: {alert['message']}"}
@@ -260,9 +262,9 @@ class SMTPChannel(Channel):
     name = "email"
     severity_min = CRITICAL
 
-    def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
-                 sender: Optional[str] = None, recipients: Optional[Sequence[str]] = None,
-                 username: Optional[str] = None, password: Optional[str] = None):
+    def __init__(self, host: str | None = None, port: int | None = None,
+                 sender: str | None = None, recipients: Sequence[str] | None = None,
+                 username: str | None = None, password: str | None = None):
         self.host = host or os.getenv("SMTP_HOST", "")
         self.port = int(port or os.getenv("SMTP_PORT", "587"))
         self.sender = sender or os.getenv("SMTP_SENDER", "")
@@ -271,7 +273,7 @@ class SMTPChannel(Channel):
         self.username = username if username is not None else os.getenv("SMTP_USERNAME", "")
         self.password = password if password is not None else os.getenv("SMTP_PASSWORD", "")
 
-    def send(self, alert: Dict[str, Any]) -> bool:
+    def send(self, alert: dict[str, Any]) -> bool:
         if not self.host or not self.recipients:
             return False
         try:
@@ -299,20 +301,20 @@ class SMTPChannel(Channel):
 class AlertManager:
     def __init__(
         self,
-        channels: Optional[Sequence[Channel]] = None,
+        channels: Sequence[Channel] | None = None,
         dedup_window_seconds: float = 60.0,
         rate_limit_per_min: int = 30,
         escalation_minutes: float = 5.0,
     ):
-        self.channels: List[Channel] = (
+        self.channels: list[Channel] = (
             list(channels) if channels is not None else [ConsoleChannel(), FileChannel()]
         )
         self.dedup_window_seconds = dedup_window_seconds
         self.rate_limit_per_min = rate_limit_per_min
         self.escalation_minutes = escalation_minutes
-        self._dedup: Dict[str, float] = {}
-        self._rate: Dict[str, List[float]] = {}
-        self._pending_escalation: Dict[str, Dict[str, Any]] = {}
+        self._dedup: dict[str, float] = {}
+        self._rate: dict[str, list[float]] = {}
+        self._pending_escalation: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     # ── routing ────────────────────────────────────────────────────────────
@@ -356,11 +358,11 @@ class AlertManager:
         self,
         alert_type: str,
         message: str,
-        severity: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
+        severity: str | None = None,
+        details: dict[str, Any] | None = None,
         force: bool = False,
-        alert_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        alert_id: str | None = None,
+    ) -> dict[str, Any]:
         runbook = RUNBOOKS.get(alert_type, RUNBOOKS["system"])
         severity = severity or runbook.severity
         if not self._allowed(alert_type):
@@ -408,11 +410,11 @@ class AlertManager:
                 return True
         return False
 
-    def pending_critical(self) -> List[Dict[str, Any]]:
+    def pending_critical(self) -> list[dict[str, Any]]:
         with self._lock:
             return [e["alert"] for e in self._pending_escalation.values()]
 
-    def escalate_pending(self) -> List[Dict[str, Any]]:
+    def escalate_pending(self) -> list[dict[str, Any]]:
         """Re-emit critical alerts that were not acked within escalation_minutes."""
         escalated = []
         now = _timestamp()
@@ -441,7 +443,7 @@ class AlertManager:
 # Integration helpers — wire drift events (item 4/5) + risk violations (item 1)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def notify_drift_event(manager: AlertManager, event: Dict[str, Any]) -> Dict[str, Any]:
+def notify_drift_event(manager: AlertManager, event: dict[str, Any]) -> dict[str, Any]:
     """Map a structured drift event (drift.data_drift / drift.model_drift) to an alert."""
     etype = event.get("type", "drift_detected")
     alert_type = "model_drift" if etype == "model_drift" else "drift_detected"
@@ -458,7 +460,7 @@ def notify_drift_event(manager: AlertManager, event: Dict[str, Any]) -> Dict[str
     return manager.alert(alert_type, message, severity=WARNING, details=event)
 
 
-def notify_risk_violation(manager: AlertManager, violation: Dict[str, Any]) -> Dict[str, Any]:
+def notify_risk_violation(manager: AlertManager, violation: dict[str, Any]) -> dict[str, Any]:
     """Map a RiskEngine decision/violation dict to a critical alert."""
     rule = violation.get("rule", "unknown")
     value = violation.get("value")
@@ -474,7 +476,7 @@ def notify_risk_violation(manager: AlertManager, violation: Dict[str, Any]) -> D
 # Default manager
 # ═════════════════════════════════════════════════════════════════════════════
 
-_default_manager: Optional[AlertManager] = None
+_default_manager: AlertManager | None = None
 
 
 def default_manager() -> AlertManager:
@@ -484,5 +486,5 @@ def default_manager() -> AlertManager:
     return _default_manager
 
 
-def publish_alert(alert_type: str, message: str, **kwargs: Any) -> Dict[str, Any]:
+def publish_alert(alert_type: str, message: str, **kwargs: Any) -> dict[str, Any]:
     return default_manager().alert(alert_type, message, **kwargs)

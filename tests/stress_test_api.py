@@ -4,9 +4,11 @@ Can be executed as a standalone python script or via pytest.
 """
 
 import time
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+
 from api.main import app
 from sizing.kelly_criterion import PositionSizer
 
@@ -26,11 +28,11 @@ def run_performance_test():
         "equity": 10000.0,
         "lot_size": 10000.0
     }
-    
+
     start_time = time.perf_counter()
     response = client.post("/kelly_sizing", json=payload)
     elapsed = time.perf_counter() - start_time
-    
+
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
     data = response.json()
     print(f"Time taken for /kelly_sizing with 10k returns: {elapsed:.4f} seconds")
@@ -73,7 +75,7 @@ def run_zero_atr_test():
     response = client.post("/kelly_sizing", json=payload_zero)
     print(f"Zero ATR status code (expect 422): {response.status_code}")
     assert response.status_code == 422
-    
+
     # Try a very small ATR that is greater than 0
     payload_tiny = payload_zero.copy()
     payload_tiny["current_atr"] = 1e-9
@@ -82,7 +84,7 @@ def run_zero_atr_test():
     assert response_tiny.status_code == 200
     data_tiny = response_tiny.json()
     print(f"Tiny ATR (1e-9) Result: lots={data_tiny['lots']}, risk_usd={data_tiny['risk_usd']:.4f}")
-    
+
     # Check that underlying PositionSizer does not crash with 0 ATR (if bypassed API validation)
     try:
         sizer = PositionSizer()
@@ -120,7 +122,7 @@ def run_low_target_vol_test():
     data = response.json()
     print(f"Target Vol (1e-9) Result: lots={data['lots']}, vol_scalar={data['vol_scalar']:.4f}")
     assert data["vol_scalar"] >= 0.1  # should be clipped to min of 0.1
-    
+
     # Test target_vol <= 0.0 (should be rejected by Pydantic gt=0.0)
     payload_bad = payload.copy()
     payload_bad["target_vol"] = 0.0
@@ -202,7 +204,7 @@ def run_nan_inf_test():
         "equity": 10000.0,
         "lot_size": 10000.0
     }
-    
+
     response_nan = client.post("/kelly_sizing", json=payload_nan)
     print(f"Returns with short 'NaN' list status code: {response_nan.status_code}")
     if response_nan.status_code == 200:

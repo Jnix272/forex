@@ -11,9 +11,9 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class ReadinessReport:
     """Structured pre-flight report. Trading is blocked unless is_ready == True."""
 
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     feed_connected: bool = False
     feed_latency_ms: float = float("inf")
     last_tick_age_s: float = float("inf")
@@ -82,9 +82,7 @@ class ReadinessReport:
 def check_feed(report: ReadinessReport, feed_client: Any) -> None:
     """Verify data feed is connected and recent."""
     try:
-        if hasattr(feed_client, "is_connected") and feed_client.is_connected():
-            report.feed_connected = True
-        elif hasattr(feed_client, "connected") and feed_client.connected:
+        if (hasattr(feed_client, "is_connected") and feed_client.is_connected()) or (hasattr(feed_client, "connected") and feed_client.connected):
             report.feed_connected = True
         else:
             report.errors.append("Data feed not connected")
@@ -93,7 +91,7 @@ def check_feed(report: ReadinessReport, feed_client: Any) -> None:
         if hasattr(feed_client, "last_tick_time"):
             last_tick = feed_client.last_tick_time
             if last_tick is not None:
-                age = (datetime.now(timezone.utc) - last_tick).total_seconds()
+                age = (datetime.now(UTC) - last_tick).total_seconds()
                 report.last_tick_age_s = age
                 if age > 30.0:
                     report.errors.append(f"Last tick is {age:.1f}s old (stale)")
@@ -174,7 +172,7 @@ def check_risk_limits(report: ReadinessReport, config: dict) -> None:
 
 
 def check_model(report: ReadinessReport, model: Any,
-                warmup_input: Optional[Any] = None) -> None:
+                warmup_input: Any | None = None) -> None:
     """Verify model is loaded and can produce inference."""
     try:
         if model is None:
@@ -222,7 +220,7 @@ def check_schema(report: ReadinessReport, model_schema_hash: str,
 def run_preflight(
     feed_client: Any = None,
     broker_client: Any = None,
-    config: Optional[dict] = None,
+    config: dict | None = None,
     model: Any = None,
     warmup_input: Any = None,
     checkpoint_dir: str = "",

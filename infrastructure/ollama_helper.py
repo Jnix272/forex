@@ -1,24 +1,22 @@
-import os
-import sys
-import requests
-import json
-import re
 import argparse
-from typing import Dict, Any, Optional
+import json
+import os
+import re
+import sys
+from typing import Any
+
+import requests
 
 try:
-    from infrastructure.discord_notifier import (
-        send_training_alert, send_fix_notification, send_tune_notification
-    )
+    from infrastructure.discord_notifier import send_fix_notification, send_training_alert, send_tune_notification
     _DISCORD = True
 except ImportError:
     try:
         # Fallback: run directly as python infrastructure/ollama_helper.py
-        import sys as _sys, os as _os
+        import os as _os
+        import sys as _sys
         _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-        from infrastructure.discord_notifier import (
-            send_training_alert, send_fix_notification, send_tune_notification
-        )
+        from infrastructure.discord_notifier import send_fix_notification, send_training_alert, send_tune_notification
         _DISCORD = True
     except ImportError:
         _DISCORD = False
@@ -28,13 +26,13 @@ class OllamaHelper:
         self.model = model
         self.base_url = base_url
         self.api_url = f"{self.base_url}/api/chat"
-        self._last_tune_epoch: Optional[int] = None
-        self._last_applied: Dict[str, Any] = {}
-        self._last_pre_metrics: Dict[str, Any] = {}
+        self._last_tune_epoch: int | None = None
+        self._last_applied: dict[str, Any] = {}
+        self._last_pre_metrics: dict[str, Any] = {}
         self._cooldown_epochs = 3
         self._tune_apply_count = 0
 
-    def _generate_response(self, prompt: str, system: str = "") -> Optional[str]:
+    def _generate_response(self, prompt: str, system: str = "") -> str | None:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -56,7 +54,7 @@ class OllamaHelper:
             print(f"\n[OllamaHelper] Error querying Ollama: {e}")
             return None
 
-    def _extract_json(self, text: str) -> Optional[Dict]:
+    def _extract_json(self, text: str) -> dict | None:
         """Attempt to extract JSON from a markdown response."""
         try:
             # Look for JSON code blocks
@@ -76,7 +74,7 @@ class OllamaHelper:
             print(f"[OllamaHelper] JSON parsing error: {e}")
         return None
 
-    def monitor_training(self, epoch: int, train_loss: float, val_loss: float, additional_metrics: Dict[str, Any] = None) -> None:
+    def monitor_training(self, epoch: int, train_loss: float, val_loss: float, additional_metrics: dict[str, Any] = None) -> None:
         """Monitors training per epoch. Only queries Ollama when anomalies are detected."""
         if self._last_applied and additional_metrics:
             try:
@@ -130,7 +128,7 @@ class OllamaHelper:
     def auto_fix_error(self, error_traceback: str, script_context: str = "") -> None:
         """Sends an error traceback to Ollama, receives a JSON patch, applies it, and restarts."""
         print(f"\n[OllamaHelper] Analyzing error and attempting auto-fix with {self.model}...")
-        
+
         system_prompt = (
             "You are an expert Python auto-fix agent. You must output exactly ONE JSON block with your fix.\n"
             "Format:\n"
@@ -144,30 +142,30 @@ class OllamaHelper:
             "Provide the exact string matches including indentation."
         )
         prompt = f"Error Traceback:\n```python\n{error_traceback}\n```\nContext: {script_context}\nProvide the JSON fix."
-        
+
         response = self._generate_response(prompt, system=system_prompt)
         if not response:
             return
-            
+
         fix_data = self._extract_json(response)
         if not fix_data or "search_string" not in fix_data or "replace_string" not in fix_data:
             print("[OllamaHelper] Could not parse a valid fix from Ollama's response.")
             print("Response was:", response)
             return
-            
+
         target_file = fix_data.get("file_to_edit", "")
         # Fallback to the current script if not provided
         if not target_file or not os.path.exists(target_file):
             target_file = sys.argv[0] if sys.argv else ""
-            
+
         if not target_file or not os.path.exists(target_file):
             print("[OllamaHelper] Cannot determine which file to fix.")
             return
-            
+
         try:
-            with open(target_file, "r", encoding="utf-8") as f:
+            with open(target_file, encoding="utf-8") as f:
                 content = f.read()
-                
+
             if fix_data["search_string"] in content:
                 new_content = content.replace(fix_data["search_string"], fix_data["replace_string"])
                 with open(target_file, "w", encoding="utf-8") as f:
@@ -185,10 +183,10 @@ class OllamaHelper:
         except Exception as e:
             print(f"[OllamaHelper] Auto-fix application failed: {e}")
 
-    def auto_tune_model(self, model_name: str, metrics: Dict[str, Any], config_path: str = "run.yaml") -> None:
+    def auto_tune_model(self, model_name: str, metrics: dict[str, Any], config_path: str = "run.yaml") -> None:
         """Gets hyperparameter suggestions, updates run.yaml, and restarts."""
         print(f"\n[OllamaHelper] Generating auto-tuning suggestions for {model_name}...")
-        
+
         system_prompt = (
             "You are an ML auto-tuner. Output a JSON block with recommended parameters to update in the config.\n"
             "Format:\n"
@@ -201,11 +199,11 @@ class OllamaHelper:
             "```"
         )
         prompt = f"Model: {model_name}\nFinal Metrics: {json.dumps(metrics, indent=2)}\nBased on these metrics, what hyperparameters should we use for the next run?"
-        
+
         response = self._generate_response(prompt, system=system_prompt)
         if not response:
             return
-            
+
         new_params = self._extract_json(response)
         if not new_params:
             print("[OllamaHelper] Could not parse tuning JSON.")
@@ -223,7 +221,7 @@ class OllamaHelper:
             return
 
         protected = {"loss", "label_method", "seq_len", "folds", "data_source", "amp"}
-        filtered: Dict[str, Any] = {}
+        filtered: dict[str, Any] = {}
         for k, v in new_params.items():
             if k in protected:
                 continue
@@ -237,18 +235,18 @@ class OllamaHelper:
                 return None
 
         if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg_text = f.read()
         else:
             cfg_text = ""
 
-        def _read_current(key: str) -> Optional[float]:
+        def _read_current(key: str) -> float | None:
             m = re.search(rf"^\s*{re.escape(key)}\s*:\s*([0-9eE\.\-]+)\s*$", cfg_text, flags=re.MULTILINE)
             if not m:
                 return None
             return _to_float(m.group(1))
 
-        safe_params: Dict[str, Any] = {}
+        safe_params: dict[str, Any] = {}
         cur_lr = _read_current("lr")
         val_loss = _to_float(metrics.get("val_loss"))
         train_loss = _to_float(metrics.get("train_loss"))
@@ -283,7 +281,7 @@ class OllamaHelper:
         if not safe_params:
             print("[OllamaHelper] No safe tuning keys to apply after guardrails.")
             return
-            
+
         print("\n" + "="*50)
         print(f"🤖 OLLAMA APPLYING TUNING FOR {model_name.upper()}:")
         print(json.dumps(safe_params, indent=2))
@@ -293,19 +291,19 @@ class OllamaHelper:
                 send_tune_notification(model_name, safe_params)
             except Exception:
                 pass
-        
+
         # Update config/run.yaml using regex to preserve comments
         if os.path.exists(config_path):
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, encoding="utf-8") as f:
                     config_text = f.read()
-                    
+
                 for k, v in safe_params.items():
                     # Look for lines like "lr: 0.00005" or "  batch_size:  256"
                     # We match numbers including decimals, negatives, and scientific notation (e.g., 1e-4)
                     pattern = rf"^(\s*{k}\s*:\s*)[0-9\.eE\-]+(.*)$"
                     config_text = re.sub(pattern, rf"\g<1>{v}\g<2>", config_text, flags=re.MULTILINE)
-                    
+
                 with open(config_path, "w", encoding="utf-8") as f:
                     f.write(config_text)
                 if epoch > 0:
@@ -331,9 +329,9 @@ if __name__ == "__main__":
     parser.add_argument("--traceback", type=str, default="Unknown error")
     parser.add_argument("--metrics", type=str, default='{"best_val_loss": 1.0}')
     args = parser.parse_args()
-    
+
     helper = OllamaHelper()
-    
+
     if args.action == "analyze":
         helper.auto_fix_error(args.traceback, "CLI manual analysis")
     elif args.action == "fix":

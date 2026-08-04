@@ -16,27 +16,24 @@ Flow:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import polars as pl
 
-from data.feature_store import FeatureStore
 from data.feature_materializers import materialize_feature_set
-
+from data.feature_store import FeatureStore
 from monitoring.drift_detection import (
     DriftReport,
     DriftSeverity,
     DriftTracker,
     schedule_drift_check,
 )
-
 from retraining.orchestrator import (
     RetrainConfig,
     RetrainOrchestrator,
 )
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Pipeline Configuration
@@ -47,7 +44,7 @@ class PipelineConfig:
     """Top-level pipeline configuration."""
     # Feature Store
     feature_store_root: str = "data/feature_store"
-    feature_names: List[str] = field(default_factory=lambda: [
+    feature_names: list[str] = field(default_factory=lambda: [
         # Names MUST match exact aliases from HAELTFeatureBuilder.build()
         "close", "ret_5", "ret_20",   # lag_returns() -> ret_{w}, NOT log_ret_{w}
         "atr_6", "atr_20",
@@ -68,7 +65,7 @@ class PipelineConfig:
     retrain_enabled: bool = True
     retrain_model_family: str = "haelt"
     retrain_dry_run: bool = False  # Production mode — retraining will execute
-    retrain_extras: List[str] = field(default_factory=lambda: [
+    retrain_extras: list[str] = field(default_factory=lambda: [
         "--epochs", "40", "--batch-size", "128",
     ])
 
@@ -119,7 +116,7 @@ class FullPipeline:
 
     def materialize(
         self, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> Dict[str, pl.DataFrame]:
+    ) -> dict[str, pl.DataFrame]:
         """Materialize configured features from raw bars."""
         if not self.config.auto_materialize:
             return {}
@@ -156,7 +153,7 @@ class FullPipeline:
 
     def evaluate_and_retrain(
         self, drift_report: DriftReport
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Evaluate all triggers and conditionally retrain."""
         if not self.config.retrain_enabled:
             return {"retrain_skipped": True, "reason": "retrain disabled in config"}
@@ -196,7 +193,7 @@ class FullPipeline:
         start: datetime = None,
         end: datetime = None,
         skip_materialize: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Execute full pipeline end-to-end.
 
@@ -209,7 +206,7 @@ class FullPipeline:
         Returns:
             Dict with keys: materialization, drift_report, retrain_result, status.
         """
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "status": "running",
             "materialization": {},
             "drift_report": None,
@@ -220,8 +217,8 @@ class FullPipeline:
         # Step 1: Materialize
         if bars is not None and not skip_materialize:
             try:
-                mat_start = start or datetime.now(timezone.utc) - timedelta(days=1)
-                mat_end = end or datetime.now(timezone.utc)
+                mat_start = start or datetime.now(UTC) - timedelta(days=1)
+                mat_end = end or datetime.now(UTC)
                 result["materialization"] = self.materialize(bars, mat_start, mat_end)
             except Exception as e:
                 self._log(f"Materialization error: {e}")
@@ -261,7 +258,7 @@ class FullPipeline:
         result["status"] = "error" if result["errors"] else "complete"
         return result
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         """Get full pipeline status summary."""
         return {
             "feature_store": {
@@ -290,7 +287,7 @@ def run_pipeline(
     config: PipelineConfig = None,
     bars: pl.DataFrame = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Convenience: create pipeline, run, return result."""
     pipeline = FullPipeline(config)
     return pipeline.run(bars=bars, **kwargs)
@@ -329,7 +326,7 @@ def load_config_from_yaml(yaml_path: str = "config/run.yaml") -> PipelineConfig:
 if __name__ == "__main__":
     # Demo
     print("Pipeline module loaded. Available components:")
-    print(f"  FullPipeline")
-    print(f"  PipelineConfig")
-    print(f"  run_pipeline()")
-    print(f"  load_config_from_yaml()")
+    print("  FullPipeline")
+    print("  PipelineConfig")
+    print("  run_pipeline()")
+    print("  load_config_from_yaml()")

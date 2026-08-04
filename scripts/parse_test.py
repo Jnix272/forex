@@ -1,10 +1,11 @@
 from bs4 import BeautifulSoup
 
+
 def parse():
-    with open('data/raw/news/forexlive_test.html', 'r', encoding='utf-8') as f:
+    with open('data/raw/news/forexlive_test.html', encoding='utf-8') as f:
         html = f.read()
     soup = BeautifulSoup(html, 'html.parser')
-    
+
     # Try to find common article containers
     for a in soup.find_all('a', href=True):
         href = a['href']

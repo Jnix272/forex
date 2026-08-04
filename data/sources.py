@@ -36,21 +36,21 @@ The REST endpoint returns per-bar OHLCV + spread data which we
 reconstruct to tick resolution using the Ask/Bid bar prices.
 """
 
+import asyncio
+import lzma
 import os
 import sys
-import asyncio
-import aiohttp
 import time
-import lzma
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Optional, List, Dict, Tuple
-from urllib.request import urlopen, Request
+from urllib.request import Request, urlopen
 
+import aiohttp
 import numpy as np
 import pandas as pd
+
 try:
     import duckdb
     _DUCKDB = True
@@ -193,13 +193,13 @@ def _parse_bi5_hour(raw_bytes: bytes, dt_hour: datetime, pair: str) -> pd.DataFr
         "ask":    ask,
         "volume": vol,
     }, index=idx)
-    
-    # DS-006: Sanitize the raw bi5 dataframe so we don't hit infinite retry loops 
+
+    # DS-006: Sanitize the raw bi5 dataframe so we don't hit infinite retry loops
     # during validation due to duplicate timestamps or zero/inverted spreads.
     df = df[~df.index.duplicated(keep="last")]
     df = df[df["ask"] > df["bid"]]
     df = df[(df.index >= dt_hour) & (df.index < dt_hour + pd.Timedelta(hours=1))]
-    
+
     return df
 
 
@@ -259,11 +259,11 @@ class DukascopyLoader:
         self,
         start_dt: datetime,
         end_dt: datetime,
-        hours: Optional[List[int]],
-    ) -> List[datetime]:
+        hours: list[int] | None,
+    ) -> list[datetime]:
         """Build the weekday/hour download schedule for a request."""
         hour_list = list(range(24)) if hours is None else list(hours)
-        tasks_dt: List[datetime] = []
+        tasks_dt: list[datetime] = []
         current = start_dt
         while current <= end_dt:
             if current.weekday() < 5:
@@ -272,7 +272,7 @@ class DukascopyLoader:
             current += timedelta(days=1)
         return tasks_dt
 
-    def _hour_coverage_report(self, df: pd.DataFrame, requested_hours: List[datetime]) -> dict:
+    def _hour_coverage_report(self, df: pd.DataFrame, requested_hours: list[datetime]) -> dict:
         """Measure duplicate timestamps and requested-hour coverage."""
         if df.empty:
             idx = pd.DatetimeIndex([], tz="UTC")
@@ -289,7 +289,7 @@ class DukascopyLoader:
             "present_hours_count": len(present_hours),
         }
 
-    def _remove_cached_hours(self, pair: str, datetimes: List[datetime]) -> None:
+    def _remove_cached_hours(self, pair: str, datetimes: list[datetime]) -> None:
         """Delete cached parquet files for specific hours before a retry."""
         for dt in datetimes:
             try:
@@ -332,7 +332,7 @@ class DukascopyLoader:
     def _load_and_validate(
         self,
         pair: str,
-        datetimes: List[datetime],
+        datetimes: list[datetime],
         *,
         auto_redownload: bool = True,
         max_redownload_passes: int = 2,
@@ -374,7 +374,7 @@ class DukascopyLoader:
     async def _fetch_hour_async(
         self, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
         pair: str, dt: datetime,
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """Download one hour of .bi5 data. Releases the semaphore between retries."""
         url = DUKASCOPY_URL.format(
             pair  = DUKA_PAIR_MAP.get(pair, pair),
@@ -416,7 +416,7 @@ class DukascopyLoader:
                             pass  # release semaphore, then backoff below
                         else:
                             pass
-                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                except (TimeoutError, aiohttp.ClientError, OSError):
                     pass
             # Backoff happens OUTSIDE the semaphore so slots stay free
             backoff = min(20, 1.5 ** attempt) if attempt > 0 else 0.75
@@ -460,7 +460,7 @@ class DukascopyLoader:
                     self._fetch_hour_async(session, semaphore, pair, dt),
                     timeout=180,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return pd.DataFrame()
 
             if raw_lzma is None:
@@ -511,7 +511,7 @@ class DukascopyLoader:
         pair:  str,
         start: str,
         end:   str,
-        hours: Optional[List[int]] = None,
+        hours: list[int] | None = None,
         auto_redownload: bool = True,
         max_redownload_passes: int = 2,
     ) -> pd.DataFrame:
@@ -520,8 +520,8 @@ class DukascopyLoader:
         Maintains compatibility with existing training scripts.
         """
         pair     = pair.upper().replace("/", "")
-        start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
         tasks_dt = self._build_tasks_dt(start_dt, end_dt, hours)
 
         if not tasks_dt:
@@ -542,10 +542,10 @@ class DukascopyLoader:
     async def _load_all_async(
         self,
         pair:      str,
-        datetimes: List[datetime],
-        session:   Optional[aiohttp.ClientSession] = None,
-        semaphore: Optional[asyncio.Semaphore]     = None,
-        executor:  Optional[ThreadPoolExecutor]    = None,
+        datetimes: list[datetime],
+        session:   aiohttp.ClientSession | None = None,
+        semaphore: asyncio.Semaphore | None     = None,
+        executor:  ThreadPoolExecutor | None    = None,
     ) -> pd.DataFrame:
         """
         Core async orchestrator. Accepts shared session/semaphore/executor so
@@ -563,7 +563,7 @@ class DukascopyLoader:
         async def _run(sess: aiohttp.ClientSession) -> pd.DataFrame:
             total     = len(datetimes)
             completed = 0
-            results: List[Optional[pd.DataFrame]] = [None] * total
+            results: list[pd.DataFrame | None] = [None] * total
             log_step  = max(total // 40, 25)
             loop      = asyncio.get_running_loop()
             t0        = loop.time()
@@ -622,21 +622,21 @@ class DukascopyLoader:
 
     def load_multiple(
         self,
-        pairs: List[str],
+        pairs: list[str],
         start: str,
         end:   str,
-        hours: Optional[List[int]] = None,
-    ) -> Dict[str, pd.DataFrame]:
+        hours: list[int] | None = None,
+    ) -> dict[str, pd.DataFrame]:
         """Load multiple pairs (see ``max_parallel_pairs`` — default is one at a time)."""
         self._parse_failures = 0
         return _run_dukascopy_async(self._load_multiple_async(pairs, start, end, hours))
 
     async def _load_multiple_async(
-        self, pairs: List[str], start: str, end: str, hours: Optional[List[int]]
-    ) -> Dict[str, pd.DataFrame]:
+        self, pairs: list[str], start: str, end: str, hours: list[int] | None
+    ) -> dict[str, pd.DataFrame]:
         hours    = list(range(24)) if hours is None else hours
-        start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
         n_pairs  = max(len(pairs), 1)
         pair_parallel = min(n_pairs, self.max_parallel_pairs)
 
@@ -669,7 +669,7 @@ class DukascopyLoader:
             connector=connector,
             headers={"User-Agent": "ForexScaler/2.0 (research)"},
         ) as sess:
-            pair_results: List[tuple] = []
+            pair_results: list[tuple] = []
             n = len(pairs)
             batch = max(1, self.max_parallel_pairs)
             for i in range(0, n, batch):
@@ -685,7 +685,7 @@ class DukascopyLoader:
         start: str,
         end:   str,
         session_only: bool = True,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """
         Convenience: load EUR/USD and GBP/USD (the two most liquid pairs).
         session_only=True loads only London session + NY open (07–17 UTC),
@@ -741,7 +741,7 @@ class TickDataSuiteLoader:
         """Detect whether file is TDS tick CSV, TDS bar CSV, or Parquet."""
         if filepath.suffix == ".parquet":
             return "parquet"
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        with open(filepath, encoding="utf-8", errors="ignore") as f:
             first = f.readline().strip()
         # Tick CSV: date and time in separate columns or combined
         if ";" in first:
@@ -762,7 +762,7 @@ class TickDataSuiteLoader:
           (b) "2024.01.01,00:00:00,bid,ask,vol"  (MT4 style)
         """
         # Try to detect column count first
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             sample = f.readline().strip()
         parts = sample.split(delimiter)
 
@@ -826,8 +826,8 @@ class TickDataSuiteLoader:
     def load_directory(
         self,
         pair:  str,
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
     ) -> pd.DataFrame:
         """
         Load all TDS files for a pair from data_dir.
@@ -941,8 +941,8 @@ class LMAXLoader:
     def __init__(
         self,
         data_dir:    str  = DEFAULT_LMAX_DATA_DIR,
-        username:    Optional[str] = None,
-        password:    Optional[str] = None,
+        username:    str | None = None,
+        password:    str | None = None,
         verbose:     bool = True,
     ):
         self.data_dir = Path(data_dir)
@@ -950,16 +950,16 @@ class LMAXLoader:
         self.password = password or os.getenv("LMAX_PASSWORD")
         self.verbose  = verbose
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._session_token: Optional[str] = None
+        self._session_token: str | None = None
 
     # ── Historical (free) ─────────────────────────────────────────────────────
 
     def load_historical_csv(
         self,
         pair:  str,
-        filepath: Optional[str] = None,
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        filepath: str | None = None,
+        start: str | None = None,
+        end:   str | None = None,
     ) -> pd.DataFrame:
         """
         Load LMAX historical 1-minute OHLCV CSV data.
@@ -1080,7 +1080,7 @@ class LMAXLoader:
             print(f"[LMAX] Login failed: {e}")
         return False
 
-    def fetch_orderbook(self, pair: str) -> Optional[dict]:
+    def fetch_orderbook(self, pair: str) -> dict | None:
         """
         Fetch live L2 order book snapshot for a pair.
         Requires active session (call login() first).
@@ -1214,13 +1214,13 @@ class ForexDataManager:
         myfxbook_dir:   str = "",          # auto-resolved from data/myfxbook.py default
         eodhd_api_key:  str = "",          # falls back to EODHD_API_KEY env var
         eodhd_cache_dir: str = "",         # auto-resolved from data/eodhd.py default
-        lmax_username:  Optional[str] = None,
-        lmax_password:  Optional[str] = None,
+        lmax_username:  str | None = None,
+        lmax_password:  str | None = None,
         verbose:        bool = True,
     ):
-        from data.myfxbook import MyfxbookLoader, DEFAULT_MYFXBOOK_DATA_DIR
-        from data.eodhd import EODHDLoader, DEFAULT_EODHD_CACHE_DIR
         from data.databento_loader import DatabentoLoader
+        from data.eodhd import DEFAULT_EODHD_CACHE_DIR, EODHDLoader
+        from data.myfxbook import DEFAULT_MYFXBOOK_DATA_DIR, MyfxbookLoader
         self.duka     = DukascopyLoader(dukascopy_dir, verbose=verbose)
         self.tds      = TickDataSuiteLoader(tds_dir, verbose=verbose)
         self.lmax     = LMAXLoader(lmax_dir, lmax_username, lmax_password, verbose=verbose)
@@ -1239,8 +1239,8 @@ class ForexDataManager:
         self,
         pair:     str,
         source:   str  = "auto",
-        start:    Optional[str] = None,
-        end:      Optional[str] = None,
+        start:    str | None = None,
+        end:      str | None = None,
         n_ticks:  int  = 10_000,       # for live sources
         session_only: bool = True,     # London session + NY open 07-17 UTC (Dukascopy)
     ) -> pd.DataFrame:
@@ -1250,7 +1250,7 @@ class ForexDataManager:
         if source == "dukascopy":
             if not start or not end:
                 raise ValueError("Dukascopy requires start and end dates")
-            
+
             try:
                 df = self.query_dukascopy_duckdb(pair, start, end)
                 if not df.empty:
@@ -1259,7 +1259,7 @@ class ForexDataManager:
                     return df
             except Exception as e:
                 print(f"[DuckDB Error] {e}")
-                
+
             hours = list(range(7, 18)) if session_only else None
             return self.duka.load(pair, start, end, hours)
 
@@ -1313,8 +1313,8 @@ class ForexDataManager:
                         schema = lazy.collect_schema()
                         ts_col = "ts_event" if "ts_event" in schema.names() else "ts_recv"
                         import datetime as _dt
-                        _s = _dt.datetime.strptime(gap_start, "%Y-%m-%d").replace(tzinfo=_dt.timezone.utc)
-                        _e = _dt.datetime.strptime(end, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=_dt.timezone.utc)
+                        _s = _dt.datetime.strptime(gap_start, "%Y-%m-%d").replace(tzinfo=_dt.UTC)
+                        _e = _dt.datetime.strptime(end, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=_dt.UTC)
                         lazy = lazy.filter((_pl.col(ts_col) >= _s) & (_pl.col(ts_col) <= _e))
                         first_px = lazy.select(_pl.col("bid_px_00").first()).collect()["bid_px_00"][0]
                         scale = 1e9 if first_px and first_px > 10000 else 1.0
@@ -1389,9 +1389,9 @@ class ForexDataManager:
     def load_all_pairs(
         self,
         source: str = "dukascopy",
-        start:  Optional[str] = None,
-        end:    Optional[str] = None,
-    ) -> Dict[str, pd.DataFrame]:
+        start:  str | None = None,
+        end:    str | None = None,
+    ) -> dict[str, pd.DataFrame]:
         """Load all 9 configured pairs. Uses load_multiple for Dukascopy (shared session)."""
         if source == "dukascopy":
             if not start or not end:
@@ -1440,9 +1440,9 @@ class ForexDataManager:
 
     def _parse_date_bounds(
         self,
-        start: Optional[str],
-        end: Optional[str],
-    ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        start: str | None,
+        end: str | None,
+    ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
         start_ts = pd.Timestamp(start, tz="UTC") if start else None
         end_ts = pd.Timestamp(end, tz="UTC") if end else None
         return start_ts, end_ts
@@ -1450,22 +1450,22 @@ class ForexDataManager:
     def _iter_dukascopy_hour_files(
         self,
         pair: str,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-    ) -> List[Tuple[datetime, Path]]:
+        start: str | None = None,
+        end: str | None = None,
+    ) -> list[tuple[datetime, Path]]:
         pair = self._normalize_pair(pair)
         pair_root = Path(self.duka.cache_dir) / pair
         if not pair_root.exists():
             return []
 
         start_ts, end_ts = self._parse_date_bounds(start, end)
-        files: List[Tuple[datetime, Path]] = []
+        files: list[tuple[datetime, Path]] = []
         for fp in sorted(pair_root.rglob("*.parquet")):
             try:
                 year = int(fp.parent.parent.name)
                 month = int(fp.parent.name)
                 day_str, hour_str = fp.stem.split("_", maxsplit=1)
-                dt = datetime(year, month, int(day_str), int(hour_str), tzinfo=timezone.utc)
+                dt = datetime(year, month, int(day_str), int(hour_str), tzinfo=UTC)
             except (ValueError, IndexError):
                 continue
 
@@ -1504,13 +1504,13 @@ class ForexDataManager:
 
     def compact_dukascopy_cache(
         self,
-        pairs: List[str],
+        pairs: list[str],
         *,
         granularity: str = "daily",
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: str | None = None,
+        end: str | None = None,
         overwrite: bool = True,
-    ) -> Dict[str, dict]:
+    ) -> dict[str, dict]:
         """
         Compact hourly Dukascopy cache files into daily or monthly parquet partitions.
 
@@ -1518,12 +1518,12 @@ class ForexDataManager:
         faster analysis/query layer.
         """
         granularity = self._normalize_granularity(granularity)
-        summary: Dict[str, dict] = {}
+        summary: dict[str, dict] = {}
 
         for raw_pair in pairs:
             pair = self._normalize_pair(raw_pair)
             hour_files = self._iter_dukascopy_hour_files(pair, start=start, end=end)
-            grouped: Dict[pd.Timestamp, List[Path]] = {}
+            grouped: dict[pd.Timestamp, list[Path]] = {}
             for dt, fp in hour_files:
                 grouped.setdefault(self._partition_key_for_hour(dt, granularity), []).append(fp)
 
@@ -1572,7 +1572,7 @@ class ForexDataManager:
     def _duckdb_partition_glob(
         self,
         granularity: str,
-        pair: Optional[str] = None,
+        pair: str | None = None,
     ) -> str:
         granularity = self._normalize_granularity(granularity)
         root = self.duka_compact_dir / f"granularity={granularity}"
@@ -1583,9 +1583,9 @@ class ForexDataManager:
     def build_dukascopy_duckdb(
         self,
         *,
-        db_path: Optional[str] = None,
+        db_path: str | None = None,
         granularity: str = "daily",
-        pair: Optional[str] = None,
+        pair: str | None = None,
         view_name: str = "dukascopy_ticks",
         as_table: bool = False,
     ) -> str:
@@ -1626,7 +1626,7 @@ class ForexDataManager:
         start: str,
         end: str,
         *,
-        db_path: Optional[str] = None,
+        db_path: str | None = None,
         granularity: str = "daily",
         view_name: str = "dukascopy_ticks",
     ) -> pd.DataFrame:
@@ -1636,10 +1636,10 @@ class ForexDataManager:
         pair = self._normalize_pair(pair)
         start_ts = pd.Timestamp(start, tz="UTC")
         end_ts = pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)
-        
+
         granularity = self._normalize_granularity(granularity)
         pair_dir = self.duka_compact_dir / f"granularity={granularity}" / f"pair={pair}"
-        
+
         dfs = []
         for dt in pd.date_range(start_ts, end_ts, freq="D", tz="UTC"):
             path = pair_dir / f"year={dt.year}" / f"month={dt.month:02d}" / f"day={dt.day:02d}" / "ticks.parquet"
@@ -1649,10 +1649,10 @@ class ForexDataManager:
                     dfs.append(df)
                 except Exception as e:
                     if self.verbose: print(f"Error reading {path}: {e}")
-        
+
         if not dfs:
             return pd.DataFrame()
-            
+
         df = pd.concat(dfs, ignore_index=False)
         # The parquet files have 'timestamp' as the index. pd.concat preserves it.
         if df.index.name in ['timestamp', 'timestamp_utc']:
@@ -1661,12 +1661,12 @@ class ForexDataManager:
                 df.rename(columns={'timestamp': 'timestamp_utc'}, inplace=True)
         elif 'timestamp' in df.columns:
             df.rename(columns={'timestamp': 'timestamp_utc'}, inplace=True)
-        
+
         df = df[(df['timestamp_utc'] >= start_ts) & (df['timestamp_utc'] < end_ts)]
-        
+
         if 'pair' not in df.columns: df['pair'] = pair
         if 'source' not in df.columns: df['source'] = "dukascopy"
-        
+
         return df.sort_values('timestamp_utc').reset_index(drop=True)
 
     def query_dukascopy_compacted(
@@ -1681,13 +1681,13 @@ class ForexDataManager:
 
     def download_dukascopy_year_by_year(
         self,
-        pairs: List[str],
+        pairs: list[str],
         start_year: int,
         end_year: int,
         session_only: bool = True,
         max_redownload_passes: int = 2,
         fail_on_missing: bool = True,
-    ) -> Dict[str, Dict[int, dict]]:
+    ) -> dict[str, dict[int, dict]]:
         """
         Download Dukascopy data pair-by-pair and year-by-year.
 
@@ -1699,8 +1699,8 @@ class ForexDataManager:
             raise ValueError("end_year must be >= start_year")
 
         hours = list(range(7, 18)) if session_only else None
-        results: Dict[str, Dict[int, dict]] = {}
-        now = datetime.now(timezone.utc)
+        results: dict[str, dict[int, dict]] = {}
+        now = datetime.now(UTC)
 
         for raw_pair in pairs:
             pair = raw_pair.upper().replace("/", "")
@@ -1709,8 +1709,8 @@ class ForexDataManager:
                 print(f"[DataManager] Starting pair {pair}")
 
             for year in range(start_year, end_year + 1):
-                year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
-                year_end = min(datetime(year, 12, 31, tzinfo=timezone.utc), now)
+                year_start = datetime(year, 1, 1, tzinfo=UTC)
+                year_end = min(datetime(year, 12, 31, tzinfo=UTC), now)
                 if year_start > year_end:
                     continue
 

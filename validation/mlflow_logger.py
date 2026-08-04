@@ -22,9 +22,9 @@ import json
 import os
 import subprocess
 import warnings
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 warnings.filterwarnings("ignore")
 
@@ -81,7 +81,8 @@ def _mlflow_available() -> bool:
 def _mlflow_server_reachable(uri: str = MLFLOW_URI, timeout: float = 3.0) -> bool:
     if not uri.startswith("http"):
         return True   # local file URI always OK
-    import urllib.request, urllib.error
+    import urllib.error
+    import urllib.request
     try:
         urllib.request.urlopen(uri + "/health", timeout=timeout)
         return True
@@ -116,12 +117,12 @@ class MLflowModelLogger:
     def log_promotion(
         self,
         model_name:        str,
-        gate_result:       Dict[str, Any],
-        training_config:   Optional[Dict]  = None,
-        fold_sharpes:      Optional[List[float]] = None,
-        report_html_path:  Optional[str]   = None,
-        checkpoint_path:   Optional[str]   = None,
-        extra_tags:        Optional[Dict]  = None,
+        gate_result:       dict[str, Any],
+        training_config:   dict | None  = None,
+        fold_sharpes:      list[float] | None = None,
+        report_html_path:  str | None   = None,
+        checkpoint_path:   str | None   = None,
+        extra_tags:        dict | None  = None,
     ) -> str:
         """
         Log a model promotion event.
@@ -143,7 +144,7 @@ class MLflowModelLogger:
         git_hash   = _git_hash()
         git_branch = _git_branch()
         git_dirty  = _git_dirty()
-        timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        timestamp  = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         params = {
             "model_name":      model_name,
@@ -198,7 +199,8 @@ class MLflowModelLogger:
             mlflow.log_metrics(metrics)
 
             # Gate report as JSON artifact
-            import tempfile, json as _json
+            import json as _json
+            import tempfile
             with tempfile.NamedTemporaryFile("w", suffix=".json",
                                              delete=False) as f:
                 _json.dump(gate_result, f, indent=2, default=str)
@@ -225,7 +227,7 @@ class MLflowModelLogger:
         self, params, metrics, tags, gate_result, report_html_path,
     ) -> str:
         FALLBACK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ts  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts  = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         out = {
             "timestamp": ts,
             "params":    params,

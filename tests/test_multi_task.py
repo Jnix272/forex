@@ -11,25 +11,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pretrain.multi_task import (
-    MultiTaskPretrainConfig,
-    MultiTaskPretrainer,
-    create_multi_task_pretrainer,
-    pretrain_multi_task,
-    TimeSeriesAugmenter,
+    CORALLoss,
     DomainDiscriminator,
     MMDLoss,
-    CORALLoss,
-    grad_reverse,
-    nt_xent_loss,
-    byol_loss,
-    masked_reconstruction_loss,
-    vae_loss,
-    forecast_loss,
-    drift_loss,
-    domain_adversarial_loss,
+    MultiTaskPretrainConfig,
+    MultiTaskPretrainer,
+    TimeSeriesAugmenter,
     adapt_encoder_to_target,
+    byol_loss,
+    create_multi_task_pretrainer,
+    domain_adversarial_loss,
+    drift_loss,
+    forecast_loss,
+    grad_reverse,
+    masked_reconstruction_loss,
+    nt_xent_loss,
+    pretrain_multi_task,
+    vae_loss,
 )
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -151,7 +150,7 @@ def test_masked_reconstruction_loss():
     target = torch.randn(B, T, F)
     mask = torch.zeros(B, T, F, dtype=torch.bool)
     mask[:, 2:5, :] = True
-    
+
     loss = masked_reconstruction_loss(recon, target, mask)
     assert loss.ndim == 0
     assert loss.item() >= 0
@@ -164,7 +163,7 @@ def test_vae_loss():
     target = torch.randn(B, T, F)
     mu = torch.randn(4, 16)
     logvar = torch.randn(4, 16)
-    
+
     loss, recon_loss, kl = vae_loss(torch.randn(4, 10, 3), torch.randn(4, 10, 3), mu, logvar, beta=0.001)
     assert loss.ndim == 0
     assert recon_loss.ndim == 0
@@ -276,7 +275,7 @@ def test_multitask_pretrainer_init():
         seed=0,
     )
     trainer = MultiTaskPretrainer(config)
-    
+
     assert hasattr(trainer, "encoder")
     assert hasattr(trainer, "heads")
     assert "contrastive_proj" in trainer.heads
@@ -302,10 +301,10 @@ def test_multitask_step():
         forecast_weight=1.0,
     )
     trainer = MultiTaskPretrainer(config)
-    
+
     x = torch.randn(8, 20, 5)
     losses = trainer.step(x)
-    
+
     assert "contrastive" in trainer.history
     assert "masked_recon" in trainer.history
     assert "forecast" in trainer.history
@@ -328,11 +327,11 @@ def test_multitask_with_domain_adaptation():
         contrastive_weight=1.0,
     )
     trainer = MultiTaskPretrainer(config)
-    
+
     x = torch.randn(8, 20, 5)
     dom_labels = torch.randint(0, 2, (8,))
     losses = trainer.step(x, dom_labels)
-    
+
     assert "contrastive" in trainer.history
     assert "domain" in trainer.history
 
@@ -355,13 +354,13 @@ def test_multitask_pretrain():
         contrastive_weight=1.0,
         masked_recon_weight=1.0,
     )
-    
+
     rng = np.random.default_rng(0)
     X = np.random.randn(64, 15, 4).astype(np.float32)
-    
+
     trainer = MultiTaskPretrainer(config)
     history = trainer.pretrain(X, epochs=3, batch_size=16, silent=True)
-    
+
     assert "loss" in history
     assert len(history["loss"]) == 3
     assert "contrastive" in trainer.history
@@ -386,14 +385,14 @@ def test_multitask_with_domain_labels():
         contrastive_weight=1.0,
         da_weight=0.5,
     )
-    
+
     rng = np.random.default_rng(0)
     X = np.random.randn(64, 15, 4).astype(np.float32)
     domain_labels = np.array([0] * 32 + [1] * 32)
-    
+
     trainer = MultiTaskPretrainer(config)
     history = trainer.pretrain(X, domain_labels=domain_labels, epochs=2, batch_size=16, silent=True)
-    
+
     assert "domain" in trainer.history
     assert len(history["domain"]) == 2
 
@@ -418,11 +417,11 @@ def test_multitask_gradnorm():
         masked_recon_weight=1.0,
         forecast_weight=1.0,
     )
-    
+
     X = np.random.randn(64, 15, 4).astype(np.float32)
     trainer = MultiTaskPretrainer(config)
     history = trainer.pretrain(X, epochs=2, batch_size=16, silent=True)
-    
+
     assert "gradnorm_weights" in trainer.history
     assert len(trainer.history["gradnorm_weights"]) == 2
 
@@ -438,7 +437,7 @@ def test_diagnostics():
     )
     trainer = MultiTaskPretrainer(config)
     X = np.random.randn(10, 15, 4).astype(np.float32)
-    
+
     diag = trainer.diagnostics(X)
     assert "embed_std" in diag
     assert "collapsed" in diag
@@ -500,7 +499,7 @@ def test_adapt_encoder_to_target_dann():
     )
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0  # shift
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="dann", epochs=3, lr=1e-3, device="cpu"
@@ -517,7 +516,7 @@ def test_adapt_encoder_fine_tune():
     )
     source = np.random.randn(30, 10, 4).astype(np.float32)
     target = np.random.randn(30, 10, 4).astype(np.float32)
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="fine_tune", epochs=2, lr=1e-3, device="cpu"
@@ -534,15 +533,15 @@ def test_full_pretraining_pipeline():
     n = 200
     seq_len = 20
     n_features = 5
-    
+
     # Source domain
     X_src = np.random.randn(100, 20, 5).astype(np.float32)
     # Target domain (shifted)
     X_tgt = np.random.randn(100, 20, 5).astype(np.float32) + 1.5
-    
+
     X = np.vstack([X_src, X_tgt])
     domain_labels = np.hstack([np.zeros(100), np.ones(100)]).astype(np.int64)
-    
+
     config = MultiTaskPretrainConfig(
         seq_len=20,
         n_features=5,
@@ -561,12 +560,12 @@ def test_full_pretraining_pipeline():
         masked_recon_weight=1.0,
         da_weight=0.5,
     )
-    
+
     trainer, history = pretrain_multi_task(
         X, domain_labels=domain_labels,
         config=config, silent=True,
     )
-    
+
     assert "contrastive" in trainer.history
     assert "masked_recon" in trainer.history
     assert "domain" in trainer.history
@@ -577,6 +576,7 @@ def test_run_multi_task_pretrain_helper(tmp_path):
     """C3 wiring: _run_multi_task_pretrain trains + saves a usable encoder ckpt."""
     import argparse
     import os
+
     import torch
 
     from training.train_gpu import _run_multi_task_pretrain
@@ -605,6 +605,7 @@ def test_run_multi_task_pretrain_helper(tmp_path):
 def test_run_multi_task_pretrain_graceful_fallback(tmp_path):
     """C3 wiring: invalid pretrain input must not raise — helper returns None."""
     import argparse
+
     import torch
 
     from training.train_gpu import _run_multi_task_pretrain

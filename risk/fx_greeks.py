@@ -20,9 +20,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional
-
-import numpy as np
 
 
 def _norm_cdf(x: float) -> float:
@@ -55,7 +52,7 @@ class FxGreeks:
     tenor_years: float
     is_jpy: bool = False
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "delta": round(self.delta, 6),
             "gamma": round(self.gamma, 8),
@@ -211,15 +208,15 @@ class PortfolioGreeks:
     quantity, call, rate_dom, rate_for``.
     """
 
-    def __init__(self, legs: Optional[List[Dict]] = None):
-        self.legs: List[Dict] = list(legs or [])
+    def __init__(self, legs: list[dict] | None = None):
+        self.legs: list[dict] = list(legs or [])
 
-    def add(self, leg: Dict) -> None:
+    def add(self, leg: dict) -> None:
         self.legs.append(leg)
 
-    def aggregate(self) -> Dict:
+    def aggregate(self) -> dict:
         total = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
-        per_leg: List[Dict] = []
+        per_leg: list[dict] = []
         for leg in self.legs:
             g = compute_greeks(
                 pair=leg["pair"],
@@ -245,9 +242,9 @@ class PortfolioGreeks:
             "n_legs": len(self.legs),
         }
 
-    def net_delta_by_currency(self) -> Dict[str, float]:
+    def net_delta_by_currency(self) -> dict[str, float]:
         """Net base-currency delta across legs, keyed by the 3-letter base code."""
-        out: Dict[str, float] = {}
+        out: dict[str, float] = {}
         for leg in self.legs:
             pair = (leg.get("pair") or "").upper()
             if len(pair) != 6:

@@ -41,7 +41,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -76,12 +76,12 @@ DEFAULT_NEWS_FILE   = "data/raw/news/historical_news_combined.parquet"
 # Utility: generate expected hours
 # ---------------------------------------------------------------------------
 def _expected_hours(
-    start: str, end: str, hours: List[int],
-) -> List[datetime]:
+    start: str, end: str, hours: list[int],
+) -> list[datetime]:
     """Generate all weekday x session-hour datetimes in the range."""
-    start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    result: List[datetime] = []
+    start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
+    end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
+    result: list[datetime] = []
     current = start_dt
     while current <= end_dt:
         if current.weekday() < 5:  # Mon-Fri
@@ -107,9 +107,9 @@ def _cache_path(cache_dir: Path, pair: str, dt: datetime) -> Path:
 def scan_duplicates(
     cache_dir: Path,
     pair: str,
-    expected: List[datetime],
+    expected: list[datetime],
     fix: bool = False,
-) -> Dict:
+) -> dict:
     """Scan all parquet files for a pair and detect duplicate timestamps."""
     stats = {"files_scanned": 0, "files_with_dupes": 0,
              "total_dupes": 0, "dupes_removed": 0}
@@ -143,9 +143,9 @@ def scan_duplicates(
 def scan_missing(
     cache_dir: Path,
     pair: str,
-    expected: List[datetime],
+    expected: list[datetime],
     min_ticks: int = 0,
-) -> Dict:
+) -> dict:
     """
     Identify missing, corrupt, and suspiciously small files.
 
@@ -156,9 +156,9 @@ def scan_missing(
       ok          : count of healthy files
       empty_ok    : count of files absent but on known holidays
     """
-    missing:   List[datetime] = []
-    corrupt:   List[datetime] = []
-    too_small: List[datetime] = []
+    missing:   list[datetime] = []
+    corrupt:   list[datetime] = []
+    too_small: list[datetime] = []
     ok = 0
     empty_ok = 0
 
@@ -202,9 +202,9 @@ def scan_missing(
 # 3. GAP ANALYSIS  (consecutive missing streaks)
 # ---------------------------------------------------------------------------
 def analyse_gaps(
-    missing_dts: List[datetime],
-    hours: List[int],
-) -> List[Tuple[datetime, datetime, int]]:
+    missing_dts: list[datetime],
+    hours: list[int],
+) -> list[tuple[datetime, datetime, int]]:
     """
     Find consecutive missing-hour streaks.
     Returns list of (start_dt, end_dt, streak_length).
@@ -214,7 +214,7 @@ def analyse_gaps(
 
     sorted_dts = sorted(missing_dts)
     hour_set   = set(hours)
-    gaps: List[Tuple[datetime, datetime, int]] = []
+    gaps: list[tuple[datetime, datetime, int]] = []
 
     streak_start = sorted_dts[0]
     streak_end   = sorted_dts[0]
@@ -256,15 +256,15 @@ def analyse_gaps(
 def _filter_suspicious_missing(
     cache_dir: Path,
     pair: str,
-    missing_dts: List[datetime],
-) -> List[datetime]:
+    missing_dts: list[datetime],
+) -> list[datetime]:
     """
     Among missing hours, keep only those where at least one neighbour
     (+/- 1 hour, same weekday constraint) has data on disk.
     This avoids trying to redownload hours that legitimately have no data
     (holidays, early closes, etc.).
     """
-    suspicious: List[datetime] = []
+    suspicious: list[datetime] = []
     for dt in missing_dts:
         has_neighbour = False
         for delta_h in [-1, 1, -2, 2]:
@@ -291,10 +291,10 @@ def _filter_suspicious_missing(
 def redownload_hours(
     cache_dir: Path,
     pair: str,
-    hours_to_fix: List[datetime],
+    hours_to_fix: list[datetime],
     concurrency: int = 8,
     request_delay: float = 0.1,
-) -> Dict:
+) -> dict:
     """
     Delete bad files and re-fetch from Dukascopy.
     Returns stats dict with counts.
@@ -328,9 +328,12 @@ def redownload_hours(
     # The loader expects start/end strings but we have specific hours.
     # Use the low-level async method via load() for each batch.
     # Group by date for efficiency.
-    from data.sources import _run_dukascopy_async
-    import aiohttp, asyncio
+    import asyncio
     from concurrent.futures import ThreadPoolExecutor
+
+    import aiohttp
+
+    from data.sources import _run_dukascopy_async
 
     async def _refetch_all():
         sem = asyncio.Semaphore(concurrency)
@@ -369,10 +372,10 @@ def redownload_hours(
 # MAIN SCAN + REPORT
 # ---------------------------------------------------------------------------
 def run_verification(
-    pairs: List[str],
+    pairs: list[str],
     start: str,
     end: str,
-    hours: List[int],
+    hours: list[int],
     cache_dir: str,
     fix: bool = False,
     min_ticks: int = 0,
@@ -445,7 +448,7 @@ def run_verification(
                   f"(neighbours have data)  |  {legit_empty} likely no-data")
         else:
             suspicious = []
-            print(f"  [Missing]    0 (all expected hours accounted for)")
+            print("  [Missing]    0 (all expected hours accounted for)")
 
         if n_small > 0:
             print(f"  [Too-small]  {n_small} files with < {min_ticks} ticks", end="")
@@ -493,7 +496,7 @@ def run_verification(
                       f"Still missing: {rd_stats['still_missing']}")
                 grand_refetched += rd_stats["refetched"]
             else:
-                print(f"  [Repair]     Nothing to fix")
+                print("  [Repair]     Nothing to fix")
 
         elapsed = time.perf_counter() - t0
         print(f"  [{pair}] scan complete in {elapsed:.1f}s")
@@ -525,10 +528,10 @@ def run_verification(
 # ---------------------------------------------------------------------------
 # Historical news verification
 # ---------------------------------------------------------------------------
-def _month_range(start_ym: str, end_ym: str) -> List[str]:
+def _month_range(start_ym: str, end_ym: str) -> list[str]:
     sy, sm = [int(x) for x in start_ym.split("-")]
     ey, em = [int(x) for x in end_ym.split("-")]
-    months: List[str] = []
+    months: list[str] = []
     while (sy, sm) <= (ey, em):
         months.append(f"{sy:04d}-{sm:02d}")
         sm += 1
@@ -548,7 +551,7 @@ def _pair_currency_sql(pair: str) -> str:
     return ", ".join("'" + c.replace("'", "''") + "'" for c in sorted(currencies))
 
 
-def verify_news_dataset(news_file: str, pairs: List[str]) -> None:
+def verify_news_dataset(news_file: str, pairs: list[str]) -> None:
     """Verify month coverage for the pair-scoped historical news Parquet."""
     try:
         import duckdb

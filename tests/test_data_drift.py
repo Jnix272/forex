@@ -9,16 +9,16 @@ import numpy as np
 import pytest
 
 from drift.data_drift import (
-    check_feature_distribution_drift,
-    check_shap_attribution_drift,
     ADWIN,
-    PageHinkley,
     DDM,
     EDDM,
     ConceptDriftTracker,
-    adversarial_validation,
-    run_data_drift_check,
+    PageHinkley,
     _psi,
+    adversarial_validation,
+    check_feature_distribution_drift,
+    check_shap_attribution_drift,
+    run_data_drift_check,
 )
 
 

@@ -14,10 +14,9 @@ import argparse
 import calendar
 import csv
 import hashlib
-from datetime import date, datetime, time, timezone
+from collections.abc import Iterable
+from datetime import UTC, date, datetime, time, timezone
 from pathlib import Path
-from typing import Iterable
-
 
 DEFAULT_NEWS_FILE = "data/raw/news/historical_news_combined.parquet"
 DEFAULT_OUT = "data/raw/news/historical_news_synthetic_fill.csv"
@@ -110,7 +109,7 @@ def stable_pick(items: list, key: str):
 def event_timestamp(day: date, pair: str, currency: str, idx: int) -> str:
     hour = stable_pick([7, 8, 9, 10, 13, 14, 15, 16], f"{day}-{pair}-{currency}-{idx}")
     minute = stable_pick([0, 15, 30, 45], f"{pair}-{currency}-{day}-{idx}-minute")
-    dt = datetime.combine(day, time(hour, minute), tzinfo=timezone.utc)
+    dt = datetime.combine(day, time(hour, minute), tzinfo=UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -335,7 +334,7 @@ def main() -> None:
         months = sorted(set(args.month))
         for month in months:
             parse_month(month)
-        months_by_pair = {pair: months for pair in pairs}
+        months_by_pair = dict.fromkeys(pairs, months)
     else:
         months_by_pair = {pair: DEFAULT_MISSING_MONTHS.get(pair, []) for pair in pairs}
 

@@ -13,7 +13,6 @@ from pathlib import Path
 
 import polars as pl
 
-
 PAIR_TO_CURRENCIES = {
     "EURUSD": "EUR,USD",
     "USDJPY": "USD,JPY",

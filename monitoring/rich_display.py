@@ -48,9 +48,8 @@ Usage
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
+from datetime import UTC, datetime
+from typing import Any
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RICH IMPORT — graceful fallback when not installed
@@ -60,10 +59,16 @@ try:
     from rich.console import Console
     from rich.live import Live
     from rich.panel import Panel
-    from rich.progress import (BarColumn, MofNCompleteColumn, Progress,
-                               SpinnerColumn, TaskProgressColumn,
-                               TextColumn, TimeElapsedColumn,
-                               TimeRemainingColumn)
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
     from rich.table import Table
     from rich.text import Text
     _RICH = True
@@ -105,7 +110,7 @@ class _BatchBar:
         self._oom = 0
         self._nan = 0
 
-    def update(self, loss: Optional[float] = None,
+    def update(self, loss: float | None = None,
                oom_skips: int = 0, nan_skips: int = 0,
                gpu_temp: int = -1) -> None:
         self._oom = oom_skips
@@ -170,7 +175,7 @@ class _PlainDisplay:
     def batch_progress(self, phase: str, n_batches: int) -> _BatchBar:
         return _BatchBar(None, None, phase)
 
-    def end_epoch(self, epoch: int, metrics: Dict[str, Any],
+    def end_epoch(self, epoch: int, metrics: dict[str, Any],
                   is_best: bool = False, no_improve: int = 0) -> None:
         tl  = metrics.get("train_loss", float("nan"))
         vl  = metrics.get("val_loss",   float("nan"))
@@ -212,12 +217,12 @@ class _RichDisplay:
         self.higher_is_better = higher_is_better
 
         self._console    = Console()
-        self._history:   List[Dict[str, Any]] = []
+        self._history:   list[dict[str, Any]] = []
         self._best_ep    = -1
         self._best_val   = float("-inf") if higher_is_better else float("inf")
         self._no_improve = 0
         self._start_ts   = time.monotonic()
-        self._live:      Optional[Live] = None
+        self._live:      Live | None = None
 
         # Epoch-level progress bar (shown above the table)
         self._ep_progress = Progress(
@@ -249,10 +254,10 @@ class _RichDisplay:
 
     # ── context manager ──────────────────────────────────────────────────────
 
-    def __enter__(self) -> "_RichDisplay":
+    def __enter__(self) -> _RichDisplay:
         self._console.rule(
             f"[bold cyan]Training  ·  {self.model_name.upper()}  ·  "
-            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            f"{datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
             style="cyan",
         )
         self._live = Live(
@@ -280,7 +285,7 @@ class _RichDisplay:
 
     # ── epoch end ────────────────────────────────────────────────────────────
 
-    def end_epoch(self, epoch: int, metrics: Dict[str, Any],
+    def end_epoch(self, epoch: int, metrics: dict[str, Any],
                   is_best: bool = False, no_improve: int = 0) -> None:
         self._no_improve = no_improve
         if is_best:
@@ -383,7 +388,7 @@ class _RichDisplay:
         return t
 
     def _build_gpu_panel(self) -> Panel:
-        lines: List[Text] = []
+        lines: list[Text] = []
 
         # Latest GPU stats
         if self._history:

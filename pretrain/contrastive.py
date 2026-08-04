@@ -13,10 +13,12 @@ Move them behind this public surface if this module is physically split later.
 """
 
 import time
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+
 try:
     from tqdm import tqdm as _tqdm
     def _pbar(it, **kw): return _tqdm(it, **kw)
@@ -40,19 +42,19 @@ except ImportError:
     SCIPY = False
 
 __all__ = [
-    "RepresentationCollapseError",
-    "TimeSeriesAugmenter",
-    "TSCLTrainer",
-    "RegimeAwareTSCLTrainer",
     "BYOLTrainer",
-    "MaskedReconstructionTrainer",
-    "DualStreamSentiment",
-    "TIPSearchManager",
     "DriftDetector",
+    "DualStreamSentiment",
+    "MaskedReconstructionTrainer",
+    "RegimeAwareTSCLTrainer",
+    "RepresentationCollapseError",
+    "TIPSearchManager",
+    "TSCLTrainer",
+    "TimeSeriesAugmenter",
     "lalign",
     "lunif",
 ]
- 
+
 class RepresentationCollapseError(Exception):
     """Raised when embeddings collapse to a single point during pretraining."""
     pass
@@ -80,7 +82,7 @@ class TimeSeriesAugmenter:
     """
     def __init__(self, jitter_std=0.02, scale_range=(0.8, 1.2),
                  feature_drop_p=0.3, crop_ratio=(0.7, 1.0), seed=None,
-                 channel_chunk: Optional[int] = None):
+                 channel_chunk: int | None = None):
         self.jitter_std = jitter_std
         self.scale_range = scale_range
         self.feature_drop_p = feature_drop_p   # fraction of features zeroed out
@@ -95,7 +97,7 @@ class TimeSeriesAugmenter:
             "shuffle": 0, "feat_drop": 0, "total": 0
         }
 
-    def augment_batch(self, X: np.ndarray, progress: float = 1.0, regime: Optional[np.ndarray] = None) -> np.ndarray:
+    def augment_batch(self, X: np.ndarray, progress: float = 1.0, regime: np.ndarray | None = None) -> np.ndarray:
         """Vectorized augmentation: applies curriculum-scaled augmentations.
 
         Using multiple augmentations creates meaningfully different views
@@ -118,7 +120,7 @@ class TimeSeriesAugmenter:
 
         # --- Second augmentation: randomly pick one of jitter/scale/crop ---
         choice = rng.integers(0, 3, size=B)  # 0=jitter 1=scale 2=crop
-        
+
         # Regime awareness
         if regime is not None and len(regime) == B:
             is_trend = regime == 1
@@ -209,7 +211,7 @@ if TORCH:
         # Extract upper triangle (excluding diagonal)
         mask = torch.triu(torch.ones_like(sq_pdist), diagonal=1).bool()
         sq_pdist = sq_pdist[mask]
-        
+
         return sq_pdist.mul(-t).exp().mean().clamp(min=1e-20).log()
 
     class ProjectionHead(nn.Module):
@@ -223,10 +225,10 @@ if TORCH:
                 hidden_dim = 1024
             else:
                 hidden_dim = min(d, 2048)
-            
+
             # LayerNorm is safer than BatchNorm for financial data with varying scales.
             self.net = nn.Sequential(
-                nn.Linear(d, hidden_dim), 
+                nn.Linear(d, hidden_dim),
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, proj_dim),
@@ -331,7 +333,7 @@ if TORCH:
                 h = h[:, -1, :]
             return self.proj(h.float())
 
-        def _check_collapse(self, epoch: int, X_ref: Optional[np.ndarray] = None) -> Tuple[bool, float, float]:
+        def _check_collapse(self, epoch: int, X_ref: np.ndarray | None = None) -> tuple[bool, float, float]:
             """Detect representation collapse by checking embedding variance.
             Also returns alignment and uniformity metrics.
             """
@@ -343,22 +345,22 @@ if TORCH:
                         sample = torch.as_tensor(X_ref[:32], dtype=torch.float32, device=self.device)
                     else:
                         sample = torch.randn(32, 60, 224, device=self.device) * 0.1
-                    
+
                     with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                         # Positive pairs for alignment (augmented views of same samples)
                         z1 = self._encode_project(sample)
-                        
+
                         # Apply augmentation again for positive pair
                         v2 = self.aug.augment_batch(sample.cpu().numpy())
                         z2 = self._encode_project(torch.as_tensor(v2, device=self.device))
-                        
+
                     # Calculate metrics outside autocast and in float32 for stability
                     align = lalign(z1, z2).item()
                     unif  = lunif(z1).item()
-                    
+
                     # Collapse if variance across samples is near zero
                     std = z1.std(dim=0).mean().item()
-                    
+
                     if not np.isfinite(align) or not np.isfinite(unif):
                         # Diagnostics for NaN metrics
                         if torch.isnan(z1).any():
@@ -369,7 +371,7 @@ if TORCH:
                 except Exception as e:
                     print(f"[Monitor] Metric error: {e}")
                     std, align, unif = 1.0, 0.0, 0.0
-            
+
             self.encoder.train()
             collapsed = std < 0.01
             if collapsed:
@@ -382,7 +384,7 @@ if TORCH:
             X: np.ndarray,           # (N, seq_len, n_features)
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             patience: int = 5,
         ) -> dict:
             if checkpoint_path is None:
@@ -406,7 +408,7 @@ if TORCH:
             for epoch in epoch_bar:
                 self._total_epochs += 1
                 cur_ep = self._total_epochs
-                
+
                 # LR warmup + cosine decay
                 if epoch < warmup_epochs:
                     lr_scale = (epoch + 1) / warmup_epochs
@@ -419,7 +421,7 @@ if TORCH:
                 epoch_loss = 0.0; n_batches = 0
                 batches = list(range(0, N, batch_size))
                 np.random.shuffle(batches)
-                
+
                 batch_bar = _pbar(batches, desc=f"  Ep {epoch+1:3d}/{epochs}",
                                   unit="batch", leave=False)
                 for start in batch_bar:
@@ -458,16 +460,16 @@ if TORCH:
 
                 avg = epoch_loss / max(n_batches, 1)
                 history["loss"].append(avg)
-                
+
                 # Metric monitoring
                 collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
                 history["align"].append(align)
                 history["unif"].append(unif)
-                
+
                 self.temp.item()
                 if hasattr(epoch_bar, "set_postfix"):
                     epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
-                
+
                 if collapsed:
                     raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
 
@@ -477,7 +479,7 @@ if TORCH:
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                
+
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
                     break
@@ -582,7 +584,7 @@ if TORCH:
             X:                np.ndarray,   # (N, seq_len, n_features)
             epochs:           int = 50,
             batch_size:       int = 256,
-            checkpoint_path:  Optional[str] = None,
+            checkpoint_path:  str | None = None,
             patience:         int = 5,
         ) -> dict:
             """
@@ -614,7 +616,7 @@ if TORCH:
             n_regimes = len(self._regime_idx)
             print(f"[RegimeTSCL] Pre-training {epochs} epochs | {N:,} windows | "
                   f"{n_regimes} regimes: "
-                  f"{ {int(r): int(len(idx)) for r, idx in self._regime_idx.items()} }")
+                  f"{ {int(r): len(idx) for r, idx in self._regime_idx.items()} }")
 
             amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else (
                 "FP16" if self._use_amp else "FP32"
@@ -636,7 +638,7 @@ if TORCH:
             for epoch in epoch_bar:
                 self._total_epochs += 1
                 cur_ep = self._total_epochs
-                
+
                 # LR warmup + cosine decay
                 if epoch < warmup_epochs:
                     lr_scale = (epoch + 1) / warmup_epochs
@@ -729,12 +731,12 @@ if TORCH:
 
                 avg = ep_loss / max(n_b, 1)
                 history["loss"].append(avg)
-                
+
                 # Metric monitoring
                 collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
                 history["align"].append(align)
                 history["unif"].append(unif)
-                
+
                 self.temp.item()
                 if hasattr(epoch_bar, "set_postfix"):
                     epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
@@ -748,7 +750,7 @@ if TORCH:
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                
+
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
                     break
@@ -848,14 +850,14 @@ if TORCH:
             """Online path — retains gradients. Returns predictor output."""
             # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
-            
+
             h = self.encoder(x)
             if h.ndim == 3:
                 h = h[:, -1, :]
             # Clamp encoder output: BF16 activations can overflow with 2240 features,
             # causing all embeddings to collapse to the same unit vector (loss=0).
             h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
-            
+
             z = self.projector(h)
             p = self.predictor(z)
             return p
@@ -920,7 +922,7 @@ if TORCH:
             X:               np.ndarray,
             epochs:          int = 50,
             batch_size:      int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent:          bool = False,  # suppress prints/bars (for multi-block calls)
             patience:        int = 5,
         ) -> dict:
@@ -1039,7 +1041,7 @@ if TORCH:
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                
+
                 if patience_counter >= patience:
                     if not silent:
                         print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
@@ -1158,7 +1160,7 @@ if TORCH:
             X: np.ndarray,
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent: bool = False,
         ) -> dict:
             if checkpoint_path is None:
@@ -1177,10 +1179,10 @@ if TORCH:
                          if not silent else range(epochs))
             for epoch in epoch_bar:
                 self._total_epochs += 1
-                
+
                 self.encoder.train()
                 self.decoder.train()
-                
+
                 if epoch < warmup_epochs:
                     lr_scale = (epoch + 1) / warmup_epochs
                 else:
@@ -1272,7 +1274,7 @@ class DualStreamSentiment:
         decay_lambda:    float = 0.1,
         update_sec:      int   = 60,
         sentiment_threshold: float = 0.3,
-        prefer_backend:  Optional[str] = None,
+        prefer_backend:  str | None = None,
         use_cache:       bool  = True,
     ):
         self.emb_dim    = embedding_dim
@@ -1293,7 +1295,7 @@ class DualStreamSentiment:
         # Live state
         self._current_bias: float = 0.0
         self._last_update:  float = 0.0
-        self._embedding_cache: Dict[str, np.ndarray] = {}
+        self._embedding_cache: dict[str, np.ndarray] = {}
 
     def compute_offline_embedding(self, text: str) -> np.ndarray:
         """
@@ -1321,7 +1323,7 @@ class DualStreamSentiment:
         # Sigmoid of first projected dimension as a proxy for positive sentiment
         return float(np.tanh(proj[0]))
 
-    def update_global_brain(self, headlines: List[str]) -> float:
+    def update_global_brain(self, headlines: list[str]) -> float:
         """
         Update the global sentiment bias from a batch of recent headlines.
         Called by the slow loop (every ~60 seconds).
@@ -1351,7 +1353,7 @@ class DualStreamSentiment:
         dt = time.time() - self._last_update
         return self._current_bias * np.exp(-self.decay_lam * dt)
 
-    def filter_signal(self, raw_signal: int, bias: Optional[float] = None) -> int:
+    def filter_signal(self, raw_signal: int, bias: float | None = None) -> int:
         """
         Apply sentiment bias to suppress counter-trend signals.
           bias > +threshold: suppress SELL signals
@@ -1364,7 +1366,7 @@ class DualStreamSentiment:
 
     def build_sentiment_series(
         self,
-        headlines_by_time: Dict[pd.Timestamp, List[str]],
+        headlines_by_time: dict[pd.Timestamp, list[str]],
         index: pd.DatetimeIndex,
     ) -> pd.Series:
         """
@@ -1427,7 +1429,7 @@ class TIPSearchManager:
         self.lb       = atr_lookback
         self.max_ms   = max_latency_ms
 
-        self._atr_history: List[float] = []
+        self._atr_history: list[float] = []
         self.stats = {"fast_used": 0, "slow_used": 0, "total": 0}
 
     def _is_vol_spike(self, current_atr: float) -> bool:
@@ -1439,7 +1441,7 @@ class TIPSearchManager:
         self,
         obs:         np.ndarray,
         current_atr: float = 0.0,
-    ) -> Tuple[int, str, float]:
+    ) -> tuple[int, str, float]:
         """
         Returns (action, model_used, latency_ms).
 
@@ -1506,7 +1508,7 @@ class DriftDetector:
         self.sd_thresh   = sharpe_drop
         self.window      = window
         self.ann_factor  = np.sqrt(bars_per_year)
-        self._train_dist: Optional[np.ndarray] = None
+        self._train_dist: np.ndarray | None = None
         self._baseline_sharpe: float = 0.0
 
     def fit_baseline(self, X_train: np.ndarray, baseline_returns: np.ndarray):

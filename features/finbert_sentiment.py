@@ -47,7 +47,6 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -136,7 +135,7 @@ _OLLAMA_PROMPT_TMPL = (
 )
 
 
-def _parse_ollama_float(raw: str) -> Optional[float]:
+def _parse_ollama_float(raw: str) -> float | None:
     """
     Robustly extract a float from an Ollama response.
     Tries JSON parse first, then regex fallback.
@@ -167,8 +166,8 @@ def _parse_ollama_float(raw: str) -> Optional[float]:
 
 def _ollama_reachable(timeout: float = 5.0) -> bool:
     """Quick check: is the Ollama server up at all? Uses /api/tags (no inference)."""
-    import urllib.request
     import urllib.error
+    import urllib.request
     try:
         with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=timeout) as r:
             return r.status == 200
@@ -180,13 +179,13 @@ def _score_ollama(
     text: str,
     model: str = OLLAMA_MODEL,
     timeout: float = 45.0,
-) -> Optional[float]:
+) -> float | None:
     """
     Ask the local Ollama LLM to rate sentiment.
     Returns float in [-1, +1], or None if Ollama is unreachable/fails.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     prompt = _OLLAMA_PROMPT_TMPL.format(headline=text[:400])
     payload = json.dumps({
@@ -232,7 +231,7 @@ def _get_finbert():
     return _finbert_pipeline
 
 
-def _score_finbert(text: str) -> Optional[float]:
+def _score_finbert(text: str) -> float | None:
     try:
         pipe   = _get_finbert()
         result = pipe(text[:512])[0]
@@ -308,7 +307,7 @@ class SentimentPipeline:
 
     def __init__(
         self,
-        prefer_backend:  Optional[str] = None,
+        prefer_backend:  str | None = None,
         ollama_model:    str           = OLLAMA_MODEL,
         use_cache:       bool          = True,
         max_workers:     int           = 4,
@@ -322,7 +321,7 @@ class SentimentPipeline:
         self._cache: dict     = _load_cache() if use_cache else {}
         self._cache_lock      = threading.Lock()
         self._new_entries     = 0       # entries added since last save
-        self._backend: Optional[str] = None
+        self._backend: str | None = None
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -331,7 +330,7 @@ class SentimentPipeline:
             self._detect_backend()
         return self._backend or "unknown"
 
-    def score_headlines_batch(self, headlines: List[str]) -> List[float]:
+    def score_headlines_batch(self, headlines: list[str]) -> list[float]:
         """
         Score each headline independently and return a list of floats in [-1, +1].
 
@@ -390,7 +389,7 @@ class SentimentPipeline:
 
         return [float(results.get(i, 0.0)) for i in range(len(texts))]
 
-    def score_headlines(self, headlines: List[str]) -> float:
+    def score_headlines(self, headlines: list[str]) -> float:
         """
         Score a list of headlines and return a weighted mean in [-1, +1].
         Kept for backward compatibility with all existing call sites.
@@ -401,7 +400,7 @@ class SentimentPipeline:
         weights = np.abs(scores) + 0.01   # stronger signals count more
         return float(np.clip(np.average(scores, weights=weights), -1.0, 1.0))
 
-    def prefetch_headlines(self, headlines: List[str], batch_size: int = 256) -> int:
+    def prefetch_headlines(self, headlines: list[str], batch_size: int = 256) -> int:
         """Pre-score all *headlines* so subsequent per-window calls are cache hits.
 
         Returns the number of cache misses that were scored (0 if all cached).
@@ -490,7 +489,7 @@ class SentimentPipeline:
     def _score_with_backend(self, text: str, backend: str) -> float:
         """Score a single headline using the specified backend; update cache."""
         key   = _cache_key(text)
-        score: Optional[float] = None
+        score: float | None = None
 
         if backend == "ollama":
             score = _score_ollama(text, model=self._ollama_model)
@@ -548,7 +547,7 @@ class SentimentPipeline:
             if "timestamp_utc" in bars.columns:
                 bars = bars.set_index("timestamp_utc")
             is_pl = True
-        
+
         if hasattr(headlines_df, "is_empty"):
             headlines_df = headlines_df.to_pandas()
 

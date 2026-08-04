@@ -11,7 +11,7 @@ Connects live execution outcomes back to the training pipeline:
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +43,7 @@ class LiveFeedbackStore:
         signals = []
         rejections = []
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
                     record = json.loads(line.strip())
@@ -66,7 +66,7 @@ class LiveFeedbackStore:
         slippage_pips = [f.get("slippage_pips", 0) for f in fills if f.get("slippage_pips") is not None]
         metrics = {
             "audit_file": str(path.name),
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
+            "ingested_at": datetime.now(UTC).isoformat(),
             "total_signals": len(signals),
             "total_fills": len(fills),
             "total_rejections": len(rejections),
@@ -170,7 +170,7 @@ class LiveFeedbackStore:
         if not path.exists():
             return []
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 self._hard_examples = json.load(f)
             return self._hard_examples
         except (json.JSONDecodeError, OSError):

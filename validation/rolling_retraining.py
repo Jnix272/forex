@@ -1,5 +1,6 @@
 """Production-like expanding-window splits with purge, embargo and lockbox."""
 from __future__ import annotations
+
 import numpy as np
 
 

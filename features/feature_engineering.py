@@ -5,4 +5,4 @@ module importable for older scripts/tests without maintaining a second,
 diverging feature schema.
 """
 
-from features.feature_engineering_pl import *  # noqa: F401,F403
+from features.feature_engineering_pl import *  # noqa: F403

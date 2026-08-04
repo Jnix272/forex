@@ -101,9 +101,9 @@ def check_pair(loader: DukascopyLoader, pair: str) -> dict:
 
     # ── pair / source tags ────────────────────────────────────────────────────
     if "pair" in df.columns and (df["pair"] != pair).any():
-        result["errors"].append(f"'pair' column contains unexpected values")
+        result["errors"].append("'pair' column contains unexpected values")
     if "source" in df.columns and (df["source"] != "dukascopy").any():
-        result["errors"].append(f"'source' column is not 'dukascopy'")
+        result["errors"].append("'source' column is not 'dukascopy'")
 
     # ── NaN check ────────────────────────────────────────────────────────────
     for col in ("bid", "ask", "mid"):

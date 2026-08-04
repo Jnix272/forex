@@ -30,15 +30,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import numpy as np
 
 # ── Matplotlib setup ────────────────────────────────────────────────────────
 try:
     import matplotlib
-    import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
+    import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     matplotlib.rcParams.update({
         "figure.facecolor":  "#0e1117",
@@ -111,14 +110,14 @@ def _run_from_filename(path: Path) -> str:
 
 def load_cv_logs(
     log_dir: Path,
-    model_filter: Optional[str] = None,
-    run_filter:   Optional[str] = None,
-) -> Dict[str, Dict]:
+    model_filter: str | None = None,
+    run_filter:   str | None = None,
+) -> dict[str, dict]:
     """
     Scan log_dir for *_cv.json files.
     Returns  {"{run}|{model}": {"run": str, "model": str, "folds": list}}
     """
-    results: Dict[str, Dict] = {}
+    results: dict[str, dict] = {}
     for p in sorted(log_dir.glob("*_cv.json")):
         model = _model_from_filename(p)
         run   = _run_from_filename(p)
@@ -138,13 +137,13 @@ def load_cv_logs(
 
 def load_checkpoint_configs(
     ckpt_dir: Path,
-    model_filter: Optional[str] = None,
-) -> Dict[str, List[dict]]:
+    model_filter: str | None = None,
+) -> dict[str, list[dict]]:
     """
     Scan checkpoints/ for {model}_fold{N}_config.json files.
     Returns  {"haelt": [cfg_fold0, cfg_fold1, ...], ...}
     """
-    results: Dict[str, List[dict]] = {}
+    results: dict[str, list[dict]] = {}
     for p in sorted(ckpt_dir.glob("*_fold*_config.json")):
         parts = p.stem.split("_fold")          # ["haelt", "0_config"]
         if len(parts) < 2:
@@ -170,7 +169,7 @@ def _epoch_x(history_list: list) -> np.ndarray:
 
 
 def _plot_metric_per_fold(
-    ax: "plt.Axes",
+    ax: plt.Axes,
     folds:  list,
     key:    str,
     title:  str,
@@ -210,7 +209,7 @@ def _plot_metric_per_fold(
         ax.legend(fontsize=7, loc="upper left", framealpha=0.5)
 
 
-def _plot_loss_overlay(ax: "plt.Axes", folds: list) -> None:
+def _plot_loss_overlay(ax: plt.Axes, folds: list) -> None:
     """Training loss (solid) + validation loss (dashed) per fold."""
     ax.set_title("Training vs Validation Loss", fontsize=10, pad=6)
     ax.set_xlabel("Epoch", fontsize=8)
@@ -240,7 +239,7 @@ def _plot_loss_overlay(ax: "plt.Axes", folds: list) -> None:
 
 
 def _plot_fold_bars(
-    ax:     "plt.Axes",
+    ax:     plt.Axes,
     folds:  list,
     model:  str,
     metric: str = "best_metric",
@@ -273,9 +272,9 @@ def _plot_fold_bars(
 
 
 def _plot_model_comparison(
-    ax:       "plt.Axes",
-    all_logs: Dict[str, Dict],
-    ckpt_cfgs: Dict[str, List[dict]],
+    ax:       plt.Axes,
+    all_logs: dict[str, dict],
+    ckpt_cfgs: dict[str, list[dict]],
 ) -> None:
     """
     Grouped bar chart: best val Sharpe per model.
@@ -288,8 +287,8 @@ def _plot_model_comparison(
     ax.grid(True, alpha=0.4, axis="y")
 
     # Gather per-model best from logs
-    model_best_log:  Dict[str, float] = {}
-    model_best_ckpt: Dict[str, float] = {}
+    model_best_log:  dict[str, float] = {}
+    model_best_ckpt: dict[str, float] = {}
 
     for key, entry in all_logs.items():
         model  = entry["model"]
@@ -311,8 +310,8 @@ def _plot_model_comparison(
     x      = np.arange(len(all_models))
     width  = 0.35
 
-    log_vals  = [model_best_log.get(m,  None) for m in all_models]
-    ckpt_vals = [model_best_ckpt.get(m, None) for m in all_models]
+    log_vals  = [model_best_log.get(m) for m in all_models]
+    ckpt_vals = [model_best_ckpt.get(m) for m in all_models]
 
     bar_log  = ax.bar(x - width/2,
                       [v if v is not None else 0 for v in log_vals],
@@ -335,7 +334,7 @@ def _plot_model_comparison(
 
 
 def _plot_sharpe_heatmap(
-    ax:    "plt.Axes",
+    ax:    plt.Axes,
     folds: list,
     model: str,
 ) -> None:
@@ -363,9 +362,9 @@ def _plot_sharpe_heatmap(
 
 
 def _plot_summary_table(
-    ax:        "plt.Axes",
-    all_logs:  Dict[str, Dict],
-    ckpt_cfgs: Dict[str, List[dict]],
+    ax:        plt.Axes,
+    all_logs:  dict[str, dict],
+    ckpt_cfgs: dict[str, list[dict]],
 ) -> None:
     """Render a text summary table inside an axes."""
     ax.axis("off")
@@ -440,9 +439,9 @@ def _plot_summary_table(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_dashboard(
-    all_logs:  Dict[str, Dict],
-    ckpt_cfgs: Dict[str, List[dict]],
-    out_path:  Optional[Path] = None,
+    all_logs:  dict[str, dict],
+    ckpt_cfgs: dict[str, list[dict]],
+    out_path:  Path | None = None,
     show:      bool           = False,
 ) -> None:
     if not all_logs and not ckpt_cfgs:
@@ -547,8 +546,8 @@ def build_dashboard(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def print_summary(
-    all_logs:  Dict[str, Dict],
-    ckpt_cfgs: Dict[str, List[dict]],
+    all_logs:  dict[str, dict],
+    ckpt_cfgs: dict[str, list[dict]],
 ) -> None:
     if not all_logs and not ckpt_cfgs:
         print("No data found.")
@@ -579,7 +578,7 @@ def print_summary(
               f"{best_sh:>8.4f}  {mean_sh:>8.4f}  {best_acc:>8.2%}  {ckpt_sh:>8}")
 
     if ckpt_cfgs:
-        print(f"\n  Checkpoint-only models (no log file):")
+        print("\n  Checkpoint-only models (no log file):")
         for model, cfgs in sorted(ckpt_cfgs.items()):
             if not any(e["model"] == model for e in all_logs.values()):
                 best = max(c.get("best_val_sharpe_proxy", -999) for c in cfgs)
@@ -635,7 +634,7 @@ def main() -> None:
 
     print_summary(all_logs, ckpt_cfgs)
 
-    out_path: Optional[Path] = None
+    out_path: Path | None = None
     if not args.no_save:
         raw = args.out or str(log_dir / "performance_dashboard.png")
         out_path = Path(raw)

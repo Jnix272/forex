@@ -8,18 +8,16 @@ import numpy as np
 import pytest
 
 from evaluation.monte_carlo import (
+    PathMonteCarlo,
+    Trade,
+    TradeSequenceMonteCarlo,
     block_bootstrap,
     block_bootstrap_indices,
-    stationary_bootstrap,
-    stationary_bootstrap_indices,
-    pl_block_bootstrap,
-    PathMonteCarlo,
-    TradeSequenceMonteCarlo,
-    Trade,
-    summarize_simulation,
     monte_carlo_backtest,
+    pl_block_bootstrap,
+    stationary_bootstrap_indices,
+    summarize_simulation,
 )
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Fixtures

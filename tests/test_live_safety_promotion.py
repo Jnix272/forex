@@ -77,6 +77,24 @@ def test_live_safety_blocks_wide_spread():
     assert str(result["reason"]).startswith("spread_too_wide")
 
 
+def test_live_safety_jpy_pip_scale():
+    """USDJPY 1-pip spread must not be treated as 100 pips (×10000 bug)."""
+    gate = LiveSafetyGate(
+        LiveSafetyConfig(max_spread_pips=2.0),
+        starting_equity=10_000.0,
+    )
+    # 1 pip on USDJPY = 0.01 price units
+    result = gate.allow_order(
+        pair="USDJPY",
+        side="buy",
+        lots=0.1,
+        bid=149.50,
+        ask=149.51,
+        equity=10_000.0,
+    )
+    assert result["ok"], result
+
+
 def test_live_safety_halts_on_daily_loss_limit():
     gate = LiveSafetyGate(
         LiveSafetyConfig(max_daily_loss_pct=0.05),
@@ -95,6 +113,48 @@ def test_live_safety_halts_on_daily_loss_limit():
     assert not result["ok"]
     assert gate.halted
     assert str(result["reason"]).startswith("daily_loss_limit")
+
+
+def test_paper_fallback_requires_explicit_flag():
+    from trading.live_engine import BrokerInterface, LiveTradingEngine
+
+    class _FailBroker(BrokerInterface):
+        def connect(self) -> bool:
+            return False
+        def disconnect(self) -> None:
+            return None
+        def get_bid_ask(self, pair: str):
+            return 1.1, 1.10005
+        def get_account(self) -> dict:
+            return {"equity": 10_000.0}
+        def market_order(self, pair: str, side: str, lots: float) -> dict:
+            return {"ok": True}
+        def close_position(self, pair: str) -> dict:
+            return {"ok": True}
+        def get_positions(self):
+            return {}
+
+    class _DummyAgent:
+        def set_agent_state(self, **kwargs):
+            pass
+        def select_action(self, obs):
+            return 1
+
+    eng = LiveTradingEngine(
+        broker=_FailBroker(),
+        fast_agent=_DummyAgent(),
+        slow_model=_DummyAgent(),
+        pair="EURUSD",
+        equity=10_000.0,
+        max_lots=0.1,
+        allow_paper_fallback=False,
+        prometheus_enabled=False,
+    )
+    try:
+        eng.start(max_bars=0)
+        assert False, "expected RuntimeError without allow_paper_fallback"
+    except RuntimeError as e:
+        assert "allow-paper-fallback" in str(e) or "allow_paper_fallback" in str(e)
 
 
 def test_live_safety_rate_limits_orders():

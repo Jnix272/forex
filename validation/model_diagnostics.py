@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any
 
-
-ARCHITECTURE_PRIORITY: List[Dict[str, Any]] = [
+ARCHITECTURE_PRIORITY: list[dict[str, Any]] = [
     {
         "rank": 1,
         "model": "haelt",
@@ -59,7 +59,7 @@ ARCHITECTURE_PRIORITY: List[Dict[str, Any]] = [
 ]
 
 
-DEFAULT_ABLATION_PLAN: List[Dict[str, Any]] = [
+DEFAULT_ABLATION_PLAN: list[dict[str, Any]] = [
     {"name": "full_features", "drop_groups": [], "purpose": "Reference run."},
     {"name": "no_sentiment", "drop_groups": ["sentiment", "news"], "purpose": "Verify news/sentiment edge."},
     {"name": "no_cross_asset", "drop_groups": ["cross_asset", "intermarket"], "purpose": "Verify external asset edge."},
@@ -69,7 +69,7 @@ DEFAULT_ABLATION_PLAN: List[Dict[str, Any]] = [
 ]
 
 
-def _as_list(values: Iterable[Any]) -> List[Any]:
+def _as_list(values: Iterable[Any]) -> list[Any]:
     if hasattr(values, "tolist"):
         return list(values.tolist())
     if hasattr(values, "to_list"):
@@ -81,7 +81,7 @@ def _clip_prob(p: float, eps: float = 1e-12) -> float:
     return min(max(float(p), eps), 1.0 - eps)
 
 
-def _softmax_row(row: Sequence[float]) -> List[float]:
+def _softmax_row(row: Sequence[float]) -> list[float]:
     vals = [float(x) for x in row]
     if not vals:
         return []
@@ -91,7 +91,7 @@ def _softmax_row(row: Sequence[float]) -> List[float]:
     return [x / s for x in exps] if s > 0 else [1.0 / len(vals)] * len(vals)
 
 
-def as_probabilities(predictions: Iterable[Any]) -> List[List[float]]:
+def as_probabilities(predictions: Iterable[Any]) -> list[list[float]]:
     """
     Convert class probabilities or logits into normalized probability rows.
 
@@ -108,7 +108,7 @@ def as_probabilities(predictions: Iterable[Any]) -> List[List[float]]:
             out.append([1.0 - q, q])
         return out
 
-    out: List[List[float]] = []
+    out: list[list[float]] = []
     for row in rows:
         vals = _as_list(row)
         vals = [float(x) for x in vals]
@@ -125,7 +125,7 @@ def classification_calibration_metrics(
     y_true: Iterable[int],
     predictions: Iterable[Any],
     n_bins: int = 10,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return ECE, MCE, Brier score, NLL, accuracy, and bin-level calibration."""
     labels = [int(x) for x in _as_list(y_true)]
     probs = as_probabilities(predictions)
@@ -202,7 +202,7 @@ def ensemble_safety_decision(
     low_threshold: float = 0.5,
     high_threshold: float = 1.0,
     min_multiplier: float = 0.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Map ensemble disagreement to deterministic size multiplier and action."""
     try:
         d = float(disagreement)
@@ -242,7 +242,7 @@ def live_use_score(row: Mapping[str, Any]) -> float:
     )
 
 
-def model_leaderboard(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+def model_leaderboard(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Return rows sorted by live-use score with rank and architecture priority."""
     priority = {item["model"]: item["rank"] for item in ARCHITECTURE_PRIORITY}
     scored = []
@@ -262,9 +262,9 @@ def model_leaderboard(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]
 def write_model_diagnostics_report(
     path: str | Path,
     leaderboard_rows: Iterable[Mapping[str, Any]],
-    calibration: Optional[Mapping[str, Any]] = None,
-    ablation_plan: Optional[Iterable[Mapping[str, Any]]] = None,
-) -> Dict[str, Any]:
+    calibration: Mapping[str, Any] | None = None,
+    ablation_plan: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Write a JSON report containing leaderboard, calibration, ablation, and priority."""
     report = {
         "leaderboard": model_leaderboard(leaderboard_rows),

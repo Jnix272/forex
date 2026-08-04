@@ -12,16 +12,17 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
+
 try:
     import polars as pl
 except ImportError:  # pragma: no cover - optional for legacy callers
     pl = None
 
+from config.settings import price_to_pips
 from data.historical_news import _filter_relevant, _load_events
-
 
 HOLD = 1
 _SPECIAL_EVENTS = ("nfp", "nonfarm", "non-farm", "cpi", "fomc", "ecb", "boe", "boj", "rate")
@@ -82,7 +83,7 @@ class EconomicCalendarGuard:
         self,
         pair: str,
         *,
-        calendar_file: Optional[str] = None,
+        calendar_file: str | None = None,
         block_before_min: int = 0,
         block_after_min: int = 0,
         special_before_min: int = 2,
@@ -138,7 +139,7 @@ class EconomicCalendarGuard:
                         "flatten_before_event": self.flatten_before_event,
                     },
                 )
-        return GuardResult(False, details={"events_loaded": int(len(self._events))})
+        return GuardResult(False, details={"events_loaded": len(self._events)})
 
 
 class SpreadVolatilityGuard:
@@ -150,21 +151,23 @@ class SpreadVolatilityGuard:
         atr_median_mult: float = 3.0,
         vol_median_mult: float = 3.0,
         lookback: int = 60,
+        pair: str = "EURUSD",
     ):
         self.max_spread_pips = float(max_spread_pips)
         self.spread_median_mult = float(spread_median_mult)
         self.atr_median_mult = float(atr_median_mult)
         self.vol_median_mult = float(vol_median_mult)
         self.lookback = int(lookback)
+        self.pair = str(pair).upper()
 
     @staticmethod
     def _last(features, col: str, default: float = 0.0) -> float:
         return _last_numeric(features, col, default)
 
-    def check(self, features, *, bid: Optional[float] = None, ask: Optional[float] = None) -> GuardResult:
+    def check(self, features, *, bid: float | None = None, ask: float | None = None) -> GuardResult:
         spread = self._last(features, "spread_pips", 0.0)
         if bid and ask and bid > 0 and ask > bid:
-            spread = max(spread, (ask - bid) * 10_000)
+            spread = max(spread, price_to_pips(float(ask) - float(bid), self.pair))
         if spread > self.max_spread_pips:
             return GuardResult(True, "spread_too_wide", {"spread_pips": spread, "max_spread_pips": self.max_spread_pips})
 
@@ -216,13 +219,13 @@ class DisagreementGate:
         self.enabled = bool(enabled)
 
     @staticmethod
-    def _safe_action(model, obs) -> Optional[int]:
+    def _safe_action(model, obs) -> int | None:
         try:
             return int(model.select_action(obs))
         except Exception:
             return None
 
-    def check(self, action: int, obs, *, fast_model=None, slow_model=None, confidence: Optional[float] = None) -> GuardResult:
+    def check(self, action: int, obs, *, fast_model=None, slow_model=None, confidence: float | None = None) -> GuardResult:
         if confidence is not None and float(confidence) < self.min_confidence:
             return GuardResult(True, "low_confidence", {"confidence": float(confidence), "min_confidence": self.min_confidence})
         if not self.enabled or fast_model is None or slow_model is None:
@@ -271,7 +274,7 @@ class NoTradeZoneGate:
         return GuardResult(False, "no_trade_ok", {"no_trade_score": float(score)})
 
     @staticmethod
-    def _heuristic(features: Any) -> Optional[float]:
+    def _heuristic(features: Any) -> float | None:
         try:
             from features.no_trade_zones import compute_heuristic_no_trade_score
             cols = ["atr_6", "spread_pips", "adx_14", "rsi_14"]

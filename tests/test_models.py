@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-import argparse
-import json
-from unittest.mock import patch
-
+from backtesting.backtest import ScalingAction
 from models.architectures import (
+    MODEL_REGISTRY,
     AsymmetricDirectionalLoss,
     EXPERTEncoder,
     GNNCrossAsset,
@@ -20,11 +22,10 @@ from models.architectures import (
     HAELTHybrid,
     HuberLoss,
     MambaScalper,
-    MODEL_REGISTRY,
+    MultiPairWrapper,
     MultiTaskHead,
     MultiTaskLoss,
     MultiTaskWrapper,
-    MultiPairWrapper,
     TFTScalper,
     build_model,
     iTransformerScalper,
@@ -35,7 +36,6 @@ from models.rl_agents import (
     ForexTradingEnv,
     PPOAgent,
 )
-from backtesting.backtest import ScalingAction
 
 
 def _synthetic_env(n: int = 120, feat_dim: int = 16) -> ForexTradingEnv:
@@ -493,7 +493,8 @@ class TestRegimeAwareTSCL:
             lr=1e-3,
             device="cpu",
         )
-        import tempfile, os
+        import os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             ckpt = os.path.join(tmp, "encoder.pt")
             history = trainer.pretrain(small_windows, epochs=2, batch_size=32,
@@ -512,7 +513,8 @@ class TestRegimeAwareTSCL:
         def _make_encoder():
             return HAELTHybrid(input_size=16, seq_len=20, lstm_hidden=16, d_model=16)
 
-        import tempfile, os
+        import os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             enc_std = _make_encoder()
             std_trainer = TSCLTrainer(enc_std, d_model=32, proj_dim=32, lr=1e-3, device="cpu")
@@ -542,7 +544,8 @@ class TestRegimeAwareTSCL:
             encoder, regime_labels=short_labels,
             d_model=16, proj_dim=16, device="cpu",
         )
-        import tempfile, os
+        import os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             history = trainer.pretrain(small_windows, epochs=1, batch_size=32,
                                        checkpoint_path=os.path.join(tmp, "e.pt"))
@@ -558,7 +561,8 @@ class TestRegimeAwareTSCL:
             encoder, regime_labels=all_same,
             d_model=16, proj_dim=16, device="cpu",
         )
-        import tempfile, os
+        import os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             history = trainer.pretrain(small_windows, epochs=1, batch_size=32,
                                        checkpoint_path=os.path.join(tmp, "e.pt"))
@@ -702,8 +706,9 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_concatenates_features(self):
         """Two equal-length pairs → X shape (N, T, 2*F)."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         T, F, N = 60, 8, 50
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
@@ -721,8 +726,9 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_aligns_to_shortest_pair(self):
         """Pairs with different sample counts → trimmed to inner-join minimum."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         T, F, N1, N2 = 60, 8, 100, 73
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
@@ -738,8 +744,9 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_reindexes_by_common_timestamps(self):
         """Out-of-order and duplicate timestamps align to ordered common timestamps."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         T, F = 2, 1
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
@@ -780,8 +787,9 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_averages_labels(self):
         """y must be the mean of each pair's label array."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         T, F, N = 60, 8, 40
         rng   = np.random.default_rng(0)
@@ -809,8 +817,9 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_empty_pairs_returns_empty(self):
         """When all pairs produce empty arrays the chunk exits gracefully."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
         scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
@@ -826,12 +835,13 @@ class TestMultiPairHelpers:
 
     def test_multipair_chunk_three_pairs_feature_count(self):
         """3 pairs × F each → n_features_total = 3*F."""
-        from training.train_gpu import _build_multipair_chunk
         from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
 
         T, F, N, P = 60, 10, 30, 3
         pairs      = ["EURUSD", "GBPUSD", "USDJPY"]
-        pair_ticks = {p: "stub" for p in pairs}
+        pair_ticks = dict.fromkeys(pairs, "stub")
         scalers    = {p: StandardScaler() for p in pairs}
 
         with patch("training.train_gpu._build_chunk",

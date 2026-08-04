@@ -7,10 +7,10 @@ Each feature is defined once with its type, source, transformation, and dependen
 
 import hashlib
 import json
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import Any
 
 
 class FeatureType(Enum):
@@ -53,13 +53,13 @@ class FeatureSpec:
     description: str
     source: FeatureSource
     transformation: str           # Human-readable: "log_ret(close, lag=1)"
-    params: Dict[str, Any] = field(default_factory=dict)  # e.g., {"window": 20, "lag": 1}
-    dependencies: List[str] = field(default_factory=list)  # Upstream feature names
+    params: dict[str, Any] = field(default_factory=dict)  # e.g., {"window": 20, "lag": 1}
+    dependencies: list[str] = field(default_factory=list)  # Upstream feature names
     version: int = 1
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     owner: str = "ml-team"
     materialization: MaterializationStrategy = MaterializationStrategy.INCREMENTAL
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat() + "Z")
     deprecated: bool = False
     # Computed fields (not in constructor)
     _hash: str = field(init=False, repr=False, default="")
@@ -81,7 +81,7 @@ class FeatureSpec:
     def hash(self) -> str:
         return self._hash
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["feature_type"] = self.feature_type.value
         d["source"] = self.source.value
@@ -90,7 +90,7 @@ class FeatureSpec:
         return d
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "FeatureSpec":
+    def from_dict(cls, data: dict[str, Any]) -> "FeatureSpec":
         data = data.copy()
         data["feature_type"] = FeatureType(data["feature_type"])
         data["source"] = FeatureSource(data["source"])
@@ -104,7 +104,7 @@ class FeatureSpec:
 # ═══════════════════════════════════════════════════════════════════════════
 # This is the canonical list. Add new features here, then run materialization.
 
-BUILTIN_FEATURES: List[FeatureSpec] = [
+BUILTIN_FEATURES: list[FeatureSpec] = [
     # ── Price / Returns ──
     FeatureSpec(
         name="log_ret_1",
@@ -1121,37 +1121,37 @@ BUILTIN_FEATURES: List[FeatureSpec] = [
 
 class FeatureRegistry:
     """In-memory registry with lookup helpers."""
-    
-    def __init__(self, features: List[FeatureSpec] = None):
-        self._by_name: Dict[str, FeatureSpec] = {}
-        self._by_source: Dict[FeatureSource, List[FeatureSpec]] = {}
-        self._by_tag: Dict[str, List[FeatureSpec]] = {}
+
+    def __init__(self, features: list[FeatureSpec] = None):
+        self._by_name: dict[str, FeatureSpec] = {}
+        self._by_source: dict[FeatureSource, list[FeatureSpec]] = {}
+        self._by_tag: dict[str, list[FeatureSpec]] = {}
         for f in (features or BUILTIN_FEATURES):
             self.register(f)
-    
+
     def register(self, spec: FeatureSpec) -> None:
         self._by_name[spec.name] = spec
         self._by_source.setdefault(spec.source, []).append(spec)
         for tag in spec.tags:
             self._by_tag.setdefault(tag, []).append(spec)
-    
-    def get(self, name: str) -> Optional[FeatureSpec]:
+
+    def get(self, name: str) -> FeatureSpec | None:
         return self._by_name.get(name)
-    
-    def get_by_source(self, source: FeatureSource) -> List[FeatureSpec]:
+
+    def get_by_source(self, source: FeatureSource) -> list[FeatureSpec]:
         return self._by_source.get(source, [])
-    
-    def get_by_tag(self, tag: str) -> List[FeatureSpec]:
+
+    def get_by_tag(self, tag: str) -> list[FeatureSpec]:
         return self._by_tag.get(tag, [])
-    
-    def all(self) -> List[FeatureSpec]:
+
+    def all(self) -> list[FeatureSpec]:
         return list(self._by_name.values())
-    
-    def resolve_dependencies(self, feature_names: List[str]) -> List[str]:
+
+    def resolve_dependencies(self, feature_names: list[str]) -> list[str]:
         """Return feature_names plus all transitive dependencies in topological order."""
         visited = set()
         result = []
-        
+
         def visit(name: str):
             if name in visited:
                 return
@@ -1162,7 +1162,7 @@ class FeatureRegistry:
                 visit(dep)
             visited.add(name)
             result.append(name)
-        
+
         for name in feature_names:
             visit(name)
         return result
@@ -1172,12 +1172,12 @@ class FeatureRegistry:
 REGISTRY = FeatureRegistry(BUILTIN_FEATURES)
 
 
-def get_feature_spec(name: str) -> Optional[FeatureSpec]:
+def get_feature_spec(name: str) -> FeatureSpec | None:
     """Quick lookup by name."""
     return REGISTRY.get(name)
 
 
-def list_features(source: FeatureSource = None, tag: str = None) -> List[FeatureSpec]:
+def list_features(source: FeatureSource = None, tag: str = None) -> list[FeatureSpec]:
     """List features filtered by source and/or tag."""
     if source and tag:
         return [f for f in REGISTRY.get_by_source(source) if tag in f.tags]
@@ -1191,7 +1191,7 @@ def list_features(source: FeatureSource = None, tag: str = None) -> List[Feature
 if __name__ == "__main__":
     # Demo
     print(f"Total features: {len(BUILTIN_FEATURES)}")
-    print(f"By source:")
+    print("By source:")
     for src in FeatureSource:
         feats = REGISTRY.get_by_source(src)
         if feats:

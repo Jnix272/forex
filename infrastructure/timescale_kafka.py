@@ -13,14 +13,14 @@ Kafka decouples the data feed (broker API) from the storage layer,
 meaning the model never blocks waiting for a database write.
 """
 
-import os
-import time
 import json
+import os
 import threading
-from typing import Optional, List
+import time
+import warnings
+
 import numpy as np
 import pandas as pd
-import warnings
 
 # ── Optional heavy dependencies — gracefully degraded ────────────────────────
 try:
@@ -132,7 +132,7 @@ class TimescaleDBStore:
         self.tick_table = tick_table
         self.bar_table  = bar_table
         self.news_table = news_table
-        self._conn: Optional[object] = None
+        self._conn: object | None = None
 
     @classmethod
     def from_env(cls) -> "TimescaleDBStore":
@@ -155,9 +155,9 @@ class TimescaleDBStore:
         store.tick_table = "tick_data"
         store.bar_table  = "ohlcv_bars"
         store.news_table = "news_data"
-        store._mock_ticks: List[dict] = []
-        store._mock_bars:  List[dict] = []
-        store._mock_news:  List[dict] = []
+        store._mock_ticks: list[dict] = []
+        store._mock_bars:  list[dict] = []
+        store._mock_news:  list[dict] = []
         store._is_mock = True
         print("[TimescaleDB] Running in MOCK mode (in-memory storage)")
         return store
@@ -277,8 +277,8 @@ class TimescaleDBStore:
     def read_ticks(
         self,
         pair:  str = "EURUSD",
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
         limit: int = 1_000_000,
     ) -> pd.DataFrame:
         """
@@ -298,7 +298,7 @@ class TimescaleDBStore:
 
         conn = self.connect()
         where = ["pair = %s"]
-        params: List = [pair]
+        params: list = [pair]
         if start:
             where.append("time >= %s")
             params.append(start)
@@ -324,8 +324,8 @@ class TimescaleDBStore:
         self,
         pair:  str = "EURUSD",
         freq:  str = "1min",
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
         limit: int = 100_000,
     ) -> pd.DataFrame:
         """Read pre-aggregated OHLCV bars."""
@@ -338,7 +338,7 @@ class TimescaleDBStore:
 
         conn = self.connect()
         where = ["pair = %s", "freq = %s"]
-        params: List = [pair, freq]
+        params: list = [pair, freq]
         if start:
             where.append("time >= %s")
             params.append(start)
@@ -363,8 +363,8 @@ class TimescaleDBStore:
     def read_news(
         self,
         pair:  str = "EURUSD",
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
         limit: int = 10_000,
     ) -> pd.DataFrame:
         """Read pre-computed news sentiment and embeddings."""
@@ -380,7 +380,7 @@ class TimescaleDBStore:
 
         conn = self.connect()
         where = ["pair = %s"]
-        params: List = [pair]
+        params: list = [pair]
         if start:
             where.append("time >= %s")
             params.append(start)
@@ -402,7 +402,7 @@ class TimescaleDBStore:
         df.index = pd.to_datetime(df.index, utc=True)
         return df.sort_index()
 
-    def latest_tick(self, pair: str = "EURUSD") -> Optional[dict]:
+    def latest_tick(self, pair: str = "EURUSD") -> dict | None:
         """Get the most recent tick for a pair (for live trading sync)."""
         if getattr(self, "_is_mock", False):
             ticks = [t for t in self._mock_ticks if t.get("pair") == pair]
@@ -473,9 +473,9 @@ class KafkaTickConsumer:
         self.batch_size        = batch_size
         self.flush_interval_ms = flush_interval_ms
         self._running          = False
-        self._thread: Optional[threading.Thread] = None
-        self._tick_buffer:  List[dict] = []
-        self._news_buffer:  List[dict] = []
+        self._thread: threading.Thread | None = None
+        self._tick_buffer:  list[dict] = []
+        self._news_buffer:  list[dict] = []
         self.stats = {"ticks_consumed": 0, "batches_written": 0, "errors": 0}
 
     def start(self):
@@ -566,7 +566,7 @@ class KafkaTickConsumer:
                     df = df.set_index("time")
                 if "pair" not in df.columns:
                     df["pair"] = "EURUSD" # Default if not provided
-                
+
                 for pair, group in df.groupby("pair"):
                     self.store.write_news(group, pair=pair)
                 self._news_buffer.clear()
@@ -585,11 +585,11 @@ class MockKafkaProducer:
     to a TimescaleDB mock store. Use during development/testing.
     """
 
-    def __init__(self, store: TimescaleDBStore, pairs: List[str] = ["EURUSD"]):
+    def __init__(self, store: TimescaleDBStore, pairs: list[str] = ["EURUSD"]):
         self.store   = store
         self.pairs   = pairs
         self._rng    = np.random.default_rng(42)
-        self._prices = {p: 1.0850 for p in pairs}
+        self._prices = dict.fromkeys(pairs, 1.085)
 
     def produce_ticks(self, n: int = 10_000) -> int:
         """Generate and store n synthetic ticks per pair."""

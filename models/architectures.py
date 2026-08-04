@@ -12,9 +12,9 @@ All six model architectures specified:
 Shared interface: forward(x) -> (batch,) scalars if num_classes==1, else (batch, num_classes) logits.
 """
 
-import warnings
 import inspect
-from typing import Any, Optional
+import warnings
+from typing import Any
 
 try:
     import torch
@@ -29,6 +29,35 @@ except ImportError:
 if TORCH:
 
     # ── Shared building blocks ─────────────────────────────────────────────
+
+    def _kaiming_init_module(mod: "nn.Module") -> None:
+        """Xavier/Kaiming-stable init; moderate head gain keeps outputs ~O(1)."""
+        for name, m in mod.named_modules():
+            if isinstance(m, nn.Linear):
+                # Final prediction heads: gain=0.1 (was 0.01 — too vanishing for deep nets).
+                is_head = (
+                    name == "head"
+                    or name.startswith("head.")
+                    or name.endswith(".head")
+                    or ".head." in name
+                )
+                gain = 0.1 if is_head else 1.0
+                nn.init.xavier_uniform_(m.weight, gain=gain)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def _maybe_checkpoint(fn, *args, enabled: bool = True):
+        """Gradient checkpointing when training; no-op at eval / when disabled."""
+        if enabled and torch.is_grad_enabled() and any(
+            isinstance(a, torch.Tensor) and a.requires_grad for a in args
+        ):
+            return torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)
+        return fn(*args)
 
     class _FlashMHA(nn.Module):
         """
@@ -125,7 +154,7 @@ if TORCH:
         """
 
         def __init__(self, in_features: int, hidden: int = 64, dropout: float = 0.1,
-                     return_aux: bool = False, recon_out_features: Optional[int] = None):
+                     return_aux: bool = False, recon_out_features: int | None = None):
             super().__init__()
             self.return_aux = bool(return_aux)
             h2 = max(hidden // 2, 16)
@@ -183,7 +212,7 @@ if TORCH:
 
         def __init__(
             self,
-            class_weights: Optional[torch.Tensor] = None,
+            class_weights: torch.Tensor | None = None,
             w_dir:       float = 1.0,
             w_ret:       float = 0.5,
             w_conf:      float = 0.3,
@@ -192,20 +221,26 @@ if TORCH:
             entropy_weight: float = 0.0,
             direction_weight_floor: float = 0.0,
             focal_gamma: float = 0.0,
-            class_prior: Optional[torch.Tensor] = None,
+            class_prior: torch.Tensor | None = None,
             w_sharpe:    float = 0.0,
             sharpe_ann:  float = 1.0,
             sharpe_eps:  float = 1e-8,
+            label_smoothing: float = 0.05,
         ):
             super().__init__()
-            self.ce    = nn.CrossEntropyLoss(weight=class_weights, reduction="none", label_smoothing=0.05)
+            self.ce    = nn.CrossEntropyLoss(
+                weight=class_weights,
+                reduction="none",
+                label_smoothing=float(max(0.0, label_smoothing)),
+            )
             self.hub   = nn.HuberLoss(delta=huber_delta, reduction="none")
             self.bce   = nn.BCEWithLogitsLoss()   # AMP-safe; sigmoid is fused internally
             self.w_dir  = w_dir
             self.w_ret  = w_ret
             self.w_conf = w_conf
             self.w_sharpe = w_sharpe
-            self.sharpe_sqrt = float(torch.sqrt(torch.tensor(max(1.0, sharpe_ann))))
+            # sharpe_ann is already the sqrt-style annualization factor (e.g. 325).
+            self.sharpe_sqrt = float(max(1.0, sharpe_ann))
             self.sharpe_eps = sharpe_eps
             self.class_balance_weight = float(class_balance_weight)
             self.entropy_weight = float(entropy_weight)
@@ -223,11 +258,11 @@ if TORCH:
             conf:    torch.Tensor,  # (B,)
             y_cls:   torch.Tensor,  # (B,) long {0,1,2}
             y_cont:  torch.Tensor,  # (B,) float continuous reward
-            y_conf:  Optional[torch.Tensor] = None,  # path_quality / confidence target / trade weight
-            recon_hat: Optional[torch.Tensor] = None,
-            recon_tgt: Optional[torch.Tensor] = None,
-            vol_hat: Optional[torch.Tensor] = None,
-            vol_tgt: Optional[torch.Tensor] = None,
+            y_conf:  torch.Tensor | None = None,  # path_quality / confidence target / trade weight
+            recon_hat: torch.Tensor | None = None,
+            recon_tgt: torch.Tensor | None = None,
+            vol_hat: torch.Tensor | None = None,
+            vol_tgt: torch.Tensor | None = None,
         ) -> torch.Tensor:
             y_flat = y_cls.reshape(-1).clamp(0, 2)
             l_dir  = self.ce(logits, y_flat)
@@ -238,8 +273,12 @@ if TORCH:
                 l_dir = l_dir * focal
             l_ret  = self.hub(ret_hat, y_cont)
             l_dir_per_sample = l_dir
-            
+
             if y_conf is not None:
+                # y_conf is the confidence / path-quality *target* for BCE.
+                # It is also used as a soft sample weight for dir/ret when provided
+                # (path_quality convention). Callers that only want a BCE target
+                # without reweighting should pass y_conf=None and rely on |y_cont|.
                 weight = y_conf.clamp(0.0, 1.0)
                 dir_weight = weight.clamp_min(self.direction_weight_floor)
                 weighted_l_dir = l_dir_per_sample * dir_weight
@@ -256,7 +295,8 @@ if TORCH:
             l_conf = self.bce(conf, conf_tgt)
             loss = self.w_dir * l_dir + self.w_ret * l_ret + self.w_conf * l_conf
             if self.w_sharpe > 0.0:
-                direction = torch.tanh(ret_hat)
+                # Softsign: avoids tanh vanishing grads on confident ret_hat.
+                direction = ret_hat / (1.0 + ret_hat.abs())
                 returns = (direction * y_cont).flatten()
                 mean = returns.mean()
                 var = returns.var(unbiased=False)
@@ -358,7 +398,7 @@ if TORCH:
             proj_to:        int   = 256,
             force_project:  bool  = False,
             return_aux:     bool  = False,
-            recon_out_features: Optional[int] = None,
+            recon_out_features: int | None = None,
         ):
             super().__init__()
             self.backbone = backbone
@@ -565,18 +605,18 @@ if TORCH:
                     xj = close_feat[..., j]
                     sc = self._rolling_corr(xi, xj, self.corr_window).unsqueeze(-1)
                     lc = self._rolling_corr(xi, xj, self.corr_window_long).unsqueeze(-1)
-                    
+
                     if self.training and self.corr_dropout_p > 0.0:
                         xi_c = xi - xi.mean(dim=-1, keepdim=True)
                         xj_c = xj - xj.mean(dim=-1, keepdim=True)
                         pair_corr = (xi_c * xj_c).sum(dim=-1) / (xi_c.norm(dim=-1) * xj_c.norm(dim=-1)).clamp(min=1e-8)
-                        
+
                         drop = (pair_corr.abs() > 0.90) & (torch.rand_like(pair_corr) < self.corr_dropout_p)
                         drop = drop.view(-1, 1, 1).expand_as(sc)
-                        
+
                         sc = sc.masked_fill(drop, 0.0)
                         lc = lc.masked_fill(drop, 0.0)
-                        
+
                     short_corr_parts.append(sc)
                     long_corr_parts.append(lc)
             if short_corr_parts:
@@ -662,11 +702,14 @@ if TORCH:
         Temporal Fusion Transformer for multi-horizon forex forecasting.
         Uses Variable Selection Networks to identify which features matter,
         LSTM for local sequential patterns, and Self-Attention for long-range.
+        Pre-norm residual blocks (TM-012) for training stability.
         """
         def __init__(self, input_size=64, hidden=128, heads=4,
-                     lstm_layers=2, dropout=0.1, num_classes=1):
+                     lstm_layers=2, dropout=0.1, num_classes=1,
+                     use_gradient_checkpointing: bool = True):
             super().__init__()
             self.num_classes = num_classes
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.vsn     = VariableSelectionNetwork(input_size, hidden, dropout)
             self.lstm    = nn.LSTM(input_size, hidden, lstm_layers,
                                    batch_first=True, dropout=dropout)
@@ -676,14 +719,24 @@ if TORCH:
                                          nn.Dropout(dropout),nn.Linear(hidden*2,hidden))
             self.norm2   = nn.LayerNorm(hidden)
             self.head    = nn.Linear(hidden, num_classes)
+            _kaiming_init_module(self)
+
+        def _attn_block(self, h):
+            return h + self.attn(self.norm1(h))
+
+        def _ffn_block(self, h):
+            return h + self.ffn(self.norm2(h))
 
         def forward(self, x):
-            # x: (B, T, F)
+            # x: (B, T, F) — pre-norm: x + f(norm(x))
             x_sel, _ = self.vsn(x)
             lstm_out, _ = self.lstm(x_sel)
-            attn_out = self.attn(lstm_out)
-            h = self.norm1(lstm_out + attn_out)
-            h = self.norm2(h + self.ffn(h))
+            h = _maybe_checkpoint(
+                self._attn_block, lstm_out, enabled=self.use_gradient_checkpointing,
+            )
+            h = _maybe_checkpoint(
+                self._ffn_block, h, enabled=self.use_gradient_checkpointing,
+            )
             out = self.head(h[:, -1, :])
             if isinstance(self.head, nn.Identity):
                 return out
@@ -699,10 +752,12 @@ if TORCH:
         Outperforms standard time-dimension Transformers on multivariate series.
         """
         def __init__(self, input_size=64, seq_len=60, d_model=128,
-                     nhead=8, num_layers=3, dim_ff=256, dropout=0.1, num_classes=1):
+                     nhead=8, num_layers=3, dim_ff=256, dropout=0.1, num_classes=1,
+                     use_gradient_checkpointing: bool = True):
             super().__init__()
             self.num_classes = num_classes
             self.seq_len = seq_len
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             # Project each variate's time-series into d_model token
             self.variate_proj = nn.Linear(seq_len, d_model)
             encoder_layer = nn.TransformerEncoderLayer(
@@ -711,24 +766,28 @@ if TORCH:
             self.encoder  = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
             self.head     = nn.Linear(d_model * input_size, num_classes)
             self.input_size = input_size
+            _kaiming_init_module(self)
 
         def forward(self, x):
             # x: (B, T, F)  ->  treat F as sequence, T as embedding
             B, T, n_feat = x.shape
             tokens = x.permute(0, 2, 1)          # (B, F, T)
             # Curriculum may slice T below build-time seq_len; resample to match variate_proj.
-            if T != self.seq_len:
+            if self.seq_len != T:
                 tokens = F.interpolate(
                     tokens, size=self.seq_len, mode="linear", align_corners=False,
                 )
             tokens = self.variate_proj(tokens)    # (B, F, d_model)
-            out    = self.encoder(tokens)         # (B, F, d_model)
-            out    = out.reshape(B, -1)           # (B, F*d_model)
-            o = self.head(out)
+            out = _maybe_checkpoint(
+                self.encoder, tokens, enabled=self.use_gradient_checkpointing,
+            )
+            # When head is Identity (MultiTaskWrapper), mean-pool variates to
+            # (B, d_model) instead of materializing (B, F*d_model).
             if isinstance(self.head, nn.Identity):
-                return o
+                return out.mean(dim=1)
+            out = out.reshape(B, -1)           # (B, F*d_model)
+            o = self.head(out)
             return o.squeeze(-1) if self.num_classes == 1 else o
-
     # ── 3. HAELT Hybrid (LSTM + Transformer in parallel) ──────────────────
 
     class HAELTHybrid(nn.Module):
@@ -739,9 +798,11 @@ if TORCH:
         fused with a learned attention gate.
         """
         def __init__(self, input_size=64, seq_len=60, lstm_hidden=64,
-                     d_model=64, nhead=4, n_layers=2, dropout=0.1, num_classes=1):
+                     d_model=64, nhead=4, n_layers=2, dropout=0.1, num_classes=1,
+                     use_gradient_checkpointing: bool = True):
             super().__init__()
             self.num_classes = num_classes
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.lstm = nn.LSTM(input_size, lstm_hidden, 2, batch_first=True, dropout=dropout)
             self.proj = nn.Linear(input_size, d_model)
             enc = nn.TransformerEncoderLayer(d_model, nhead, d_model*4,
@@ -756,14 +817,7 @@ if TORCH:
             self._init_weights()
 
         def _init_weights(self):
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-                elif isinstance(m, nn.LayerNorm):
-                    nn.init.ones_(m.weight)
-                    nn.init.zeros_(m.bias)
+            _kaiming_init_module(self)
 
         def forward(self, x):
             # PIPE-006: soft clipping via tanh scaling instead of hard clamp at ±10
@@ -773,7 +827,9 @@ if TORCH:
             lout, _ = self.lstm(x)
             attn_w_l = torch.softmax(self.attn_pool_lstm(lout), dim=1)
             lf = (lout * attn_w_l).sum(dim=1)
-            tout = self.trf(self.proj(x))
+            tout = _maybe_checkpoint(
+                self.trf, self.proj(x), enabled=self.use_gradient_checkpointing,
+            )
             attn_w_t = torch.softmax(self.attn_pool_trf(tout), dim=1)
             tf = (tout * attn_w_t).sum(dim=1)
             c  = torch.cat([lf, tf], dim=-1)
@@ -810,19 +866,20 @@ if TORCH:
             self.C        = nn.Linear(d_inner, d_state, bias=False)
 
         def forward(self, x):
-            # x: (B, T, d_model)
+            # x: (B, T, d_model) — pre-norm residual (TM-012)
             B, T, D = x.shape
             res   = x
-            xz    = self.in_proj(x)           # (B, T, d_inner*2)
+            x_n   = self.norm(x)
+            xz    = self.in_proj(x_n)         # (B, T, d_inner*2)
             x2, z = xz.chunk(2, dim=-1)       # each (B, T, d_inner)
             # 1D conv along time (causal)
             x2c   = self.conv1d(x2.permute(0,2,1))[:, :, :T].permute(0,2,1)
             x2c   = self.act(x2c)
-            # Simplified SSM (linear recurrence approximation)
+            # Simplified SSM (linear recurrence approximation); softplus dt (TM-009)
             y     = x2c * F.softplus(self.dt_proj(x2c))
             y     = y * torch.sigmoid(z)      # gating
             out   = self.out_proj(y)
-            return self.norm(out + res)
+            return res + self.drop(out)
 
     class MambaScalper(nn.Module):
         """
@@ -841,6 +898,7 @@ if TORCH:
             ])
             self.norm = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, num_classes)
+            _kaiming_init_module(self)
 
         def forward(self, x):
             h = self.embed(x)
@@ -876,18 +934,21 @@ if TORCH:
             self.norms = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(num_layers)])
             self.head  = nn.Linear(hidden * n_nodes, num_classes)
             self.drop  = nn.Dropout(dropout)
+            _kaiming_init_module(self)
 
         def forward(self, x, adj=None):
             """
             x  : (B, n_nodes, node_features) — one feature vector per node per bar
             adj: ignored (kept for API compatibility); edge weights are learned via adj_logits.
+            Pre-norm message passing (TM-012).
             """
             h = self.node_embed(x)          # (B, N, hidden)
             A = torch.sigmoid(self.adj_logits).unsqueeze(0).expand(h.shape[0], -1, -1)
             for attn, norm in zip(self.attn_layers, self.norms):
-                h_mix = torch.einsum("bnm,bmh->bnh", A, h)
+                h_n = norm(h)
+                h_mix = torch.einsum("bnm,bmh->bnh", A, h_n)
                 out = attn(h_mix)
-                h = norm(h + self.drop(out))
+                h = h + self.drop(out)
             o = self.head(h.reshape(h.shape[0], -1))
             # MultiTaskWrapper sets head to Identity to expose (B, D). Never squeeze in that
             # case: num_classes==1 + squeeze(-1) would turn (B, 1) into (B,) and breaks BYOL.
@@ -942,11 +1003,12 @@ if TORCH:
             self.act   = nn.GELU()
 
         def forward(self, x):
-            # x: (B, T, D)
-            h = x.permute(0,2,1)
+            # x: (B, T, D) — pre-norm residual (TM-012)
+            x_n = self.norm(x)
+            h = x_n.permute(0,2,1)
             h = self.act(self.conv1(h))
             h = self.drop(self.conv2(h))
-            return self.norm(x + h.permute(0,2,1))
+            return x + h.permute(0,2,1)
 
     class EXPERTEncoder(nn.Module):
         """
@@ -958,9 +1020,11 @@ if TORCH:
         Focused architecture makes it more data-efficient than general Transformers.
         """
         def __init__(self, input_size=64, d_model=128, nhead=8,
-                     num_layers=4, dropout=0.1, num_classes=1):
+                     num_layers=4, dropout=0.1, num_classes=1,
+                     use_gradient_checkpointing: bool = True):
             super().__init__()
             self.num_classes = num_classes
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.proj   = nn.Linear(input_size, d_model)
             # No positional encoding by design
             self.layers = nn.ModuleList([
@@ -973,13 +1037,22 @@ if TORCH:
             ])
             self.pool = nn.AdaptiveAvgPool1d(1)
             self.head = nn.Linear(d_model, num_classes)
+            _kaiming_init_module(self)
+
+        def _layer_forward(self, layer, h):
+            # Pre-norm attention + ConvFFN (which is itself pre-norm)
+            h = h + layer["attn"](layer["norm1"](h))
+            return layer["ffn"](h)
 
         def forward(self, x):
             h = self.proj(x)
             for layer in self.layers:
-                attn_out = layer["attn"](h)
-                h = layer["norm1"](h + attn_out)
-                h = layer["ffn"](h)
+                # Capture layer in default-arg closure for checkpoint safety.
+                def _run(t, _layer=layer):
+                    return self._layer_forward(_layer, t)
+                h = _maybe_checkpoint(
+                    _run, h, enabled=self.use_gradient_checkpointing,
+                )
             h = self.pool(h.permute(0,2,1)).squeeze(-1)
             o = self.head(h)
             if isinstance(self.head, nn.Identity):
@@ -1023,7 +1096,7 @@ if TORCH:
             self,
             weight:         float = 0.10,
             same_role_mult: float = 2.0,   # extra penalty for same-role pairs
-            roles:          Optional[list] = None,   # list of role strings, one per model
+            roles:          list | None = None,   # list of role strings, one per model
         ):
             super().__init__()
             self.weight         = float(weight)
@@ -1183,7 +1256,7 @@ if TORCH:
         "expert":      EXPERTEncoder,
     }
 
-    def build_model(name: str, input_size: int, seq_len: Optional[Any] = 60, **kwargs) -> nn.Module:
+    def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) -> nn.Module:
         """
         Model factory with automatic hyperparameter filtering.
         Handles both explicit kwargs and argparse.Namespace objects.
@@ -1202,7 +1275,7 @@ if TORCH:
         # 2. Extract valid hyperparameters from the model's signature
         sig = inspect.signature(cls.__init__)
         params = sig.parameters
-        
+
         # Merge input_size and seq_len into kwargs if expected but not present
         if "input_size" in params and "input_size" not in kwargs:
             kwargs["input_size"] = input_size
@@ -1237,7 +1310,7 @@ if TORCH:
 
         # Filter kwargs to only include what the constructor accepts
         valid_kwargs = {k: v for k, v in kwargs.items() if k in params}
-        
+
         try:
             model = cls(**valid_kwargs)
         except TypeError as e:

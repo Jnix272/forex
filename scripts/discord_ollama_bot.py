@@ -31,7 +31,6 @@ from typing import Any
 
 import aiohttp
 
-
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 CHECKPOINT_DIR = ROOT / "checkpoints"

@@ -5,7 +5,6 @@ import time
 
 import duckdb
 
-
 DEFAULT_INPUTS = [
     "data/raw/news/Hugging_Face.csv",
     "data/raw/news/historical_news_2021_2025.csv",

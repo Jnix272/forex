@@ -30,6 +30,8 @@ import torch
 import torch.nn as nn
 
 from models.architectures import (
+    MODEL_ROLES,
+    DiversityLoss,
     EXPERTEncoder,
     GNNFromSequence,
     HAELTHybrid,
@@ -37,8 +39,6 @@ from models.architectures import (
     MultiPairWrapper,
     TFTScalper,
     iTransformerScalper,
-    DiversityLoss,
-    MODEL_ROLES,
 )
 
 # ── shared fixtures ───────────────────────────────────────────────────────────

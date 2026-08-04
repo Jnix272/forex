@@ -1,5 +1,184 @@
 ---
 
+## Session — 2026-08-04 — Training cache / loop perf
+
+**Summary:** Four training I/O + optimizer remediations:
+
+1. **Polars-first `_build_chunk`** — FE / win_start / feature mask / news_ok stay Polars; one-way pandas bridge only for labeling + row quality; `align_labels_with_features` Polars path; HTF context rewritten without Polars→Pandas→Polars (`features/feature_engineering_pl.py`).
+2. **Mixed-precision Zarr** — feature array `X` stored as FP16 (`ZARR_FEATURE_DTYPE`); labels/close/ATR/spread stay FP32. Readers already upcast to FP32.
+3. **Fused AdamW** — `training/gpu_device.build_adamw()` prefers `torch.optim.AdamW(fused=True)`, then apex `FusedAdamW`/`FusedAdam(adam_w_mode=True)`, else eager. Wired in supervised loop + `run_diversity_finetune`.
+4. **Linux Zarr compression** — `default_zarr_compression()` → **lz4@1** on Linux (local FS), **zstd@3** elsewhere; `cname=auto` supported. `run_ubuntu.yaml` + ubuntu hardware profiles set lz4/1; `run.yaml` uses auto.
+
+**Verify:** `uv run pytest tests/test_zarr_prefetch.py tests/test_fused_adamw.py tests/test_model_full_data_flow.py tests/test_ds002_warmup_and_pit.py -q`
+
+---
+
+## Session — 2026-08-04 — Curriculum / GPU util modules 26–36
+
+**Summary:** Audited training modules 26–36 (curriculum → feature_ablation). Fixed `SharpeProxyLoss` / `MultiTaskLoss` Sharpe direction: softsign instead of `tanh` (TPA-S04). Mapped `distillation.student_model` in `_YAML_MAP` when KD enabled. Confirmed `gpu_cli._HOST_DEPS` already slim and `direction_control` binds epoch helpers from `supervised_loop` (no train_gpu cycle for those symbols). Documented in [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md) “Module slice 26–36”; CONTINUE + CHANGELOG updated.
+
+**Verify:** `uv run pytest tests/test_gpu_losses.py tests/test_curriculum_audit.py -q` (17 passed)
+
+---
+
+## Session — 2026-08-04 — Latency + GPU util stubs closed
+
+**Summary:** `BrokerBridge.get_latency` for MT5 (terminal ping / tick RTT) and IBKR (`ib_insync` + `reqCurrentTime`); IBKR connect/orders soft-depend on `ib_insync`; `_StageTimer` GPU util/temp/mem → `run_manifest.gpu_stats` and `stage_timings.jsonl`; train_logger `_gpu_stats` includes util.
+
+**Verify:** `uv run pytest tests/test_audit_remaining_fixes.py -q`
+
+---
+
+## Session — 2026-08-04 — Remaining audit backlog closed
+
+**Summary:** Tabular XGB/CatBoost purged/embargoed CV via `cv_splits`; pretrain guardrails + handoff gate wired; stage wall-clock timings in `train_gpu` manifest/JSONL; BrokerBridge fail-closed; live CLI refuses non-paper without promotion gate.
+
+**Verify:** `uv run pytest tests/test_audit_remaining_fixes.py tests/test_ds002_warmup_and_pit.py tests/test_training_smoke.py -q`
+
+---
+
+## Session — 2026-08-04 — DS-002 warmup + news PIT
+
+**Summary:** Unified feature warmup (`_FEATURE_WARMUP_DAYS=14`) on multipair sequential, parallel workers, and single-pair real-data paths; pass `win_start` so warmup is sliced before labels. News/sentiment/art_counts/cats/FinBERT now join on `available_time` (+1m default); `news_ok` kill-zone is post-release only. Cache tag includes `wu14`.
+
+**Verify:** `uv run pytest tests/test_ds002_warmup_and_pit.py tests/test_training_smoke.py -q`
+
+---
+
+## Session — 2026-08-04 — Training Top-5 remediation
+
+**Summary:** Implemented Top 5 from [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md): CLI `timedelta`/`_settings`/`all_models` default; CatBoost shell + native params; regime bid/ask exits + `lexit-bid_ask` cache tag; ensemble meta trainable-prefix sampling; embargo floor; promotion `gate_input_type`; smoke schema-gate opt-out; multitask Sharpe ann; YAML warmup/pretrain epoch sync.
+
+**Verify:** `uv run python -m training.train_gpu --validate-config --config config/run.yaml` OK; 92 targeted tests passed.
+
+---
+
+## Session — 2026-08-04 — Full training pipeline audit
+
+**Summary:** Stage-by-stage audit of model training post-`train_gpu` split. Living report: [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md). Linked from CONTINUE + README. Top P0s remediated in follow-up session (see above).
+
+---
+
+## Session — 2026-08-04 ~21:05 UTC — Docs consolidation
+
+**Summary:** Removed / merged docs. Living set: README, CONTINUE (includes train_gpu split), CONFIG_CONSISTENCY, IMPROVEMENT_PLAN, NEWS_DATA_GUIDE, SESSION_REPORT. Historical audits → `docs/archive/`. Deleted `TRAIN_GPU_SPLIT.md`. Root `improvement_plan.md` → stub.
+
+---
+
+## Session — 2026-08-04 ~21:00 UTC — Config consistency docs + multi-part gates
+
+**Summary:** Documented and tightened settings↔YAML / curriculum / dataset schema checks. Added operator guide `docs/CONFIG_CONSISTENCY.md`; rewrote `docs/CONTINUE.md` from a completed backlog dump into a short “read first / just landed / next” tracker.
+
+**Shipped earlier in this thread (code):**
+- `config/curriculum_audit.py` — curriculum vs schema, market columns, settings↔YAML curriculum drift, built-schema audit
+- `config/config_mismatch_audit.py` — section shared-key mismatches + args↔YAML
+- Dataset build multi-part gate in `training/dataset_builder.py` (`built_schema`, `settings_yaml`, `args_yaml`) → `*_feature_schema_audit.json`
+- Preflight wiring in `training/config_validate.py`; train-time warnings in `supervised_loop.py`
+- Critical `settings.py` values synced to `run.yaml` (curriculum stubs, `seq_len`/`loss`/`sharpe_annualization_factor`, `atr_stop_mult`, `reward.overtrade`)
+
+**Verify:** `uv run pytest tests/test_curriculum_audit.py -q`
+
+**Docs:** `docs/CONFIG_CONSISTENCY.md`, `docs/CONTINUE.md`, `docs/IMPROVEMENT_PLAN.md` (cross-link)
+
+---
+
+## Commit `b02ce9c` — 2026-08-04 18:06 UTC
+**Author:** jamie  
+**Message:** Implement 6 remaining improvement items (Risk Controls, Metrics, Data drift, Model drift, Audit, Alerting) + wiring
+
+**Files changed:**
+```
+CHANGELOG.md
+audit/__init__.py
+audit/lineage.py
+audit/manifest.py
+backtesting/execution.py
+backtesting/improvements.py
+config/config_schema.py
+config/run.yaml
+config/settings.py
+data/data_ingestion.py
+data/fetch_oanda_sentiment.py
+data/sources.py
+docs/CONTINUE.md
+docs/IMPROVEMENT_PLAN.md
+docs/SESSION_REPORT.md
+drift/__init__.py
+drift/data_drift.py
+drift/model_drift.py
+evaluation/__init__.py
+evaluation/metrics.py
+evaluation/monte_carlo.py
+features/cross_asset_factors.py
+features/feature_engineering_pl.py
+features/feature_quality_monitor.py
+features/no_trade_zones.py
+features/regime_detection.py
+features/sentiment_fusion.py
+features/streaming_pipeline.py
+infrastructure/docker-compose.streaming.yml
+labeling/off_policy_rewards.py
+labeling/triple_barrier_meta.py
+models/rl_agents.py
+monitoring/alerting.py
+monitoring/pipeline.py
+pretrain/multi_task.py
+pyproject.toml
+requirements-base.txt
+risk/fx_greeks.py
+risk/portfolio_monitor.py
+risk/risk_engine.py
+scripts/backtest_model.py
+scripts/check_all_data.py
+scripts/merge_massive_datasets.py
+scripts/optuna_tune.py
+scripts/pump_redpanda.py
+scripts/rebuild_all_news.sh
+scripts/run_feature_engineering.py
+scripts/run_pipeline.py
+scripts/scrape_forexlive.py
+tests/test_alerting.py
+tests/test_audit.py
+tests/test_backtest_wiring.py
+tests/test_cross_asset_factors.py
+tests/test_curriculum.py
+tests/test_cv.py
+tests/test_data_drift.py
+tests/test_data_ingestion.py
+tests/test_feature_pipeline.py
+tests/test_feature_quality_monitor.py
+tests/test_fx_greeks.py
+tests/test_hpo.py
+tests/test_live_safety_promotion.py
+tests/test_memory_management.py
+tests/test_metrics.py
+tests/test_model_drift.py
+tests/test_monte_carlo.py
+tests/test_multi_task.py
+tests/test_no_trade_zones.py
+tests/test_off_policy_rewards.py
+tests/test_portfolio_monitor.py
+tests/test_regime_detection.py
+tests/test_risk_engine.py
+tests/test_rl_off_policy.py
+tests/test_sentiment_fusion.py
+tests/test_streaming_pipeline.py
+tests/test_triple_barrier_meta.py
+trading/live_engine.py
+trading/live_guards.py
+training/adversarial_generator.py
+training/curriculum.py
+training/ewc.py
+training/hpo.py
+training/memory_management.py
+training/train_gpu.py
+training/train_xgboost.py
+uv.lock
+validation/cv.py
+```
+
+---
+
 ## Session — 2026-08-04 16:46 UTC
 **Summary:** Wired the standalone improvement modules into production entry points as opt-in, behavior-preserving CLI flags, then added the final Monte Carlo facade. Completed the A1/A2/B1/B2/C1/C2/C3/C4/D1/D2 wiring items from `docs/CONTINUE.md`.
 
@@ -54,6 +233,105 @@
 - Combined regression suite incl. `tests/test_feature_pipeline.py tests/test_labeling_pipeline.py tests/test_monte_carlo.py` → 212 passed
 - Pre-existing collection errors in `tests/test_system.py` (`cannot import name 'MODELS'`) and `tests/test_streaming_pipeline.py` (`cannot import name 'FeatureState'`) remain; full-suite run still times out so targeted suites are used.
 
+---
+
+## Session — 2026-08-04 19:15 UTC
+**Summary:** Closed the open items from `docs/FULL_AUDIT_REPORT.md` (P0/P1/P2 correctness + broken test collection) and remaining training-model audit hardening (init, pre-norm, checkpointing, label smoothing, compile unwrap, CV purge, empty-split fail-hard). Real-data e2e and the previously failing smoke suites are green.
+
+- **P0 `sanitize_array`** — `infrastructure/numerics.py` coerces empty strings / non-numeric via `pd.to_numeric(errors="coerce")`; training smoke + model full-data flow no longer crash on Dukascopy `''`.
+- **P0 OANDA netting** — `trading/live_engine.py` `get_positions`: `long_u - abs(short_u)` (handles positive short magnitude fixtures/feeds).
+- **P1 bad-tick spikes** — `data/data_ingestion.py` `clean_bad_ticks`: lag-1 rolling mean/std/median/MAD + `.fill_null(False)` on outlier/spread flags so injected spikes are replaced.
+- **P1 RegimeCV** — `validation/cv.py`: after per-regime fold build, drop train indices within `purge` of any val index (global temporal adjacency).
+- **P2 test collection** — `tests/test_system.py` remove stale `settings.MODELS`; `tests/test_streaming_pipeline.py` rewritten for current Bytewax exports; `MarketTick.to_dict()`.
+- **P2 dual `sanitize_frame`** — numerics path gains `_SANITIZE_NO_CLIP` (bid/ask/mid/OHLCV/spread/COT) matching the feature-engineering contract.
+- **CombCV purge/embargo** — implemented block ban around test folds; `tests/test_cv.py::test_comb_cv_purge_embargo_gap` added.
+- **Training hardening** — architectures: shared init + pre-norm + optional grad checkpoint; `MultiTaskLoss` label_smoothing; ensemble dead `diversity_loss` removed; `train_gpu`: `_core_model` / load strip `_orig_mod`, empty-split `RuntimeError`, dual best-metric trackers, quick-mode soft direction gates, `sidecar` always bound across WF folds, `_FIRST_CHUNK_COLS` reset + order reindex; `position_limit_flags(..., pair=pair)`.
+
+**Files changed:**
+- `infrastructure/numerics.py`, `data/data_ingestion.py`, `trading/live_engine.py`, `validation/cv.py`, `models/architectures.py`, `models/ensemble.py`, `features/feature_engineering_pl.py`, `features/streaming_pipeline.py`, `training/train_gpu.py`
+- `tests/test_finite_guard.py`, `tests/test_system.py`, `tests/test_streaming_pipeline.py`, `tests/test_cv.py`, `tests/test_model_full_data_flow.py`
+- `CHANGELOG.md`, `docs/SESSION_REPORT.md`
+
+**Validation:**
+- `tests/test_finite_guard.py` + OANDA netting + bad-tick spike + RegimeCV + system + streaming → 27 passed
+- `tests/test_training_smoke.py` → 3 passed
+- `tests/test_model_full_data_flow.py` → 7 passed (incl. after training-smoke order)
+- `tests/test_e2e_real_data.py::test_full_pipeline_with_real_data` → 1 passed
+- `tests/test_cv.py` + `tests/test_feature_pipeline.py` → 53 passed
+- `tests/test_model_behavior.py` + models/ensemble deep → 160 passed (prior session)
+
+**Notes:**
+- Full-suite ruff / monolith split (P3) not in scope this session.
+- Live P0s (PaperBroker fallback, RiskEngine, `stop_loss_atr`) closed in session 19:30 UTC.
+
+---
+
+## Session — 2026-08-04 20:25 UTC
+**Summary:** Optional final thinning — device/preflight, expanded direction helpers, feature ablation.
+
+- New/expanded: `training/gpu_device.py`, `direction_control.py` (~490), `feature_ablation.py`; `_strict_load_report` → `model_factory.py`
+- `train_gpu.py` **2,961 → ~2,190** lines (−85% from original 15,017)
+- Tracker marks split **complete**
+- Smoke: `tests/test_training_smoke.py` + `tests/test_cv.py` → 35 passed
+
+---
+
+## Session — 2026-08-04 20:20 UTC
+**Summary:** Final planned `train_gpu` carve-outs — cache integrity, model factory, post-train (ensemble/gate/auto-tune).
+
+- New: `training/cache_integrity.py`, `model_factory.py`, `post_train.py`
+- `train_gpu.py` **5,392 → 2,961** lines (−80% from original 15,017)
+- Tracker: `docs/TRAIN_GPU_SPLIT.md`
+- Smoke: `tests/test_training_smoke.py` + `tests/test_cv.py` → 35 passed
+
+---
+
+## Session — 2026-08-04 20:15 UTC
+**Summary:** Finished planned `train_gpu` split — CLI, CV, pretrain, RL modules; tracker updated.
+
+- New: `training/gpu_cli.py`, `cv_splits.py`, `pretrain_runner.py`, `rl_runner.py`
+- `train_gpu.py` **8,884 → 5,392** lines
+- Tracker: `docs/TRAIN_GPU_SPLIT.md`
+- Smoke: `tests/test_training_smoke.py` → 3 passed
+
+---
+
+## Session — 2026-08-04 20:05 UTC
+**Summary:** Continued `train_gpu.py` split — extracted `dataset_builder` + `supervised_loop`; added tracker doc.
+
+- New: `training/dataset_builder.py`, `training/supervised_loop.py`, `docs/TRAIN_GPU_SPLIT.md`
+- `train_gpu.py` **15,017 → 8,884** lines; re-exports + `bind_host` / `_ensure_bound` for cycle-safe helpers
+- Smoke: `tests/test_training_smoke.py` → 3 passed
+
+---
+
+## Session — 2026-08-04 19:43 UTC
+**Summary:** Closed audit **P3** — ruff + pyright project wiring, critical undefined-name fixes, and first real split of `training/train_gpu.py` into focused modules (losses / cache I/O / datasets / direction gates) with back-compat re-exports.
+
+- **Ruff** — `[tool.ruff]` high-signal rule set; autofix already applied earlier; remaining critical F821/F601/F811/E722 fixed (alerting, demotion, curriculum, regime annotations, feature timezone, execution engine duplicates, train_gpu AMP/`np` issues).
+- **Pyright** — `[tool.pyright]` + `pyrightconfig.json`; `pyright` in `dependency-groups.dev`; gradual mode (assignment/return/attr issues as warnings). `uv run pyright` → 0 errors.
+- **Split** — new `training/gpu_losses.py`, `gpu_cache_io.py`, `gpu_datasets.py`, `direction_control.py`; `train_gpu.py` ~15.0k lines (was ~15.5k) and still re-exports symbols for `train_min` / `scale_model` / scripts.
+
+**Validation:**
+- `uv run pyright` → 0 errors, 65 warnings
+- `tests/test_curriculum.py` + `test_regime_detection.py` + `test_alerting.py` + `test_feature_pipeline.py` → 81 passed
+
+---
+
+## Session — 2026-08-04 19:30 UTC
+**Summary:** Closed remaining live-trading and feature look-ahead bugs left after the audit P0/P1 pass: PaperBroker fallback, RiskEngine live wiring, ATR stop-loss, OANDA equity fetch, JPY pip scale, causal HMM, eco available_time join.
+
+- **PaperBroker** — fail hard on connect/pricing failure unless `--allow-paper-fallback` or `--broker paper`.
+- **RiskEngine** — attached by default; pre-trade `check_order`, post-bar `update_equity` + flatten on circuit breaker; `RiskEngine.new_day()`; `--risk-config`.
+- **stop_loss_atr** — live ATR stop flatten + journal.
+- **OANDA get_account** — raise instead of `{}` so stale-equity halt works.
+- **JPY pips** — `price_to_pips()` / `get_pip_size` in safety gate + spread guard.
+- **HMM** — warm-start fit + 1-bar lag; causal rolling vol (no `convolve(..., mode="same")`).
+- **Eco PIT** — `available_time` (or event+1min) asof join.
+
+**Validation:** `tests/test_live_safety_promotion.py` + `tests/test_risk_engine.py` + `tests/test_regime_detection.py` → 51 passed.
+
+---
 
 ## Manual Update — 2026-08-04 03:56 UTC
 **Author:** jamie  

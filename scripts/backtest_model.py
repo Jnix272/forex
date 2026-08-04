@@ -1,7 +1,7 @@
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +21,8 @@ from data.news_feed import get_latest_headlines
 from features.advanced_features import AdvancedFeatureBuilder
 from features.feature_engineering import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
-from training.train_gpu import build_model
 from models.ensemble import EnsembleMetaLearner
+from training.train_gpu import build_model
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
 PIP_SIZES = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001, "EURGBP": 0.0001, "NZDUSD": 0.0001, "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01}
@@ -217,8 +217,8 @@ def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls
     profitable. Returns (None, None) when training is impossible.
     """
     try:
-        from labeling.triple_barrier_meta import MetaLabeler, MetaLabelConfig
         from labeling.triple_barrier_labeling import compute_triple_barrier_labels
+        from labeling.triple_barrier_meta import MetaLabelConfig, MetaLabeler
 
         cls = np.asarray(cls)
         n_pred = len(cls)
@@ -399,7 +399,7 @@ def _advanced_execution_overlay(args, base_bars, signals):
                                            spread=0.0002, volatility=0.001)
                 for _ in range(16)
             ])), 4),
-            "overlay_applied_to_n_signals": int(len(signals)),
+            "overlay_applied_to_n_signals": len(signals),
         }
         return mean_eff, meta
     except Exception as exc:
@@ -409,7 +409,7 @@ def _advanced_execution_overlay(args, base_bars, signals):
 
 def run_backtest():
     args = parse_args()
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     out_dir = Path("logs/backtests")
     wf_jsonl = out_dir / f"{args.model}_{run_id}_walkforward.jsonl"
     windows = [(args.start, args.end)] if not args.walk_forward else _build_windows(args.start, args.end, args.wf_window_days, args.wf_step_days)
@@ -544,21 +544,21 @@ def run_backtest():
                 take_profit = 0.0
             if act:
                 last_signal_i = i
-                
+
                 # Fractional Kelly Sizing
                 try:
                     from config.settings import SIZING
                     kelly_frac = SIZING.get("kelly_fraction", 0.25)
                 except ImportError:
                     kelly_frac = 0.25
-                
+
                 win_prob = float(conf[off])
                 reward_to_risk = take_pips / max(stop_pips, 1e-5)
                 if reward_to_risk > 0:
                     kelly_k = win_prob - ((1.0 - win_prob) / reward_to_risk)
                 else:
                     kelly_k = 0.0
-                
+
                 dynamic_lots = args.lots * max(0.0, kelly_k * kelly_frac)
                 # Ensure minimum lot size
                 dynamic_lots = max(0.01, dynamic_lots)
@@ -608,7 +608,7 @@ def run_backtest():
         norm_metrics = _normalize_backtest_metrics(metrics)
         mc = MonteCarloBacktest(n_simulations=args.mc_sims, initial_equity=args.equity).run_from_backtest(bt) if args.mc_sims > 0 and len(bt.trades) >= 5 else None
 
-        rec = {"ts": datetime.now(timezone.utc).isoformat(), "run_id": run_id, "component": "backtest", "event_type": "walkforward_window", "model": args.model, "window_index": idx, "window_start": ws, "window_end": we, "n_trades": norm_metrics["n_trades"], "sharpe": norm_metrics["sharpe"], "win_rate": norm_metrics["win_rate"], "max_drawdown": norm_metrics["max_drawdown"], "net_pnl": norm_metrics["net_pnl"]}
+        rec = {"ts": datetime.now(UTC).isoformat(), "run_id": run_id, "component": "backtest", "event_type": "walkforward_window", "model": args.model, "window_index": idx, "window_start": ws, "window_end": we, "n_trades": norm_metrics["n_trades"], "sharpe": norm_metrics["sharpe"], "win_rate": norm_metrics["win_rate"], "max_drawdown": norm_metrics["max_drawdown"], "net_pnl": norm_metrics["net_pnl"]}
         _append_jsonl(wf_jsonl, rec)
         wf_rows.append(rec)
         _send_discord_backtest({

@@ -70,14 +70,14 @@ def main() -> int:
             else:
                 download_args.append(arg)
                 train_args.append(arg)
-                
+
         # The correct script name is run_feature_engineering.py
         for script in ("download_all.py", "run_feature_engineering.py", "train.py", "run_backtest.py"):
             script_path = _ROOT / "scripts" / script
             if not script_path.exists():
                 print(f"[pipeline] Skipping {script} (not found)", flush=True)
                 continue
-                
+
             script_passthrough = download_args if script == "download_all.py" else train_args
             rc = _run_script(script, script_passthrough)
             if rc != 0:

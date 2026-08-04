@@ -33,12 +33,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
-
-_DEFAULT_PATH = Path("logs/training_memory.json")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_PATH = _REPO_ROOT / "logs" / "training_memory.json"
 
 # Maximum ratio by which a single run may nudge the recommended LR
 _MAX_LR_CHANGE = 0.5          # can halve or double in one step, but clamped below
@@ -62,7 +62,7 @@ class TrainingMemory:
 
     def __init__(self, path: str | Path = _DEFAULT_PATH):
         self.path = Path(path)
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
         self.load()
 
     # ── persistence ─────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ class TrainingMemory:
     def load(self) -> None:
         if self.path.exists():
             try:
-                with open(self.path, "r", encoding="utf-8") as f:
+                with open(self.path, encoding="utf-8") as f:
                     self._data = json.load(f)
                 print(f"[TrainingMemory] Loaded from {self.path}  "
                       f"(runs={self._data.get('total_runs', 0)}, "
@@ -83,7 +83,7 @@ class TrainingMemory:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._data["updated_at"] = datetime.now(UTC).isoformat()
         fd, tmp = tempfile.mkstemp(
             prefix=".training_memory.", suffix=".tmp", dir=str(self.path.parent)
         )
@@ -102,7 +102,7 @@ class TrainingMemory:
 
     # ── update ───────────────────────────────────────────────────────────────
 
-    def update(self, run_result: Dict[str, Any]) -> None:
+    def update(self, run_result: dict[str, Any]) -> None:
         """Record the outcome of a completed training run.
 
         Parameters
@@ -141,12 +141,12 @@ class TrainingMemory:
                 self._data["best_run"]     = run
                 self._data["best_epoch"]   = b_ep
 
-            sharpe_hist: List[float] = self._data.get("sharpe_history", [])
+            sharpe_hist: list[float] = self._data.get("sharpe_history", [])
             sharpe_hist.append(round(float(sharpe), 6))
             self._data["sharpe_history"] = sharpe_hist[-50:]   # keep last 50
 
         # epoch pattern
-        val_sharpe_curve: List[float] = hist.get("val_sharpe", [])
+        val_sharpe_curve: list[float] = hist.get("val_sharpe", [])
         if val_sharpe_curve and b_ep is not None and t_ep and t_ep > 0:
             peak_frac = b_ep / t_ep
             if peak_frac < 0.35:
@@ -203,7 +203,7 @@ class TrainingMemory:
         fc[key] = fc.get(key, 0) + 1
         self._data["failure_counts"] = fc
 
-    def _update_recommendations(self, run_result: Dict[str, Any]) -> None:
+    def _update_recommendations(self, run_result: dict[str, Any]) -> None:
         """Conservative hyperparameter nudges based on run outcome."""
         hist   = run_result.get("history") or {}
         b_ep   = run_result.get("best_epoch")
@@ -290,7 +290,7 @@ class TrainingMemory:
                 # Blend: move 50% toward recommendation
                 blended = cur + 0.50 * (rec_lr - cur)
                 blended = max(_LR_FLOOR, min(_LR_CEIL, blended))
-                setattr(args, "lr", blended)
+                args.lr = blended
                 applied.append(f"lr {cur:.2e} -> {blended:.2e} (rec={rec_lr:.2e})")
 
         if rec_do is not None and hasattr(args, "dropout"):
@@ -298,20 +298,20 @@ class TrainingMemory:
             if abs(cur - rec_do) > 0.02:
                 blended = cur + 0.50 * (rec_do - cur)
                 blended = max(_DO_FLOOR, min(_DO_CEIL, blended))
-                setattr(args, "dropout", round(blended, 4))
+                args.dropout = round(blended, 4)
                 applied.append(f"dropout {cur:.3f} -> {blended:.3f} (rec={rec_do:.3f})")
 
         if rec_pat is not None and hasattr(args, "patience"):
             cur = int(getattr(args, "patience", rec_pat))
             if cur != rec_pat:
-                setattr(args, "patience", rec_pat)
+                args.patience = rec_pat
                 applied.append(f"patience {cur} -> {rec_pat}")
 
         # Only lower max epochs if pattern is early_peak (cap at best+4)
         if rec_ep is not None and hasattr(args, "epochs") and pattern == "early_peak":
             cur_ep = int(getattr(args, "epochs", rec_ep))
             if cur_ep > rec_ep:
-                setattr(args, "epochs", rec_ep)
+                args.epochs = rec_ep
                 applied.append(f"epochs {cur_ep} -> {rec_ep} (early_peak pattern)")
 
         if applied:

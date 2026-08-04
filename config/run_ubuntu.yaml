@@ -65,6 +65,7 @@ curriculum:
   - epoch_start: 0
     max_difficulty: 2
   difficulty_spread_threshold: 1.5
+  difficulty_spread_threshold_hard: 2.0
   feature_groups:
     cross_asset:
       always_on: false
@@ -88,9 +89,7 @@ curriculum:
       - carry_eurgbp
       - carry_eurjpy
       - carry_chf
-      - carry_spot_forward
       - yield_curve_slope
-      - corr_break_gold_DXY
     execution_cost:
       always_on: false
       epoch_unfreeze: 2
@@ -101,7 +100,6 @@ curriculum:
       - spread_widening_5m
       - spread_widening_20m
       - cost_to_atr
-      - expected_latency_ms
     higher_timeframe:
       always_on: false
       epoch_unfreeze: 20
@@ -158,9 +156,6 @@ curriculum:
       - eco_surprise
       - eco_revision
       - news_ok
-      - pre_news
-      - post_news
-      - buzz
       - cat_central_bank
       - cat_inflation
       - cat_labor
@@ -216,7 +211,7 @@ curriculum:
 # ── Data source, tick ingestion, and feature-pipeline config ────────────────
 data:
   auto_rebuild_on_mismatch: true
-  chunk_size: 200000
+  chunk_size: 500000
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
@@ -238,6 +233,10 @@ data:
   start: '2008-01-01'
   use_cache: true
   window_batch_days: 1
+  # Linux local FS: lz4@1 maximizes decompress throughput for training reads.
+  # Use zstd@3 (or --zarr-cname zstd) if the cache lives on slow/network storage.
+  zarr_cname: lz4
+  zarr_clevel: 1
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
 direction_training:
   label_smoothing: 0.05
@@ -342,15 +341,17 @@ feature_store:
     poll_interval_sec: 60
   registry_db: registry.db
   root: data/feature_store
-# ── DataLoader worker and memory config (0 workers = main-process + thread prefetch) ─
+# ── DataLoader worker and memory config ─────────────────────────────────────
 hardware:
-  num_workers: 0
-  persistent_workers: false
-  pin_memory: false
+  num_workers: 4
+  persistent_workers: true
+  pin_memory: true
   prefetch_factor: 4
   profile: ubuntu_rtx_laptop
-  thread_prefetch_batches: 4
-  val_num_workers: 0
+  thread_prefetch_batches: 8
+  torch_compile: true
+  torch_compile_mode: reduce-overhead
+  val_num_workers: 4
   val_prefetch_factor: 2
 # ── Model maturity stage (dev → paper → production) – gates promotion ──────
 maturity:
@@ -520,7 +521,7 @@ training:
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
   epochs: 40
-  grad_accum_steps: 4
+  grad_accum_steps: 4  # production: larger effective batch; run.yaml uses 2 for faster dev
   grad_clip: 0.75
   label_method: rl_reward
   label_smoothing: 0.05

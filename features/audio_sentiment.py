@@ -23,7 +23,7 @@ class AudioSentimentPipeline:
         if whisper is None:
             self.logger.error("Whisper library is not installed. Run `pip install openai-whisper`")
             return False
-        
+
         self.logger.info(f"Loading Whisper model ({self.model_size})...")
         self.model = whisper.load_model(self.model_size)
         return True
@@ -32,7 +32,7 @@ class AudioSentimentPipeline:
         """Transcribe an audio file to text."""
         if not self.model:
             self.load_model()
-            
+
         self.logger.info(f"Transcribing audio: {audio_path}")
         result = self.model.transcribe(audio_path)
         transcript = result["text"].strip()
@@ -45,7 +45,7 @@ class AudioSentimentPipeline:
         Returns a float between -1.0 (Hawkish/Bearish) and 1.0 (Dovish/Bullish).
         """
         self.process_audio(audio_path)
-        
+
         # Here we would import and call the existing FinBERT pipeline from finbert_sentiment.py
         # For now, return a placeholder neutral signal
         self.logger.info("Routing transcript to FinBERT...")

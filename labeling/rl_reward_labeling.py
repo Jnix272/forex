@@ -15,10 +15,12 @@ Label values:
   near-zero -> no clear edge (hold)
 """
 
+
 import numpy as np
 import pandas as pd
-from typing import Optional, Tuple
+
 from infrastructure.numerics import sanitize_frame
+
 try:
     import polars as pl
 except ImportError:  # pragma: no cover - pandas-only legacy environments
@@ -167,7 +169,7 @@ def compute_rl_reward_labels(
         horizon = close[entry_i+1 : entry_i+1+lookahead_bars]
         horizon_l = exit_long_path[entry_i+1 : entry_i+1+lookahead_bars]
         horizon_s = exit_short_path[entry_i+1 : entry_i+1+lookahead_bars]
-        
+
         if not np.isfinite(horizon).all() or not valid_market[entry_i + 1 : entry_i + 1 + len(horizon)].all():
             continue
 
@@ -256,13 +258,13 @@ def _compute_slippage_multiplier(
     mult = np.ones(n, dtype=np.float32)
 
     # Rolling median ATR
-    med_atr = pd.Series(atr).rolling(vol_window, min_periods=10).median().bfill().values
+    med_atr = pd.Series(atr).rolling(vol_window, min_periods=10).median().ffill().fillna(0.0).values
     if med_atr.max() > 0:
         vol_ratio   = np.maximum(0.0, atr / np.maximum(med_atr, 1e-10) - 1.0)
         mult += vol_alpha * vol_ratio
 
     # Rolling median spread
-    med_spr = pd.Series(spread).rolling(spread_window, min_periods=10).median().bfill().values
+    med_spr = pd.Series(spread).rolling(spread_window, min_periods=10).median().ffill().fillna(0.0).values
     if med_spr.max() > 0:
         spr_ratio   = np.maximum(0.0, spread / np.maximum(med_spr, 1e-10) - 1.0)
         mult += liq_alpha * spr_ratio
@@ -275,13 +277,13 @@ def compute_rl_reward_labels_regime(
     features:          pd.DataFrame,
     atr_col:           str   = "atr_6",
     lookahead_bars:    int   = 10,
-    profit_atr_mult:   Optional[float] = None,
-    stop_atr_mult:     Optional[float] = None,
+    profit_atr_mult:   float | None = None,
+    stop_atr_mult:     float | None = None,
     pip_size:          float = 0.0001,
-    session_col:       Optional[str] = None,
-    regime_col:        Optional[str] = None,
-    no_trade_col:      Optional[str] = None,
-    latency_col:       Optional[str] = None,
+    session_col:       str | None = None,
+    regime_col:        str | None = None,
+    no_trade_col:      str | None = None,
+    latency_col:       str | None = None,
     latency_baseline_ms: float       = 50.0,
     execution_delay_bars: int        = 1,
 ) -> pd.DataFrame:
@@ -301,7 +303,8 @@ def compute_rl_reward_labels_regime(
     Falls back to base parameters when regime columns are unavailable.
     """
     try:
-        from config.settings import LABEL_REGIME as _LR, NO_TRADE as _NT
+        from config.settings import LABEL_REGIME as _LR
+        from config.settings import NO_TRADE as _NT
         barrier_scale   = _LR["barrier_scale"]
         high_vol_pct    = _LR["high_vol_pct"]
         low_vol_pct     = _LR["low_vol_pct"]
@@ -329,20 +332,25 @@ def compute_rl_reward_labels_regime(
         from config.settings import LABELING as _LBL
     except Exception:
         _LBL = {}
-    
+
     if profit_atr_mult is None:
         profit_atr_mult = float(_LBL.get("profit_target_atr", 1.8))
     if stop_atr_mult is None:
         stop_atr_mult = float(_LBL.get("stop_loss_atr", 0.9))
 
     close = bars["close"].reindex(features.index).ffill().values.astype(np.float64)
-    if "ask_close" in bars.columns:
+    if "ask_close" in bars.columns and "bid_close" in bars.columns:
         entry_long  = bars["ask_close"].reindex(features.index).ffill().values.astype(np.float64)
         entry_short = bars["bid_close"].reindex(features.index).ffill().values.astype(np.float64)
+        # Exit long at bid, exit short at ask (DS-001 / live realism).
+        exit_long_path = entry_short.copy()
+        exit_short_path = entry_long.copy()
     else:
         spread_half  = features.get("spread_pips", pd.Series(0.5, index=features.index)).values * pip_size / 2
         entry_long   = close + spread_half
         entry_short  = close - spread_half
+        exit_long_path = entry_short.copy()
+        exit_short_path = entry_long.copy()
 
     atr = features[atr_col].values.astype(np.float64) if atr_col in features.columns else np.full(len(close), 0.0005)
     valid_market = (
@@ -353,6 +361,8 @@ def compute_rl_reward_labels_regime(
     close = np.nan_to_num(close, nan=0.0, posinf=0.0, neginf=0.0)
     entry_long = np.nan_to_num(entry_long, nan=0.0, posinf=0.0, neginf=0.0)
     entry_short = np.nan_to_num(entry_short, nan=0.0, posinf=0.0, neginf=0.0)
+    exit_long_path = np.nan_to_num(exit_long_path, nan=0.0, posinf=0.0, neginf=0.0)
+    exit_short_path = np.nan_to_num(exit_short_path, nan=0.0, posinf=0.0, neginf=0.0)
     atr = np.nan_to_num(atr, nan=0.0005, posinf=0.0005, neginf=0.0005)
     n   = len(close)
 
@@ -447,21 +457,26 @@ def compute_rl_reward_labels_regime(
         tp_l = el + tp_mult * atr[entry_i];  sl_l = el - sl_mult * atr[entry_i]
         tp_s = es - tp_mult * atr[entry_i];  sl_s = es + sl_mult * atr[entry_i]
 
-        fwd = close[entry_i+1 : entry_i+1+horizon]
-        if len(fwd) == 0:
+        fwd_l = exit_long_path[entry_i+1 : entry_i+1+horizon]
+        fwd_s = exit_short_path[entry_i+1 : entry_i+1+horizon]
+        if len(fwd_l) == 0 or len(fwd_s) == 0:
             continue
-        if not np.isfinite(fwd).all() or not valid_market[entry_i + 1 : entry_i + 1 + len(fwd)].all():
+        if (
+            not np.isfinite(fwd_l).all()
+            or not np.isfinite(fwd_s).all()
+            or not valid_market[entry_i + 1 : entry_i + 1 + len(fwd_l)].all()
+        ):
             continue
 
-        # ── Long path simulation ───────────────────────────────────────────
+        # ── Long path simulation (exit at bid) ─────────────────────────────
         mae_l = 0.0; mfe_l = 0.0
-        pnl_l = None; exit_bar_l = len(fwd)
-        for j, p in enumerate(fwd):
+        pnl_l = None; exit_bar_l = len(fwd_l)
+        for j, p in enumerate(fwd_l):
             mae_l = max(mae_l, (el - p) / pip_size)   # max adverse excursion
             mfe_l = max(mfe_l, (p  - el) / pip_size)  # max favourable excursion
             if p >= tp_l:   pnl_l = (tp_l - el) / pip_size; exit_bar_l = j + 1; break
             elif p <= sl_l: pnl_l = (sl_l - el) / pip_size; exit_bar_l = j + 1; break
-        if pnl_l is None:   pnl_l = (fwd[-1] - el) / pip_size
+        if pnl_l is None:   pnl_l = (fwd_l[-1] - el) / pip_size
 
         # ── C: Bad-win penalty ─────────────────────────────────────────────
         # Three types of bad wins — all get a 30% discount on the reward:
@@ -482,15 +497,15 @@ def compute_rl_reward_labels_regime(
                 bad_win_l = abs(pnl_l) * 0.3
         reward_long[i] = pnl_l - tx_pips - bad_win_l
 
-        # ── Short path simulation ──────────────────────────────────────────
+        # ── Short path simulation (exit at ask) ────────────────────────────
         mae_s = 0.0; mfe_s = 0.0
-        pnl_s = None; exit_bar_s = len(fwd)
-        for j, p in enumerate(fwd):
+        pnl_s = None; exit_bar_s = len(fwd_s)
+        for j, p in enumerate(fwd_s):
             mae_s = max(mae_s, (p  - es) / pip_size)
             mfe_s = max(mfe_s, (es - p)  / pip_size)
             if p <= tp_s:   pnl_s = (es - tp_s) / pip_size; exit_bar_s = j + 1; break
             elif p >= sl_s: pnl_s = (es - sl_s) / pip_size; exit_bar_s = j + 1; break
-        if pnl_s is None:   pnl_s = (es - fwd[-1]) / pip_size
+        if pnl_s is None:   pnl_s = (es - fwd_s[-1]) / pip_size
 
         bad_win_s = 0.0
         if pnl_s > 0:
@@ -570,11 +585,11 @@ def compute_rl_reward_labels_regime(
           f"Long: {counts.get(1,0):,}  Hold: {counts.get(0,0):,}  Short: {counts.get(-1,0):,} | "
           f"No-trade: {nt_pct:.1f}% | avg path_quality: {pq_avg:.3f} | "
           f"regime_col: {'yes' if _use_regime_col else 'ATR-fallback'}")
-    
+
     # TIER-1 INTEGRITY CHECK: "Wrong / Unstable Loss" prevention.
-    # Mathematically guarantee no positive reward was ever assigned to a trade 
+    # Mathematically guarantee no positive reward was ever assigned to a trade
     # if it couldn't beat the explicitly calculated spread and slippage cost.
-    # (Since we subtract costs in the loop, if reward > 0, it intrinsically beat the costs, 
+    # (Since we subtract costs in the loop, if reward > 0, it intrinsically beat the costs,
     # but we add this explicit structural assert to prevent future code regressions).
     assert not (result['label'] == 1).any() or result.loc[result['label'] == 1, 'reward_long'].min() > 0, "Tier-1 Violation: Long label assigned with negative net reward."
     assert not (result['label'] == -1).any() or result.loc[result['label'] == -1, 'reward_short'].min() > 0, "Tier-1 Violation: Short label assigned with negative net reward."
@@ -586,7 +601,7 @@ def align_labels_with_features(
     labels_df:    pd.DataFrame,
     features_df:  pd.DataFrame,
     target_col:   str = "label",
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Inner-join and return (X, y, sidecar) ready for supervised or RL training.
 
     sidecar is a DataFrame aligned with X/y containing the true direction
@@ -599,16 +614,27 @@ def align_labels_with_features(
     if _is_polars_frame(labels_df) or _is_polars_frame(features_df):
         labels_pl = _to_polars_with_timestamp(labels_df)
         features_pl = _to_polars_with_timestamp(features_df)
+        # Match join-key precision (pandas→Polars often yields μs; bar frames are ns).
+        ts_dtype = features_pl.schema["timestamp_utc"]
+        labels_pl = labels_pl.with_columns(pl.col("timestamp_utc").cast(ts_dtype))
+        features_pl = features_pl.with_columns(pl.col("timestamp_utc").cast(ts_dtype))
         _sidecar_cols = [c for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side")
                          if c in labels_pl.columns]
         if target_col not in labels_pl.columns:
             raise KeyError(f"target_col '{target_col}' not found in labels")
         join_cols = list(dict.fromkeys(["reward", "label", target_col] + _sidecar_cols))
-        combined = features_pl.join(labels_pl.select(["timestamp_utc"] + join_cols), on="timestamp_utc", how="inner").drop_nulls()
+        combined = features_pl.join(
+            labels_pl.select(["timestamp_utc"] + [c for c in join_cols if c in labels_pl.columns]),
+            on="timestamp_utc",
+            how="inner",
+        ).drop_nulls()
         X_cols = [c for c in combined.columns if c not in set(["timestamp_utc"] + join_cols)]
         X = combined.select(X_cols)
         y = combined[target_col]
-        sidecar = combined.select(_sidecar_cols) if _sidecar_cols else pl.DataFrame()
+        # Keep timestamp_utc on the sidecar so callers can build time_idx / reindex
+        # without a second Polars↔Pandas round-trip of the feature matrix.
+        sc_keep = ["timestamp_utc"] + [c for c in _sidecar_cols if c in combined.columns]
+        sidecar = combined.select(sc_keep)
         return X, y, sidecar
 
     _sidecar_cols = [c for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side")
@@ -631,7 +657,7 @@ def align_labels_with_features(
 
 if __name__ == "__main__":
     import sys; sys.path.insert(0, "..")
-    from data.data_ingestion import generate_synthetic_tick_data, ForexDataPipeline
+    from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
     from features.feature_engineering import FeatureEngineer
 
     ticks = generate_synthetic_tick_data(n_rows=500_000)

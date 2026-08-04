@@ -3,8 +3,8 @@ Stress tests for the Risk Management API.
 Verifies behavior under extreme and boundary inputs.
 """
 
-import pytest
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 try:
@@ -33,11 +33,11 @@ def test_stress_large_returns_array(client):
         "equity": 10000.0,
         "lot_size": 10000.0
     }
-    
+
     start_time = time.time()
     response = client.post("/kelly_sizing", json=payload)
     elapsed = time.time() - start_time
-    
+
     assert response.status_code == 200
     data = response.json()
     assert "lots" in data
@@ -244,14 +244,14 @@ def test_api_performance_benchmark(client):
         "equity": 10000.0,
         "lot_size": 10000.0
     }
-    
+
     times = []
     for _ in range(100):
         start = time.time()
         response = client.post("/kelly_sizing", json=payload)
         times.append(time.time() - start)
         assert response.status_code == 200
-        
+
     mean_time = np.mean(times)
     p95_time = np.percentile(times, 95)
     print(f"\nAPI Performance Benchmark (500 return elements): Mean = {mean_time*1000:.2f}ms, 95th Percentile = {p95_time*1000:.2f}ms")

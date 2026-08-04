@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from labeling.triple_barrier_labeling import compute_triple_barrier_labels
-from monitoring.discord_alerts import DiscordAlerter
 from models.architectures import MultiTaskHead, MultiTaskLoss, MultiTaskWrapper
-from torch.utils.data import DataLoader, TensorDataset
+from monitoring.discord_alerts import DiscordAlerter
 from training.train_gpu import validate_epoch
-import torch
 
 
 def test_triple_barrier_accepts_trainer_execution_keywords():

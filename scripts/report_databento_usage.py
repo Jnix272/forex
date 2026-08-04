@@ -1,6 +1,8 @@
-from pathlib import Path
 import argparse
+from pathlib import Path
+
 import humanize
+
 
 def get_file_size(path: Path) -> int:
     return path.stat().st_size

@@ -21,11 +21,10 @@ Usage:
     df_features = eco.build(bars)   # bars: pd.DataFrame with DatetimeTZIndex (UTC)
 """
 
-import os
 import json
+import os
 import warnings
 from pathlib import Path
-from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -78,7 +77,7 @@ def _synthetic_calendar(start: pd.Timestamp, end: pd.Timestamp,
     """
     rng = np.random.default_rng(seed)
     days = pd.date_range(start.date(), end.date(), freq="D")
-    events: List[Dict] = []
+    events: list[dict] = []
 
     event_menu = [
         ("NFP", 200e3, 185e3, 170e3),
@@ -124,7 +123,8 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
     Covers: REAL_GDP, CPI, FEDERAL_FUNDS_RATE, UNEMPLOYMENT, RETAIL_SALES.
     Free tier: 25 requests/day — results are cached locally.
     """
-    import urllib.request, urllib.parse
+    import urllib.parse
+    import urllib.request
 
     functions = [
         ("REAL_GDP",            "GDP"),
@@ -134,12 +134,12 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
         ("RETAIL_SALES",        "Retail Sales"),
     ]
 
-    rows: List[Dict] = []
+    rows: list[dict] = []
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     for fn, label in functions:
         cache_path = CACHE_DIR / f"av_{fn}.json"
-        data: Optional[dict] = None
+        data: dict | None = None
 
         # Load from cache if fresh (< 24 h)
         if cache_path.exists():
@@ -213,7 +213,7 @@ class EcoCalendarFeatureBuilder:
     def __init__(
         self,
         news_buffer_minutes: int = 15,
-        av_api_key: Optional[str] = None,
+        av_api_key: str | None = None,
         use_synthetic: bool = False,
     ):
         self.buffer_min   = news_buffer_minutes
@@ -269,51 +269,51 @@ class EcoCalendarFeatureBuilder:
         pd.Timedelta(minutes=self.buffer_min)
         bars_df = pd.DataFrame({"bar_dt": bars.index})
         events_df = events.sort_values("datetime").copy()
-        
+
         # Backward merge to find the LAST event
         past = pd.merge_asof(
-            bars_df, 
-            events_df, 
-            left_on="bar_dt", 
-            right_on="datetime", 
+            bars_df,
+            events_df,
+            left_on="bar_dt",
+            right_on="datetime",
             direction="backward"
         )
-        
+
         # Forward merge to find the NEXT event
         future = pd.merge_asof(
-            bars_df, 
-            events_df, 
-            left_on="bar_dt", 
-            right_on="datetime", 
+            bars_df,
+            events_df,
+            left_on="bar_dt",
+            right_on="datetime",
             direction="forward",
             allow_exact_matches=False
         )
-        
+
         # Calculate deltas
         delta_bk = (bars_df["bar_dt"] - past["datetime"]).dt.total_seconds() / 60.0
         delta_fwd = (future["datetime"] - bars_df["bar_dt"]).dt.total_seconds() / 60.0
-        
+
         # Fill missing with 1440.0
         delta_bk = delta_bk.fillna(1440.0).clip(0, 1440.0)
         delta_fwd = delta_fwd.fillna(1440.0).clip(0, 1440.0)
-        
+
         out["eco_minutes_since_last"] = delta_bk.values
         out["eco_minutes_to_next"] = delta_fwd.values
-        
+
         # Surprise calculation (DS-005/Issue 6: enforcing 1-min latency)
         prior = past["prior"].fillna(0.0).astype(float)
         actual = past["actual"].astype(float)
         forecast = past["forecast"].astype(float)
-        
+
         surprise = (actual - forecast) / prior.where(prior.abs() > 1e-9, np.nan)
         surprise = surprise.where(delta_bk >= 1.0, 0.0)
         surprise = surprise.fillna(0.0).clip(-5.0, 5.0)
         out["eco_surprise_norm"] = surprise.values
-        
+
         # Release flag (true if within news_buffer_minutes of PAST or FUTURE event)
         flag_mask = (delta_bk <= self.buffer_min) | (delta_fwd <= self.buffer_min)
         out["eco_release_flag"] = flag_mask.astype(float).values
-        
+
         return out
 
 

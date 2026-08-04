@@ -8,16 +8,17 @@ PPO and Deep Q-Learning agents with:
   - Dynamic stop-loss integration
 """
 
-import numpy as np
 import collections
 import random
-from typing import Any, Optional, Tuple, Dict
+from typing import Any
+
+import numpy as np
 
 try:
     import torch
     import torch.nn as nn
-    import torch.optim as optim
     import torch.nn.functional as F
+    import torch.optim as optim
     TORCH = True
 except ImportError:
     TORCH = False
@@ -62,7 +63,7 @@ class ForexTradingEnv:
         commission_per_lot: float = 3.5,
         slippage_pips:  float = 0.5,
         pip_size:       float = 0.0001,
-        reward_weights: Optional[Dict] = None,
+        reward_weights: dict | None = None,
         # Dynamic SL params
         atr_sl_mult:    float = 1.5,
         trail_activation_r: float = 1.0,
@@ -73,7 +74,7 @@ class ForexTradingEnv:
         # A-H1: episode sampling — randomise start offset / sub-window each reset
         # so the agent doesn't replay the identical trajectory every episode.
         random_reset:   bool = True,
-        episode_len:    Optional[int] = None,
+        episode_len:    int | None = None,
     ):
         self.features       = features.astype(np.float32)
         self.prices         = prices.astype(np.float32)
@@ -109,7 +110,7 @@ class ForexTradingEnv:
         self.n_actions = 10
         self.reset()
 
-    def reset(self, valid_starts: Optional[np.ndarray] = None) -> np.ndarray:
+    def reset(self, valid_starts: np.ndarray | None = None) -> np.ndarray:
         # A-H1: sample a random start offset / sub-window so each episode sees a
         # different slice of the price history (otherwise every episode replays
         # the identical trajectory from idx=0 and the agent overfits one path).
@@ -205,7 +206,7 @@ class ForexTradingEnv:
             if direction > 0: self.stop_loss = max(self.stop_loss, init_entry)
             else:             self.stop_loss = min(self.stop_loss, init_entry)
 
-    def _check_sl_tp(self, p: float, direction: int) -> Tuple[bool, float]:
+    def _check_sl_tp(self, p: float, direction: int) -> tuple[bool, float]:
         """Returns (hit, pnl_pips). P&L calculated from _initial_entry_price."""
         init_entry = self._initial_entry_price
         if direction > 0:
@@ -216,7 +217,7 @@ class ForexTradingEnv:
             if p <= self.take_profit: return True, (init_entry - self.take_profit) / self.pip_size
         return False, 0.0
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, dict]:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
         assert not self.done
         p   = self.prices[self.idx]
         atr = self.atr[self.idx]
@@ -406,7 +407,7 @@ if TORCH:
             self.opt = optim.Adam(self.net.parameters(), lr=lr)
             self.buffer = []
 
-        def select_action(self, obs: np.ndarray, mask: Optional[np.ndarray] = None):
+        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None):
             x = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             m = torch.tensor(mask, dtype=torch.bool, device=self.device).unsqueeze(0) if mask is not None else None
             with torch.no_grad():
@@ -539,7 +540,7 @@ if TORCH:
             self.buf    = ReplayBuffer(buf_size)
             self.steps  = 0
 
-        def select_action(self, obs: np.ndarray, mask: Optional[np.ndarray] = None) -> int:
+        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None) -> int:
             if random.random() < self.eps:
                 if mask is not None:
                     valid = np.where(mask)[0]
@@ -691,15 +692,16 @@ def evaluate_agent(
     return returns, env.summary()
 
 
-def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int) -> Optional[dict]:
+def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int) -> dict | None:
     """
     Re-estimate an episode's rewards with IPS / doubly-robust estimators
     (Improvement #5) using the agent's current policy as the behavior policy.
     Returns a dict (or None when the agent exposes no logits, e.g. DQN).
     """
     try:
-        from labeling.off_policy_rewards import compute_off_policy_rewards
         import torch as _torch
+
+        from labeling.off_policy_rewards import compute_off_policy_rewards
 
         if not hasattr(agent, "net") or not hasattr(agent.net, "actor"):
             return None
@@ -722,7 +724,7 @@ def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int
             "episode": int(episode),
             "ips_value": float(last["ipw_value"]),
             "dr_value": float(last["dr_value"]),
-            "n_steps": int(len(actions)),
+            "n_steps": len(actions),
         }
     except Exception:
         return None
@@ -735,8 +737,8 @@ def train_agent(
     n_steps_ppo: int = 2048,
     agent_type: str = "ppo",
     curriculum = None,
-    reward_normalizer: Optional[Any] = None,
-    reward_sharpe: Optional[Any] = None,
+    reward_normalizer: Any | None = None,
+    reward_sharpe: Any | None = None,
     off_policy_rewards: bool = False,
 ) -> list:
     """Generic training loop for PPO or DQN.
@@ -822,7 +824,7 @@ def train_agent(
 if __name__ == "__main__":
     print("RL Agents smoke test (10-action ScalingAction space)")
     import sys; sys.path.insert(0, "..")
-    from data.data_ingestion import generate_synthetic_tick_data, ForexDataPipeline
+    from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
     from features.feature_engineering import FeatureEngineer
 
     ticks = generate_synthetic_tick_data(n_rows=200_000)

@@ -7,8 +7,7 @@ Replaces hardcoded UTC hour ranges with timezone-aware boundaries that
 correctly shift during Daylight Saving Time transitions.
 """
 
-from datetime import datetime, time, timezone
-from typing import Optional, Tuple
+from datetime import UTC, datetime, time
 
 try:
     from zoneinfo import ZoneInfo
@@ -24,7 +23,7 @@ _SESSION_LOCAL_HOURS = {
 }
 
 
-def get_session_hours_utc(session: str, date: Optional[datetime] = None) -> Tuple[int, int]:
+def get_session_hours_utc(session: str, date: datetime | None = None) -> tuple[int, int]:
     """Get current UTC hour boundaries for a trading session, accounting for DST.
 
     Args:
@@ -44,7 +43,7 @@ def get_session_hours_utc(session: str, date: Optional[datetime] = None) -> Tupl
     tz = ZoneInfo(tz_name)
 
     if date is None:
-        date = datetime.now(timezone.utc)
+        date = datetime.now(UTC)
 
     ref_date = date.date() if hasattr(date, "date") else date
 
@@ -54,8 +53,8 @@ def get_session_hours_utc(session: str, date: Optional[datetime] = None) -> Tupl
     close_local = dt.combine(ref_date, local_close, tzinfo=tz)
 
     # Convert to UTC hours
-    open_utc = open_local.astimezone(timezone.utc).hour
-    close_utc = close_local.astimezone(timezone.utc).hour
+    open_utc = open_local.astimezone(UTC).hour
+    close_utc = close_local.astimezone(UTC).hour
 
     # Handle day wrap
     if close_utc <= open_utc:
@@ -64,10 +63,10 @@ def get_session_hours_utc(session: str, date: Optional[datetime] = None) -> Tupl
     return (open_utc, close_utc)
 
 
-def get_current_session(dt_utc: Optional[datetime] = None) -> str:
+def get_current_session(dt_utc: datetime | None = None) -> str:
     """Determine which trading session is currently active."""
     if dt_utc is None:
-        dt_utc = datetime.now(timezone.utc)
+        dt_utc = datetime.now(UTC)
 
     hour = dt_utc.hour
 
@@ -81,6 +80,6 @@ def get_current_session(dt_utc: Optional[datetime] = None) -> str:
     return "off"
 
 
-def is_session_active(session: str, dt_utc: Optional[datetime] = None) -> bool:
+def is_session_active(session: str, dt_utc: datetime | None = None) -> bool:
     """Check if a specific session is currently active."""
     return get_current_session(dt_utc) == session

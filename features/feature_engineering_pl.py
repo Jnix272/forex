@@ -2,6 +2,8 @@
 features/feature_engineering.py  (v2 - Polars Edition)
 All microstructure + momentum + cross-asset + sentiment features using Polars Expressions.
 """
+from datetime import UTC
+
 import numpy as np
 import polars as pl
 from sklearn.linear_model import LogisticRegression
@@ -35,6 +37,65 @@ def sanitize_frame(df: pl.DataFrame, fill_value: float = 0.0, context: str = "fr
         for c in noclip_cols
     ]
     return df.with_columns(exprs)
+
+
+# Default delay when observations only have event/publication time (not a true
+# available_time). Matches eco join: avoid same-bar leakage at release.
+_DEFAULT_PIT_DELAY_MINUTES = 1
+
+
+def _with_available_time(
+    df: pl.DataFrame | None,
+    delay_minutes: int = _DEFAULT_PIT_DELAY_MINUTES,
+    time_dtype: pl.DataType | None = None,
+) -> pl.DataFrame | None:
+    """Ensure ``available_time`` exists for point-in-time asof joins."""
+    if df is None or len(df) == 0:
+        return df
+    dtype = time_dtype or pl.Datetime("ns", "UTC")
+    if "available_time" in df.columns:
+        return df.with_columns(pl.col("available_time").cast(dtype))
+    if "timestamp_utc" not in df.columns:
+        return df
+    return df.with_columns(
+        (pl.col("timestamp_utc").cast(dtype)
+         + pl.duration(minutes=int(delay_minutes))).alias("available_time")
+    )
+
+
+def _join_asof_available(
+    left: pl.DataFrame,
+    right: pl.DataFrame | None,
+    *,
+    delay_minutes: int = _DEFAULT_PIT_DELAY_MINUTES,
+) -> pl.DataFrame:
+    """Backward asof join on when information became knowable (available_time)."""
+    if right is None or len(right) == 0 or "timestamp_utc" not in left.columns:
+        return left
+    left_dtype = left.schema["timestamp_utc"]
+    right = _with_available_time(right, delay_minutes=delay_minutes, time_dtype=left_dtype)
+    if right is None or "available_time" not in right.columns:
+        return left
+    drop_cols = [
+        c for c in right.columns
+        if c in left.columns and c not in ("timestamp_utc", "available_time")
+    ]
+    right_join = right.drop(drop_cols).sort("available_time")
+    # Don't bring event timestamp_utc across — left already has bar time.
+    if "timestamp_utc" in right_join.columns:
+        right_join = right_join.drop("timestamp_utc")
+    # Match join-key dtypes exactly (ns vs us UTC mismatches fail hard).
+    right_join = right_join.with_columns(pl.col("available_time").cast(left_dtype))
+    out = left.join_asof(
+        right_join,
+        left_on="timestamp_utc",
+        right_on="available_time",
+        strategy="backward",
+    )
+    if "available_time" in out.columns:
+        out = out.drop("available_time")
+    return out
+
 
 # === Microstructure ==========================================================================================
 def order_flow_imbalance(window: int = 20) -> pl.Expr:
@@ -143,12 +204,12 @@ def vpin(bucket_size: int = 50, n_buckets: int = 50) -> pl.Expr:
     # Classify buy/sell volume from close vs open
     buy_vol = pl.when(pl.col("close") > pl.col("open")).then(pl.col("volume")).otherwise(0.0)
     sell_vol = pl.when(pl.col("close") < pl.col("open")).then(pl.col("volume")).otherwise(0.0)
-    
+
     # Rolling sums over bucket_size
     buy_bucket = buy_vol.rolling_sum(window_size=bucket_size)
     sell_bucket = sell_vol.rolling_sum(window_size=bucket_size)
     total_bucket = buy_bucket + sell_bucket + 1e-9
-    
+
     # VPIN = rolling mean of |buy - sell| / (buy + sell) over n_buckets
     vpin_val = ((buy_bucket - sell_bucket).abs() / total_bucket).rolling_mean(window_size=n_buckets)
     return vpin_val.alias("vpin")
@@ -256,18 +317,18 @@ def circuit_breaker_features(
     # Rolling equity curve approximation from returns
     ret = (pl.col("close") / pl.col("close").shift(1)).log()
     equity = (1 + ret).cum_prod()
-    
+
     # Current drawdown
     peak = equity.cum_max()
     drawdown = (equity - peak) / peak
-    
+
     # Daily P&L
     daily_ret = ret.rolling_sum(window_size=1440)  # ~1 day at 1-min bars
-    
+
     # VaR (historical)
     var_95 = ret.rolling_quantile(0.05, window_size=var_window)
     var_99 = ret.rolling_quantile(0.01, window_size=var_window)
-    
+
     return [
         drawdown.alias("drawdown"),
         (drawdown < -max_drawdown_pct).cast(pl.Int32).alias("drawdown_breach"),
@@ -290,7 +351,7 @@ def position_limit_flags(
       Approximated as $7.0 (conservative) since exact rate isn't available at feature time.
     """
     pair_upper = str(pair).upper()
-    
+
     # Calculate exact pip value in account currency (assuming USD account)
     if "JPY" in pair_upper:
         # 1 pip = 0.01 JPY. Value in USD = (100,000 * 0.01) / USDJPY rate
@@ -361,7 +422,7 @@ def compute_finbert_embeddings(
     timestamps = news_df["timestamp_utc"] if "timestamp_utc" in news_df.columns else None
 
     try:
-        from transformers import AutoTokenizer, AutoModel
+        from transformers import AutoModel, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)
         model.eval()
@@ -412,10 +473,10 @@ def feature_discovery_mutual_info(
     """
     if candidates is None:
         candidates = ["close", "volume", "rsi_14", "macd", "atr_6"]
-    
+
     ret = (pl.col("close") / pl.col("close").shift(1)).log()
     pl.col(target)
-    
+
     exprs = []
     for c in candidates:
         corr = pl.rolling_corr(ret, pl.col(c), window_size=20)
@@ -483,8 +544,8 @@ def model_card_template(
     
     Returns dict that can be saved as JSON alongside model.
     """
-    from datetime import datetime, timezone, timedelta
-    _now = datetime.now(timezone.utc)
+    from datetime import datetime, timedelta
+    _now = datetime.now(UTC)
     return {
         "model_name": model_name,
         "version": version,
@@ -699,14 +760,14 @@ def is_morning_star() -> pl.Expr:
     c2_close = pl.col("close").shift(1)
     c3_open = pl.col("open")
     c3_close = pl.col("close")
-    
+
     c1_bearish = c1_close < c1_open
     c2_small = (c2_close - c2_open).abs() < (c1_open - c1_close).abs() * 0.3
     c2_gap_down = pl.min_horizontal(c2_open, c2_close) < c1_close
     c3_bullish = c3_close > c3_open
     c3_gap_up = pl.min_horizontal(c3_open, c3_close) > c2_close
     c3_closes_above = c3_close > (c1_open + c1_close) / 2
-    
+
     cond = c1_bearish & c2_small & c2_gap_down & c3_bullish & c3_gap_up & c3_closes_above
     return cond.cast(pl.Int32).alias("morning_star")
 
@@ -718,14 +779,14 @@ def is_evening_star() -> pl.Expr:
     c2_close = pl.col("close").shift(1)
     c3_open = pl.col("open")
     c3_close = pl.col("close")
-    
+
     c1_bullish = c1_close > c1_open
     c2_small = (c2_close - c2_open).abs() < (c1_close - c1_open).abs() * 0.3
     c2_gap_up = pl.max_horizontal(c2_open, c2_close) > c1_close
     c3_bearish = c3_close < c3_open
     c3_gap_down = pl.max_horizontal(c3_open, c3_close) < c2_close
     c3_closes_below = c3_close < (c1_open + c1_close) / 2
-    
+
     cond = c1_bullish & c2_small & c2_gap_up & c3_bearish & c3_gap_down & c3_closes_below
     return cond.cast(pl.Int32).alias("evening_star")
 
@@ -808,7 +869,7 @@ def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
     """
     if existing_cols is None:
         existing_cols = set()
-    
+
     exprs = []
     # Trend-following features (active in trending regime)
     if "rsi_14" in existing_cols and "trend_regime" in existing_cols:
@@ -819,7 +880,7 @@ def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
         exprs.append((pl.col("adx_14") * pl.col("trend_regime")).alias("adx_trend"))
     if "ret_5" in existing_cols and "trend_regime" in existing_cols:
         exprs.append((pl.col("ret_5") * pl.col("trend_regime")).alias("ret5_trend"))
-    
+
     # Mean-reversion features (active in ranging regime)
     if "stoch_k" in existing_cols and "range_regime" in existing_cols:
         exprs.append((pl.col("stoch_k") * pl.col("range_regime")).alias("stoch_range"))
@@ -829,7 +890,7 @@ def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
         exprs.append((pl.col("williams_r") * pl.col("range_regime")).alias("williams_range"))
     if "cci" in existing_cols and "range_regime" in existing_cols:
         exprs.append((pl.col("cci") * pl.col("range_regime")).alias("cci_range"))
-    
+
     # Volatility-breakout features (active in volatile regime)
     if "atr_ratio_6_20" in existing_cols and "volatility_regime" in existing_cols:
         exprs.append((pl.col("atr_ratio_6_20") * pl.col("volatility_regime")).alias("atr_ratio_volatile"))
@@ -837,7 +898,7 @@ def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
         exprs.append((pl.col("breakout_pressure") * pl.col("volatility_regime")).alias("breakout_volatile"))
     if "vwap_zscore" in existing_cols and "volatility_regime" in existing_cols:
         exprs.append((pl.col("vwap_zscore") * pl.col("volatility_regime")).alias("vwap_z_volatile"))
-    
+
     return exprs
 
 
@@ -849,15 +910,15 @@ def interaction_features(existing_cols: set = None) -> list[pl.Expr]:
     """
     if existing_cols is None:
         existing_cols = set()
-    
+
     exprs = []
-    
+
     # Volatility    Flow
     if "atr_6" in existing_cols and "ofi_z" in existing_cols:
         exprs.append((pl.col("atr_6") * pl.col("ofi_z")).alias("atr_x_ofi"))
     if "atr_ratio_6_20" in existing_cols and "ofi_z" in existing_cols:
         exprs.append((pl.col("atr_ratio_6_20") * pl.col("ofi_z")).alias("atr_ratio_x_ofi"))
-    
+
     # Momentum    Regime
     if "rsi_14" in existing_cols and "trend_regime" in existing_cols:
         exprs.append((pl.col("rsi_14") * pl.col("trend_regime")).alias("rsi_x_trend"))
@@ -865,23 +926,23 @@ def interaction_features(existing_cols: set = None) -> list[pl.Expr]:
         exprs.append((pl.col("macd") * pl.col("trend_regime")).alias("macd_x_trend"))
     if "stoch_k" in existing_cols and "range_regime" in existing_cols:
         exprs.append((pl.col("stoch_k") * pl.col("range_regime")).alias("stoch_x_range"))
-    
+
     # Spread / Cost    Volatility
     if "bb_pct" in existing_cols and "range_regime" in existing_cols:
         exprs.append((pl.col("bb_pct") * pl.col("range_regime")).alias("bb_x_range"))
     if "cost_to_atr" in existing_cols and "volatility_regime" in existing_cols:
         exprs.append((pl.col("cost_to_atr") * pl.col("volatility_regime")).alias("cost_x_volatile"))
-    
+
     # Macro    Risk
     if "yield_curve_slope" in existing_cols and "risk_off_signal" in existing_cols:
         exprs.append((pl.col("yield_curve_slope") * pl.col("risk_off_signal")).alias("curve_x_risk"))
     if "carry_eur" in existing_cols and "trend_regime" in existing_cols:
         exprs.append((pl.col("carry_eur") * pl.col("trend_regime")).alias("carry_x_trend"))
-    
+
     # Cross-asset    Risk
     if "gold_dxy_corr" in existing_cols and "risk_off_signal" in existing_cols:
         exprs.append((pl.col("gold_dxy_corr") * pl.col("risk_off_signal")).alias("gold_dxy_x_risk"))
-    
+
     return exprs
 
 
@@ -896,37 +957,37 @@ def compute_quality_report(df: pl.DataFrame) -> dict:
     """
     from datetime import datetime
     report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "n_rows": len(df),
         "n_cols": len(df.columns),
         "features": {},
     }
-    
+
     numeric_cols = df.select(pl.col(pl.NUMERIC_DTYPES)).columns
     for col in numeric_cols:
         s = df[col]
         n_null = s.null_count()
         n_total = len(s)
         vals = s.drop_nulls()
-        
+
         if len(vals) == 0:
             report["features"][col] = {
                 "null_pct": 100.0, "constant": True, "dtype": str(s.dtype),
             }
             continue
-        
+
         # Check for constant
         is_const = vals.n_unique() == 1
-        
+
         # Basic stats
         mean_v = float(vals.mean())
         std_v = float(vals.std())
         skew_v = float(vals.skew()) if len(vals) > 2 else 0.0
         kurt_v = float(vals.kurtosis()) if len(vals) > 3 else 0.0
-        
+
         # Extreme values
         inf_count = int(s.is_infinite().sum())
-        
+
         report["features"][col] = {
             "dtype": str(s.dtype),
             "null_count": int(n_null),
@@ -941,7 +1002,7 @@ def compute_quality_report(df: pl.DataFrame) -> dict:
             "kurtosis": kurt_v,
             "inf_count": inf_count,
         }
-    
+
     return report
 
 
@@ -956,22 +1017,22 @@ class CrossAssetFeatures:
     def build(self, bars: pl.DataFrame, data: dict = None) -> pl.DataFrame:
         len(bars)
         synthetic = self._synthetic(bars)
-        
+
         merged = dict(synthetic)
         if data is not None:
             for k, v in data.items():
                 if "timestamp_utc" in v.columns:
                     v = v.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
                 merged[k] = v
-        
+
         # Start with bars
         F = bars
-        
+
         # Calculate forex return
         F = F.with_columns([
             (pl.col("close").log() - pl.col("close").shift(1).log()).alias("forex_ret")
         ])
-        
+
         # Join assets
         for asset, s_df in merged.items():
             # Rename value column to the asset name
@@ -979,26 +1040,26 @@ class CrossAssetFeatures:
                 s_df = s_df.rename({"value": asset})
             elif s_df.columns[-1] != "timestamp_utc":
                 s_df = s_df.rename({s_df.columns[-1]: asset})
-                
+
             s_df = s_df.select(["timestamp_utc", asset]).sort("timestamp_utc")
             F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
             # forward fill
             F = F.with_columns([pl.col(asset).fill_null(strategy="forward")])
-            
+
             # Returns
             lr = (pl.col(asset).log() - pl.col(asset).shift(1).log())
             exprs = [lr.alias(f"{asset}_ret")]
             for lag in self.lags:
                 exprs.append(lr.shift(lag).alias(f"{asset}_ret_l{lag}"))
-                
+
             # rolling corr and beta
             cov = pl.rolling_cov(lr, pl.col("forex_ret"), window_size=self.cw, min_periods=max(5, self.cw//4))
             var_x = pl.col("forex_ret").rolling_var(window_size=self.cw, min_periods=max(5, self.cw//4))
             var_y = lr.rolling_var(window_size=self.cw, min_periods=max(5, self.cw//4))
-            
+
             corr = cov / (var_x.sqrt() * var_y.sqrt() + 1e-9)
             beta = cov / (var_x + 1e-9)
-            
+
             exprs.append(corr.alias(f"{asset}_corr"))
             exprs.append(beta.alias(f"{asset}_beta"))
             F = F.with_columns(exprs)
@@ -1035,7 +1096,7 @@ class CrossAssetFeatures:
             exprs.append(
                 (0.6 * pl.col("COPPER_ret").shift(1) + 0.4 * pl.col("WTI_ret").shift(1)).alias("commodity_fx_lead")
             )
-        
+
         if exprs:
             F = F.with_columns(exprs)
 
@@ -1055,6 +1116,7 @@ class CrossAssetFeatures:
         two assets; otherwise returns F unchanged.
         """
         import pandas as pd
+
         from features.cross_asset_factors import build_cross_asset_factors
 
         ret_cols = [c for c in F.columns if c.endswith("_ret") and c not in ("forex_ret",)]
@@ -1193,16 +1255,16 @@ class RegimeGateClassifier:
             self._zscore("yield_spread_us_de_10y_chg").alias("yield_chg_z"),
             self._zscore("risk_off_signal", lb=30).alias("risk_off_z")
         ])
-        
+
         y_expr = (
-            (pl.col("gold_break_z") > 1.0) & 
+            (pl.col("gold_break_z") > 1.0) &
             ((pl.col("risk_off_z") > 0.5) | (pl.col("curve_chg_z").abs() > 1.0))
         ).cast(pl.Int32)
-        
+
         y = X_df.select(y_expr.alias("y"))["y"].to_numpy()
         X_pd = X_df.to_pandas()
         ok = X_pd.notna().all(axis=1)
-        
+
         if ok.sum() < self.min_samples or len(np.unique(y[ok])) < 2:
             score = (0.8 * X_pd["gold_break_z"].fillna(0) +
                      0.5 * X_pd["risk_off_z"].fillna(0) +
@@ -1213,7 +1275,7 @@ class RegimeGateClassifier:
         ok_idx = np.where(ok)[0]
         fit_end = max(self.min_samples, int(len(ok_idx) * 0.70))
         fit_idx = ok_idx[:fit_end]
-        
+
         if len(np.unique(y[fit_idx])) < 2:
             score = (0.8 * X_pd["gold_break_z"].fillna(0) +
                      0.5 * X_pd["risk_off_z"].fillna(0) +
@@ -1379,62 +1441,98 @@ def add_market_regime_features(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
-    """Join completed 5m/15m/1h context back to each 1m row without lookahead."""
-    import pandas as pd
+    """Join completed 5m/15m/1h context back to each 1m row without lookahead.
 
+    Stays in Polars (group_by_dynamic + join_asof) — no Polars→Pandas→Polars
+    round-trip of the full bar frame.
+    """
     req = {"timestamp_utc", "open", "high", "low", "close", "volume"}
     if not req.issubset(set(df.columns)) or len(df) == 0:
         return df
 
-    pdf = df.to_pandas().sort_values("timestamp_utc")
-    idxed = pdf.set_index(pd.to_datetime(pdf["timestamp_utc"], utc=True)).sort_index()
-    merged = pdf.copy()
-
-    def _rsi_series(close: "pd.Series", period: int = 14) -> "pd.Series":
-        d = close.diff()
-        gain = d.clip(lower=0.0).rolling(period, min_periods=5).mean()
-        loss = (-d.clip(upper=0.0)).rolling(period, min_periods=5).mean()
-        return 100.0 - 100.0 / (1.0 + gain / (loss + 1e-9))
-
-    for rule, suffix, median_window in (("5min", "5m", 48), ("15min", "15m", 32), ("1h", "1h", 24)):
-        ohlcv = idxed.resample(rule, label="right", closed="right").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna(subset=["open", "high", "low", "close"])
-        if ohlcv.empty:
-            continue
-        prev_close = ohlcv["close"].shift(1)
-        tr = pd.concat([
-            ohlcv["high"] - ohlcv["low"],
-            (ohlcv["high"] - prev_close).abs(),
-            (ohlcv["low"] - prev_close).abs(),
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(14, min_periods=3).mean()
-        tp = (ohlcv["high"] + ohlcv["low"] + ohlcv["close"]) / 3.0
-        vol = ohlcv["volume"].replace(0.0, np.nan).fillna(1.0)
-        vwap = (tp * vol).rolling(20, min_periods=3).sum() / (vol.rolling(20, min_periods=3).sum() + 1e-9)
-        feats = pd.DataFrame(index=ohlcv.index)
-        feats[f"ret_{suffix}"] = np.log(ohlcv["close"] / ohlcv["close"].shift(1))
-        feats[f"rsi_{suffix}"] = _rsi_series(ohlcv["close"])
-        feats[f"atr_{suffix}"] = atr
-        feats[f"trend_slope_{suffix}"] = (ohlcv["close"] - ohlcv["close"].shift(3)) / (atr + 1e-9)
-        feats[f"distance_to_vwap_{suffix}"] = (ohlcv["close"] - vwap) / (atr + 1e-9)
-        feats[f"volatility_regime_{suffix}"] = atr / (atr.rolling(median_window, min_periods=5).median() + 1e-9)
-        feats = feats.shift(1).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        feats.index.name = "timestamp_utc"
-        merged = pd.merge_asof(
-            merged.sort_values("timestamp_utc"),
-            feats.reset_index().sort_values("timestamp_utc"),
-            on="timestamp_utc",
-            direction="backward",
+    out = df.sort("timestamp_utc")
+    for every, suffix, median_window in (("5m", "5m", 48), ("15m", "15m", 32), ("1h", "1h", 24)):
+        ohlcv = (
+            out.group_by_dynamic(
+                "timestamp_utc", every=every, closed="right", label="right",
+            )
+            .agg(
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+            )
+            .drop_nulls(subset=["open", "high", "low", "close"])
+            .sort("timestamp_utc")
         )
+        if ohlcv.height == 0:
+            continue
+        prev_close = pl.col("close").shift(1)
+        tr = pl.max_horizontal(
+            pl.col("high") - pl.col("low"),
+            (pl.col("high") - prev_close).abs(),
+            (pl.col("low") - prev_close).abs(),
+        )
+        atr = tr.rolling_mean(14, min_samples=3)
+        tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
+        vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume")).fill_null(1.0)
+        vwap = (tp * vol).rolling_sum(20, min_samples=3) / (
+            vol.rolling_sum(20, min_samples=3) + 1e-9
+        )
+        # RSI(14) on HTF close
+        d = pl.col("close").diff()
+        gain = d.clip(lower_bound=0.0).rolling_mean(14, min_samples=5)
+        loss = (-d.clip(upper_bound=0.0)).rolling_mean(14, min_samples=5)
+        rsi = 100.0 - 100.0 / (1.0 + gain / (loss + 1e-9))
 
-    num_cols = merged.select_dtypes(include=[np.number]).columns
-    merged[num_cols] = merged[num_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return pl.from_pandas(merged)
+        feats = ohlcv.with_columns(
+            [
+                (pl.col("close").log() - pl.col("close").shift(1).log()).alias(f"ret_{suffix}"),
+                rsi.alias(f"rsi_{suffix}"),
+                atr.alias(f"atr_{suffix}"),
+                ((pl.col("close") - pl.col("close").shift(3)) / (atr + 1e-9)).alias(
+                    f"trend_slope_{suffix}"
+                ),
+                ((pl.col("close") - vwap) / (atr + 1e-9)).alias(f"distance_to_vwap_{suffix}"),
+                (
+                    atr / (atr.rolling_median(median_window, min_samples=5) + 1e-9)
+                ).alias(f"volatility_regime_{suffix}"),
+            ]
+        ).select(
+            [
+                "timestamp_utc",
+                f"ret_{suffix}",
+                f"rsi_{suffix}",
+                f"atr_{suffix}",
+                f"trend_slope_{suffix}",
+                f"distance_to_vwap_{suffix}",
+                f"volatility_regime_{suffix}",
+            ]
+        )
+        # Shift completed bar by 1 so the join never sees the in-progress HTF bar.
+        feat_cols = [c for c in feats.columns if c != "timestamp_utc"]
+        feats = feats.with_columns([pl.col(c).shift(1) for c in feat_cols]).fill_null(0.0)
+        out = out.join_asof(feats, on="timestamp_utc", strategy="backward")
+
+    # Finite cleanup on newly added numeric HTF cols
+    htf_cols = [
+        c for c in out.columns
+        if c.endswith(("_5m", "_15m", "_1h")) and c.startswith(
+            ("ret_", "rsi_", "atr_", "trend_slope_", "distance_to_vwap_", "volatility_regime_")
+        )
+    ]
+    if htf_cols:
+        out = out.with_columns(
+            [
+                pl.when(pl.col(c).is_infinite())
+                .then(0.0)
+                .otherwise(pl.col(c).fill_nan(0.0).fill_null(0.0))
+                .alias(c)
+                for c in htf_cols
+            ]
+        )
+    return out
 
 # ==================================================================================================================-
 # MISSINGNESS FLAGS
@@ -1444,7 +1542,7 @@ def missingness_flags(df: pl.DataFrame, cols: list, decay: float = 0.9) -> pl.Da
         if c not in df.columns:
             df = df.with_columns([pl.lit(1.0).alias(f"{c}_missing"), pl.lit(1.0).alias(f"{c}_staleness")])
             continue
-        
+
         is_null = df[c].is_null()
         df = df.with_columns([
             is_null.cast(pl.Float64).alias(f"{c}_missing"),
@@ -1461,7 +1559,7 @@ def compute_latency_feature(df: pl.DataFrame, latency_baseline_ms: float = 50.0,
         med_atr = df[atr_col].fill_null(strategy="forward").rolling_median(atr_window_ref, min_samples=10).fill_null(strategy="backward").to_numpy()
         atr_excess = np.maximum(0.0, atr_vals / np.maximum(med_atr, 1e-12) - 1.0)
         latency += latency_baseline_ms * 0.5 * atr_excess
-    
+
     latency = np.clip(latency, latency_baseline_ms, latency_baseline_ms * 10.0)
     return pl.Series("expected_latency_ms", latency)
 
@@ -1476,7 +1574,7 @@ class FeatureEngineer:
         self.rsi_p=rsi_period; self.mf=macd_fast; self.ms=macd_slow; self.msig=macd_signal
         self.bb_w=bb_window; self.bb_s=bb_std; self.lags=lag_windows
         self.vm=vol_mult; self.nb=news_buf; self.dl=decay_lam; self.fb=fb_dim
-        
+
         try:
             import yaml
             with open("config/run.yaml") as f:
@@ -1487,7 +1585,7 @@ class FeatureEngineer:
             from config.settings import FEATURE_SCALES as FS
         except ImportError:
             FS = {}
-            
+
         self.atr_ws = yaml_fs.get("atr_windows", FS.get("atr_windows", [self.atr_w, 20, 60]))
         self.vol_ws = yaml_fs.get("vol_windows", FS.get("vol_windows", [6, 20, 60]))
         self.ofi_ws = yaml_fs.get("ofi_windows", FS.get("ofi_windows", [5, 20, 60]))
@@ -1578,7 +1676,7 @@ class FeatureEngineer:
     def build(self,bars: pl.DataFrame,cross_asset=None,sentiment=None,eco_act=None,eco_fc=None,
               art_counts=None,finbert_embs=None,news_events=None, cot_data=None, pair="EURUSD",
               eco_prior=None, news_cats=None) -> pl.DataFrame:
-        
+
         import pandas as pd
         if isinstance(bars, pd.DataFrame):
             if bars.index.name is None:
@@ -1600,7 +1698,7 @@ class FeatureEngineer:
             art_counts = art_counts.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
         if cot_data is not None and "timestamp_utc" in cot_data.columns:
             cot_data = cot_data.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
-            
+
         # 1. Base Features (Independent)
         F = bars.with_columns(
             [order_book_imbalance_proxy()] +
@@ -1622,15 +1720,15 @@ class FeatureEngineer:
             [vpin(50, 50)] +
             multi_level_obi(5)
         )
-        
+
         # 2. Derived Features (Dependent on Base Features)
         tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
         vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume")).fill_null(1.0)
         vwap = (tp * vol).rolling_sum(60) / vol.rolling_sum(60)
-        
+
         # Volume-weighted features (Improvement #4)
         vwap_bands_expr = vwap_bands(60, 2.0)
-        
+
         F = F.with_columns(
             vwap_bands_expr +
             [volume_weighted_momentum(20)] +
@@ -1638,7 +1736,7 @@ class FeatureEngineer:
             [((pl.col("ofi") - pl.col("ofi").rolling_mean(min(120, self.ofi_w*6))) / (pl.col("ofi").rolling_std(min(120, self.ofi_w*6)) + 1e-9)).alias("ofi_z")] +
             # Multi-scale ATR
             [((pl.col(f"atr_{self.atr_w}") / (pl.col("atr_20") + 1e-9)).clip(0.1, 10.0)).alias(f"atr_ratio_{self.atr_w}_20")] +
-            [((pl.col("atr_20") / (pl.col("atr_60") + 1e-9)).clip(0.1, 10.0)).alias(f"atr_ratio_20_60")] +
+            [((pl.col("atr_20") / (pl.col("atr_60") + 1e-9)).clip(0.1, 10.0)).alias("atr_ratio_20_60")] +
             # Multi-scale Volatility
             [((pl.col("vol_6") / (pl.col("vol_20") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_6_20")] +
             [((pl.col("vol_20") / (pl.col("vol_60") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_20_60")] +
@@ -1647,29 +1745,29 @@ class FeatureEngineer:
             # Liquidity Vacuum (requires bid/ask columns)
             ([liquidity_vacuum(120)] if "ask_close" in F.columns and "bid_close" in F.columns else [pl.lit(0.0).alias("liquidity_vacuum")])
         )
-        
+
         # 3. Fragility
         F = F.with_columns([
             vol_of_vol(20, 20),
             price_ofi_divergence(self.ofi_w, 10)
         ])
-        
+
         pip_size = _pip_size_for_pair(pair)
-        if "spread_avg" in F.columns: 
+        if "spread_avg" in F.columns:
             F = F.with_columns([(pl.col("spread_avg") / pip_size).alias("spread_pips")])
-        elif "ask_close" in F.columns: 
+        elif "ask_close" in F.columns:
             F = F.with_columns([((pl.col("ask_close") - pl.col("bid_close")) / pip_size).alias("spread_pips")])
-        else: 
+        else:
             F = F.with_columns([pl.lit(0.5).alias("spread_pips")])
 
         ac = f"atr_{self.atr_w}"
         F = add_spread_cost_features(F, pair=pair, atr_col=ac)
         F = add_market_regime_features(F)
-        
+
         # Regime-gated features (Improvement #3) - create regime-specific variants
         existing = set(F.columns)
         F = F.with_columns(regime_gated_features(existing))
-        
+
         # Add regime quality features
         F = F.with_columns([
             # realized_vol_regime: 0=low, 1=normal, 2=high (percentile-based)
@@ -1682,13 +1780,13 @@ class FeatureEngineer:
             # trend_quality: ADX (trend strength) x 5-bar RSI momentum (direction & pace)
             (pl.col("adx_14") * (pl.col("rsi_14") - pl.col("rsi_14").shift(5))).alias("trend_quality"),
         ])
-        
+
         # Interaction features (Improvement #5) - explicit non-linear combinations
         existing = set(F.columns)
         F = F.with_columns(interaction_features(existing))
-        
+
         F = add_higher_timeframe_context(F)
-        
+
         # HMM Regime Detection + CPD (Regime Detection Upgrade)
         existing = set(F.columns)
         try:
@@ -1704,12 +1802,12 @@ class FeatureEngineer:
             F = F.with_columns(hmm_regime_probs(3, 60))
         F = F.with_columns(cpd_ret("close", 60))
         F = F.with_columns(regime_persistence(20))
-        
+
         # Circuit Breakers / Kill Switches
         existing = set(F.columns)
         F = F.with_columns(circuit_breaker_features())
-        F = F.with_columns(position_limit_flags(atr_col=ac))
-        
+        F = F.with_columns(position_limit_flags(atr_col=ac, pair=pair))
+
         # FinBERT embeddings: use real embeddings if provided, otherwise zero placeholders
         if finbert_embs is not None and len(finbert_embs) > 0:
             try:
@@ -1718,12 +1816,12 @@ class FeatureEngineer:
                 else:
                     emb_df = pl.DataFrame(finbert_embs)
                 if "timestamp_utc" in emb_df.columns and "timestamp_utc" in F.columns:
-                    emb_df = emb_df.sort("timestamp_utc")
+                    emb_df = emb_df.with_columns(
+                        pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+                    )
                     emb_cols = [c for c in emb_df.columns if c.startswith("embed_") or c.startswith("fb_")]
-                    F = F.join_asof(
-                        emb_df.select(["timestamp_utc"] + emb_cols),
-                        on="timestamp_utc",
-                        strategy="backward",
+                    F = _join_asof_available(
+                        F, emb_df.select(["timestamp_utc"] + emb_cols)
                     )
                     rename_map = {c: f"embed_{i}" for i, c in enumerate(emb_cols) if not c.startswith("embed_")}
                     if rename_map:
@@ -1740,7 +1838,7 @@ class FeatureEngineer:
                 F = F.with_columns(embedding_placeholders(8))
         else:
             F = F.with_columns(embedding_placeholders(8))
-        
+
         # Cross asset
         F = self.ca.build(F, cross_asset)
 
@@ -1783,19 +1881,20 @@ class FeatureEngineer:
 
         # Filters
         F = F.with_columns([vol_filter(ac, self.vm, 60)])
-        
-        # News Filter - Join events if any
+
+        # News Filter - Join events if any.
+        # news_ok kill-zone is post-release only [ev, ev+buf] to avoid same-bar /
+        # pre-publication leakage from article timestamps. pre_news still marks
+        # the calendar-style lead-in for scheduled events known in advance.
         if news_events is not None and len(news_events) > 0:
             import pandas as pd
             buf = pd.Timedelta(minutes=self.nb)
-            # Polars doesn't do non-equi joins easily without `join_where` in newer versions, 
-            # so we map to numpy or pandas for speed given small event arrays
             ts = F["timestamp_utc"].to_pandas()
             flags = pd.DataFrame({"news_ok": 1.0, "pre_news": 0.0, "post_news": 0.0}, index=ts)
             for ev in news_events:
-                mask_ok = ((ts >= ev-buf) & (ts <= ev+buf)).values
-                mask_pre = ((ts >= ev-buf) & (ts < ev)).values
-                mask_post = ((ts >= ev) & (ts <= ev+buf)).values
+                mask_ok = ((ts >= ev) & (ts <= ev + buf)).values
+                mask_pre = ((ts >= ev - buf) & (ts < ev)).values
+                mask_post = ((ts >= ev) & (ts <= ev + buf)).values
                 flags.loc[mask_ok, "news_ok"] = 0.0
                 flags.loc[mask_pre, "pre_news"] = 1.0
                 flags.loc[mask_post, "post_news"] = 1.0
@@ -1810,7 +1909,7 @@ class FeatureEngineer:
                 pl.lit(0.0).alias("pre_news"),
                 pl.lit(0.0).alias("post_news")
             ])
-            
+
         if self.enable_regime_gate:
             rbp = self.regime_gate.fit_predict(F)
             F = F.with_columns([rbp])
@@ -1819,14 +1918,14 @@ class FeatureEngineer:
                 (1.0 - 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_yield_weight"),
                 (0.3 + 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_risk_weight")
             ])
-            
-        # Sentiment & News features using join_asof
-        # Sentiment tiers (raw, decayed, FinBERT projection)
+
+        # Sentiment & News features — join on available_time (PIT), not event time.
         if sentiment is not None:
-            # timestamp already cast at top of build()
-            drop_cols = [c for c in sentiment.columns if c in F.columns and c != "timestamp_utc"]
-            F = F.join_asof(sentiment.sort("timestamp_utc").drop(drop_cols), on="timestamp_utc", strategy="backward")
-            # Apply the tiered sentiment helper (adds raw, decay, and placeholder FinBERT cols)
+            if "timestamp_utc" in sentiment.columns:
+                sentiment = sentiment.with_columns(
+                    pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+                )
+            F = _join_asof_available(F, sentiment)
             F = sentiment_tiers(F, decay_lam=self.dl, fb_dim=self.fb)
         else:
             # No sentiment data     create zeroed columns for the three tiers
@@ -1844,8 +1943,16 @@ class FeatureEngineer:
                 _tcol = "text" if "text" in sentiment.columns else "headline"
                 _ev = sentiment.rename({_tcol: "text"}) if _tcol != "text" else sentiment
                 _keep = [c for c in ("timestamp_utc", "source", "text", "sentiment") if c in _ev.columns]
+                # Shift event timestamps to available_time so fusion cannot see
+                # same-bar headlines (PIT parity with _join_asof_available).
+                _ev_pit = _ev.select(_keep)
+                if "timestamp_utc" in _ev_pit.columns:
+                    _ev_pit = _ev_pit.with_columns(
+                        (pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+                         + pl.duration(minutes=_DEFAULT_PIT_DELAY_MINUTES)).alias("timestamp_utc")
+                    )
                 F = add_sentiment_features(
-                    F, _ev.select(_keep),
+                    F, _ev_pit,
                     time_col="timestamp_utc",
                     lam=float(self.dl) if self.dl else 0.05,
                     dt_sec=3600.0,
@@ -1853,7 +1960,7 @@ class FeatureEngineer:
                 )
             except Exception as e:
                 print(f"[FeatureEngineering] WARNING: multi-modal sentiment failed: {e}")
-            
+
         if eco_act is not None:
             eco_act = eco_act.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             if eco_fc is not None:
@@ -1866,10 +1973,33 @@ class FeatureEngineer:
                 drop_pr = [c for c in eco_prior.columns if c in eco.columns and c != "timestamp_utc"]
                 eco = eco.join(eco_prior.drop(drop_pr), on="timestamp_utc", how="outer_coalesce").sort("timestamp_utc")
             drop_cols = [c for c in eco.columns if c in F.columns and c != "timestamp_utc"]
-            F = F.join_asof(eco.drop(drop_cols), on="timestamp_utc", strategy="backward")
+            # Point-in-time: join on when the release became knowable, not raw
+            # event time (avoids same-bar leakage at the release timestamp).
+            left_dtype = F.schema["timestamp_utc"]
+            if "available_time" not in eco.columns:
+                eco = eco.with_columns(
+                    (pl.col("timestamp_utc").cast(left_dtype) + pl.duration(minutes=1))
+                    .alias("available_time")
+                )
+            else:
+                eco = eco.with_columns(pl.col("available_time").cast(left_dtype))
+            eco_join = (
+                eco.drop(drop_cols)
+                .with_columns(pl.col("available_time").cast(left_dtype))
+                .sort("available_time")
+            )
+            join_drop = [c for c in ("timestamp_utc",) if c in eco_join.columns]
+            F = F.join_asof(
+                eco_join.drop(join_drop) if join_drop else eco_join,
+                left_on="timestamp_utc",
+                right_on="available_time",
+                strategy="backward",
+            )
+            if "available_time" in F.columns:
+                F = F.drop("available_time")
             if "actual" in F.columns and "forecast" in F.columns:
                 F = F.with_columns([
-                    (pl.col("actual").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False) - 
+                    (pl.col("actual").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False) -
                      pl.col("forecast").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False)).fill_null(0.0).alias("eco_surprise")
                 ])
                 if "prior" in F.columns:
@@ -1883,13 +2013,17 @@ class FeatureEngineer:
                 F = F.with_columns([pl.lit(0.0).alias("eco_surprise"), pl.lit(0.0).alias("eco_revision")])
         else:
             F = F.with_columns([pl.lit(0.0).alias("eco_surprise"), pl.lit(0.0).alias("eco_revision")])
-            
+
         if art_counts is not None:
-            drop_cols = [c for c in art_counts.columns if c in F.columns and c != "timestamp_utc"]
-            F = F.join_asof(art_counts.sort("timestamp_utc").drop(drop_cols), on="timestamp_utc", strategy="backward")
-            F = F.with_columns([
-                pl.col("article_counts").fill_null(0.0)
-            ])
+            if "timestamp_utc" in art_counts.columns:
+                art_counts = art_counts.with_columns(
+                    pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+                )
+            F = _join_asof_available(F, art_counts)
+            if "article_counts" in F.columns:
+                F = F.with_columns([pl.col("article_counts").fill_null(0.0)])
+            else:
+                F = F.with_columns([pl.lit(0.0).alias("article_counts")])
             F = F.with_columns([buzz_score()])
         else:
             F = F.with_columns([pl.lit(0.0).alias("buzz")])
@@ -1898,8 +2032,7 @@ class FeatureEngineer:
         _NEWS_CAT_COLS = ["cat_central_bank", "cat_inflation", "cat_labor", "cat_growth", "cat_geopolitical", "cat_commentary"]
         if news_cats is not None and "timestamp_utc" in news_cats.columns:
             news_cats = news_cats.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
-            drop_cols = [c for c in news_cats.columns if c in F.columns and c != "timestamp_utc"]
-            F = F.join_asof(news_cats.sort("timestamp_utc").drop(drop_cols), on="timestamp_utc", strategy="backward")
+            F = _join_asof_available(F, news_cats)
             for _nc in _NEWS_CAT_COLS:
                 if _nc in F.columns:
                     F = F.with_columns(pl.col(_nc).fill_null(0.0))
@@ -1913,8 +2046,8 @@ class FeatureEngineer:
         missing_fb = [c for c in fb_cols if c not in F.columns]
         if missing_fb:
             F = F.with_columns([pl.lit(0.0).alias(c) for c in missing_fb])
-        
-        
+
+
         # Temporal
         import pandas as pd
         ts_pd = F["timestamp_utc"].to_pandas()
@@ -1926,23 +2059,23 @@ class FeatureEngineer:
             pl.Series("day_cos", np.cos(2*np.pi*ts_pd.dt.dayofweek/5)),
             pl.Series("london_ny", ((h >= 13) & (h <= 17)).astype(float))
         ])
-        
+
         # Missingness
         tracked = ["sentiment_decayed", "eco_surprise", "buzz"]
         F = missingness_flags(F, tracked, 0.9)
         F = F.with_columns([pl.col(c).fill_null(strategy="forward").fill_null(0.0) for c in tracked if c in F.columns])
-        
+
         # Latency
         try:
             from config.settings import EXECUTION as _EX
             _lat_base = float(_EX.get("latency_baseline_ms", 50.0))
         except Exception:
             _lat_base = 50.0
-            
+
         F = F.with_columns([
             compute_latency_feature(F, _lat_base, ac)
         ])
-        
+
         # Final cleanup
         n0 = len(F)
         F = F.drop(["actual", "forecast", "prior", "_eco_raw", "_eco_scale", "sentiment", "article_counts"], strict=False)
@@ -1959,12 +2092,11 @@ class FeatureEngineer:
         # Consumed downstream by labeling (no_trade_col) and live trading gates.
         if self.enable_no_trade_zones:
             try:
-                import pandas as _pd
                 from features.no_trade_zones import compute_heuristic_no_trade_score
                 _nt_cols = [c for c in ("atr_6", "spread_pips", "adx_14", "rsi_14") if c in F.columns]
                 _nt_pd = F.select(_nt_cols).to_pandas()
                 F = F.with_columns(pl.Series("no_trade_score", compute_heuristic_no_trade_score(_nt_pd)))
-                print(f"[Features] No-trade zones enabled: added 'no_trade_score' column")
+                print("[Features] No-trade zones enabled: added 'no_trade_score' column")
             except Exception as _e:
                 print(f"[Features] WARNING: no-trade zones failed: {_e}")
 

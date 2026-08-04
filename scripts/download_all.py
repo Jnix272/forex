@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +100,7 @@ def _load_yaml_defaults() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "pairs": list(DEFAULT_PAIRS),
         "start": "2008-01-01",
-        "end": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "end": datetime.now(UTC).strftime("%Y-%m-%d"),
         "full_day": False,
         "yearly": True,
         "keep_going": True,

@@ -4,13 +4,13 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-import pytest
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +30,7 @@ def test_embargo_bars_includes_delay():
 
 
 def test_multitask_class_index_from_direction_labels():
-    from training.train_gpu import labels_to_class_index, _reward_to_class_index
+    from training.train_gpu import _reward_to_class_index, labels_to_class_index
 
     y_dir = torch.tensor([-1.0, 0.0, 1.0])
     assert labels_to_class_index(y_dir).tolist() == [0, 1, 2]
@@ -39,8 +39,8 @@ def test_multitask_class_index_from_direction_labels():
 
 
 def test_forced_logits_map_model_classes_to_live_actions():
-    from trading.live_actions import LiveAction, model_class_to_live_action
     from inference.pytorch_inference import _logits_to_proba
+    from trading.live_actions import LiveAction, model_class_to_live_action
 
     cases = [
         (np.array([9.0, 0.0, 0.0]), LiveAction.SELL),
@@ -94,7 +94,7 @@ def test_live_feature_path_keeps_polars_for_realistic_bars():
 
 
 def test_polars_rl_labels_and_alignment():
-    from labeling.rl_reward_labeling import compute_rl_reward_labels, align_labels_with_features
+    from labeling.rl_reward_labeling import align_labels_with_features, compute_rl_reward_labels
 
     ts = pd.date_range("2024-01-02", periods=30, freq="1min", tz="UTC")
     close = 1.1000 + np.arange(len(ts)) * 0.00005
@@ -172,6 +172,7 @@ def test_cache_integrity_rejects_missing_or_mismatched_direction_sidecars(monkey
 
 def test_postprocess_cache_integrity_check_fails_after_bad_processing(monkeypatch):
     import pytest
+
     import training.train_gpu as tg
 
     class Args:
@@ -191,6 +192,7 @@ def test_postprocess_cache_integrity_check_fails_after_bad_processing(monkeypatc
 
 def test_feature_schema_mismatch_fails_fast():
     import inspect
+
     import training.train_gpu as tg
 
     source = inspect.getsource(tg._build_chunk)
@@ -202,6 +204,7 @@ def test_feature_schema_mismatch_fails_fast():
 
 def test_train_epoch_does_not_unconditionally_mix_labels():
     import inspect
+
     import training.train_gpu as tg
 
     source = inspect.getsource(tg.train_epoch)
@@ -286,18 +289,27 @@ def test_nonfinite_training_targets_are_sanitized():
     y_cls = torch.tensor([float("inf")])
     y_conf = torch.tensor([-float("inf")])
 
-    xb, yb, y_cls, y_conf = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
+    xb, yb, y_cls, y_conf, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
 
     assert torch.isfinite(xb).all()
-    assert torch.isfinite(yb).all()
-    assert torch.isfinite(y_cls).all()
-    assert torch.isfinite(y_conf).all()
-    assert labels_to_class_index(y_cls).tolist() == [2]
-    assert y_conf.tolist() == [0.0]
+    # Targets are NOT silently zeroed — keep mask surfaces bad rows for the caller to drop.
+    assert keep is not None
+    assert bool(keep[0]) is False
+    assert not torch.isfinite(yb).all()
+    # Finite rows still clamp confidence into [0, 1] when present
+    yb2 = torch.tensor([0.5])
+    y_cls2 = torch.tensor([0.0])
+    y_conf2 = torch.tensor([0.7])
+    xb2 = torch.ones(1, 1, 4)
+    xb2, yb2, y_cls2, y_conf2, keep2 = _sanitize_batch_tensors(xb2, yb2, y_cls2, y_conf2)
+    assert bool(keep2.all())
+    assert labels_to_class_index(y_cls2).tolist() == [1]
+    assert y_conf2.tolist() == pytest.approx([0.7])
 
 
 def test_train_epoch_without_teacher_model_does_not_name_error():
     from torch.utils.data import DataLoader, TensorDataset
+
     from training.train_gpu import train_epoch
 
     model = torch.nn.Sequential(

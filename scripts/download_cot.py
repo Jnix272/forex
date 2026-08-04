@@ -1,12 +1,14 @@
-import io
-import time
-import random
-import zipfile
 import argparse
-import requests
-import pandas as pd
+import io
+import random
+import time
+import zipfile
+from datetime import datetime
+from datetime import time as dtime
 from pathlib import Path
-from datetime import datetime, time as dtime
+
+import pandas as pd
+import requests
 
 try:
     from zoneinfo import ZoneInfo  # Python 3.9+

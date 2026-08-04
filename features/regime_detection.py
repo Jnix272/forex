@@ -21,10 +21,14 @@ name while swapping in the *real* HMM behind the same interface.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import polars as pl
 
 try:
     from hmmlearn.hmm import GaussianHMM
@@ -37,7 +41,7 @@ except Exception:  # pragma: no cover - optional dependency
 # Hurst exponents
 # ════════════════════════════════════════════════════════════════════════════
 
-def hurst_rs(x: Sequence[float], max_lag: Optional[int] = None) -> float:
+def hurst_rs(x: Sequence[float], max_lag: int | None = None) -> float:
     """
     Hurst exponent via Rescaled Range (R/S) analysis.
 
@@ -135,7 +139,7 @@ def hurst_dfa(x: Sequence[float], min_box: int = 4) -> float:
         return 0.5
 
 
-def fractal_dimension(x: Sequence[float], k_max: Optional[int] = None) -> float:
+def fractal_dimension(x: Sequence[float], k_max: int | None = None) -> float:
     """
     Fractal dimension of a time series via the Higuchi method.
 
@@ -206,11 +210,11 @@ class RegimeHMM:
             raise ImportError(
                 "RegimeHMM requires 'hmmlearn'. Install with: uv pip install hmmlearn")
         self._model = None
-        self._mean: Optional[np.ndarray] = None
-        self._std: Optional[np.ndarray] = None
-        self._cols: List[str] = []
+        self._mean: np.ndarray | None = None
+        self._std: np.ndarray | None = None
+        self._cols: list[str] = []
 
-    def fit(self, features: np.ndarray) -> "RegimeHMM":
+    def fit(self, features: np.ndarray) -> RegimeHMM:
         X = np.asarray(features, dtype=float)
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         self._mean = X.mean(axis=0)
@@ -248,7 +252,7 @@ class RegimeHMM:
             raise RuntimeError("RegimeHMM.fit() must be called first")
         return self._model.transmat_
 
-    def set_features(self, features: np.ndarray, cols: Optional[List[str]] = None) -> "RegimeHMM":
+    def set_features(self, features: np.ndarray, cols: list[str] | None = None) -> RegimeHMM:
         self._features = np.asarray(features, dtype=float)
         self._cols = cols or []
         return self
@@ -269,12 +273,57 @@ def fit_regime_hmm(
 # Standalone Polars-friendly regime probs (same output names as legacy)
 # ════════════════════════════════════════════════════════════════════════════
 
+def _causal_hmm_decode(
+    feat: np.ndarray,
+    n_states: int = 3,
+    min_fit: int = 120,
+    refit_every: int = 20,
+    random_state: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Causal-ish HMM decode: fit params on a warm-up prefix only, then decode.
+
+    Fitting on the full series lets future bars influence early state posteriors
+    (look-ahead). We instead:
+
+    1. Fit GaussianHMM parameters on ``feat[:min_fit]`` only.
+    2. Decode the full series with those frozen params.
+    3. Lag posteriors / states by 1 bar so bar ``t`` never sees ``t``'s return
+       in the smoothed posterior used as a feature.
+
+    ``refit_every`` is retained for API compatibility but unused (full expanding
+    refits are O(n²) and too slow for production feature builds).
+    """
+    del refit_every  # API compat
+    n = len(feat)
+    probs = np.full((n, n_states), 1.0 / max(1, n_states), dtype=np.float64)
+    states = np.zeros(n, dtype=np.int32)
+    if n < min_fit or not _HMMLEARN_OK:
+        return probs, states
+
+    try:
+        model = RegimeHMM(n_states=n_states, random_state=random_state)
+        model.set_features(feat[:min_fit])
+        model.fit(feat[:min_fit])
+        # Decode full series with warm-up mean/std + frozen transition/emission
+        model.set_features(feat)
+        raw_p = np.asarray(model.state_probs, dtype=np.float64)
+        raw_s = np.asarray(model.states, dtype=np.int32)
+        # 1-bar lag: feature at t uses posterior known at t-1
+        probs[1:] = raw_p[:-1]
+        states[1:] = raw_s[:-1]
+        probs[0] = 1.0 / n_states
+        states[0] = 0
+    except Exception:
+        pass
+    return probs, states
+
+
 def vol_regime_probs_polars(
     df,
     close_col: str = "close",
     n_states: int = 3,
     window: int = 60,
-) -> "pl.DataFrame":
+) -> pl.DataFrame:
     """
     Drop-in replacement for the legacy ``hmm_regime_probs`` expression builder.
 
@@ -290,19 +339,19 @@ def vol_regime_probs_polars(
     ret = np.zeros(n)
     ret[1:] = np.diff(np.log(np.maximum(close, 1e-12)))
     abs_ret = np.abs(ret)
-    vol = np.convolve(abs_ret, np.ones(window) / window, mode="same")
+    # Causal rolling vol (no mode="same" convolution look-ahead)
+    vol = np.zeros(n)
+    for i in range(window, n):
+        vol[i] = abs_ret[i - window:i].mean()
 
     feat = np.column_stack([ret, vol])
-    model = RegimeHMM(n_states=n_states, random_state=42)
-    model.set_features(feat)
-    model.fit(feat)
-    probs = model.state_probs
+    probs, _ = _causal_hmm_decode(feat, n_states=n_states, min_fit=max(window * 2, 120))
 
     out = {f"vol_regime_state_{s}_prob": probs[:, s] for s in range(n_states)}
     return pl.DataFrame(out)
 
 
-def vol_regime_quantile_probs(n_states: int = 3, window: int = 60) -> List:
+def vol_regime_quantile_probs(n_states: int = 3, window: int = 60) -> list:
     """
     Legacy volatility-tercile regime probs (equivalent to the old
     ``hmm_regime_probs`` in ``feature_engineering_pl.py``) — kept so callers
@@ -332,7 +381,7 @@ def detect_regimes_polars(
     hurst_window: int = 120,
     fractal_window: int = 60,
     step: int = 1,
-) -> "pl.DataFrame":
+) -> pl.DataFrame:
     """
     Full regime feature builder over a Polars bar frame.
 
@@ -363,11 +412,9 @@ def detect_regimes_polars(
         vol[i] = abs_ret[i - window:i].mean()
     feat = np.column_stack([ret, vol])
 
-    model = RegimeHMM(n_states=n_states, random_state=42)
-    model.set_features(feat)
-    model.fit(feat)
-    probs = model.state_probs
-    states = model.states
+    probs, states = _causal_hmm_decode(
+        feat, n_states=n_states, min_fit=max(window * 2, 120),
+    )
 
     hurst_rs_arr = np.full(n, 0.5)
     hurst_dfa_arr = np.full(n, 0.5)

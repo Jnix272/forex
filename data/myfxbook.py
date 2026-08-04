@@ -37,15 +37,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from data.sources import (
-    _enforce_schema,
-    TICK_COLUMNS,
     _DATA_DIR,
+    TICK_COLUMNS,
+    _enforce_schema,
 )
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -195,8 +194,8 @@ class MyfxbookLoader:
     def load(
         self,
         pair:  str,
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
     ) -> pd.DataFrame:
         """
         Load and concatenate all CSVs found in data_dir/<pair>/.
@@ -260,8 +259,8 @@ class MyfxbookLoader:
     def load_ohlcv(
         self,
         pair:  str,
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
     ) -> pd.DataFrame:
         """
         Return raw daily OHLCV DataFrame (no bid/ask synthesis).

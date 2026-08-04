@@ -2,7 +2,7 @@
 Proposed api/main.py
 FastAPI application interface for Forex Scaling Model risk & kelly sizing.
 """
-from typing import List, Optional
+
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -19,17 +19,17 @@ app = FastAPI(
 class KellySizingRequest(BaseModel):
     win_prob: float = Field(..., description="Winning probability, float between 0.0 and 1.0", ge=0.0, le=1.0)
     win_loss_ratio: float = Field(..., description="Win/loss ratio, positive float", gt=0.0)
-    returns: List[float] = Field(..., description="List of historical returns (floats)")
+    returns: list[float] = Field(..., description="List of historical returns (floats)")
     price: float = Field(..., description="Current asset price, positive float", gt=0.0)
     current_atr: float = Field(..., description="Current Average True Range (ATR), positive float", gt=0.0)
     equity: float = Field(..., description="Current portfolio equity, positive float", gt=0.0)
     lot_size: float = Field(10000.0, description="Standard lot contract size (e.g. 10000 or 100000)", gt=0.0)
 
     # Optional PositionSizer configuration parameter overrides
-    kelly_fraction: Optional[float] = Field(None, description="Fractional Kelly multiplier (default: 0.25)", gt=0.0, le=1.0)
-    max_position_pct: Optional[float] = Field(None, description="Maximum position risk percentage of equity (default: 0.05)", gt=0.0, le=1.0)
-    target_vol: Optional[float] = Field(None, description="Target annual volatility (default: 0.10)", gt=0.0)
-    pip_risk: Optional[float] = Field(None, description="Minimum stop loss in pips (default: 20.0)", gt=0.0)
+    kelly_fraction: float | None = Field(None, description="Fractional Kelly multiplier (default: 0.25)", gt=0.0, le=1.0)
+    max_position_pct: float | None = Field(None, description="Maximum position risk percentage of equity (default: 0.05)", gt=0.0, le=1.0)
+    target_vol: float | None = Field(None, description="Target annual volatility (default: 0.10)", gt=0.0)
+    pip_risk: float | None = Field(None, description="Minimum stop loss in pips (default: 20.0)", gt=0.0)
 
 
 class KellySizingResponse(BaseModel):
@@ -42,7 +42,7 @@ class KellySizingResponse(BaseModel):
 
 
 class VolatilityBoundsRequest(BaseModel):
-    returns: List[float] = Field(..., description="List of historical returns (floats)")
+    returns: list[float] = Field(..., description="List of historical returns (floats)")
     target_vol: float = Field(0.10, description="Target annual volatility, positive float", gt=0.0)
     lookback: int = Field(20, description="Lookback window size, positive integer", gt=1)
 
@@ -133,7 +133,7 @@ def kelly_sizing(payload: KellySizingRequest):
             impact_usd=result["impact_usd"],
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Sizing calculation failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Sizing calculation failed: {e!s}")
 
 
 @app.post("/volatility_bounds", response_model=VolatilityBoundsResponse)
@@ -157,7 +157,7 @@ def volatility_bounds(payload: VolatilityBoundsRequest):
         # Clean returns list to filter out non-finite float values (NaN, Inf, -Inf)
         clean_returns = [r for r in payload.returns if r is not None and np.isfinite(r)]
         returns_np = np.array(clean_returns)
-        
+
         # Guard against empty or single-element arrays
         if len(returns_np) < 2:
             return VolatilityBoundsResponse(
@@ -183,7 +183,7 @@ def volatility_bounds(payload: VolatilityBoundsRequest):
             realized_vol=realized_vol,
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Volatility bounds calculation failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Volatility bounds calculation failed: {e!s}")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,10 @@ financial NER, lexicon scoring, topic modeling, bar fusion.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import polars as pl
-import pytest
-from datetime import datetime, timezone, timedelta
 
 from features.sentiment_fusion import (
     NER_CATEGORIES,
@@ -27,12 +27,12 @@ _HEADLINES = [
 ]
 
 
-def _bars(n=24, start=datetime(2024, 1, 1, tzinfo=timezone.utc)):
+def _bars(n=24, start=datetime(2024, 1, 1, tzinfo=UTC)):
     return [start + timedelta(hours=i) for i in range(n)]
 
 
 def _events(n_ev=3):
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
     return pl.DataFrame({
         "timestamp_utc": [start + timedelta(hours=1), start + timedelta(hours=2),
                           start + timedelta(hours=1, minutes=30)],
@@ -164,7 +164,7 @@ def test_build_sentiment_features_lexicon_fallback_when_no_sent_col():
 
 def test_add_sentiment_features_appends_to_bars():
     from features.sentiment_fusion import add_sentiment_features
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
     bars = pl.DataFrame({
         "timestamp_utc": [start + timedelta(hours=i) for i in range(6)],
         "close": [1.0 + 0.01 * i for i in range(6)],

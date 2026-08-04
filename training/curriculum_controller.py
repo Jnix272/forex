@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,9 @@ class CurriculumEvent:
     stage: str
     seq_len: int
     lr_multiplier: float = 1.0
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "epoch": self.epoch,
             "event": self.event,
@@ -62,7 +62,7 @@ class CurriculumController:
     def __init__(
         self,
         start_stage: str = "easy",
-        start_seq_len: Optional[int] = None,
+        start_seq_len: int | None = None,
         config: AdaptiveCurriculumConfig | None = None,
     ):
         self.logger = logging.getLogger(__name__)
@@ -74,10 +74,10 @@ class CurriculumController:
         self.current_seq_len = int(start_seq_len or self.config.seq_lens[0])
         self.stable_epochs = 0
         self.recovery_left = 0
-        self.sharpe_history: List[float] = []
-        self.events: List[CurriculumEvent] = []
+        self.sharpe_history: list[float] = []
+        self.events: list[CurriculumEvent] = []
 
-    def _rolling_stats(self) -> Dict[str, float]:
+    def _rolling_stats(self) -> dict[str, float]:
         window = self.sharpe_history[-self.config.stability_window :]
         if not window:
             return {"mean": 0.0, "std": 0.0, "peak": 0.0, "current": 0.0}
@@ -90,20 +90,20 @@ class CurriculumController:
             "current": self.sharpe_history[-1],
         }
 
-    def _next_stage(self) -> Optional[str]:
+    def _next_stage(self) -> str | None:
         idx = self.config.stages.index(self.current_stage)
         if idx >= len(self.config.stages) - 1:
             return None
         return self.config.stages[idx + 1]
 
-    def _next_seq_len(self) -> Optional[int]:
+    def _next_seq_len(self) -> int | None:
         ordered = sorted(set(int(x) for x in self.config.seq_lens))
         for seq_len in ordered:
             if seq_len > self.current_seq_len:
                 return seq_len
         return None
 
-    def _previous_seq_len(self) -> Optional[int]:
+    def _previous_seq_len(self) -> int | None:
         ordered = sorted(set(int(x) for x in self.config.seq_lens))
         prev = [seq_len for seq_len in ordered if seq_len < self.current_seq_len]
         return prev[-1] if prev else None
@@ -128,14 +128,14 @@ class CurriculumController:
         self.events.append(item)
         self.logger.info("[Curriculum] %s", item.to_dict())
 
-    def evaluate_epoch(self, epoch: int, val_sharpe: float, val_loss: float = 0.0) -> Dict[str, Any]:
+    def evaluate_epoch(self, epoch: int, val_sharpe: float, val_loss: float = 0.0) -> dict[str, Any]:
         """Evaluate validation metrics and return curriculum actions."""
         val_sharpe = float(val_sharpe)
         val_loss = float(val_loss)
         self.sharpe_history.append(val_sharpe)
         stats = self._rolling_stats()
 
-        actions: Dict[str, Any] = {
+        actions: dict[str, Any] = {
             "advance_difficulty": False,
             "delay_seq_len_increase": False,
             "revert_seq_len": False,
@@ -271,10 +271,10 @@ class CurriculumController:
 
         return actions
 
-    def event_log(self) -> List[Dict[str, Any]]:
+    def event_log(self) -> list[dict[str, Any]]:
         return [event.to_dict() for event in self.events]
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         return {
             "current_stage": self.current_stage,
             "current_seq_len": self.current_seq_len,
@@ -284,7 +284,7 @@ class CurriculumController:
             "events": self.event_log(),
         }
 
-    def write_report(self, output_path: str | Path) -> Dict[str, Any]:
+    def write_report(self, output_path: str | Path) -> dict[str, Any]:
         report = self.state_dict()
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)

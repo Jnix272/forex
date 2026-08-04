@@ -7,6 +7,7 @@ supervised validation, and the forward promotion holdout.
 
 import logging
 
+
 class PretrainGuardrails:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -17,15 +18,15 @@ class PretrainGuardrails:
         """
         pre_start, pre_end = pretrain_window
         hold_start, hold_end = promotion_holdout_window
-        
+
         # Check for any overlap
         if max(pre_start, hold_start) < min(pre_end, hold_end):
             self.logger.error(f"FATAL LEAKAGE: Pretrain window {pretrain_window} overlaps with Forward Holdout {promotion_holdout_window}!")
             raise RuntimeError("Data Leakage Guardrail triggered. Halting pretraining.")
-            
+
         self.logger.info("Guardrail Passed: No overlap between pretrain and forward holdout.")
         return True
-        
+
     def enforce_distinct_validation_slices(self, pretrain_val_slice: tuple, prod_promotion_slice: tuple) -> bool:
         """
         Do not choose the pretrain method using the same validation slice used for production promotion.
@@ -33,7 +34,7 @@ class PretrainGuardrails:
         if pretrain_val_slice == prod_promotion_slice:
             self.logger.error("FATAL LEAKAGE: Pretrain is tuning on the exact same validation slice used for production promotion!")
             raise RuntimeError("Data Leakage Guardrail triggered. Halting pretraining.")
-            
+
         self.logger.info("Guardrail Passed: Pretrain validation slice is independent of production promotion slice.")
         return True
 

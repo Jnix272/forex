@@ -1,6 +1,7 @@
-import pandas as pd
-from pathlib import Path
 import json
+from pathlib import Path
+
+import pandas as pd
 
 MIN_PASS_SNAPSHOTS = 60
 MAX_PASS_CADENCE_MINUTES = 10.0
@@ -35,32 +36,32 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
     for pair, file_list in pairs.items():
         dfs = [pd.read_parquet(f) for f in file_list]
         df = pd.concat(dfs).sort_values("timestamp")
-        
+
         # Calculate stats
         total_rows = len(df)
         min_time = df["timestamp"].min()
         max_time = df["timestamp"].max()
-        
+
         # Freshness / Cadence
         time_diffs = df["timestamp"].diff().dt.total_seconds() / 60.0
         avg_cadence_mins = time_diffs.dropna().mean()
         avg_cadence_value = None if pd.isna(avg_cadence_mins) else round(float(avg_cadence_mins), 2)
-        
+
         # Missing minutes (assuming 1-min expected cadence)
         expected_minutes = ((max_time - min_time).total_seconds() / 60.0) + 1 if pd.notnull(max_time) else 0
         missing_minutes = max(0, expected_minutes - total_rows)
-        
+
         # Stale snapshots (no change in data)
         # We can approximate staleness by looking for duplicate feature vectors
         features = ["retail_long_ratio", "order_imbalance"]
         stale_count = df.duplicated(subset=features).sum()
-        
+
         # Mock data tracking
         mock_count = df["is_mock"].sum() if "is_mock" in df.columns else 0
-        
+
         # Null rates
         null_rates = (df.isnull().sum() / total_rows).to_dict() if total_rows > 0 else {}
-        
+
         # Status calculation
         status = "PASS"
         reasons = []
@@ -82,7 +83,7 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
         elif avg_cadence_value is not None and avg_cadence_value > MAX_PASS_CADENCE_MINUTES:
             status = "WARN (Low Cadence)"
             reasons.append("low_cadence")
-            
+
         report["pairs"][pair] = {
             "status": status,
             "reasons": reasons,
@@ -94,10 +95,10 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
             "mock_snapshot_count": int(mock_count),
             "null_rates": {k: float(v) for k, v in null_rates.items()}
         }
-        
+
     with open(output_json, "w") as f:
         json.dump(report, f, indent=4, allow_nan=False)
-        
+
     print(f"Generated report at {output_json}")
     for p, stats in report["pairs"].items():
         print(f"  [{p}] Status: {stats['status']} | Snapshots: {stats['total_snapshots']} | Mock: {stats['mock_snapshot_count']}")

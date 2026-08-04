@@ -17,11 +17,10 @@ Everything is deterministic and self-contained (numpy/scipy only):
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. Propensity helpers
@@ -64,10 +63,10 @@ def ipw_value_estimate(
     rewards: np.ndarray,
     behavior_probs: np.ndarray,
     target_probs: np.ndarray,
-    clip: Optional[float] = None,
+    clip: float | None = None,
     n_bootstrap: int = 0,
     seed: int = 0,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """IPS estimate of the value of a target policy.
 
     ``actions``          : int array of realized actions (behavior policy)
@@ -117,7 +116,7 @@ def counterfactual_reward_by_action(
     behavior_probs: np.ndarray,
     target_probs: np.ndarray,
     n_actions: int,
-    clip: Optional[float] = None,
+    clip: float | None = None,
 ) -> np.ndarray:
     """Per-action IPS counterfactual reward estimates.
 
@@ -154,8 +153,8 @@ def doubly_robust_reward_by_action(
     behavior_probs: np.ndarray,
     target_probs: np.ndarray,
     n_actions: int,
-    q: Optional[np.ndarray] = None,
-    clip: Optional[float] = None,
+    q: np.ndarray | None = None,
+    clip: float | None = None,
 ) -> np.ndarray:
     """Per-action doubly-robust counterfactual reward estimates.
 
@@ -213,9 +212,9 @@ def quantile_reward_labels(
     profit_atr_mult: float = 1.5,
     stop_atr_mult: float = 1.0,
     levels: Sequence[float] = (0.05, 0.25, 0.5, 0.75, 0.95),
-    spread_half: Optional[np.ndarray] = None,
+    spread_half: np.ndarray | None = None,
     execution_delay_bars: int = 0,
-    valid: Optional[np.ndarray] = None,
+    valid: np.ndarray | None = None,
 ) -> pl.DataFrame:
     """Per-bar quantile (QR-DQN) reward labels.
 
@@ -308,12 +307,12 @@ def quantile_reward_labels(
 def compute_off_policy_rewards(
     actions: np.ndarray,
     rewards: np.ndarray,
-    behavior_logits: Optional[np.ndarray] = None,
-    behavior_probs: Optional[np.ndarray] = None,
-    target_logits: Optional[np.ndarray] = None,
-    target_probs: Optional[np.ndarray] = None,
+    behavior_logits: np.ndarray | None = None,
+    behavior_probs: np.ndarray | None = None,
+    target_logits: np.ndarray | None = None,
+    target_probs: np.ndarray | None = None,
     n_actions: int = 3,
-    clip: Optional[float] = 10.0,
+    clip: float | None = 10.0,
     n_bootstrap: int = 200,
     seed: int = 0,
 ) -> pl.DataFrame:

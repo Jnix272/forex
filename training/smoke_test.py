@@ -40,7 +40,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 # ── project root on path ───────────────────────────────────────────────────────
 _ROOT = Path(__file__).resolve().parent.parent
@@ -128,7 +128,7 @@ class ModelResult:
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_dataset(cfg: Dict[str, Any], device: "torch.device") -> Tuple[
+def _make_dataset(cfg: dict[str, Any], device: torch.device) -> tuple[
         DataLoader, DataLoader]:
     """Generate a tiny random dataset and return train/val DataLoaders."""
     n     = cfg["n_samples"]
@@ -152,7 +152,7 @@ def _make_dataset(cfg: Dict[str, Any], device: "torch.device") -> Tuple[
     return train_dl, val_dl
 
 
-def _nan_in_grads(model: "nn.Module") -> int:
+def _nan_in_grads(model: nn.Module) -> int:
     """Return number of parameters whose .grad contains NaN."""
     count = 0
     for p in model.parameters():
@@ -161,7 +161,7 @@ def _nan_in_grads(model: "nn.Module") -> int:
     return count
 
 
-def _count_params(model: "nn.Module") -> int:
+def _count_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
@@ -178,8 +178,8 @@ def _print(msg: str, style: str = "") -> None:
 
 def _test_model(
     name:       str,
-    cfg:        Dict[str, Any],
-    device:     "torch.device",
+    cfg:        dict[str, Any],
+    device:     torch.device,
     use_amp:    bool,
     amp_dtype:  Any,
     ckpt_dir:   Path,
@@ -379,8 +379,8 @@ def _test_model(
 # REPORTING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _print_results_rich(results: List[ModelResult], total_s: float,
-                         cfg: Dict[str, Any], device_str: str,
+def _print_results_rich(results: list[ModelResult], total_s: float,
+                         cfg: dict[str, Any], device_str: str,
                          use_amp: bool) -> None:
     n_pass = sum(1 for r in results if r.passed)
     n_fail = len(results) - n_pass
@@ -467,7 +467,7 @@ def _print_results_rich(results: List[ModelResult], total_s: float,
         )
 
 
-def _print_results_plain(results: List[ModelResult], total_s: float) -> None:
+def _print_results_plain(results: list[ModelResult], total_s: float) -> None:
     SEP = "─" * 90
     print(f"\n{SEP}")
     print(f"  {'MODEL':<12} {'STATUS':<7} {'BUILD':<7} {'FWD':<6} {'BWD':<6} "
@@ -609,7 +609,7 @@ def main() -> int:
         )
     else:
         print(f"\n{'═'*62}")
-        print(f"  Forex Scaling Model — Pre-flight Smoke Test")
+        print("  Forex Scaling Model — Pre-flight Smoke Test")
         print(f"  Device  : {device_str}")
         print(f"  AMP     : {use_amp}")
         print(f"  Models  : {', '.join(m.upper() for m in models_to_test)}")
@@ -618,7 +618,7 @@ def main() -> int:
         print("═" * 62)
 
     # ── Run tests ─────────────────────────────────────────────────────────────
-    results: List[ModelResult] = []
+    results: list[ModelResult] = []
     total_t0 = time.perf_counter()
 
     with tempfile.TemporaryDirectory() as ckpt_dir:

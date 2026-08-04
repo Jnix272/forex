@@ -1,7 +1,8 @@
 import argparse
+from pathlib import Path
+
 import databento as db
 import pandas as pd
-from pathlib import Path
 from dotenv import load_dotenv
 
 CME_MAP = {
@@ -40,12 +41,12 @@ def main():
     dataset = "GLBX.MDP3"
     symbols = [f"{sym}.c.0"]
 
-    print(f"--- Databento Request Details ---")
+    print("--- Databento Request Details ---")
     print(f"Dataset:  {dataset}")
     print(f"Symbols:  {symbols}")
     print(f"Schema:   {args.schema}")
     print(f"Date:     {args.start} -> {args.end}")
-    
+
     # Calculate Total Cost
     total_estimated_cost = 0.0
     if not getattr(args, 'skip_cost_check', False):
@@ -91,7 +92,7 @@ def main():
     # Generate week-by-week date pairs to avoid 5GB streaming limit
     start_dt = pd.to_datetime(args.start)
     end_dt = pd.to_datetime(args.end)
-    
+
     # Create weekly periods
     periods = pd.date_range(start=start_dt, end=end_dt, freq='7D')
     if len(periods) == 0 or periods[-1] < end_dt:
@@ -145,13 +146,13 @@ def main():
             t.join(timeout=300)  # 5-minute timeout per chunk
 
             if t.is_alive():
-                print(f"     [TIMEOUT] Chunk timed out after 5 min, skipping.")
+                print("     [TIMEOUT] Chunk timed out after 5 min, skipping.")
                 continue
             if error[0] is not None:
                 raise error[0]
             data = result[0]
             data.to_parquet(out_file)
-            print(f"     [SUCCESS] Saved chunk.")
+            print("     [SUCCESS] Saved chunk.")
             # Update accumulators
             total_cost_accum += per_chunk_cost
             total_size_bytes += out_file.stat().st_size

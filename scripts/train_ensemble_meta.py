@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +29,6 @@ if str(ROOT) not in sys.path:
 from config.settings import PATHS
 from models.ensemble import EnsembleMetaLearner, train_meta_learner
 from training.train_gpu import ZarrStreamDataset, _on_disk_sequence_count, build_model
-
 
 DEFAULT_CACHE = (
     ROOT
@@ -299,7 +298,7 @@ def main() -> int:
     )
     manifest = {
         "kind": "ensemble_meta_learner",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "base_models": [
             {
                 "name": name,

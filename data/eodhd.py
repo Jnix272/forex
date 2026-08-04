@@ -41,7 +41,6 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -53,9 +52,9 @@ except ImportError:
     pass
 
 from data.sources import (
-    _enforce_schema,
-    TICK_COLUMNS,
     _DATA_DIR,
+    TICK_COLUMNS,
+    _enforce_schema,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -65,7 +64,7 @@ DEFAULT_EODHD_CACHE_DIR = str(_DATA_DIR / "raw" / "eodhd")
 
 # ── Forex pair -> EODHD ticker mapping ────────────────────────────────────────
 # All forex pairs use the ".FOREX" exchange in EODHD.
-EODHD_FOREX_PAIRS: Dict[str, str] = {
+EODHD_FOREX_PAIRS: dict[str, str] = {
     "EURUSD": "EURUSD.FOREX",
     "GBPUSD": "GBPUSD.FOREX",
     "USDJPY": "USDJPY.FOREX",
@@ -83,7 +82,7 @@ EODHD_FOREX_PAIRS: Dict[str, str] = {
 }
 
 # Typical half-spread per pair (price units) for bid/ask synthesis.
-_TYPICAL_HALF_SPREAD: Dict[str, float] = {
+_TYPICAL_HALF_SPREAD: dict[str, float] = {
     "EURUSD": 0.00005,
     "GBPUSD": 0.00008,
     "USDJPY": 0.005,
@@ -114,7 +113,7 @@ def _pair_half_spread(pair: str) -> float:
 #   .FOREX — FX-quoted spot prices (gold, silver)
 #   .CC    — crypto
 #   .GBOND — government bond yields
-EODHD_CROSS_ASSET: Dict[str, str] = {
+EODHD_CROSS_ASSET: dict[str, str] = {
     # Commodities
     "WTI":        "OILCRUDEWTI.COMM",
     "GOLD":       "XAUUSD.FOREX",
@@ -153,18 +152,18 @@ EODHD_CROSS_ASSET: Dict[str, str] = {
 
 def _eodhd_get(
     endpoint:  str,
-    params:    Dict[str, str],
+    params:    dict[str, str],
     api_key:   str,
     timeout:   int = 30,
     max_retry: int = 3,
-) -> Optional[list]:
+) -> list | None:
     """
     Make a GET request to EODHD API, returning parsed JSON or None on failure.
     Retries with exponential back-off on rate-limit (429) responses.
     """
     import json
-    import urllib.request
     import urllib.parse
+    import urllib.request
 
     params["api_token"] = api_key
     params["fmt"]       = "json"
@@ -259,7 +258,7 @@ def _parse_intraday_response(data: list, pair: str) -> pd.DataFrame:
     return _enforce_schema(df, pair, "eodhd")
 
 
-def _parse_cross_asset_response(data: list, asset: str) -> Optional[pd.Series]:
+def _parse_cross_asset_response(data: list, asset: str) -> pd.Series | None:
     """
     Convert EODHD /eod/ JSON list to a daily price Series (UTC DatetimeIndex).
     """
@@ -291,7 +290,7 @@ def _cache_path_for_pair(cache_dir: str, pair: str, suffix: str = "daily") -> Pa
     return Path(cache_dir) / pair / f"{pair}_{suffix}.parquet"
 
 
-def _cache_read_parquet(path: Path) -> Optional[pd.DataFrame]:
+def _cache_read_parquet(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
     try:
@@ -315,7 +314,7 @@ def _cache_path_cross(cache_dir: str, asset: str) -> Path:
     return Path(cache_dir) / "cross_asset" / f"{asset}_eodhd.csv"
 
 
-def _cache_read_cross(path: Path) -> Optional[pd.Series]:
+def _cache_read_cross(path: Path) -> pd.Series | None:
     if not path.exists():
         return None
     try:
@@ -385,8 +384,8 @@ class EODHDLoader:
     def load(
         self,
         pair:  str,
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        start: str | None = None,
+        end:   str | None = None,
         use_cache: bool = True,
     ) -> pd.DataFrame:
         """
@@ -456,11 +455,11 @@ class EODHDLoader:
 
     def load_multiple(
         self,
-        pairs: List[str],
-        start: Optional[str] = None,
-        end:   Optional[str] = None,
+        pairs: list[str],
+        start: str | None = None,
+        end:   str | None = None,
         use_cache: bool = True,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """Load multiple pairs. Returns dict of pair -> DataFrame."""
         results = {}
         for pair in pairs:
@@ -475,8 +474,8 @@ class EODHDLoader:
         self,
         pair:      str,
         interval:  str = "1h",
-        start:     Optional[str] = None,
-        end:       Optional[str] = None,
+        start:     str | None = None,
+        end:       str | None = None,
         use_cache: bool = True,
     ) -> pd.DataFrame:
         """
@@ -541,11 +540,11 @@ class EODHDLoader:
 
     def load_cross_asset(
         self,
-        start:     Optional[str] = None,
-        end:       Optional[str] = None,
-        assets:    Optional[List[str]] = None,
+        start:     str | None = None,
+        end:       str | None = None,
+        assets:    list[str] | None = None,
         use_cache: bool = True,
-    ) -> Dict[str, pd.Series]:
+    ) -> dict[str, pd.Series]:
         """
         Load the full cross-asset panel from EODHD.
 
@@ -568,7 +567,7 @@ class EODHDLoader:
         start_ts = pd.Timestamp(start, tz="UTC")
         end_ts   = pd.Timestamp(end,   tz="UTC")
 
-        out: Dict[str, pd.Series] = {}
+        out: dict[str, pd.Series] = {}
 
         for asset in target_assets:
             ticker = EODHD_CROSS_ASSET.get(asset)

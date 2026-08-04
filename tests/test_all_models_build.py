@@ -31,7 +31,7 @@ def _default_args(n_features: int = 80, multitask: bool = True) -> argparse.Name
 
 
 def test_build_and_forward(n_features: int = 80, multitask: bool = True) -> dict[str, dict]:
-    from training.train_gpu import build_model, _multitask_head_in
+    from training.train_gpu import _multitask_head_in, build_model
 
     args = _default_args(n_features, multitask)
     B, T = 2, args.seq_len
@@ -87,7 +87,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     cur = test_transformer_curriculum_seq_mismatch()
-    print(f"\n=== transformer curriculum seq_len=30 with model built for 60 ===")
+    print("\n=== transformer curriculum seq_len=30 with model built for 60 ===")
     print(f"  {cur}")
 
     print("\nOK: all model build/forward smoke tests passed")

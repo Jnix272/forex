@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -20,11 +20,11 @@ class LineageStep:
     """One processing step in the data → training pipeline."""
     step: str
     name: str
-    params: Dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
     data_hash: str = ""
     timestamp: str = field(default_factory=_now_iso)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "step": self.step,
             "name": self.name,
@@ -40,10 +40,10 @@ class DecisionRecord:
     decision: str            # promote | rollback | risk_block | drift_alert ...
     model: str
     decision_made: bool
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=_now_iso)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision,
             "model": self.model,
@@ -71,20 +71,20 @@ class DataLineage:
         self.dataset = dataset
         self.dataset_version = dataset_version
         self.dataset_hash = dataset_hash
-        self.steps: List[LineageStep] = []
-        self.training_runs: List[Dict[str, Any]] = []
+        self.steps: list[LineageStep] = []
+        self.training_runs: list[dict[str, Any]] = []
         self.created_at: str = _now_iso()
 
-    def add_step(self, step: str, name: str, params: Optional[Dict[str, Any]] = None,
+    def add_step(self, step: str, name: str, params: dict[str, Any] | None = None,
                  data_hash: str = "") -> LineageStep:
         s = LineageStep(step=step, name=name, params=params or {}, data_hash=data_hash)
         self.steps.append(s)
         return s
 
-    def record_training_run(self, run_id: str, params: Optional[Dict[str, Any]] = None,
-                            seed: Optional[int] = None, commit: Optional[str] = None,
-                            env: Optional[Dict[str, Any]] = None,
-                            model: str = "unknown") -> Dict[str, Any]:
+    def record_training_run(self, run_id: str, params: dict[str, Any] | None = None,
+                            seed: int | None = None, commit: str | None = None,
+                            env: dict[str, Any] | None = None,
+                            model: str = "unknown") -> dict[str, Any]:
         run = {
             "run_id": run_id,
             "model": model,
@@ -101,7 +101,7 @@ class DataLineage:
         self.training_runs.append(run)
         return run
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "dataset": self.dataset,
             "dataset_version": self.dataset_version,
@@ -121,8 +121,8 @@ class DataLineage:
             f.write(self.to_json())
 
     @classmethod
-    def load(cls, path: str) -> "DataLineage":
-        with open(path, "r", encoding="utf-8") as f:
+    def load(cls, path: str) -> DataLineage:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         lineage = cls(data.get("dataset", ""), data.get("dataset_version", ""),
                       data.get("dataset_hash", ""))
@@ -140,14 +140,14 @@ class DataLineage:
 def ModelRegistryRecord(
     model: str,
     run_id: str,
-    params: Optional[Dict[str, Any]] = None,
-    data_hash: Optional[str] = None,
-    code_commit: Optional[str] = None,
-    seed: Optional[int] = None,
-    env: Optional[Dict[str, Any]] = None,
-    dataset_hash: Optional[str] = None,
-    created_at: Optional[str] = None,
-) -> Dict[str, Any]:
+    params: dict[str, Any] | None = None,
+    data_hash: str | None = None,
+    code_commit: str | None = None,
+    seed: int | None = None,
+    env: dict[str, Any] | None = None,
+    dataset_hash: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
     """Model registry hook — a flat, queryable record of one model artifact."""
     return {
         "model": model,
@@ -166,10 +166,10 @@ def decision_trail(
     model: str,
     decision: str,
     decision_made: bool,
-    details: Optional[Dict[str, Any]] = None,
-    history: Optional[List[DecisionRecord]] = None,
-    path: Optional[str] = None,
-) -> Dict[str, Any]:
+    details: dict[str, Any] | None = None,
+    history: list[DecisionRecord] | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
     """Append a decision to an audit trail (and optionally persist to JSON).
 
     ``history`` may be an existing list of DecisionRecord dicts; returns a dict
@@ -177,7 +177,7 @@ def decision_trail(
     """
     record = DecisionRecord(decision=decision, model=model,
                             decision_made=decision_made, details=details or {})
-    trail: List[Dict[str, Any]] = []
+    trail: list[dict[str, Any]] = []
     if history:
         for h in history:
             if isinstance(h, DecisionRecord):

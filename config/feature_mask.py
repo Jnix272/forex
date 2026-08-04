@@ -1,15 +1,22 @@
 # config/feature_mask.py
 """
-Domain‑knowledge‑driven feature mask.
-Set a key to True to keep the feature; False (or missing) will drop it.
+Domain-knowledge-driven feature mask.
 
-NOTE: All features are currently enabled (True). This is the intentional
-development baseline — no pruning is applied.  Set individual keys to
-False once feature-importance analysis identifies low-value columns.
+``True``  → keep the column in the training matrix.
+``False`` → drop it in ``apply_feature_mask`` (dataset_builder).
+Columns absent from this dict (e.g. ``mid_close``) are kept so market
+contracts for RL/backtest stay intact.
+
+Pruned defaults disable collinear / sparse / offline-useless columns so the
+mask is not a no-op placeholder.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 FEATURE_MASK = {
-    # Core microstructure / momentum – keep high‑value ones
+    # Core microstructure / momentum – keep high-value ones
     "ofi": True,
     "ofi_z": True,
     "ofi_l2": True,
@@ -19,7 +26,7 @@ FEATURE_MASK = {
     "amihud_illiq": True,
     "realized_spread": True,
     "vpin": True,
-    
+
     # Volatility / ATR
     "atr_6": True,
     "atr_20": True,
@@ -32,14 +39,14 @@ FEATURE_MASK = {
     "vol_ratio_6_20": True,
     "vol_ratio_20_60": True,
     "vol_of_vol": True,
-    
-    # Bollinger Bands
-    "bb_mid": True,
+
+    # Bollinger Bands — bb_mid is near-collinear with price; keep width/pct
+    "bb_mid": False,
     "bb_upper": True,
     "bb_lower": True,
     "bb_width": True,
     "bb_pct": True,
-    
+
     # Momentum & Returns
     "rsi_14": True,
     "macd": True,
@@ -48,7 +55,7 @@ FEATURE_MASK = {
     "ret_5": True,
     "ret_20": True,
     "ret_60": True,
-    
+
     # VWAP / Breakout & Spread
     "breakout_pressure": True,
     "liquidity_vacuum": True,
@@ -59,7 +66,7 @@ FEATURE_MASK = {
     "spread_widening_5m": True,
     "spread_widening_20m": True,
     "cost_to_atr": True,
-    
+
     # Market Regime / Tradeability
     "adx_14": True,
     "chop_index": True,
@@ -71,7 +78,7 @@ FEATURE_MASK = {
     "hurst_exponent": True,
     "noise_to_signal_60": True,
     "trailing_volatility_60": True,
-    
+
     # Higher-timeframe context
     "ret_5m": True,
     "rsi_5m": True,
@@ -91,41 +98,34 @@ FEATURE_MASK = {
     "trend_slope_1h": True,
     "distance_to_vwap_1h": True,
     "volatility_regime_1h": True,
-    
-    # Leakage-safe trailing label quality — DISABLED (not yet implemented)
-    # "rolling_hit_rate_240": True,
-    # "rolling_label_sharpe_240": True,
-    # "recent_loss_cluster_30": True,
-    # "label_confidence_prior_240": True,
-    # "rolling_false_breakout_rate_240": True,
-    
-    # Temporal & Latency
+
+    # Temporal & Latency — offline training has no meaningful latency signal
     "time_sin": True,
     "time_cos": True,
     "day_sin": True,
     "day_cos": True,
     "london_ny": True,
-    "expected_latency_ms": True,
-    
-    # Advanced groups
-    "carry_spot_forward": True,
+    "expected_latency_ms": False,
+
+    # Advanced groups — sparse / optional exotic cross-breaks off by default
+    "carry_spot_forward": False,
     "yield_curve_slope": True,
-    "corr_break_gold_DXY": True,
-    
+    "corr_break_gold_DXY": False,
+
     # Sentiment tiers
     "sentiment_raw": True,
     "sentiment_decayed": True,
-    
+
     # FinBERT projection (8 dims = SENTIMENT["finbert_proj_dim"] from settings.py)
     **{f"fb_{i}": True for i in range(8)},
 
-    # News & Economic Calendar
+    # News & Economic Calendar — pre/post are redundant with news_ok timing
     "eco_surprise": True,
     "eco_revision": True,
     "news_ok": True,
-    "pre_news": True,
-    "post_news": True,
-    "buzz": True,
+    "pre_news": False,
+    "post_news": False,
+    "buzz": False,
     "cat_central_bank": True,
     "cat_inflation": True,
     "cat_labor": True,
@@ -138,8 +138,8 @@ FEATURE_MASK = {
     "sentiment_decayed_staleness": True,
     "eco_surprise_missing": True,
     "eco_surprise_staleness": True,
-    "buzz_missing": True,
-    "buzz_staleness": True,
+    "buzz_missing": False,
+    "buzz_staleness": False,
 
     # COT Features
     "cot_net_hf": True,
@@ -173,6 +173,36 @@ FEATURE_MASK = {
     "yield_momentum_5d": True,
     "yield_momentum_20d": True,
     "yield_vol_20d": True,
-
-    # Everything else defaults to False/omitted
 }
+
+
+def enabled_feature_names(mask: dict[str, bool] | None = None) -> list[str]:
+    """Names explicitly marked True in the mask."""
+    m = mask if mask is not None else FEATURE_MASK
+    return [k for k, v in m.items() if v]
+
+
+def disabled_feature_names(mask: dict[str, bool] | None = None) -> list[str]:
+    """Names explicitly marked False (will be dropped when present)."""
+    m = mask if mask is not None else FEATURE_MASK
+    return [k for k, v in m.items() if not v]
+
+
+def apply_feature_mask(frame: Any, mask: dict[str, bool] | None = None) -> Any:
+    """
+    Drop columns whose mask entry is False.
+
+    Columns not listed in the mask are retained (price / aux columns).
+    Supports pandas and Polars DataFrames.
+    """
+    m = mask if mask is not None else FEATURE_MASK
+    if frame is None or not hasattr(frame, "columns") or not hasattr(frame, "drop"):
+        return frame
+    drop = [c for c in list(frame.columns) if m.get(c) is False]
+    if not drop:
+        return frame
+    # Polars: drop(*names); pandas: drop(columns=...)
+    mod = type(frame).__module__
+    if mod.startswith("polars"):
+        return frame.drop(drop)
+    return frame.drop(columns=drop)

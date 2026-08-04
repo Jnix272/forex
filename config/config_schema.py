@@ -1,13 +1,14 @@
-from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass
 from datetime import time
+from typing import Any
+
 
 @dataclass
 class SessionLimit:
     max_lots: float
     max_open_trades: int
-    hours_local: Optional[Tuple[time, time]] = None
-    tz: Optional[Any] = None
+    hours_local: tuple[time, time] | None = None
+    tz: Any | None = None
 
 @dataclass
 class RegimeScale:
@@ -28,7 +29,7 @@ class LiveRiskSchema:
     daily_loss_limit: float
     max_consecutive_losses: int
     recovery_bars: int
-    session_limits: Dict[str, SessionLimit]
+    session_limits: dict[str, SessionLimit]
     atr_multiplier: float
     trail_activation_r: float
     breakeven_at_r: float
@@ -46,7 +47,7 @@ class LiveRiskSchema:
             raise ValueError("max_total_lots must be > 0")
         if self.max_drawdown_halt <= 0 or self.max_drawdown_halt >= 1.0:
             raise ValueError("max_drawdown_halt must be > 0 and < 1")
-        
+
         # Convert nested dicts to objects
         if isinstance(self.session_limits, dict):
             new_limits = {}
@@ -56,7 +57,7 @@ class LiveRiskSchema:
                 else:
                     new_limits[k] = v
             self.session_limits = new_limits
-            
+
         if isinstance(self.regime_scale, dict):
             self.regime_scale = RegimeScale(**self.regime_scale)
 
@@ -105,7 +106,7 @@ class SizingSchema:
     pyramid_add_pct: float
     martingale_add_pct: float
     max_total_lots: float
-    scale_out_targets: List[float]
+    scale_out_targets: list[float]
 
     def __post_init__(self):
         if not (0 < self.kelly_fraction < 1.0):

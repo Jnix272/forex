@@ -8,12 +8,12 @@ import numpy as np
 import pytest
 
 from drift.model_drift import (
-    ChampionChallengerHarness,
-    CanaryRollout,
     AutomatedRollbackMonitor,
+    CanaryRollout,
+    ChampionChallengerHarness,
+    ModelStats,
     RollbackConfig,
     run_model_drift_check,
-    ModelStats,
 )
 
 

@@ -18,12 +18,11 @@ Threshold conventions (used for the drift/quality flags):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import polars as pl
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. Population Stability Index (PSI)
@@ -116,7 +115,7 @@ def information_value(feature: np.ndarray, target: np.ndarray, n_bins: int = 10)
     return iv
 
 
-def _roc_auc(feature: np.ndarray, target: np.ndarray) -> Optional[float]:
+def _roc_auc(feature: np.ndarray, target: np.ndarray) -> float | None:
     """AUC of a single feature as a classifier of a binary target."""
     from sklearn.metrics import roc_auc_score
     f = np.asarray(feature, dtype=float)
@@ -135,7 +134,7 @@ def _roc_auc(feature: np.ndarray, target: np.ndarray) -> Optional[float]:
 # 3. Stability: rolling PSI + Kolmogorov-Smirnov vs a baseline window
 # ════════════════════════════════════════════════════════════════════════════
 
-def _ffill_steps(n: int, positions: List[int], values: List[float]) -> np.ndarray:
+def _ffill_steps(n: int, positions: list[int], values: list[float]) -> np.ndarray:
     """Forward-fill refit values: row ``i`` uses the last refit at or before ``i``."""
     out = np.zeros(n)
     if not positions:
@@ -194,7 +193,7 @@ class LeakageResult:
     """Per-feature leakage assessment."""
     feature: str
     iv: float
-    auc: Optional[float]
+    auc: float | None
     is_target_shift: bool
     near_perfect: bool
     leak_flag: bool
@@ -213,7 +212,7 @@ def _is_target_shift(feature: np.ndarray, target: np.ndarray) -> bool:
 def leakage_scan(
     X: pl.DataFrame,
     target: np.ndarray,
-    exclude_cols: Optional[Sequence[str]] = None,
+    exclude_cols: Sequence[str] | None = None,
     n_bins: int = 10,
     auc_threshold: float = 0.85,
     iv_threshold: float = 0.5,
@@ -258,9 +257,9 @@ def leakage_scan(
 
 def feature_quality_monitor(
     df: pl.DataFrame,
-    target_col: Optional[str] = None,
-    reference_df: Optional[pl.DataFrame] = None,
-    exclude_cols: Optional[Sequence[str]] = None,
+    target_col: str | None = None,
+    reference_df: pl.DataFrame | None = None,
+    exclude_cols: Sequence[str] | None = None,
     n_bins: int = 10,
     stability_window: int = 500,
     stability_step: int = 50,
@@ -371,9 +370,9 @@ def drift_level(psi: float, threshold_moderate: float = 0.10, threshold_severe: 
 
 def filter_features(
     df: pl.DataFrame,
-    target_col: Optional[str] = None,
-    reference_df: Optional[pl.DataFrame] = None,
-    exclude_cols: Optional[Sequence[str]] = None,
+    target_col: str | None = None,
+    reference_df: pl.DataFrame | None = None,
+    exclude_cols: Sequence[str] | None = None,
     drop_leaky: bool = True,
     drop_severe_drift: bool = True,
     **kwargs,

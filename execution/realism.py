@@ -6,10 +6,9 @@ ambiguous bar that touches both stop and target resolves stop-first.
 """
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-import zlib
 
 import numpy as np
 import pandas as pd
@@ -31,7 +30,7 @@ class EmpiricalFillModel:
     fill_fraction,rejected``. Missing conditioning columns are simply ignored.
     """
 
-    def __init__(self, samples: Optional[pd.DataFrame] = None, seed: int = 17,
+    def __init__(self, samples: pd.DataFrame | None = None, seed: int = 17,
                  base_slippage_pips: float = 0.5, randomize: bool = True):
         self.samples = samples.copy() if samples is not None else pd.DataFrame()
         self.seed = int(seed)
@@ -39,7 +38,7 @@ class EmpiricalFillModel:
         self.randomize = bool(randomize)
 
     @classmethod
-    def from_csv(cls, path: str | Path | None, **kwargs) -> "EmpiricalFillModel":
+    def from_csv(cls, path: str | Path | None, **kwargs) -> EmpiricalFillModel:
         p = Path(path) if path else None
         return cls(pd.read_csv(p) if p and p.is_file() else None, **kwargs)
 
@@ -124,7 +123,7 @@ def _path_pnl(side: str, entry: float, start: int, end: int, q: dict[str, np.nda
 def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_col: str = "atr_6",
                              lookahead_bars: int = 10, pip_size: float = .0001,
                              execution_delay_bars: int = 1, pair: str = "EURUSD",
-                             fill_model: Optional[EmpiricalFillModel] = None,
+                             fill_model: EmpiricalFillModel | None = None,
                              edge_margin_pips: float = .25, rejection_penalty_pips: float = 1.0,
                              latency_col: str | None = None, no_trade_col: str | None = None,
                              profit_target_atr: float = 1.5, stop_loss_atr: float = 1.0,

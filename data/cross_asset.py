@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import pandas as pd
 
-
 # ── Stooq symbol candidates (tried in order until one returns data) ───────────
-STOOQ_SYMBOLS: Dict[str, List[str]] = {
+STOOQ_SYMBOLS: dict[str, list[str]] = {
     # Commodities
     "WTI":       ["cl.f",      "cl"],
     "GOLD":      ["xauusd",    "gc.f"],
@@ -64,7 +62,7 @@ STOOQ_SYMBOLS: Dict[str, List[str]] = {
 # ── Yahoo Finance fallback symbols ─────────────────────────────────────────────
 # NOTE: Yahoo symbols for bond yields are unreliable / often wrong.
 # Only use for assets where stooq fails and there is no FRED series.
-YAHOO_SYMBOLS: Dict[str, str] = {
+YAHOO_SYMBOLS: dict[str, str] = {
     "WTI":       "CL=F",
     "GOLD":      "GC=F",
     "COPPER":    "HG=F",
@@ -86,7 +84,7 @@ YAHOO_SYMBOLS: Dict[str, str] = {
 }
 
 # ── FRED series IDs for bond yields (most reliable source) ────────────────────
-FRED_YIELD_SYMBOLS: Dict[str, str] = {
+FRED_YIELD_SYMBOLS: dict[str, str] = {
     "US10Y": "DGS10",
     "US2Y":  "DGS2",
     "DE10Y": "IRLTLT01DEM156N",   # Germany 10Y (monthly — ffill to daily)
@@ -111,7 +109,7 @@ def _stooq_url(symbol: str) -> str:
     return f"https://stooq.com/q/d/l/?s={symbol}&i=d"
 
 
-def _read_stooq_daily(symbol: str) -> Optional[pd.Series]:
+def _read_stooq_daily(symbol: str) -> pd.Series | None:
     try:
         import io
         import urllib.request
@@ -146,7 +144,7 @@ def _read_stooq_daily(symbol: str) -> Optional[pd.Series]:
 
 # ── Yahoo Finance helper ───────────────────────────────────────────────────────
 
-def _read_yahoo_daily(symbol: str, start: str, end: str) -> Optional[pd.Series]:
+def _read_yahoo_daily(symbol: str, start: str, end: str) -> pd.Series | None:
     try:
         import yfinance as yf
     except ImportError:
@@ -183,7 +181,7 @@ def _read_yahoo_daily(symbol: str, start: str, end: str) -> Optional[pd.Series]:
 
 # ── FRED helper ───────────────────────────────────────────────────────────────
 
-def _read_fred_daily(series_id: str, start: str, end: str) -> Optional[pd.Series]:
+def _read_fred_daily(series_id: str, start: str, end: str) -> pd.Series | None:
     """Fetch from FRED; returns None if fredapi not installed or key missing."""
     fred_key = os.getenv("FRED_API_KEY", "")
     if not fred_key:
@@ -205,7 +203,7 @@ def _read_fred_daily(series_id: str, start: str, end: str) -> Optional[pd.Series
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
-def _cache_read(cache_path: Path) -> Optional[pd.Series]:
+def _cache_read(cache_path: Path) -> pd.Series | None:
     if not cache_path.exists():
         return None
     try:
@@ -235,7 +233,7 @@ def _read_eodhd_daily(
     start:     str,
     end:       str,
     cache_dir: Path,
-) -> Optional[pd.Series]:
+) -> pd.Series | None:
     """
     Fetch a cross-asset series from EODHD as last-resort fallback.
     Only called if EODHD_API_KEY is set in the environment.
@@ -274,7 +272,7 @@ def load_cross_asset_panel(
     end:       str,
     cache_dir: str,
     source:    str = "auto",
-) -> Dict[str, pd.Series]:
+) -> dict[str, pd.Series]:
     """
     Return dict of asset -> daily price/yield series with UTC DatetimeIndex,
     clipped to [start, end].
@@ -292,10 +290,10 @@ def load_cross_asset_panel(
     cdir = Path(cache_dir)
     cdir.mkdir(parents=True, exist_ok=True)
 
-    out: Dict[str, pd.Series] = {}
+    out: dict[str, pd.Series] = {}
 
     for asset, candidates in STOOQ_SYMBOLS.items():
-        ser: Optional[pd.Series] = None
+        ser: pd.Series | None = None
 
         provider_order = (
             ["stooq", "yahoo", "fred", "eodhd"] if source == "auto" else [source]

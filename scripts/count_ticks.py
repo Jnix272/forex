@@ -49,7 +49,7 @@ def run():
 
     print()
     print(f"Tick Count Estimate  |  2010-2025  |  {len(PAIRS)} pairs")
-    print(f"Sample: 1 trading day per year (second Tuesday of January)")
+    print("Sample: 1 trading day per year (second Tuesday of January)")
     print(f"{'Year':<6} {'Date':<12} {'Pairs':<6} {'Ticks/day':>10}  Breakdown")
     print("-" * 72)
 

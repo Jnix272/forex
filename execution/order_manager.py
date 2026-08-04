@@ -9,9 +9,8 @@ State is persisted to a JSON file after every mutation so it survives restarts.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ class OrderManager:
         """Restore state from disk on startup."""
         if self.state_file.exists():
             try:
-                with open(self.state_file, "r", encoding="utf-8") as f:
+                with open(self.state_file, encoding="utf-8") as f:
                     data = json.load(f)
                 self.active_orders = data.get("active_orders", {})
                 self.closed_orders = data.get("closed_orders", [])
@@ -51,7 +50,7 @@ class OrderManager:
                 json.dump({
                     "active_orders": self.active_orders,
                     "closed_orders": self.closed_orders[-500:],
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "last_updated": datetime.now(UTC).isoformat(),
                 }, f, indent=2, default=str)
             tmp_path.replace(self.state_file)
         except OSError as e:
@@ -66,7 +65,7 @@ class OrderManager:
             "sl": sl,
             "tp": tp,
             "status": "OPEN",
-            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "opened_at": datetime.now(UTC).isoformat(),
         }
         self._persist_state()
 
@@ -80,7 +79,7 @@ class OrderManager:
         order["status"] = "CLOSED"
         order["exit_price"] = exit_price
         order["close_reason"] = reason
-        order["closed_at"] = datetime.now(timezone.utc).isoformat()
+        order["closed_at"] = datetime.now(UTC).isoformat()
 
         pip_mult = 0.0001 if "JPY" not in order["symbol"] else 0.01
         if order["side"] == "BUY":
@@ -111,7 +110,7 @@ class OrderManager:
                 order["sl"] = new_sl
                 self._persist_state()
 
-    def check_stops(self, trade_id: str, current_price: float) -> Optional[str]:
+    def check_stops(self, trade_id: str, current_price: float) -> str | None:
         """Check if SL or TP hit. Returns 'sl', 'tp', or None."""
         if trade_id not in self.active_orders:
             return None
@@ -129,12 +128,12 @@ class OrderManager:
                 return "tp"
         return None
 
-    def get_active_orders(self, symbol: Optional[str] = None) -> dict:
+    def get_active_orders(self, symbol: str | None = None) -> dict:
         if symbol is None:
             return dict(self.active_orders)
         return {k: v for k, v in self.active_orders.items() if v["symbol"] == symbol}
 
-    def get_exposure(self, symbol: Optional[str] = None) -> int:
+    def get_exposure(self, symbol: str | None = None) -> int:
         """Net exposure: +1 per BUY, -1 per SELL."""
         orders = self.get_active_orders(symbol)
         return sum(1 if v["side"] == "BUY" else -1 for v in orders.values())

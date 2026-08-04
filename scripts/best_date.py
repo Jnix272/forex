@@ -22,8 +22,9 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from data.sources import DUKA_PAIR_MAP, DukascopyLoader
 import statistics
+
+from data.sources import DUKA_PAIR_MAP, DukascopyLoader
 
 PAIRS = list(DUKA_PAIR_MAP.keys())
 YEARS = list(range(2010, 2026))
@@ -67,7 +68,7 @@ def run():
 
     print()
     print(f"Best-date analysis  |  {len(YEARS)} years  |  {len(PAIRS)} pairs  |  session hours {SESSION_HOURS[0]}-{SESSION_HOURS[-1]} UTC")
-    print(f"Candidates per year: 3rd Tuesday of March, June, September, December")
+    print("Candidates per year: 3rd Tuesday of March, June, September, December")
     print()
 
     best_per_year: dict[int, dict] = {}
@@ -110,7 +111,7 @@ def run():
         b = best_per_year[year]
         missing = [p for p in PAIRS if b["counts"].get(p, 0) == 0]
         missing_str = ", ".join(missing) if missing else "none"
-        print(f"{year:<6} {str(b['date']):<12} {b['complete']:>7}/9  {b['total']:>9,}  {missing_str}")
+        print(f"{year:<6} {b['date']!s:<12} {b['complete']:>7}/9  {b['total']:>9,}  {missing_str}")
 
     # Overall recommendation
     fully_complete = [y for y, b in best_per_year.items() if b["complete"] == 9]

@@ -6,8 +6,9 @@ to catch bad historical data.
 """
 
 import json
-from pathlib import Path
 import logging
+from pathlib import Path
+
 
 class DataQualityReporter:
     def __init__(self, output_dir: str):
@@ -28,15 +29,15 @@ class DataQualityReporter:
             "reward_distribution": reward_dist,
             "per_regime_sample_counts": per_regime_counts
         }
-        
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         report_path = self.output_dir / "data_quality_report.json"
-        
+
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
-            
+
         self.logger.info(f"Data quality report saved to {report_path}")
-        
+
         # Check for catastrophic imbalances
         for k, v in label_class_balance.items():
             if v > 0.8:

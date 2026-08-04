@@ -13,14 +13,15 @@ Improvements over v1
 * sequence_mode="temporal" feeds 6xF summary stats instead of 1 last bar
 """
 
-import os
-import sys
-import json
 import argparse
 import itertools
+import json
+import os
+import sys
 import time
 from math import sqrt
 from pathlib import Path
+
 import numpy as np
 import xgboost as xgb
 from dotenv import load_dotenv
@@ -29,12 +30,13 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models.xgboost_model import XGBoostForecaster
 from config.settings import PATHS
+from models.xgboost_model import XGBoostForecaster
 
 try:
-    import wandb
     import os
+
+    import wandb
     WANDB = bool(os.environ.get("WANDB_API_KEY"))
 except ImportError:
     WANDB = False
@@ -152,23 +154,25 @@ def compute_dir_accuracy(pred_dir: np.ndarray, y_dir: np.ndarray) -> float:
     return float((pred_dir == y_dir).mean())
 
 # ---------------------------------------------------------------------------
-# Walk-forward folds
+# Walk-forward folds (purged/embargoed via training.cv_splits)
 # ---------------------------------------------------------------------------
 
-def walk_forward_splits(n: int, folds: int = 5):
-    """
-    Yields (train_idx, val_idx) for expanding-window walk-forward CV.
-    First train window covers 60% of data; each subsequent fold adds
-    roughly (40% / folds) more training data.
-    """
-    base = int(n * 0.60)
-    step = max(1, int(n * 0.40 / folds))
-    for i in range(folds):
-        train_end = base + i * step
-        val_end   = min(train_end + step, n)
-        if train_end >= val_end:
-            break
-        yield np.arange(0, train_end), np.arange(train_end, val_end)
+def walk_forward_splits(n: int, folds: int = 5, cfg: dict | None = None):
+    """Expanding-window walk-forward with purge+embargo (same math as GPU path)."""
+    from training.cv_splits import embargo_purge_from_config
+    from training.cv_splits import walk_forward_splits as _purged_wf
+
+    emb, pur, meth = embargo_purge_from_config(cfg)
+    print(f"[WalkForward] folds={folds} embargo={emb} purge={pur} method={meth}")
+    return _purged_wf(n, folds, emb, pur, meth)
+
+
+def _tune_train_val_split(n: int, cfg: dict | None = None, val_split: float = 0.20):
+    """Chronological train/val for tuning with purge+embargo gap."""
+    from training.cv_splits import _embargo_split, embargo_purge_from_config
+
+    emb, pur, meth = embargo_purge_from_config(cfg)
+    return _embargo_split(n, val_split, emb, pur, meth)
 
 # ---------------------------------------------------------------------------
 # Hyperparameter tuning
@@ -346,12 +350,13 @@ def main():
     X_tab = _tmp._prepare_inputs(X)
     print(f"Data: N={N:,}  raw_features={X.shape[2]}  tabular_features={X_tab.shape[1]}  task={args.task}")
 
-    # ── single 80/20 split for tuning ─────────────────────────────────────────
-    split_idx = int(N * 0.80)
-    X_train_tab, X_val_tab = X_tab[:split_idx], X_tab[split_idx:]
-    y_train_target, y_val_target = y_target[:split_idx], y_target[split_idx:]
-    y_val_dir = y_dir[split_idx:]
-    y_val_ret = y_ret[split_idx:]
+    # ── purged/embargoed split for tuning / final early-stop ──────────────────
+    tr_idx, va_idx = _tune_train_val_split(N, cfg)
+    X_train_tab, X_val_tab = X_tab[tr_idx], X_tab[va_idx]
+    y_train_target, y_val_target = y_target[tr_idx], y_target[va_idx]
+    y_val_dir = y_dir[va_idx]
+    y_val_ret = y_ret[va_idx]
+    print(f"[Split] tune train={len(tr_idx):,} val={len(va_idx):,} (purged/embargoed)")
 
     # ── hyperparameter tuning ─────────────────────────────────────────────────
     best_params: dict = {}
@@ -382,7 +387,7 @@ def main():
 
     if args.folds > 0:
         print(f"\n[WalkForward] {args.folds} folds...")
-        for fold_i, (tr_idx, va_idx) in enumerate(walk_forward_splits(N, args.folds)):
+        for fold_i, (tr_idx, va_idx) in enumerate(walk_forward_splits(N, args.folds, cfg)):
             Xtr = X_tab[tr_idx];  ytr = y_target[tr_idx]
             Xva = X_tab[va_idx];  yva = y_target[va_idx]
             yva_dir = y_dir[va_idx];  yva_ret = y_ret[va_idx]

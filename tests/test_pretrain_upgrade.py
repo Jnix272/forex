@@ -15,10 +15,10 @@ from pretrain.contrastive import (
     TSCLTrainer,
 )
 from pretrain.extended_trainers import (
-    VAESeqTrainer,
     ClusterContrastiveTrainer,
-    ForecastPretextTrainer,
     DriftContrastiveTrainer,
+    ForecastPretextTrainer,
+    VAESeqTrainer,
 )
 from training.train_gpu import (
     _apply_yaml_config,

@@ -2,8 +2,9 @@
 Purged/Embargoed Cross-Validation for time series.
 Prevents leakage across regime boundaries; matches live deployment.
 """
+from collections.abc import Iterator
+
 import numpy as np
-from typing import Iterator, Tuple, List
 from sklearn.model_selection import BaseCrossValidator
 
 
@@ -31,51 +32,51 @@ class PurgedEmbargoCV(BaseCrossValidator):
         self.purge_bars = purge_bars
         self.embargo_bars = embargo_bars
         self.min_train_size = min_train_size
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         n_samples = len(X)
         indices = np.arange(n_samples)
-        
+
         # Split into n_splits contiguous test blocks
         test_size = n_samples // (self.n_splits + 1)
-        
+
         for i in range(self.n_splits):
             test_start = (i + 1) * test_size
             test_end = min(test_start + test_size, n_samples)
-            
+
             if test_end - test_start < 100:
                 continue
-            
+
             # Purge: exclude purge_bars before test from train
             purge_start = max(0, test_start - self.purge_bars)
-            
+
             # Train indices: everything before purge_start
             train_indices = indices[:purge_start]
-            
+
             if len(train_indices) < self.min_train_size:
                 continue
-            
+
             # Test indices
             test_indices = indices[test_start:test_end]
-            
+
             yield train_indices, test_indices
-    
+
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return self.n_splits
 
 
 def compute_regime_consistency(
-    val_sharpes: List[float],
+    val_sharpes: list[float],
     regime_sharpes: dict,
     min_mean_sharpe: float = 1.5,
     min_regime_sharpe: float = 0.5,
     max_regime_std: float = 0.3,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check regime consistency for promotion.
     
@@ -90,20 +91,20 @@ def compute_regime_consistency(
         (passed, reason)
     """
     mean_sharpe = np.mean(val_sharpes)
-    
+
     if mean_sharpe < min_mean_sharpe:
         return False, f"Mean Sharpe {mean_sharpe:.2f} < {min_mean_sharpe}"
-    
+
     for regime, sharpes in regime_sharpes.items():
         regime_mean = np.mean(sharpes)
         regime_std = np.std(sharpes)
-        
+
         if regime_mean < min_regime_sharpe:
             return False, f"Regime {regime} Sharpe {regime_mean:.2f} < {min_regime_sharpe}"
-        
+
         if regime_std > max_regime_std:
             return False, f"Regime {regime} Sharpe std {regime_std:.2f} > {max_regime_std}"
-    
+
     return True, f"All checks passed: mean_sharpe={mean_sharpe:.2f}"
 
 

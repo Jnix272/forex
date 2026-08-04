@@ -19,13 +19,12 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 from data.feature_store import FeatureStore
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -86,10 +85,10 @@ class ModelRecord:
     created_at: str
     reason: str
     training_cmd: str
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    drift_report: Optional[Dict[str, Any]] = None
-    promoted_at: Optional[str] = None
-    rollback_at: Optional[str] = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+    drift_report: dict[str, Any] | None = None
+    promoted_at: str | None = None
+    rollback_at: str | None = None
     notes: str = ""
 
 
@@ -120,11 +119,11 @@ class ModelRegistry:
     Tracks training runs, promotion status, and metadata.
     """
 
-    def __init__(self, root: Union[str, Path] = DEFAULT_MODEL_ROOT):
+    def __init__(self, root: str | Path = DEFAULT_MODEL_ROOT):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._path = self.root / DEFAULT_REGISTRY_FILE
-        self._records: List[ModelRecord] = []
+        self._records: list[ModelRecord] = []
         self._load()
 
     def _load(self) -> None:
@@ -135,7 +134,7 @@ class ModelRegistry:
     def _save(self) -> None:
         data = {
             "registry_version": 1,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "models": [asdict(r) for r in self._records],
         }
         self._path.write_text(json.dumps(data, indent=2, default=str))
@@ -154,7 +153,7 @@ class ModelRegistry:
         reason: str,
         checkpoint_dir: str,
         training_cmd: str = "",
-        metrics: Dict = None,
+        metrics: dict = None,
     ) -> ModelRecord:
         """Register a new model training run."""
         version = self.next_version(family)
@@ -163,7 +162,7 @@ class ModelRegistry:
             family=family,
             status=ModelStatus.TRAINING,
             checkpoint_dir=str(checkpoint_dir),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             reason=reason,
             training_cmd=training_cmd,
             metrics=metrics or {},
@@ -174,7 +173,7 @@ class ModelRegistry:
 
     def update_status(
         self, family: str, version: int, status: ModelStatus,
-        metrics: Dict = None, notes: str = None,
+        metrics: dict = None, notes: str = None,
     ) -> None:
         """Update model status and optional metrics."""
         for r in self._records:
@@ -183,42 +182,42 @@ class ModelRegistry:
                 if metrics:
                     r.metrics.update(metrics)
                 if status == ModelStatus.PROMOTED:
-                    r.promoted_at = datetime.now(timezone.utc).isoformat()
+                    r.promoted_at = datetime.now(UTC).isoformat()
                 elif status == ModelStatus.ROLLED_BACK:
-                    r.rollback_at = datetime.now(timezone.utc).isoformat()
+                    r.rollback_at = datetime.now(UTC).isoformat()
                 if notes:
                     r.notes = notes
                 self._save()
                 return
         raise KeyError(f"Model {family} v{version} not found")
 
-    def get_latest(self, family: str, status: ModelStatus = None) -> Optional[ModelRecord]:
+    def get_latest(self, family: str, status: ModelStatus = None) -> ModelRecord | None:
         """Get latest version of a model family, optionally filtered by status."""
         candidates = [r for r in self._records if r.family == family]
         if status:
             candidates = [r for r in candidates if r.status == status]
         return max(candidates, key=lambda r: r.version) if candidates else None
 
-    def get_production(self) -> Optional[ModelRecord]:
+    def get_production(self) -> ModelRecord | None:
         """Get the currently promoted production model."""
         for r in sorted(self._records, key=lambda x: x.version, reverse=True):
             if r.status == ModelStatus.PROMOTED:
                 return r
         return None
 
-    def list_models(self, family: str = None) -> List[ModelRecord]:
+    def list_models(self, family: str = None) -> list[ModelRecord]:
         """List all records, optionally filtered by family."""
         if family:
             return [r for r in self._records if r.family == family]
         return list(self._records)
 
-    def get_version(self, family: str, version: int) -> Optional[ModelRecord]:
+    def get_version(self, family: str, version: int) -> ModelRecord | None:
         for r in self._records:
             if r.family == family and r.version == version:
                 return r
         return None
 
-    def rollback(self, family: str) -> Optional[ModelRecord]:
+    def rollback(self, family: str) -> ModelRecord | None:
         """Rollback to previous promoted version."""
         promoted = sorted(
             [r for r in self._records if r.family == family and r.status == ModelStatus.PROMOTED],
@@ -253,7 +252,7 @@ class ModelRegistry:
 # Promotion Gate
 # ════════════════════════════════════════════════════════════════════════════
 
-def check_promotion_gates(metrics: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def check_promotion_gates(metrics: dict[str, Any]) -> tuple[bool, list[str]]:
     """
     Validate model metrics against promotion thresholds.
     Returns (passed, reasons).
@@ -311,12 +310,12 @@ class RetrainOrchestrator:
 
     def should_retrain(
         self, family: str = "haelt", force: bool = False
-    ) -> Tuple[bool, str, Dict[str, Any]]:
+    ) -> tuple[bool, str, dict[str, Any]]:
         """
         Evaluate all retrain triggers.
         Returns (should_retrain, reason, context).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         latest = self.registry.get_latest(family, status=ModelStatus.PROMOTED)
 
         if force:
@@ -343,11 +342,11 @@ class RetrainOrchestrator:
 
         return False, "", {}
 
-    def _check_drift_trigger(self) -> Dict[str, Any]:
+    def _check_drift_trigger(self) -> dict[str, Any]:
         """Check if drift severity warrants retraining."""
         from monitoring.drift_detection import DriftTracker
         tracker = DriftTracker(self.store)
-        summary = tracker.get_drift_summary(since=datetime.now(timezone.utc) - timedelta(days=7))
+        summary = tracker.get_drift_summary(since=datetime.now(UTC) - timedelta(days=7))
 
         n_drifted = summary.get("n_drifted", 0)
         n_total = summary.get("total_checks", 0)
@@ -375,8 +374,8 @@ class RetrainOrchestrator:
         return self.config.model_root / dir_name
 
     def _build_training_cmd(
-        self, family: str, version: int, checkpoint_dir: Path, extras: List[str] = None
-    ) -> List[str]:
+        self, family: str, version: int, checkpoint_dir: Path, extras: list[str] = None
+    ) -> list[str]:
         """Build the training command for subprocess."""
         if family == ModelFamily.XGBOOST.value:
             script = XGB_TRAINING_SCRIPT
@@ -398,10 +397,10 @@ class RetrainOrchestrator:
         self,
         family: str = "haelt",
         reason: str = "manual",
-        extras: List[str] = None,
+        extras: list[str] = None,
         timeout_seconds: int = 86400,  # 24h default
         dry_run: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Execute a full retrain lifecycle:
           1. Register new model version
@@ -423,7 +422,7 @@ class RetrainOrchestrator:
             reason=reason,
             checkpoint_dir=str(ckpt_dir),
             training_cmd=training_cmd,
-            metrics={"started_at": datetime.now(timezone.utc).isoformat()},
+            metrics={"started_at": datetime.now(UTC).isoformat()},
         )
 
         result = {
@@ -493,8 +492,8 @@ class RetrainOrchestrator:
         return result
 
     def _fail_training(
-        self, record: ModelRecord, result: Dict, error: str
-    ) -> Dict:
+        self, record: ModelRecord, result: dict, error: str
+    ) -> dict:
         self.registry.update_status(
             record.family, record.version, ModelStatus.FAILED,
             notes=error,
@@ -503,7 +502,7 @@ class RetrainOrchestrator:
         result["error"] = error
         return result
 
-    def _extract_metrics(self, output: str) -> Dict[str, Any]:
+    def _extract_metrics(self, output: str) -> dict[str, Any]:
         """
         Extract key metrics from training stdout.
         Parses log lines like:
@@ -537,10 +536,10 @@ class RetrainOrchestrator:
     def check_and_retrain(
         self,
         family: str = "haelt",
-        extras: List[str] = None,
+        extras: list[str] = None,
         force: bool = False,
         dry_run: bool = False,
-    ) -> Optional[Dict]:
+    ) -> dict | None:
         """
         Check triggers and retrain if needed. Returns result dict or None.
         """
@@ -557,7 +556,7 @@ class RetrainOrchestrator:
         result["trigger_context"] = context
         return result
 
-    def get_status(self, family: str = None) -> Dict:
+    def get_status(self, family: str = None) -> dict:
         """Get orchestrator status summary."""
         latest = None
         for f in ([family] if family else [e.value for e in ModelFamily]):
@@ -583,7 +582,7 @@ def auto_retrain_on_drift(
     family: str = "haelt",
     config: RetrainConfig = None,
     dry_run: bool = False,
-) -> Dict:
+) -> dict:
     """
     One-shot: check drift for all materialized features and trigger retrain if needed.
     """

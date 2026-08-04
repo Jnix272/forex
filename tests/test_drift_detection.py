@@ -4,23 +4,22 @@ Tests for Phase 2 — Drift Detection: PSI, KS, DriftTracker, and report generat
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
 import pytest
 
+from data.feature_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import (
     DriftSeverity,
     DriftTracker,
-    _safe_psi,
     _psi_to_severity,
+    _safe_psi,
     check_feature_drift,
     run_drift_check,
     schedule_drift_check,
 )
-from data.feature_store import FeatureStore, MaterializationStrategy
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -40,20 +39,20 @@ def drift_tracker(tmp_store) -> DriftTracker:
 def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
     """Pre-seed a store with materialized features for drift checks."""
     store = FeatureStore(root=tmp_path / "fs_drift")
-    
+
     rng = np.random.default_rng(42)
     n_base = 200
     n_live = 100
-    
+
     base_ts = [
-        datetime(2024, 1, 1, 8, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n_base)
     ]
     live_ts = [
-        datetime(2024, 6, 1, 8, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 6, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n_live)
     ]
-    
+
     # Feature A: shifted distribution (drift)
     feat_a_base = pl.DataFrame({
         "timestamp_utc": base_ts,
@@ -63,7 +62,7 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
         "timestamp_utc": live_ts,
         "feat_a": rng.normal(0.5, 1.2, n_live),
     })
-    
+
     # Feature B: same distribution (no drift)
     feat_b_base = pl.DataFrame({
         "timestamp_utc": base_ts,
@@ -73,7 +72,7 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
         "timestamp_utc": live_ts,
         "feat_b": rng.normal(0, 1, n_live),
     })
-    
+
     store._store_materialization(
         "feat_a", feat_a_base,
         base_ts[0], base_ts[-1],
@@ -94,7 +93,7 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
         live_ts[0], live_ts[-1],
         MaterializationStrategy.EAGER_BATCH,
     )
-    
+
     tracker = DriftTracker(store)
     return store, tracker
 
@@ -310,10 +309,10 @@ class TestDriftTracker:
 
     def test_check_from_store(self, drift_tracker_with_data):
         store, tracker = drift_tracker_with_data
-        base_start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        base_end = datetime(2024, 1, 1, 8, tzinfo=timezone.utc) + timedelta(minutes=199)
-        live_start = datetime(2024, 6, 1, 8, tzinfo=timezone.utc)
-        live_end = datetime(2024, 6, 1, 8, tzinfo=timezone.utc) + timedelta(minutes=99)
+        base_start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        base_end = datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=199)
+        live_start = datetime(2024, 6, 1, 8, tzinfo=UTC)
+        live_end = datetime(2024, 6, 1, 8, tzinfo=UTC) + timedelta(minutes=99)
 
         report = tracker.check_from_store(
             ["feat_a", "feat_b"], base_start, base_end, live_start, live_end

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import sys
-import atexit
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class LiveLogger:
@@ -26,10 +26,10 @@ class LiveLogger:
         self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.component = component
         self.verbose = verbose
-        self._log: Optional[logging.Logger] = None
+        self._log: logging.Logger | None = None
         self._jsonl = None
 
-    def setup(self) -> Dict[str, Path]:
+    def setup(self) -> dict[str, Path]:
         if self._jsonl is not None:
             self.close()
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ class LiveLogger:
             self.info(message)
         if self._jsonl is None:
             return
-        rec: Dict[str, Any] = {
+        rec: dict[str, Any] = {
             "ts": _utc_now(),
             "run_id": self.run_id,
             "component": self.component,

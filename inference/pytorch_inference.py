@@ -11,7 +11,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -64,8 +64,8 @@ def load_pytorch_model(
     checkpoint_path: str,
     model_name: str,
     seq_len: int = 60,
-    n_features: Optional[int] = None,
-    device: Optional[Any] = None,
+    n_features: int | None = None,
+    device: Any | None = None,
 ):
     """Rebuild and load weights using the same path as ONNX export."""
     import torch
@@ -81,7 +81,7 @@ def load_pytorch_model(
     if sidecar_model == "ensemble":
         n_features = int(manifest_schema.get("n_features", n_features or 0)) or n_features
         seq_len = int(manifest_schema.get("seq_len", seq_len))
-    
+
     if sidecar_model == "xgboost":
         # Skip torch.load entirely for XGBoost JSON models
         from models.xgboost_model import XGBoostForecaster
@@ -186,9 +186,9 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         checkpoint_path: str,
         model_name: str,
         seq_len: int = 60,
-        n_features: Optional[int] = None,
+        n_features: int | None = None,
         hold_threshold: float = 0.45,
-        device: Optional[Any] = None,
+        device: Any | None = None,
     ):
         import torch
 
@@ -240,10 +240,10 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
 
     def reload(
         self,
-        checkpoint_path: Optional[str] = None,
-        model_name: Optional[str] = None,
-        seq_len: Optional[int] = None,
-        n_features: Optional[int] = None,
+        checkpoint_path: str | None = None,
+        model_name: str | None = None,
+        seq_len: int | None = None,
+        n_features: int | None = None,
     ) -> None:
         path = checkpoint_path or self.checkpoint_path
         name = model_name or self.model_name
@@ -276,7 +276,7 @@ def build_pytorch_engine(
     pt_path: Path,
     model_name: str,
     seq_len: int = 60,
-    n_features: Optional[int] = None,
+    n_features: int | None = None,
 ) -> PyTorchInferenceEngine:
     return PyTorchInferenceEngine(
         checkpoint_path=str(pt_path),

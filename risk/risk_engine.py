@@ -34,13 +34,13 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Deque, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
 
 import numpy as np
 
 try:
-    from config.settings import LIVE_RISK as _LR, RISK as _RISK
+    from config.settings import LIVE_RISK as _LR
+    from config.settings import RISK as _RISK
 except ImportError:
     _LR = {}
     _RISK = {}
@@ -51,7 +51,7 @@ _PAIRS = ("EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _clip_currency(currency: str) -> str:
@@ -81,7 +81,7 @@ class RiskConfig:
     require_approval:    bool = bool(_LR.get("require_approval_on_flatten", False))
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict] = None, **overrides: float) -> "RiskConfig":
+    def from_dict(cls, data: dict | None = None, **overrides: float) -> RiskConfig:
         """Build a RiskConfig from an explicit dict (e.g. a file loaded by
         ``--risk-config``). Unknown keys are ignored; missing keys fall back to
         the RISK / LIVE_RISK defaults embedded above.
@@ -101,9 +101,9 @@ class RiskDecision:
     limit: float
     action: str = "ok"
     reason: str = ""
-    details: Dict = field(default_factory=dict)
+    details: dict = field(default_factory=dict)
 
-    def to_audit(self, ts: Optional[str] = None) -> Dict:
+    def to_audit(self, ts: str | None = None) -> dict:
         return {
             "ts": ts or _now_iso(),
             "rule": self.rule,
@@ -120,33 +120,33 @@ class RiskEngine:
     """Real-time risk engine with pre-trade checks, post-trade monitoring and
     circuit breakers. All decisions are appended to an in-memory audit log."""
 
-    def __init__(self, equity: float = 10_000.0, cfg: Optional[RiskConfig] = None):
+    def __init__(self, equity: float = 10_000.0, cfg: RiskConfig | None = None):
         self.cfg = cfg or RiskConfig()
         self.equity = float(equity)
         self.peak_equity = float(equity)
         self.start_equity = float(equity)
         self.daily_start_equity = float(equity)
 
-        self.positions: Dict[str, Dict] = {}          # pair -> {"lots":..., "entry_price":..., "direction":...}
+        self.positions: dict[str, dict] = {}          # pair -> {"lots":..., "entry_price":..., "direction":...}
         self.realized_pnl: float = 0.0
         self.day_realized_pnl: float = 0.0
         self.consecutive_losses: int = 0
-        self.gap_flagged: Dict[str, bool] = {}
+        self.gap_flagged: dict[str, bool] = {}
         self._halted: bool = False
         self._soft_reduce: bool = False
 
         # returns history for VaR/CVaR (per-pair and portfolio)
-        self._returns: Dict[str, Deque[float]] = {}
-        self._portfolio_returns: Deque[float] = deque(maxlen=max(100, self.cfg.var_window))
+        self._returns: dict[str, deque[float]] = {}
+        self._portfolio_returns: deque[float] = deque(maxlen=max(100, self.cfg.var_window))
 
         # order frequency guard (timestamps of the last N order requests)
-        self._order_times: Deque[float] = deque()
+        self._order_times: deque[float] = deque()
 
         # audit log
-        self.audit_log: List[Dict] = []
+        self.audit_log: list[dict] = []
 
         # circuit-breaker auto-flatten decision
-        self.breach_reasons: List[str] = []
+        self.breach_reasons: list[str] = []
 
     # ── pre-trade ──────────────────────────────────────────────────────────
 
@@ -155,10 +155,10 @@ class RiskEngine:
         pair: str,
         lots: float,
         price: float,
-        position_size_pct: Optional[float] = None,
-        notional_usd: Optional[float] = None,
-        hour_utc: Optional[int] = None,
-        now: Optional[str] = None,
+        position_size_pct: float | None = None,
+        notional_usd: float | None = None,
+        hour_utc: int | None = None,
+        now: str | None = None,
     ) -> RiskDecision:
         """Run every pre-trade check. Returns the first blocking decision, or an
         allowed decision when all checks pass."""
@@ -206,7 +206,7 @@ class RiskEngine:
                 return d
 
         # frequency accounting only counts accepted orders
-        self._order_times.append(float(datetime.now(timezone.utc).timestamp()))
+        self._order_times.append(float(datetime.now(UTC).timestamp()))
         while self._order_times and self._order_times[-1] - self._order_times[0] > 60.0:
             self._order_times.popleft()
 
@@ -253,8 +253,8 @@ class RiskEngine:
         pair: str = "EURUSD",
         lots: float = 0.0,
         direction: str = "long",
-        now: Optional[str] = None,
-    ) -> Optional[RiskDecision]:
+        now: str | None = None,
+    ) -> RiskDecision | None:
         """Update daily P&L, consecutive-loss counter and return series after a
         closed trade. Returns a circuit-breaker decision if limits breach."""
         now = now or _now_iso()
@@ -281,7 +281,7 @@ class RiskEngine:
             return d
         return None
 
-    def update_equity(self, equity: float, now: Optional[str] = None) -> Dict:
+    def update_equity(self, equity: float, now: str | None = None) -> dict:
         """Run post-trade drawdown / VaR monitoring. Returns a monitor dict with
         a circuit_breaker flag that callers may act on (flatten / standby)."""
         now = now or _now_iso()
@@ -289,7 +289,7 @@ class RiskEngine:
         self.peak_equity = max(self.peak_equity, self.equity)
 
         dd = self.current_drawdown()
-        breach: List[str] = []
+        breach: list[str] = []
         if dd >= self.cfg.max_drawdown_halt:
             breach.append("max_drawdown_halt")
         if self.day_realized_pnl < 0 and abs(self.day_realized_pnl) >= self.equity * self.cfg.max_daily_loss_pct:
@@ -329,7 +329,22 @@ class RiskEngine:
             "decision": decision.to_audit(now) if decision else None,
         }
 
-    def flatten(self) -> Dict:
+    def new_day(self, equity: float | None = None) -> None:
+        """Reset daily loss counters at the UTC day boundary."""
+        if equity is not None:
+            self.equity = float(equity)
+            self.peak_equity = max(self.peak_equity, self.equity)
+        self.daily_start_equity = self.equity
+        self.day_realized_pnl = 0.0
+        self.consecutive_losses = 0
+        # Clear daily / soft halt so a new session can trade; max-DD halt stays
+        # until an explicit flatten()/manual resume if still under water.
+        if self.current_drawdown() < self.cfg.max_drawdown_halt:
+            self._halted = False
+            self._soft_reduce = False
+            self.breach_reasons = []
+
+    def flatten(self) -> dict:
         """Auto-flatten: stand down and clear open positions. Records a single
         audit decision (per-instrument details captured in the details dict)."""
         pairs = list(self.positions.keys())
@@ -357,7 +372,7 @@ class RiskEngine:
             return 0.0
         return max(0.0, (self.peak_equity - self.equity) / self.peak_equity)
 
-    def historical_var(self, returns: Optional[Deque[float]] = None, confidence: Optional[float] = None) -> Dict:
+    def historical_var(self, returns: deque[float] | None = None, confidence: float | None = None) -> dict:
         """Historical simulation VaR / CVaR of the return series."""
         conf = confidence or self.cfg.var_confidence
         r = np.array(list(returns if returns is not None else self._portfolio_returns), dtype=np.float64)
@@ -370,7 +385,7 @@ class RiskEngine:
         cvar_pct = -float(tail.mean()) if tail.size else var_pct
         return {"var_pct": round(var_pct, 6), "cvar_pct": round(cvar_pct, 6), "n_obs": int(r.size)}
 
-    def parametric_var(self, confidence: Optional[float] = None) -> Dict:
+    def parametric_var(self, confidence: float | None = None) -> dict:
         """Parametric (normal) VaR of the portfolio return series."""
         conf = confidence or self.cfg.var_confidence
         r = np.array(list(self._portfolio_returns), dtype=np.float64)
@@ -390,7 +405,7 @@ class RiskEngine:
         cvar_pct = -(mu - cvar_z * sd)
         return {"var_pct": round(max(0.0, var_pct), 6), "cvar_pct": round(max(0.0, cvar_pct), 6)}
 
-    def portfolio_var(self, confidence: Optional[float] = None) -> Dict:
+    def portfolio_var(self, confidence: float | None = None) -> dict:
         h = self.historical_var(confidence=confidence)
         p = self.parametric_var(confidence=confidence)
         var_usd = h["var_pct"] * self.equity
@@ -404,13 +419,13 @@ class RiskEngine:
             "param_cvar_pct": p["cvar_pct"],
         }
 
-    def exposure_by_pair(self) -> Dict[str, float]:
+    def exposure_by_pair(self) -> dict[str, float]:
         return {p: float(pos.get("lots", 0.0)) for p, pos in self.positions.items()}
 
-    def exposure_by_currency(self) -> Dict[str, float]:
+    def exposure_by_currency(self) -> dict[str, float]:
         """Net exposure per currency (base credit, quote debit). Uses simple
         per-lot 100k notional so tests stay deterministic."""
-        out: Dict[str, float] = {}
+        out: dict[str, float] = {}
         for pair, pos in self.positions.items():
             lots = float(pos.get("lots", 0.0))
             direction = pos.get("direction", "long")
@@ -420,9 +435,9 @@ class RiskEngine:
             out[quote] = out.get(quote, 0.0) - sign * lots * 100_000
         return {k: round(v, 2) for k, v in out.items()}
 
-    def _check_gaps(self) -> Dict[str, bool]:
+    def _check_gaps(self) -> dict[str, bool]:
         """Gap-risk flags: per-pair if any recent |return| exceeds threshold."""
-        out: Dict[str, bool] = {}
+        out: dict[str, bool] = {}
         for pair, dq in self._returns.items():
             r = np.array(list(dq), dtype=np.float64)
             out[pair] = bool(r.size > 0 and float(np.max(np.abs(r))) > self.cfg.gap_move_threshold)
@@ -436,11 +451,11 @@ class RiskEngine:
         notional = abs(float(lots)) * 100_000.0
         return float(pnl) / max(notional, 1.0)
 
-    def _log(self, decision: RiskDecision, ts: Optional[str] = None) -> None:
+    def _log(self, decision: RiskDecision, ts: str | None = None) -> None:
         entry = decision.to_audit(ts)
         self.audit_log.append(entry)
 
-    def get_audit(self, rule: Optional[str] = None) -> List[Dict]:
+    def get_audit(self, rule: str | None = None) -> list[dict]:
         if rule is None:
             return list(self.audit_log)
         return [e for e in self.audit_log if e["rule"] == rule]

@@ -20,21 +20,20 @@ if str(_ROOT) not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+import yaml
+
 from data.sources import (
     DEFAULT_DUKASCOPY_CACHE_DIR,
     DEFAULT_DUKASCOPY_COMPACT_DIR,
     ForexDataManager,
 )
 
-
-import yaml
-
 # ── Load config/run_ubuntu.yaml for defaults ──────────────────────────────────
 _yaml_config = {}
 _config_path = _ROOT / "config" / "run_ubuntu.yaml"
 if _config_path.exists():
     try:
-        with open(_config_path, "r", encoding="utf-8") as _f:
+        with open(_config_path, encoding="utf-8") as _f:
             _yaml_config = yaml.safe_load(_f) or {}
     except Exception:
         pass

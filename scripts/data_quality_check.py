@@ -14,10 +14,10 @@ except ImportError:
 def check_array(name: str, obj: zarr.Array, full: bool = False):
     """Perform sanity checks on a Zarr array in chunks to prevent OOM."""
     issues = []
-    
+
     chunk_size = 10000
     n_samples = obj.shape[0] if len(obj.shape) > 0 else 1
-    
+
     n_total = 0
     sum_val = 0.0
     sum_sq_val = 0.0
@@ -25,19 +25,19 @@ def check_array(name: str, obj: zarr.Array, full: bool = False):
     max_val = float('-inf')
     has_nan = False
     has_inf = False
-    
+
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
         if len(obj.shape) > 0:
             arr_chunk = obj[start:end]
         else:
             arr_chunk = np.array([obj[...]])
-            
+
         if np.isnan(arr_chunk).any():
             has_nan = True
         if np.isinf(arr_chunk).any():
             has_inf = True
-            
+
         valid = arr_chunk[~np.isnan(arr_chunk) & ~np.isinf(arr_chunk)]
         if valid.size > 0:
             sum_val += float(np.sum(valid, dtype=np.float64))

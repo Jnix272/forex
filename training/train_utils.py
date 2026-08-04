@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from typing import Optional
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MixupBatch — time-series MixUp augmentation
@@ -50,8 +48,8 @@ class MixupBatch:
         self,
         xb: torch.Tensor,
         yb: torch.Tensor,
-        y_cls_b: Optional[torch.Tensor] = None,
-        y_conf_b: Optional[torch.Tensor] = None,
+        y_cls_b: torch.Tensor | None = None,
+        y_conf_b: torch.Tensor | None = None,
     ) -> tuple:
         if self.alpha <= 0.0 or np.random.random() > self.p:
             return xb, yb, y_cls_b, y_conf_b
@@ -73,19 +71,24 @@ class MixupBatch:
             # If integer labels, convert to one-hot then blend
             if y_cls_b.dtype in (torch.long, torch.int32, torch.int64):
                 n_cls = 3  # Sell / Hold / Buy
+                # Clamp OOR labels so scatter never writes past one-hot width;
+                # invalid rows stay as all-zeros (uniform / ignored by CE soft).
+                y_a = y_cls_b.long()
+                y_b = y_cls_b[idx].long()
+                valid_a = (y_a >= 0) & (y_a < n_cls)
+                valid_b = (y_b >= 0) & (y_b < n_cls)
                 one_hot_a = torch.zeros(bsz, n_cls, device=xb.device, dtype=torch.float32)
                 one_hot_b = torch.zeros(bsz, n_cls, device=xb.device, dtype=torch.float32)
-                valid_a = (y_cls_b >= 0) & (y_cls_b < n_cls)
-                valid_b = (y_cls_b[idx] >= 0) & (y_cls_b[idx] < n_cls)
-                one_hot_a[valid_a] = one_hot_a[valid_a].scatter_(
-                    1, y_cls_b[valid_a].unsqueeze(1), 1.0
-                )
-                one_hot_b[valid_b] = one_hot_b[valid_b].scatter_(
-                    1, y_cls_b[idx][valid_b].unsqueeze(1), 1.0
-                )
+                if bool(valid_a.any()):
+                    one_hot_a.scatter_(1, y_a.clamp(0, n_cls - 1).unsqueeze(1), 1.0)
+                    one_hot_a = one_hot_a * valid_a.unsqueeze(1).float()
+                if bool(valid_b.any()):
+                    one_hot_b.scatter_(1, y_b.clamp(0, n_cls - 1).unsqueeze(1), 1.0)
+                    one_hot_b = one_hot_b * valid_b.unsqueeze(1).float()
                 y_cls_mixed = lam * one_hot_a + (1 - lam) * one_hot_b
             else:
-                y_cls_mixed = lam * y_cls_b + (1 - lam) * y_cls_b[idx]
+                # Continuous / soft labels: clamp into a sane range before blend
+                y_cls_mixed = lam * y_cls_b.clamp(-1.0, 1.0) + (1 - lam) * y_cls_b[idx].clamp(-1.0, 1.0)
 
         if y_conf_b is not None:
             y_conf_mixed = lam * y_conf_b + (1 - lam) * y_conf_b[idx]
@@ -125,8 +128,8 @@ class VolatilityStratifiedSampler:
     def __init__(
         self,
         train_idx: np.ndarray,
-        diff_array: Optional[np.ndarray] = None,
-        n_samples: Optional[int] = None,
+        diff_array: np.ndarray | None = None,
+        n_samples: int | None = None,
         seed: int = 42,
     ):
         self.train_idx  = train_idx
@@ -165,12 +168,43 @@ class VolatilityStratifiedSampler:
         parts = []
         for i, (tier, idx) in enumerate(sorted(self._tier_indices.items())):
             k = per_tier + (1 if i < remainder else 0)
-            chosen = self.rng.choice(idx, size=k, replace=(k > len(idx)))
+            if k <= 0:
+                continue
+            if k <= len(idx):
+                chosen = self.rng.choice(idx, size=k, replace=False)
+            else:
+                # Never duplicate within an epoch: take all of this tier, then
+                # top up from the remaining train pool without replacement.
+                chosen = idx.copy()
+                need = k - len(chosen)
+                pool = self.train_idx[~np.isin(self.train_idx, chosen)]
+                if len(pool) >= need:
+                    chosen = np.concatenate([
+                        chosen,
+                        self.rng.choice(pool, size=need, replace=False),
+                    ])
+                elif len(pool) > 0:
+                    chosen = np.concatenate([chosen, pool])
+                # If still short, leave under-filled rather than replace=True
             parts.append(chosen)
 
+        if not parts:
+            shuffled = self.train_idx.copy()
+            self.rng.shuffle(shuffled)
+            return shuffled[: self.n_samples]
+
         combined = np.concatenate(parts)
+        # Deduplicate if top-up overlapped another tier's draw
+        _, uniq_idx = np.unique(combined, return_index=True)
+        combined = combined[np.sort(uniq_idx)]
+        if len(combined) < self.n_samples:
+            pool = self.train_idx[~np.isin(self.train_idx, combined)]
+            need = self.n_samples - len(combined)
+            if len(pool) > 0:
+                take = self.rng.choice(pool, size=min(need, len(pool)), replace=False)
+                combined = np.concatenate([combined, take])
         self.rng.shuffle(combined)
-        return combined
+        return combined[: self.n_samples]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,7 +252,7 @@ class RegimeTierTracker:
         passing = self.all_tiers_pass()
         return f"[RegimeTiers] {' | '.join(parts)} | {'PASS' if passing else 'FAIL'}"
 
-    def best_epoch(self) -> Optional[int]:
+    def best_epoch(self) -> int | None:
         """Return the epoch where the sum of tier Sharpes was highest."""
         if not self._history:
             return None

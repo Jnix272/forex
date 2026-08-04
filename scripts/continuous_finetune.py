@@ -15,12 +15,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
-import yaml
-
 import pandas as pd
+import yaml
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -92,7 +91,7 @@ def write_temp_finetune_config(
     epochs: int = 1,
 ) -> Path:
     """Write a temporary YAML for fine-tuning without mutating config/run.yaml."""
-    with open(base_config, "r", encoding="utf-8") as f:
+    with open(base_config, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     config.setdefault("data", {})["start"] = start_date
     config["data"]["end"] = end_date
@@ -110,7 +109,7 @@ def write_temp_finetune_config(
 
 def run_pipeline(pair: str, lookback_days: int):
     """Executes download + warm-start fine-tune on a label-safe window."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     horizon = _label_horizon_bars()
     embargo = _embargo_bars_from_config(yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {})
     end_dt = now_utc - timedelta(minutes=horizon + embargo)
@@ -168,7 +167,7 @@ def run_pipeline(pair: str, lookback_days: int):
         except OSError:
             pass
 
-    print(f"\n[{datetime.now(timezone.utc).isoformat()}] Fine-Tuning Pipeline Complete!")
+    print(f"\n[{datetime.now(UTC).isoformat()}] Fine-Tuning Pipeline Complete!")
 
 
 def main():
@@ -188,7 +187,7 @@ def main():
     print(f"Daemon started. Waking up daily at {args.run_time} UTC to fine-tune {args.pair}.")
 
     while True:
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         target_time = now_utc.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
 
         if now_utc >= target_time:

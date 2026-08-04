@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from config.models import MODELS, SUPPORTED_SUPERVISED, architecture_config
-from config.settings import MODELS as SETTINGS_MODELS, PATHS, PROJECT_ROOT, project_path
+from config.models import SUPPORTED_SUPERVISED, architecture_config
+from config.settings import PATHS, PROJECT_ROOT, project_path
 from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
 from features.feature_engineering import FeatureEngineer
 from models.architectures import MODEL_REGISTRY
@@ -30,11 +30,8 @@ class TestConfiguration:
             assert isinstance(val, str)
             assert Path(val).is_absolute() or key.startswith("file_")
 
-    def test_settings_models_matches_config_models(self):
-        assert SETTINGS_MODELS is MODELS
-
     def test_supervised_keys_match_model_registry(self):
-        assert SUPPORTED_SUPERVISED == frozenset(MODEL_REGISTRY.keys())
+        assert frozenset(MODEL_REGISTRY.keys()) == SUPPORTED_SUPERVISED
 
     def test_architecture_config_roundtrip(self):
         cfg = architecture_config("expert")
@@ -58,7 +55,7 @@ class TestDataPipelineSmoke:
         atr_col = "atr_6" if "atr_6" in feats.columns else feats.columns[0]
         atr = feats[atr_col].to_numpy().astype(np.float32)
         spreads = np.full(len(prices), 0.00005, dtype=np.float32)
-        
+
         # Drop timestamp before converting to array
         feat_df = feats.drop("timestamp_utc") if "timestamp_utc" in feats.columns else feats
         feat_arr = feat_df.to_numpy().astype(np.float32)

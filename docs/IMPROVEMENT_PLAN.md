@@ -4,10 +4,10 @@
 **Scope:** Personal-use FX research + automated trading (solo developer, no regulatory constraints)
 **Hardware:** RTX 4060 8 GB + 16 GB RAM, Linux
 
-> This document is the forward-looking **roadmap**. Existing audit results live in
-> [`PIPELINE_IMPROVEMENT_REPORT.md`](PIPELINE_IMPROVEMENT_REPORT.md) (11 issues) and
-> [`DATASET_IMPROVEMENT_REPORT.md`](DATASET_IMPROVEMENT_REPORT.md) (10 issues); this plan
-> prioritises and schedules their resolution alongside new capability work.
+> This document is the forward-looking **roadmap**. Historical audits live in
+> [`archive/`](archive/) (start with [`archive/FIXES_APPLIED.md`](archive/FIXES_APPLIED.md)).
+> Config / curriculum / dataset schema gates: [`CONFIG_CONSISTENCY.md`](CONFIG_CONSISTENCY.md).
+> Day-to-day tracker: [`CONTINUE.md`](CONTINUE.md). Docs index: [`README.md`](README.md).
 
 ---
 

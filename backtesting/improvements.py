@@ -9,11 +9,11 @@ Backtesting additions:
 
 import json
 import warnings
+from datetime import UTC, datetime
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List, Dict
-from datetime import datetime, timezone
 
 from config.settings import PATHS
 
@@ -229,7 +229,7 @@ class SlippageCalibrator:
         self.adv = adv_lots
         self.alpha_: float = 0.5    # Default impact coefficient
         self.beta_:  float = 0.5    # Default exponent (square-root)
-        self.session_factors: Dict[str, float] = {
+        self.session_factors: dict[str, float] = {
             "london_ny": 1.0,   # Reference (tightest spreads)
             "london":    1.15,
             "ny":        1.20,
@@ -392,7 +392,7 @@ class LockboxTest:
         self,
         start:       str  = "2024-01-01",
         end:         str  = "2024-12-31",
-        log_path:    Optional[str] = None,
+        log_path:    str | None = None,
         max_evals:   int  = 1,   # Only 1 evaluation allowed
     ):
         if log_path is None:
@@ -401,9 +401,9 @@ class LockboxTest:
         self.end       = end
         self.log_path  = Path(log_path)
         self.max_evals = max_evals
-        self._evals:   List[dict] = []
+        self._evals:   list[dict] = []
         self._sealed   = False
-        self._model_registry: List[dict] = []
+        self._model_registry: list[dict] = []
         self._load_log()
 
     def _load_log(self):
@@ -434,7 +434,7 @@ class LockboxTest:
         entry = {
             "name": model_name,
             "description": description,
-            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "registered_at": datetime.now(UTC).isoformat(),
         }
         self._model_registry.append(entry)
         self._save_log()
@@ -460,7 +460,7 @@ class LockboxTest:
         model_name:   str,
         predictions:  np.ndarray,  # Model signals: +1, 0, -1
         returns:      np.ndarray,  # Actual forward returns
-        trade_pnls:   Optional[np.ndarray] = None,
+        trade_pnls:   np.ndarray | None = None,
         notes:        str = "",
     ) -> dict:
         """
@@ -503,7 +503,7 @@ class LockboxTest:
 
         result = {
             "model":              model_name,
-            "evaluated_at":       datetime.now(timezone.utc).isoformat(),
+            "evaluated_at":       datetime.now(UTC).isoformat(),
             "lockbox_period":     {"start": self.start, "end": self.end},
             "n_predictions":      len(predictions),
             "directional_acc":    round(directional_acc, 4),
@@ -523,7 +523,7 @@ class LockboxTest:
 
         self._save_log()
 
-        print(f"\n[Lockbox] RESULTS:")
+        print("\n[Lockbox] RESULTS:")
         print(f"  Directional accuracy: {directional_acc:.1%}")
         print(f"  Sharpe ratio:         {sharpe:.3f}")
         print(f"  Max drawdown:         {max_dd:.1%}")

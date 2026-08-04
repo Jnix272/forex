@@ -45,3 +45,105 @@ markers = [
     "slow: longer-running regression or integration coverage",
     "gpu: tests that require CUDA/GPU support",
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruff — stable, high-signal rule set (audit P3)
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "logs",
+    "checkpoints",
+    "data/raw",
+    "data/processed",
+    "**/__pycache__",
+]
+
+[tool.ruff.lint]
+# High-signal correctness + style; omit noisy BLE/TRY/PERF/PLR complexity rules
+# that dominate the default rule set (~4k findings, mostly cosmetic).
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # bugbear
+    "SIM",    # simplify
+    "RUF",    # ruff-specific
+    "C4",     # comprehensions
+]
+ignore = [
+    "E501",   # line length — enforced loosely via formatter if desired
+    "B008",   # function-call defaults (common for argparse / FastAPI)
+    "B904",   # raise-from inside except (gradual)
+    "SIM108", # ternary vs if — style preference
+    "SIM105", # contextlib.suppress — style preference
+    "RUF012", # mutable class defaults (dataclasses often intentional)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "E402"]
+"scripts/**" = ["E402", "F401"]
+"training/train_gpu.py" = ["E402"]  # late imports in monolith
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "audit", "backtesting", "config", "data", "drift", "evaluation",
+    "features", "infrastructure", "labeling", "models", "monitoring",
+    "pretrain", "risk", "sizing", "trading", "training", "validation",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pyright — gradual typing (audit P3)
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pyright]
+include = [
+    "audit",
+    "risk",
+    "evaluation",
+    "drift",
+    "validation",
+    "sizing",
+    "config",
+]
+exclude = [
+    ".venv",
+    "**/node_modules",
+    "**/__pycache__",
+    "data",
+    "logs",
+    "checkpoints",
+    "training/train_gpu.py",
+]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# Gradual adoption: treat common stub/shape noise as warnings so `uv run pyright`
+# is a usable smoke gate while packages are typed incrementally.
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+reportUnusedImport = "warning"
+reportPrivateImportUsage = false
+reportAttributeAccessIssue = "warning"
+reportArgumentType = "warning"
+reportOptionalMemberAccess = "warning"
+reportOptionalSubscript = "warning"
+reportOptionalOperand = "warning"
+reportCallIssue = "warning"
+reportGeneralTypeIssues = "warning"
+reportIndexIssue = "warning"
+reportOperatorIssue = "warning"
+reportAssignmentType = "warning"
+reportReturnType = "warning"
+reportIncompatibleMethodOverride = "warning"
+
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+]

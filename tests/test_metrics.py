@@ -10,18 +10,18 @@ import numpy as np
 import pytest
 
 from evaluation.metrics import (
-    sharpe_ratio,
-    probabilistic_sharpe_ratio,
-    deflated_sharpe_ratio,
-    max_drawdown,
-    calmar_ratio,
-    downside_deviation,
-    sortino_ratio,
-    omega_ratio,
-    tail_ratio,
-    minimum_backtest_length,
-    backtest_metrics,
     MetricReport,
+    backtest_metrics,
+    calmar_ratio,
+    deflated_sharpe_ratio,
+    downside_deviation,
+    max_drawdown,
+    minimum_backtest_length,
+    omega_ratio,
+    probabilistic_sharpe_ratio,
+    sharpe_ratio,
+    sortino_ratio,
+    tail_ratio,
 )
 
 

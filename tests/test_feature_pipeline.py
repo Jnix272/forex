@@ -4,11 +4,11 @@ cross-asset builder, and full FeatureEngineer.build().
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import polars as pl
 import pytest
-from datetime import datetime, timezone, timedelta
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,7 +19,7 @@ def sample_bars() -> pl.DataFrame:
     """Minimal 1-minute OHLCV bars for pipeline testing."""
     n = 300
     ts = [
-        datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 1, 2, 10, 0, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n)
     ]
     rng = np.random.default_rng(42)
@@ -98,10 +98,11 @@ class TestSanitizeFrame:
 
 class TestSentimentTiers:
     def test_adds_sentiment_columns_when_present(self):
+        from datetime import datetime
+
         from features.feature_engineering_pl import sentiment_tiers
-        from datetime import datetime, timezone
         ts = [
-            datetime(2024, 1, 2, 10, i, tzinfo=timezone.utc) for i in range(5)
+            datetime(2024, 1, 2, 10, i, tzinfo=UTC) for i in range(5)
         ]
         df = pl.DataFrame({
             "timestamp_utc": ts,

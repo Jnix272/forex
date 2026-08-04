@@ -1,8 +1,9 @@
-import subprocess
 import argparse
-import sys
 import json
+import subprocess
+import sys
 from pathlib import Path
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run diverse model recipes sequentially.")
@@ -25,25 +26,25 @@ def main():
     for model in models:
         print(f"\n{'='*50}\nTraining Model Recipe: {model.upper()}\n{'='*50}")
         cmd = base_cmd + ["--model", model]
-        
+
         # Run training
         try:
             subprocess.run(cmd, check=True)
             print(f"[Success] {model} finished training.")
-            
+
             # Read back the deployment.json or train_summary.json
             summary_path = Path(args.checkpoint_dir) / model / "train_summary.json"
             if summary_path.exists():
-                with open(summary_path, "r") as f:
+                with open(summary_path) as f:
                     summary = json.load(f)
                     results[model] = summary.get("best_val_sharpe", 0.0)
             else:
                 results[model] = "N/A"
-                
+
         except subprocess.CalledProcessError as e:
             print(f"[Failed] {model} failed with exit code {e.returncode}")
             results[model] = "Failed"
-            
+
     print(f"\n{'='*50}\nDiverse Recipes Results\n{'='*50}")
     for m, score in results.items():
         print(f"Model: {m.ljust(10)} | Val Sharpe: {score}")

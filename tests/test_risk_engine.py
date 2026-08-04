@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from risk.risk_engine import RiskConfig, RiskEngine, RiskDecision
+from risk.risk_engine import RiskConfig, RiskDecision, RiskEngine
 
 
 @pytest.fixture
@@ -189,6 +189,14 @@ def test_audit_filter_by_rule(engine):
     filtered = engine.get_audit(rule="max_total_lots")
     assert len(filtered) == 1
     assert filtered[0]["rule"] == "max_total_lots"
+
+
+def test_risk_engine_new_day_resets_daily_pnl(engine):
+    engine.on_trade_closed(pnl=-50.0, equity=9_950.0, pair="EURUSD", lots=0.1)
+    assert engine.day_realized_pnl < 0
+    engine.new_day(equity=9_950.0)
+    assert engine.day_realized_pnl == 0.0
+    assert engine.consecutive_losses == 0
 
 
 def test_risk_decision_to_audit_shape():

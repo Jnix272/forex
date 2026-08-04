@@ -1,7 +1,9 @@
 import json
-import time
 import random
+import time
+
 from confluent_kafka import Producer
+
 
 def delivery_report(err, msg):
     if err is not None:
@@ -10,16 +12,16 @@ def delivery_report(err, msg):
 def main():
     print("Starting Redpanda Tick Pump...")
     producer = Producer({'bootstrap.servers': 'localhost:9092'})
-    
+
     symbols = ["EURUSD", "GBPUSD", "USDJPY"]
     base_prices = {"EURUSD": 1.08, "GBPUSD": 1.27, "USDJPY": 149.5}
-    
+
     try:
         for i in range(1, 100):
             symbol = random.choice(symbols)
             price = base_prices[symbol] + random.gauss(0, 0.0005)
             spread = random.uniform(0.0001, 0.0003)
-            
+
             tick = {
                 "symbol": symbol,
                 "timestamp": int(time.time_ns()),
@@ -32,10 +34,10 @@ def main():
                 "trade_side": random.choice(["buy", "sell"]) if random.random() < 0.1 else None,
                 "exchange": "synthetic"
             }
-            
+
             # Remove None values
             tick = {k: v for k, v in tick.items() if v is not None}
-            
+
             producer.produce(
                 'market.ticks',
                 key=symbol.encode('utf-8'),
@@ -43,10 +45,10 @@ def main():
                 callback=delivery_report
             )
             producer.poll(0)
-            
+
             print(f"Produced tick for {symbol}: Bid={tick['bid']:.4f} Ask={tick['ask']:.4f}")
             time.sleep(0.5)  # 2 ticks per second
-            
+
     except KeyboardInterrupt:
         pass
     finally:

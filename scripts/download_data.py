@@ -54,6 +54,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
+
 import yaml
 
 # Suppress Python 3.14 DeprecationWarnings from aiohttp/asyncio
@@ -71,18 +72,19 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import sys
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from data.cross_asset import load_cross_asset_panel
+from data.eodhd import DEFAULT_EODHD_CACHE_DIR, EODHD_FOREX_PAIRS, EODHDLoader
+from data.myfxbook import DEFAULT_MYFXBOOK_DATA_DIR, MyfxbookLoader
 from data.sources import (
-    DukascopyLoader,
     DEFAULT_DUKASCOPY_CACHE_DIR,
     DEFAULT_DUKASCOPY_COMPACT_DIR,
+    DukascopyLoader,
     ForexDataManager,
 )
-from data.cross_asset import load_cross_asset_panel
-from data.myfxbook import MyfxbookLoader, DEFAULT_MYFXBOOK_DATA_DIR
-from data.eodhd import EODHDLoader, DEFAULT_EODHD_CACHE_DIR, EODHD_FOREX_PAIRS
 
 # ── Load run config for defaults ───────────────────────────────────────────────
 _yaml_config = {}
@@ -91,7 +93,7 @@ for _config_name in ("run.yaml", "run_ubuntu.yaml"):
     if not _config_path.exists():
         continue
     try:
-        with open(_config_path, "r", encoding="utf-8") as _f:
+        with open(_config_path, encoding="utf-8") as _f:
             _yaml_config = yaml.safe_load(_f) or {}
         break
     except Exception:
@@ -495,12 +497,8 @@ def auto_redownload_missing_data(
     scope: str = "both",
 ) -> None:
     from pathlib import Path
-    from scripts.verify_data import (
-        _expected_hours,
-        scan_missing,
-        _filter_suspicious_missing,
-        redownload_hours
-    )
+
+    from scripts.verify_data import _expected_hours, _filter_suspicious_missing, redownload_hours, scan_missing
 
     scope = (scope or "both").lower()
     if scope not in {"months", "years", "pairs", "both"}:
@@ -508,7 +506,7 @@ def auto_redownload_missing_data(
 
     cache = Path(cache_dir)
     expected = _expected_hours(start, end, hours)
-    
+
     print("\n" + "=" * 66)
     print(f"  AUTO-CHECK: Missing Data by {scope.capitalize()}")
     print("=" * 66)
@@ -519,7 +517,7 @@ def auto_redownload_missing_data(
     for pair in pairs:
         miss_stats = scan_missing(cache, pair, expected, min_ticks=0)
         n_missing = len(miss_stats["missing"])
-        
+
         if n_missing > 0:
             suspicious = _filter_suspicious_missing(cache, pair, miss_stats["missing"])
             if suspicious:
@@ -571,7 +569,7 @@ def auto_redownload_missing_data(
                 f"dukascopy/{pair}/missing_hours_repaired": rd_stats['refetched'],
                 f"dukascopy/{pair}/missing_hours_unfixable": rd_stats['still_missing'],
             })
-    
+
     print("-" * 66)
 
 

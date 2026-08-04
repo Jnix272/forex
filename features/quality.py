@@ -6,12 +6,10 @@ Per-feature quality metrics for monitoring and debugging feature pipelines.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import polars as pl
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Data Classes
@@ -27,15 +25,15 @@ class FeatureQuality:
     infinite_count: int
     constant: bool
     unique_count: int
-    mean: Optional[float]
-    std: Optional[float]
-    min: Optional[float]
-    max: Optional[float]
-    skew: Optional[float]
-    kurtosis: Optional[float]
-    q25: Optional[float]
-    q50: Optional[float]
-    q75: Optional[float]
+    mean: float | None
+    std: float | None
+    min: float | None
+    max: float | None
+    skew: float | None
+    kurtosis: float | None
+    q25: float | None
+    q50: float | None
+    q75: float | None
     # Derived flags
     has_nulls: bool
     has_inf: bool
@@ -49,25 +47,25 @@ class FeatureQualityReport:
     """Aggregate quality report for a feature DataFrame."""
     n_rows: int
     n_cols: int
-    features: List[FeatureQuality]
-    summary: Dict[str, int]
-    
-    def to_dict(self) -> Dict:
+    features: list[FeatureQuality]
+    summary: dict[str, int]
+
+    def to_dict(self) -> dict:
         return {
             "n_rows": self.n_rows,
             "n_cols": self.n_cols,
             "features": [asdict(f) for f in self.features],
             "summary": self.summary,
         }
-    
-    def get_problematic(self) -> List[FeatureQuality]:
+
+    def get_problematic(self) -> list[FeatureQuality]:
         """Return features with quality issues."""
-        return [f for f in self.features 
+        return [f for f in self.features
                 if f.has_nulls or f.has_inf or f.is_constant or f.near_constant]
-    
-    def get_clean(self) -> List[FeatureQuality]:
+
+    def get_clean(self) -> list[FeatureQuality]:
         """Return features passing all quality checks."""
-        return [f for f in self.features 
+        return [f for f in self.features
                 if not (f.has_nulls or f.has_inf or f.is_constant or f.near_constant)]
 
 
@@ -77,7 +75,7 @@ class FeatureQualityReport:
 
 def compute_quality_report(
     df: pl.DataFrame,
-    exclude_cols: Optional[List[str]] = None,
+    exclude_cols: list[str] | None = None,
     near_constant_threshold: float = 1e-8,
     high_cardinality_threshold: float = 0.9,
 ) -> FeatureQualityReport:
@@ -95,24 +93,24 @@ def compute_quality_report(
     """
     exclude = set(exclude_cols or [])
     numeric_cols = [
-        c for c in df.columns 
+        c for c in df.columns
         if c not in exclude and df[c].dtype.is_numeric()
     ]
-    
+
     n_rows = len(df)
     features = []
-    
+
     for col in numeric_cols:
         s = df[col]
         null_count = s.null_count()
         null_pct = null_count / n_rows if n_rows > 0 else 0.0
-        
+
         # Convert to numpy for stats (drop nulls)
         vals = s.drop_nulls().to_numpy()
         finite_vals = vals[np.isfinite(vals)]
-        
+
         infinite_count = int(np.sum(~np.isfinite(vals))) if len(vals) > 0 else 0
-        
+
         if len(finite_vals) == 0:
             fq = FeatureQuality(
                 name=col,
@@ -133,13 +131,13 @@ def compute_quality_report(
             )
             features.append(fq)
             continue
-        
+
         unique_count = int(np.unique(finite_vals).size)
         is_const = unique_count <= 1
         std_val = float(np.std(finite_vals))
         near_const = std_val < near_constant_threshold
         high_card = unique_count > (high_cardinality_threshold * n_rows)
-        
+
         fq = FeatureQuality(
             name=col,
             dtype=str(s.dtype),
@@ -164,7 +162,7 @@ def compute_quality_report(
             high_cardinality=high_card,
         )
         features.append(fq)
-    
+
     # Summary counts
     summary = {
         "total": len(features),
@@ -175,7 +173,7 @@ def compute_quality_report(
         "near_constant": sum(1 for f in features if f.near_constant),
         "high_cardinality": sum(1 for f in features if f.high_cardinality),
     }
-    
+
     return FeatureQualityReport(
         n_rows=n_rows,
         n_cols=len(features),
@@ -220,7 +218,7 @@ def print_quality_report(report: FeatureQualityReport, show_clean: bool = False)
     print(f"FEATURE QUALITY REPORT  |  rows={report.n_rows:,}  cols={report.n_cols}")
     print(f"{'='*80}")
     print(f"Summary: {report.summary}")
-    
+
     problematic = report.get_problematic()
     if problematic:
         print(f"\n⚠️  PROBLEMATIC FEATURES ({len(problematic)}):")
@@ -232,7 +230,7 @@ def print_quality_report(report: FeatureQualityReport, show_clean: bool = False)
             if f.near_constant: issues.append(f"near-const(std={f.std:.2e})")
             if f.high_cardinality: issues.append("high-card")
             print(f"  {f.name:30s} | {'; '.join(issues)}")
-    
+
     if show_clean:
         clean = report.get_clean()
         print(f"\n✅ CLEAN FEATURES ({len(clean)}):")
@@ -246,7 +244,7 @@ def print_quality_report(report: FeatureQualityReport, show_clean: bool = False)
 # ════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    
+
     # Quick self-test
     rng = np.random.default_rng(42)
     df = pl.DataFrame({
@@ -256,10 +254,10 @@ if __name__ == "__main__":
         "inf_feat": [1.0 if i != 500 else float("inf") for i in range(1000)],
         "high_card": rng.uniform(0, 1, 1000),
     })
-    
+
     report = compute_quality_report(df)
     print_quality_report(report)
-    
+
     # Verify flags
     assert any(f.name == "const_feat" and f.is_constant for f in report.features)
     assert any(f.name == "null_feat" and f.has_nulls for f in report.features)

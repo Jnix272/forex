@@ -1,23 +1,24 @@
-import unittest
-import tempfile
 import json
-from pathlib import Path
 import shutil
+import tempfile
+import unittest
+from pathlib import Path
 
 # Importing the module we just created
 from models.rl_report import RLReporter
+
 
 class TestRLReport(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.reporter = RLReporter(checkpoint_dir=self.temp_dir)
-        
+
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
     def test_rl_report_generation(self):
         """Validates that rl_report.json is correctly generated with all required metrics."""
-        
+
         # Mock data representing a successful PPO run
         self.reporter.generate_report(
             algorithm="PPO",
@@ -35,26 +36,26 @@ class TestRLReport(unittest.TestCase):
             rl_best_updated=True,
             comparison_vs_supervised={"delta_sharpe": 0.3, "delta_return": 0.05}
         )
-        
+
         report_path = Path(self.temp_dir) / "rl_report.json"
         self.assertTrue(report_path.exists(), "rl_report.json was not created.")
-        
-        with open(report_path, "r", encoding="utf-8") as f:
+
+        with open(report_path, encoding="utf-8") as f:
             data = json.load(f)
-            
+
         # Verify schema structure
         self.assertEqual(data["configuration"]["algorithm"], "PPO")
         self.assertEqual(data["configuration"]["observation_mode"], "frozen_encoder")
-        
+
         self.assertEqual(data["performance_metrics"]["validation_sharpe"], 2.1)
         self.assertEqual(data["performance_metrics"]["max_drawdown"], -0.04)
-        
+
         self.assertEqual(data["trading_behavior"]["trade_count"], 150)
         self.assertEqual(data["trading_behavior"]["action_distribution"]["Hold"], 0.4)
-        
+
         self.assertTrue(data["promotion_status"]["rl_best_updated"])
         self.assertEqual(data["promotion_status"]["comparison_vs_supervised_baseline"]["delta_sharpe"], 0.3)
-        
+
     def test_rl_report_rejection(self):
         """Validates that the report handles rejection gracefully."""
         self.reporter.generate_report(
@@ -73,11 +74,11 @@ class TestRLReport(unittest.TestCase):
             rl_best_updated=False,
             comparison_vs_supervised={"delta_sharpe": -2.0, "delta_return": -0.15}
         )
-        
+
         report_path = Path(self.temp_dir) / "rl_report.json"
-        with open(report_path, "r", encoding="utf-8") as f:
+        with open(report_path, encoding="utf-8") as f:
             data = json.load(f)
-            
+
         self.assertFalse(data["promotion_status"]["rl_best_updated"])
         self.assertEqual(data["configuration"]["algorithm"], "DQN")
 

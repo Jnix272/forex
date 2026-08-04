@@ -40,12 +40,10 @@ Features produced (all daily, forward-filled to bars.index via ffill):
 
 import os
 import time
-from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 import polars as pl
-
 
 # ── FRED series IDs ───────────────────────────────────────────────────────────
 # Daily: DGS10, DGS2 (US only — FRED provides these at daily frequency)
@@ -120,11 +118,11 @@ def _fetch_all_yields(
     start:    pd.Timestamp,
     end:      pd.Timestamp,
     fred_key: str,
-) -> Dict[str, Optional[pd.Series]]:
+) -> dict[str, pd.Series | None]:
     """Fetch all configured yield series from FRED."""
     start_s = str(start.date())
     end_s   = str(end.date())
-    result: Dict[str, Optional[pd.Series]] = {}
+    result: dict[str, pd.Series | None] = {}
 
     for name, series_id in FRED_SERIES.items():
         try:
@@ -144,7 +142,7 @@ def _synthetic_yields(
     start: pd.Timestamp,
     end:   pd.Timestamp,
     seed:  int = 42,
-) -> Dict[str, pd.Series]:
+) -> dict[str, pd.Series]:
     """
     Generate synthetic yield series calibrated to realistic levels and
     correlations. Used when FRED API is unavailable.
@@ -191,7 +189,7 @@ class MacroYieldFeatureBuilder:
 
     def __init__(
         self,
-        fred_api_key:      Optional[str] = None,
+        fred_api_key:      str | None = None,
         momentum_windows:  tuple         = (5, 20),
         vol_window:        int           = 20,
     ):
@@ -205,7 +203,7 @@ class MacroYieldFeatureBuilder:
         self,
         start: pd.Timestamp,
         end:   pd.Timestamp,
-    ) -> Dict[str, pd.Series]:
+    ) -> dict[str, pd.Series]:
         """Load all yield series; fills any gaps with synthetic data."""
         if self._fred_key:
             try:
@@ -241,12 +239,12 @@ class MacroYieldFeatureBuilder:
         end   = pd.Timestamp(max_dt)
 
         yields = self.load_yields(start, end)
-        
+
         pdf = pd.DataFrame(yields)
         # Yield dates are tz-aware UTC
         pdf.index = pd.to_datetime(pdf.index, utc=True)
         pdf.index.name = "timestamp_utc"
-        
+
         yield_df = pl.from_pandas(pdf.reset_index())
         yield_df = yield_df.with_columns(pl.all().exclude("timestamp_utc").forward_fill())
 
@@ -264,7 +262,7 @@ class MacroYieldFeatureBuilder:
             on="timestamp_utc",
             strategy="backward"
         )
-        
+
         # Forward-fill only. Backward-fill would leak future yield observations
         # into bars before the first available macro timestamp.
         out = out.with_columns(pl.all().exclude("timestamp_utc").forward_fill().fill_null(0.0))
@@ -300,14 +298,14 @@ class MacroYieldFeatureBuilder:
         exprs = []
         for w in self._mom_wins:
             exprs.append((pl.col("spread_us_de") - pl.col("spread_us_de").shift(w)).alias(f"yield_momentum_{w}d"))
-        
+
         exprs.append(pl.col("spread_us_de").rolling_std(window_size=self._vol_win).fill_null(0.0).alias("yield_vol_20d"))
-        
+
         out = out.with_columns(exprs)
 
         drop_cols = ["timestamp_utc", "US10Y", "US2Y", "DE10Y", "JP10Y", "GB10Y", "AU10Y", "CA10Y", "NZ10Y", "CH10Y"]
         out = out.drop([c for c in drop_cols if c in out.columns])
-        
+
         return out.fill_null(0.0)
 
 

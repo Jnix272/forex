@@ -8,8 +8,8 @@ from inference.onnx_inference import (
 
 __all__ = [
     "DirectMLInferenceEngine",
-    "export_to_onnx",
     "export_ensemble_to_onnx",
-    "export_rl_to_onnx",
     "export_rl_execution_to_onnx",
+    "export_rl_to_onnx",
+    "export_to_onnx",
 ]

@@ -26,19 +26,16 @@ Outputs (one row per input bar, forward-filled):
 
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
-
 import numpy as np
 import pandas as pd
 import polars as pl
 from scipy import stats
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # Internal helpers
 # ════════════════════════════════════════════════════════════════════════════
 
-def _refit_indices(n: int, window: int, step: int) -> List[int]:
+def _refit_indices(n: int, window: int, step: int) -> list[int]:
     """Refit row indices: rows ``window..n-1`` every ``step`` (incl. last)."""
     if n <= window:
         return []
@@ -60,7 +57,7 @@ def _stdize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return out
 
 
-def _ffill_refits(n: int, positions: List[int], rows: List[np.ndarray]) -> np.ndarray:
+def _ffill_refits(n: int, positions: list[int], rows: list[np.ndarray]) -> np.ndarray:
     """Broadcast refit rows across full length: row ``i`` uses last refit <= i."""
     out = np.zeros((n, rows[0].shape[0]), dtype=float)
     if not positions:
@@ -106,7 +103,7 @@ def rolling_factor_scores(
         return pd.DataFrame(np.zeros((n, len(cols))), columns=cols, index=returns.index)
 
     positions = _refit_indices(n, window, step)
-    rows: List[np.ndarray] = []
+    rows: list[np.ndarray] = []
     for t in positions:
         W = returns.iloc[max(0, t - window + 1): t + 1].fillna(0.0).to_numpy(dtype=float)
         X = _stdize(W)
@@ -130,7 +127,7 @@ def rolling_factor_scores(
     return pd.DataFrame(out, columns=cols, index=returns.index)
 
 
-def _pca_fit(X: np.ndarray, n_comp: int) -> Tuple[np.ndarray, np.ndarray]:
+def _pca_fit(X: np.ndarray, n_comp: int) -> tuple[np.ndarray, np.ndarray]:
     """PCA via eigendecomposition of the (possibly rank-deficient) covariance."""
     cov = np.cov(X, rowvar=False)
     evals, evecs = np.linalg.eigh(cov)
@@ -169,7 +166,7 @@ def granger_f_test(y: np.ndarray, x: np.ndarray, maxlag: int = 1) -> float:
     x = np.asarray(x, dtype=float).ravel()
     T = len(y)
     p = int(maxlag)
-    if T <= 2 * p + 2 or np.std(y) < 1e-12 or np.std(x) < 1e-12:
+    if 2 * p + 2 >= T or np.std(y) < 1e-12 or np.std(x) < 1e-12:
         return 1.0
     Y = np.stack([y[p - 1 - l: T - 1 - l] for l in range(p)], axis=1)  # y_{t-l}
     Xl = np.stack([x[p - 1 - l: T - 1 - l] for l in range(p)], axis=1)  # x_{t-l}
@@ -208,11 +205,11 @@ def granger_lead_scores(
         return out
 
     positions = _refit_indices(n, window, step)
-    rows: List[Tuple[np.ndarray, List[str]]] = []
+    rows: list[tuple[np.ndarray, list[str]]] = []
     for t in positions:
         W = returns.iloc[max(0, t - window + 1): t + 1].fillna(0.0)
         pvec = np.ones(n_assets)
-        names: List[str] = [""] * n_assets
+        names: list[str] = [""] * n_assets
         for i, target in enumerate(assets):
             y = W[target].to_numpy(dtype=float)
             best_p = 1.0
@@ -235,7 +232,7 @@ def granger_lead_scores(
             sc = -np.log10(np.clip(pmat[:, i], 1e-9, 1.0))
             out[f"granger_score_{a}"] = np.clip(sc, 0.0, 5.0)
         # best-predictor names: string forward-fill from refit rows
-        name_pos: List[List[str]] = [[""] * n_assets for _ in range(n)]
+        name_pos: list[list[str]] = [[""] * n_assets for _ in range(n)]
         idx = 0
         for i in range(n):
             if idx + 1 < len(positions) and i >= positions[idx + 1]:

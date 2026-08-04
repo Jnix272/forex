@@ -19,9 +19,9 @@ Integration: challenger vs champion comparisons reuse the repo's promotion gate
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover - evaluation.metrics ships with repo
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_sharpe(pnls: np.ndarray, annual_factor: float = 252.0) -> float:
@@ -73,13 +73,13 @@ class ModelStats:
     """Rolling window of trade results + prediction errors for one model."""
     model_id: str
     maxlen: int = 500
-    pnls: List[float] = field(default_factory=list)
-    equity: List[float] = field(default_factory=list)
-    errors: List[bool] = field(default_factory=list)
+    pnls: list[float] = field(default_factory=list)
+    equity: list[float] = field(default_factory=list)
+    errors: list[bool] = field(default_factory=list)
     n_trades: int = 0
     n_errors: int = 0
 
-    def record_trade(self, pnl: float, equity: Optional[float] = None) -> None:
+    def record_trade(self, pnl: float, equity: float | None = None) -> None:
         self.pnls.append(float(pnl))
         if equity is not None:
             self.equity.append(float(equity))
@@ -107,7 +107,7 @@ class ModelStats:
             return 0.0
         return float(np.mean(self.errors))
 
-    def summary(self, annual_factor: float = 252.0) -> Dict[str, float]:
+    def summary(self, annual_factor: float = 252.0) -> dict[str, float]:
         return {
             "n_trades": float(len(self.pnls)),
             "sharpe": round(_safe_sharpe(self.pnl_array, annual_factor), 4),
@@ -143,7 +143,7 @@ class ChampionChallengerHarness:
         challengers: Sequence[str] = (),
         window: int = 300,
         sharpe_margin: float = 0.2,
-        promotion_gate: Optional[PromotionGate] = None,
+        promotion_gate: PromotionGate | None = None,
         annual_factor: float = 252.0,
     ):
         self.champion = champion
@@ -152,7 +152,7 @@ class ChampionChallengerHarness:
         self.sharpe_margin = sharpe_margin
         self.annual_factor = annual_factor
         self._gate = promotion_gate or PromotionGate()
-        self._stats: Dict[str, ModelStats] = {champion: ModelStats(champion, window)}
+        self._stats: dict[str, ModelStats] = {champion: ModelStats(champion, window)}
         for c in self.challengers:
             self._stats.setdefault(c, ModelStats(c, window))
 
@@ -161,18 +161,18 @@ class ChampionChallengerHarness:
             self._stats[model_id] = ModelStats(model_id, self.window)
             self.challengers.append(model_id)
 
-    def record_trade(self, model_id: str, pnl: float, equity: Optional[float] = None) -> None:
+    def record_trade(self, model_id: str, pnl: float, equity: float | None = None) -> None:
         self._stats.setdefault(model_id, ModelStats(model_id, self.window)).record_trade(pnl, equity)
 
     def record_error(self, model_id: str, is_error: bool) -> None:
         self._stats.setdefault(model_id, ModelStats(model_id, self.window)).record_error(is_error)
 
-    def stats(self, model_id: Optional[str] = None) -> Dict[str, Dict]:
+    def stats(self, model_id: str | None = None) -> dict[str, dict]:
         if model_id is not None:
             return {model_id: self._stats[model_id].summary(self.annual_factor)}
         return {k: s.summary(self.annual_factor) for k, s in self._stats.items()}
 
-    def compare(self, challenger: str, min_trades: int = 30) -> Dict:
+    def compare(self, challenger: str, min_trades: int = 30) -> dict:
         """Evaluate challenger vs champion; returns gate result + relative metrics."""
         ch = self._stats[self.champion]
         ca = self._stats[challenger]
@@ -252,7 +252,7 @@ class CanaryRollout:
         self._escalated = 0
         self._deescalated = 0
 
-    def route(self, signal: Optional[object] = None) -> str:
+    def route(self, signal: object | None = None) -> str:
         """Pick which model handles this signal."""
         self._n_signals += 1
         if self.fraction >= 1.0:
@@ -275,7 +275,7 @@ class CanaryRollout:
         self.fraction = max(self.min_fraction, self.fraction - self.step)
         return self.fraction
 
-    def status(self) -> Dict:
+    def status(self) -> dict:
         return {
             "champion": self.champion,
             "challenger": self.challenger,
@@ -313,8 +313,8 @@ class AutomatedRollbackMonitor:
     def __init__(
         self,
         model_id: str,
-        config: Optional[RollbackConfig] = None,
-        rollback_callback: Optional[Callable[[Dict], None]] = None,
+        config: RollbackConfig | None = None,
+        rollback_callback: Callable[[dict], None] | None = None,
         window: int = 300,
         verbose: bool = True,
     ):
@@ -324,18 +324,18 @@ class AutomatedRollbackMonitor:
         self.window = window
         self.verbose = verbose
         self._live = ModelStats(model_id, window)
-        self._baseline_error_rate: Optional[float] = None
-        self._baseline_psr: Optional[float] = None
-        self._baseline_equity: List[float] = []
+        self._baseline_error_rate: float | None = None
+        self._baseline_psr: float | None = None
+        self._baseline_equity: list[float] = []
         self._rolled_back = False
-        self._triggers: List[str] = []
+        self._triggers: list[str] = []
 
     def set_baseline(
         self,
-        trade_pnls: Optional[Sequence[float]] = None,
-        equity_curve: Optional[Sequence[float]] = None,
-        error_rate: Optional[float] = None,
-        psr: Optional[float] = None,
+        trade_pnls: Sequence[float] | None = None,
+        equity_curve: Sequence[float] | None = None,
+        error_rate: float | None = None,
+        psr: float | None = None,
     ) -> None:
         """Record the deployment-time baseline performance."""
         if trade_pnls is not None:
@@ -350,7 +350,7 @@ class AutomatedRollbackMonitor:
         if error_rate is not None:
             self._baseline_error_rate = float(error_rate)
 
-    def on_trade_closed(self, pnl: float, equity: Optional[float] = None) -> Optional[Dict]:
+    def on_trade_closed(self, pnl: float, equity: float | None = None) -> dict | None:
         """Record a live trade; returns a rollback alert if thresholds breach."""
         self._live.record_trade(pnl, equity)
         if self._rolled_back:
@@ -375,8 +375,8 @@ class AutomatedRollbackMonitor:
         """Record a prediction error on the live stream."""
         self._live.record_error(is_error)
 
-    def _check(self) -> Optional[Dict]:
-        triggers: List[str] = []
+    def _check(self) -> dict | None:
+        triggers: list[str] = []
         eq = self._live.equity_array
         pnls = self._live.pnl_array
 
@@ -425,11 +425,11 @@ def run_model_drift_check(
     champion_id: str,
     challenger_ids: Sequence[str],
     champion_pnls: Sequence[float],
-    challenger_pnls: Dict[str, Sequence[float]],
-    champion_equity: Optional[Sequence[float]] = None,
+    challenger_pnls: dict[str, Sequence[float]],
+    champion_equity: Sequence[float] | None = None,
     window: int = 300,
     annual_factor: float = 252.0,
-) -> Dict:
+) -> dict:
     """One-call model drift audit: populate the harness from existing trade lists
     and emit a comparison report with structured events for alerting."""
     harness = ChampionChallengerHarness(

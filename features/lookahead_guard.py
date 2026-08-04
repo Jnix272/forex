@@ -9,7 +9,6 @@ that adapts thresholds based on the data distribution and feature characteristic
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 
@@ -138,7 +137,7 @@ def assert_no_lookahead(
     timestamps: np.ndarray,
     features: np.ndarray,
     feature_names: list[str],
-    forward_returns: Optional[np.ndarray] = None,
+    forward_returns: np.ndarray | None = None,
     corr_threshold: float = 0.95,
     max_nan_tail_ratio: float = 0.01,
     adaptive: bool = True,

@@ -1,5 +1,8 @@
-import polars as pl
+from datetime import UTC
 from pathlib import Path
+
+import polars as pl
+
 
 class DatabentoLoader:
     """
@@ -8,8 +11,8 @@ class DatabentoLoader:
     def __init__(self, data_dir: str = "data/raw/databento", verbose: bool = True):
         self.data_dir = Path(data_dir)
         self.verbose = verbose
-        
-        # These CME futures trade as 1 USD = X Foreign Currency on spot, 
+
+        # These CME futures trade as 1 USD = X Foreign Currency on spot,
         # but CME quotes them as 1 Foreign Currency = X USD.
         # So we must invert the price: 1 / price
         self.INVERT_PAIRS = {"USDJPY", "USDCAD", "USDCHF"}
@@ -22,14 +25,14 @@ class DatabentoLoader:
 
         # Use LazyFrames for massive memory savings and speed
         glob_pattern = str(self.data_dir / f"{pair}_mbp-10_*.parquet")
-        
+
         try:
             lazy_df = pl.scan_parquet(glob_pattern)
         except Exception as e:
             if self.verbose:
                 print(f"[Databento] Failed to scan parquet files: {e}")
             return pl.DataFrame()
-            
+
         # Filter by date if provided
         schema = lazy_df.collect_schema()
         ts_col = "ts_event" if "ts_event" in schema.names() else "ts_recv"
@@ -39,22 +42,22 @@ class DatabentoLoader:
         lazy_df = lazy_df.with_columns(
             pl.col(ts_col).cast(pl.Datetime("ns")).dt.replace_time_zone("UTC")
         )
-        
+
         if start:
-            from datetime import datetime, timezone
-            start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            from datetime import datetime
+            start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
             lazy_df = lazy_df.filter(pl.col(ts_col) >= start_dt)
         if end:
-            from datetime import datetime, timezone
-            end_dt = datetime.strptime(end, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+            from datetime import datetime
+            end_dt = datetime.strptime(end, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=UTC)
             lazy_df = lazy_df.filter(pl.col(ts_col) <= end_dt)
-            
+
         try:
             # Handle scaling if Databento didn't pre-scale it (if prices > 1e6, it's fixed precision)
             # We check the median of a small slice
             med_df = lazy_df.select(pl.col("bid_px_00").first()).collect()
             first_px = med_df["bid_px_00"][0] if not (len(med_df) == 0) else 0
-            
+
             scale_factor = 1e9 if first_px is not None and first_px > 10000 else 1.0
 
             out_lazy = lazy_df.select([
@@ -71,22 +74,22 @@ class DatabentoLoader:
                     (1.0 / pl.col("ask")).alias("real_bid"),
                     (1.0 / pl.col("bid")).alias("real_ask")
                 ]).drop(["bid", "ask"]).rename({"real_bid": "bid", "real_ask": "ask"})
-                
+
             # Add mid and spread
             out_lazy = out_lazy.with_columns([
                 ((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid"),
                 (pl.col("ask") - pl.col("bid")).alias("spread")
             ])
-                
+
             # Add static columns
             out_lazy = out_lazy.with_columns([
                 pl.lit(pair).alias("pair"),
                 pl.lit("databento").alias("source")
             ])
-            
+
             out_lazy = out_lazy.sort("timestamp_utc")
             return out_lazy.collect()
-            
+
         except Exception as e:
             print(f"[Databento] Failed to collect data: {e}")
             return pl.DataFrame()

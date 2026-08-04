@@ -1,11 +1,10 @@
 import json
 import os
 from pathlib import Path
-from typing import List
 from urllib.request import Request, urlopen
 
 
-def get_latest_headlines(limit: int = 20) -> List[str]:
+def get_latest_headlines(limit: int = 20) -> list[str]:
     """
     HTTP-first, file-fallback headline loader.
     Env:

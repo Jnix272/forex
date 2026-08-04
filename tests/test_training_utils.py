@@ -5,18 +5,18 @@ YAML mapping, and model resolution.
 from __future__ import annotations
 
 import argparse
-import pytest
 from pathlib import Path
 
+import pytest
+
+from config.models import MODELS, SUPPORTED_SUPERVISED
 from training.config_validate import (
-    collect_config_issues,
-    resolve_models_to_train,
-    estimate_run_minutes,
     _effective_max_seq_len,
     _parse_pretrain_ablation_models,
+    collect_config_issues,
+    estimate_run_minutes,
+    resolve_models_to_train,
 )
-from config.models import MODELS, SUPPORTED_SUPERVISED
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -24,8 +24,9 @@ Why this matters:
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any
 
 import numpy as np
 
@@ -51,8 +52,8 @@ def block_bootstrap_indices(
     n: int,
     block_length: int = 20,
     n_bootstraps: int = 1000,
-    seed: Optional[int] = None,
-    rng: Optional[np.random.Generator] = None,
+    seed: int | None = None,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """
     Generate fixed-length block bootstrap index sets.
@@ -91,8 +92,8 @@ def stationary_bootstrap_indices(
     n: int,
     avg_block_length: int = 20,
     n_bootstraps: int = 1000,
-    seed: Optional[int] = None,
-    rng: Optional[np.random.Generator] = None,
+    seed: int | None = None,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """
     Generate Politis–Romano stationary bootstrap index sets.
@@ -132,7 +133,7 @@ def pl_block_bootstrap(
     series: Any,
     block_length: int = 20,
     n_bootstraps: int = 1000,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     prefix: str = "boot",
 ) -> Any:
     """
@@ -219,7 +220,7 @@ def _path_stats(
 def summarize_simulation(
     results: Sequence[SimResult],
     confidence: float = 0.95,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Aggregate a list of per-simulation stats into percentile confidence
     intervals plus tail probabilities.
@@ -238,7 +239,7 @@ def summarize_simulation(
     lo = (1.0 - confidence) / 2.0
     hi = 1.0 - lo
 
-    def _band(a: np.ndarray) -> List[float]:
+    def _band(a: np.ndarray) -> list[float]:
         return [
             round(float(np.percentile(a, lo * 100.0)), 4),
             round(float(np.percentile(a, hi * 100.0)), 4),
@@ -246,7 +247,7 @@ def summarize_simulation(
 
     return {
         "confidence": confidence,
-        "n_simulations": int(len(results)),
+        "n_simulations": len(results),
         "final_equity_mean": round(float(equity.mean()), 2),
         "final_equity_ci": [round(float(np.percentile(equity, lo * 100.0)), 2),
                             round(float(np.percentile(equity, hi * 100.0)), 2)],
@@ -292,14 +293,14 @@ class PathMonteCarlo:
 
     def __init__(
         self,
-        strategy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        strategy: Callable[[np.ndarray], np.ndarray] | None = None,
         n_simulations: int = 1000,
         confidence: float = 0.95,
         bars_per_year: float = 252.0,
         initial_equity: float = 10_000.0,
         bootstrap: str = "block",
         block_length: int = 20,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ):
         self.strategy = strategy
         self.n_sims = n_simulations
@@ -317,7 +318,7 @@ class PathMonteCarlo:
             return block_bootstrap_indices(n, self.block_length, 1, rng=rng)[0]
         return stationary_bootstrap_indices(n, self.block_length, 1, rng=rng)[0]
 
-    def run(self, returns: Sequence[float]) -> Dict[str, Any]:
+    def run(self, returns: Sequence[float]) -> dict[str, Any]:
         """
         Run the path simulation over ``n_simulations`` resampled return paths.
         """
@@ -325,7 +326,7 @@ class PathMonteCarlo:
         _validate_length(len(arr), name="returns")
         rng = np.random.default_rng(self.seed)
 
-        results: List[SimResult] = []
+        results: list[SimResult] = []
         for _ in range(self.n_sims):
             idx = self._resample(len(arr), rng)
             path = arr[idx]
@@ -359,7 +360,7 @@ class Trade:
     exit: int                 # exit bar index (exclusive)
     size: float = 1.0         # signed fraction of equity (+ long / - short)
     weight: float = 1.0       # per-trade scaling factor
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class TradeSequenceMonteCarlo:
@@ -388,7 +389,7 @@ class TradeSequenceMonteCarlo:
         initial_equity: float = 10_000.0,
         bootstrap: str = "block",
         block_length: int = 20,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ):
         self.n_sims = n_simulations
         self.confidence = confidence
@@ -401,7 +402,7 @@ class TradeSequenceMonteCarlo:
         self.seed = seed
 
     @staticmethod
-    def from_pnls(trade_pnls: Sequence[float], returns: Sequence[float]) -> List[Trade]:
+    def from_pnls(trade_pnls: Sequence[float], returns: Sequence[float]) -> list[Trade]:
         """
         Build trades from a flat list of per-trade P&L. Each trade is assigned
         a unit-size bar of length 1 at a sequential index, and the P&L is
@@ -423,7 +424,7 @@ class TradeSequenceMonteCarlo:
         self,
         market_returns: Sequence[float],
         trades: Sequence[Trade],
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Run the trade-sequence simulation.
 
@@ -437,7 +438,7 @@ class TradeSequenceMonteCarlo:
             raise ValueError("at least one Trade is required")
         rng = np.random.default_rng(self.seed)
 
-        results: List[SimResult] = []
+        results: list[SimResult] = []
         for _ in range(self.n_sims):
             path = arr[self._resample(len(arr), rng)]
             pnls = []
@@ -463,15 +464,15 @@ class TradeSequenceMonteCarlo:
 
 def monte_carlo_backtest(
     returns: Sequence[float],
-    strategy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    strategy: Callable[[np.ndarray], np.ndarray] | None = None,
     n_simulations: int = 1000,
     confidence: float = 0.95,
     bars_per_year: float = 252.0,
     initial_equity: float = 10_000.0,
     bootstrap: str = "block",
     block_length: int = 20,
-    seed: Optional[int] = None,
-) -> Dict[str, Any]:
+    seed: int | None = None,
+) -> dict[str, Any]:
     """
     One-call Monte Carlo robustness report for a return series.
 
@@ -495,7 +496,7 @@ def block_bootstrap(
     data: Sequence[float],
     block_length: int = 20,
     n_bootstraps: int = 1000,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Sample ``data`` with the fixed-length block bootstrap.
 
@@ -511,7 +512,7 @@ def stationary_bootstrap(
     data: Sequence[float],
     avg_block_length: int = 20,
     n_bootstraps: int = 1000,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Sample ``data`` with the Politis–Romano stationary bootstrap.
 
@@ -524,15 +525,15 @@ def stationary_bootstrap(
 
 
 __all__ = [
-    "block_bootstrap_indices",
-    "stationary_bootstrap_indices",
-    "block_bootstrap",
-    "stationary_bootstrap",
-    "pl_block_bootstrap",
     "PathMonteCarlo",
-    "TradeSequenceMonteCarlo",
-    "Trade",
     "SimResult",
-    "summarize_simulation",
+    "Trade",
+    "TradeSequenceMonteCarlo",
+    "block_bootstrap",
+    "block_bootstrap_indices",
     "monte_carlo_backtest",
+    "pl_block_bootstrap",
+    "stationary_bootstrap",
+    "stationary_bootstrap_indices",
+    "summarize_simulation",
 ]

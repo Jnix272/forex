@@ -331,13 +331,15 @@ backtest:
   mc_sims: 500
 hardware:
   profile: ''
-  num_workers: 0
+  num_workers: 4
   prefetch_factor: 4
-  val_num_workers: 0
+  val_num_workers: 4
   val_prefetch_factor: 2
-  pin_memory: false
-  persistent_workers: false
-  thread_prefetch_batches: 4
+  pin_memory: true
+  persistent_workers: true
+  torch_compile: true
+  torch_compile_mode: reduce-overhead
+  thread_prefetch_batches: 8
 tracking:
   wandb_project: forex-scaling-model
   run_name: high-impact

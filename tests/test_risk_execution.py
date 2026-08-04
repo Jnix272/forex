@@ -8,20 +8,19 @@ import numpy as np
 import pytest
 
 from risk.execution import (
-    RegimePositionSizer,
     AlmgrenChrissExecutor,
-    SessionLimitsEnforcer,
     DrawdownAwareExitManager,
     PortfolioVaR,
+    RegimePositionSizer,
+    SessionLimitsEnforcer,
 )
 from sizing.kelly_criterion import (
-    kelly_binary,
-    fractional_kelly,
-    vol_target_scalar,
-    square_root_impact,
     PositionSizer,
+    fractional_kelly,
+    kelly_binary,
+    square_root_impact,
+    vol_target_scalar,
 )
-
 
 # ---------------------------------------------------------------------------
 # 1. SessionLimitsEnforcer

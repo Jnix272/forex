@@ -16,8 +16,8 @@ Tests for the Stage 1 data-ingestion upgrades in data/data_ingestion.py:
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import polars as pl
 import pytest
@@ -39,7 +39,7 @@ from data.data_ingestion import (
 def _make_dukascopy_df(n: int = 500) -> pl.DataFrame:
     """Frame shaped like raw Dukascopy parquet: no timestamp_utc column."""
     rng = np.random.default_rng(7)
-    start = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    start = datetime(2024, 1, 2, tzinfo=UTC)
     idx = pl.datetime_range(
         start=start,
         end=start + timedelta(minutes=1),
@@ -93,8 +93,8 @@ def test_load_tick_data_time_range_filter(tmp_path):
     df.write_parquet(path)
     out = load_tick_data(str(path), start="2024-01-03", end="2024-01-03 12:00")
     assert len(out) > 0
-    assert out["timestamp_utc"].min() >= datetime(2024, 1, 3, tzinfo=timezone.utc)
-    assert out["timestamp_utc"].max() < datetime(2024, 1, 3, 12, tzinfo=timezone.utc)
+    assert out["timestamp_utc"].min() >= datetime(2024, 1, 3, tzinfo=UTC)
+    assert out["timestamp_utc"].max() < datetime(2024, 1, 3, 12, tzinfo=UTC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,8 +186,8 @@ def test_detect_bar_gaps_finds_missing_rows():
     bars = pl.DataFrame(
         {
             "timestamp_utc": pl.datetime_range(
-                start=datetime(2024, 1, 2, tzinfo=timezone.utc),
-                end=datetime(2024, 1, 2, 0, 9, tzinfo=timezone.utc),
+                start=datetime(2024, 1, 2, tzinfo=UTC),
+                end=datetime(2024, 1, 2, 0, 9, tzinfo=UTC),
                 interval="1m",
                 eager=True,
                 time_zone="UTC",
@@ -207,8 +207,8 @@ def test_fill_gaps_drop_and_ffill():
     bars = pl.DataFrame(
         {
             "timestamp_utc": pl.datetime_range(
-                start=datetime(2024, 1, 2, tzinfo=timezone.utc),
-                end=datetime(2024, 1, 2, 0, 5, tzinfo=timezone.utc),
+                start=datetime(2024, 1, 2, tzinfo=UTC),
+                end=datetime(2024, 1, 2, 0, 5, tzinfo=UTC),
                 interval="1m",
                 eager=True,
                 time_zone="UTC",

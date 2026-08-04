@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import lzma
 import struct
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,14 +24,13 @@ import pytest
 
 from data.sources import (
     DUKA_PAIR_MAP,
-    ForexDataManager,
     PIP_SIZES,
     TICK_COLUMNS,
     DukascopyLoader,
+    ForexDataManager,
     _enforce_schema,
     _parse_bi5_hour,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -61,7 +60,7 @@ def _make_bi5_lzma(n_ticks: int = 5) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestParseBi5Hour:
-    DT = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+    DT = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
 
     def test_empty_bytes_returns_empty_df(self):
         df = _parse_bi5_hour(b"", self.DT, "EURUSD")
@@ -103,7 +102,7 @@ class TestParseBi5Hour:
     def test_jpy_pair_uses_correct_point(self):
         """USDJPY uses point=1000, so prices should be ~100-level, not ~1.0."""
         point = 1000
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         ask_scaled = int(149.500 * point)
         bid_scaled = int(149.490 * point)
         raw = struct.pack(">IIIff", 0, ask_scaled, bid_scaled, 1.0, 1.0)
@@ -207,7 +206,7 @@ class TestPairConfig:
 class TestDukascopyLoaderCachePath:
     def test_cache_path_structure(self, tmp_path):
         loader = DukascopyLoader(cache_dir=str(tmp_path), verbose=False)
-        dt = datetime(2024, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 3, 15, 10, 0, 0, tzinfo=UTC)
         p = loader._cache_path("EURUSD", dt)
         assert p.parent.parent.parent.name == "EURUSD"
         assert p.suffix == ".parquet"
@@ -340,8 +339,8 @@ class TestDukascopyLoaderLoad:
 
     def test_load_redownloads_missing_hours(self, tmp_path):
         loader = self._make_loader(tmp_path)
-        dt1 = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
-        dt2 = datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc)
+        dt1 = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
+        dt2 = datetime(2024, 1, 2, 9, 0, 0, tzinfo=UTC)
 
         first_df = _enforce_schema(
             pd.DataFrame(
@@ -388,7 +387,7 @@ class TestDukascopyLoaderLoad:
         pytest.importorskip("pyarrow", reason="pyarrow required for parquet caching")
 
         loader = self._make_loader(tmp_path)
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         cache_file = loader._cache_path("EURUSD", dt)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -414,7 +413,7 @@ class TestDukascopyLoaderLoad:
 
     def test_load_truncated_payload_refetches_hour(self, tmp_path):
         loader = self._make_loader(tmp_path)
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         good_payload = _make_bi5_lzma(n_ticks=10)
         bad_payload = lzma.compress(_make_bi5_bytes(n_ticks=10)[:-1])
         payloads = [bad_payload, good_payload]
@@ -525,14 +524,14 @@ class TestDukascopyLoaderMultiplePairs:
 class TestDataIntegrity:
     def test_no_nan_in_parsed_ticks(self):
         raw = _make_bi5_bytes(n_ticks=10)
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         df = _parse_bi5_hour(raw, dt, "EURUSD")
         assert not df["bid"].isna().any()
         assert not df["ask"].isna().any()
 
     def test_prices_in_realistic_eurusd_range(self):
         raw = _make_bi5_bytes(n_ticks=10)
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         df = _parse_bi5_hour(raw, dt, "EURUSD")
         assert (df["ask"] > 0.5).all()
         assert (df["ask"] < 2.0).all()
@@ -548,7 +547,7 @@ class TestDataIntegrity:
 
     def test_volume_non_negative(self):
         raw = _make_bi5_bytes(n_ticks=10)
-        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
         df = _parse_bi5_hour(raw, dt, "EURUSD")
         assert (df["volume"] >= 0).all()
 
@@ -571,7 +570,7 @@ class TestYearByYearDownload:
         )
 
         mgr.duka.load = MagicMock(return_value=sample_df)
-        mgr.duka._build_tasks_dt = MagicMock(return_value=[datetime(2024, 1, 2, 7, 0, 0, tzinfo=timezone.utc)])
+        mgr.duka._build_tasks_dt = MagicMock(return_value=[datetime(2024, 1, 2, 7, 0, 0, tzinfo=UTC)])
         mgr.duka._hour_coverage_report = MagicMock(
             return_value={
                 "duplicate_timestamps": 0,
@@ -623,8 +622,8 @@ class TestCompactedStorage:
         pytest.importorskip("pyarrow", reason="pyarrow required for parquet compaction")
 
         mgr = self._make_manager(tmp_path)
-        dt1 = datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc)
-        dt2 = datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc)
+        dt1 = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
+        dt2 = datetime(2024, 1, 2, 9, 0, 0, tzinfo=UTC)
         self._write_hour(mgr, "EURUSD", dt1, [(1.0849, 1.0850), (1.0850, 1.0851)])
         self._write_hour(mgr, "EURUSD", dt2, [(1.0851, 1.0852)])
 
@@ -654,13 +653,13 @@ class TestCompactedStorage:
         self._write_hour(
             mgr,
             "EURUSD",
-            datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC),
             [(1.0849, 1.0850)],
         )
         self._write_hour(
             mgr,
             "EURUSD",
-            datetime(2024, 1, 3, 8, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 3, 8, 0, 0, tzinfo=UTC),
             [(1.0851, 1.0852)],
         )
 
@@ -687,13 +686,13 @@ class TestCompactedStorage:
         self._write_hour(
             mgr,
             "EURUSD",
-            datetime(2024, 1, 2, 8, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC),
             [(1.0849, 1.0850), (1.0850, 1.0851)],
         )
         self._write_hour(
             mgr,
             "EURUSD",
-            datetime(2024, 1, 3, 8, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 3, 8, 0, 0, tzinfo=UTC),
             [(1.0852, 1.0853)],
         )
         mgr.compact_dukascopy_cache(["EURUSD"], granularity="daily")

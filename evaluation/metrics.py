@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 
 try:
+    from scipy.stats import kurtosis as _kurtosis_fn
     from scipy.stats import norm
     from scipy.stats import skew as _skew_fn
-    from scipy.stats import kurtosis as _kurtosis_fn
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
@@ -92,8 +92,8 @@ def probabilistic_sharpe_ratio(
     returns,
     benchmark_sharpe: float = 0.0,
     annual_factor: float = 252,
-    skewness: Optional[float] = None,
-    kurtosis: Optional[float] = None,
+    skewness: float | None = None,
+    kurtosis: float | None = None,
 ) -> float:
     """Probability that the true (annualised) Sharpe exceeds ``benchmark_sharpe``.
 
@@ -122,7 +122,7 @@ def deflated_sharpe_ratio(
     returns,
     n_trials: int = 1,
     annual_factor: float = 252,
-    variance_of_trials: Optional[float] = None,
+    variance_of_trials: float | None = None,
 ) -> float:
     """Deflated Sharpe Ratio (Bailey–López de Prado).
 
@@ -254,7 +254,7 @@ def minimum_backtest_length(
     return float(z * z * num / denom + 1.0)
 
 
-def backtest_metrics(backtest: Any, annual_factor: float = 252) -> Dict[str, float]:
+def backtest_metrics(backtest: Any, annual_factor: float = 252) -> dict[str, float]:
     """Compute the full metric suite from a backtest-like object.
 
     Accepts either an object exposing ``results_df`` (with a return column) /
@@ -286,18 +286,18 @@ def backtest_metrics(backtest: Any, annual_factor: float = 252) -> Dict[str, flo
     }
 
 
-def _extract_returns(backtest: Any) -> Optional[np.ndarray]:
+def _extract_returns(backtest: Any) -> np.ndarray | None:
     if isinstance(backtest, (np.ndarray, list, tuple)):
         return np.asarray(backtest, dtype=np.float64)
-    if hasattr(backtest, "results_df") and getattr(backtest, "results_df") is not None:
+    if hasattr(backtest, "results_df") and backtest.results_df is not None:
         df = backtest.results_df
         for col in ("returns", "return", "net_return", "pnl", "pnl_usd"):
             if col in df.columns:
                 return df[col].to_numpy(dtype=np.float64)
-    if hasattr(backtest, "_trade_pnls") and getattr(backtest, "_trade_pnls") is not None:
+    if hasattr(backtest, "_trade_pnls") and backtest._trade_pnls is not None:
         pnls = np.asarray(backtest._trade_pnls, dtype=np.float64)
         return pnls[np.isfinite(pnls)] / 10_000.0 if pnls.size else pnls  # USD -> notional-ish returns
-    if hasattr(backtest, "trades") and getattr(backtest, "trades") is not None:
+    if hasattr(backtest, "trades") and backtest.trades is not None:
         trades = backtest.trades
         pnls = []
         for t in trades:
@@ -311,7 +311,7 @@ def _extract_returns(backtest: Any) -> Optional[np.ndarray]:
 @dataclass
 class MetricReport:
     """Typed convenience wrapper around the dict returned by backtest_metrics."""
-    values: Dict[str, float]
+    values: dict[str, float]
 
     @property
     def sharpe(self) -> float:
@@ -334,16 +334,16 @@ class MetricReport:
 
 
 __all__ = [
-    "sharpe_ratio",
-    "probabilistic_sharpe_ratio",
-    "deflated_sharpe_ratio",
-    "max_drawdown",
-    "calmar_ratio",
-    "downside_deviation",
-    "sortino_ratio",
-    "omega_ratio",
-    "tail_ratio",
-    "minimum_backtest_length",
-    "backtest_metrics",
     "MetricReport",
+    "backtest_metrics",
+    "calmar_ratio",
+    "deflated_sharpe_ratio",
+    "downside_deviation",
+    "max_drawdown",
+    "minimum_backtest_length",
+    "omega_ratio",
+    "probabilistic_sharpe_ratio",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "tail_ratio",
 ]

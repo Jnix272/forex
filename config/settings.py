@@ -6,10 +6,10 @@ Covers all 25 architectural choices specified.
 """
 
 import os
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Optional
 from datetime import time
+from pathlib import Path
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -33,7 +33,7 @@ def project_path(*parts: str) -> str:
     return str(PROJECT_ROOT.joinpath(*parts))
 
 
-def active_checkpoint_dir(config_path: Optional[Path] = None) -> Path:
+def active_checkpoint_dir(config_path: Path | None = None) -> Path:
     """Resolve the active run checkpoint directory.
 
     Priority: CHECKPOINT_RUN_DIR env → config paths.checkpoint_dir → checkpoints/.
@@ -67,15 +67,15 @@ class CheckpointPaths:
     """Resolved checkpoint artifacts under the active run directory."""
 
     checkpoint_dir: Path
-    pt_path: Optional[Path]
-    onnx_path: Optional[Path]
+    pt_path: Path | None
+    onnx_path: Path | None
     source: str
     reload_flag: Path
 
 
 def resolve_checkpoint_paths(
     model_name: str,
-    checkpoint_dir: Optional[Path] = None,
+    checkpoint_dir: Path | None = None,
 ) -> CheckpointPaths:
     """Locate production or model-specific checkpoints for live inference.
 
@@ -96,7 +96,7 @@ def resolve_checkpoint_paths(
         ("legacy_flat", PROJECT_ROOT / "checkpoints" / f"{model}_best.pt"),
     ]
 
-    pt_path: Optional[Path] = None
+    pt_path: Path | None = None
     source = "none"
     for label, path in candidates:
         if path.is_file():
@@ -104,7 +104,7 @@ def resolve_checkpoint_paths(
             source = label
             break
 
-    onnx_path: Optional[Path] = None
+    onnx_path: Path | None = None
     if pt_path is not None:
         sibling = pt_path.with_suffix(".onnx")
         if sibling.is_file():
@@ -130,7 +130,7 @@ def resolve_checkpoint_paths(
 # exports/       ONNX and other export artifacts (monitoring ONNXExporter)
 # logs/          training history, shadow mode, SHAP, reports, live engine
 # data/          processed caches, embeddings, raw vendor feeds (incl. data/raw/*)
-PATHS: Dict[str, str] = {
+PATHS: dict[str, str] = {
     "checkpoints": project_path("checkpoints"),
     "exports": project_path("exports"),
     "logs": project_path("logs"),
@@ -147,7 +147,7 @@ PATHS: Dict[str, str] = {
     "file_lockbox_log": project_path("checkpoints", "lockbox_log.json"),
 }
 
-BEST_CHECKPOINTS: Dict[str, str] = {
+BEST_CHECKPOINTS: dict[str, str] = {
     name: project_path("checkpoints", name, f"{name}_best.pt")
     for name in ("haelt", "mamba", "gnn", "tft", "transformer", "expert")
 }
@@ -253,23 +253,23 @@ TRAINING = {
     "batch_size":       212,
     "epochs":           100,
     "patience":         10,
-    "loss":             "cross_entropy",
+    "loss":             "sharpe_huber",  # matches config/run.yaml
     "huber_delta":      1.0,
     "asymmetric_sign_weight": 2.0,
     "grad_clip":        1.0,
     "weight_decay":     1e-4,
     "amp":              True,
     "val_split":        0.2,
-    "seq_len":          60,
+    "seq_len":          80,              # matches config/run.yaml + curriculum
     "checkpoint_dir":   PATHS["checkpoints"],
     "walk_forward_folds": 6,
     "early_stop_metric": "sharpe",
-    "sharpe_annualization_factor": 1.0,
+    "sharpe_annualization_factor": 325.0,  # matches config/run.yaml (FX minute bars)
     "onecycle_pct_start": 0.1,
     "onecycle_max_lr_mult": 10.0,
     # Gradient accumulation: effective_batch = batch_size × grad_accum_steps
-    # 4 steps × batch_size = effective batch with no extra VRAM
-    "grad_accum_steps": 4,
+    # Dev default 2 (faster iteration); production run_ubuntu.yaml keeps 4.
+    "grad_accum_steps": 2,
     # Stochastic Weight Averaging: averages weights over last 25% of training
     "swa_enabled":      True,
     "swa_start_frac":   0.75,   # start at 75% of total epochs
@@ -323,6 +323,9 @@ HARDWARE_PROFILES = {
         "chunk_size":         250_000,
         "prefetch_factor":    4,
         "local_project_paths": False,
+        # Linux local FS: lz4@1 for Zarr training-read throughput.
+        "zarr_cname":         "lz4",
+        "zarr_clevel":        1,
     },
     "ubuntu_rtx4070_laptop": {
         # RTX 4070 Laptop (12 GB VRAM, Ada Lovelace) — BF16 Tensor Cores kick in.
@@ -332,6 +335,8 @@ HARDWARE_PROFILES = {
         "chunk_size":         350_000,
         "prefetch_factor":    2,
         "local_project_paths": True,
+        "zarr_cname":         "lz4",
+        "zarr_clevel":        1,
     },
     "ubuntu_rtx4090_desktop": {
         # RTX 4090 desktop on Ubuntu — full throughput, BF16, large batch.
@@ -340,6 +345,8 @@ HARDWARE_PROFILES = {
         "chunk_size":         500_000,
         "prefetch_factor":    4,
         "local_project_paths": True,
+        "zarr_cname":         "lz4",
+        "zarr_clevel":        1,
     },
 }
 
@@ -405,7 +412,7 @@ BACKTEST = {
     "lots":                 0.1,
     "stop_pips":            12.0,
     "take_profit_pips":     18.0,
-    "atr_stop_mult":        0.9,
+    "atr_stop_mult":        1.2,  # matches config/run.yaml
     "atr_take_profit_mult": 1.8,
     "slippage_pips":        0.7,
     "commission_per_lot":   3.5,
@@ -444,7 +451,7 @@ RL = {
         "pnl_weight":               1.0,
         "drawdown_penalty":         0.5,
         "transaction_cost_penalty": 0.3,
-        "overtrade":                0.2,
+        "overtrade":                0.25,  # matches config/run.yaml
         "holding_cost":             0.01,
     },
 }
@@ -454,7 +461,8 @@ RL = {
 # ─────────────────────────────────────────────────────────────────────────────
 LABELING = {
     "method":               "rl_reward",
-    "lookahead_bars":       20,
+    "lookahead_bars":       30,  # synced with strategy.lookahead_bars in config/run.yaml
+
     "profit_target_atr":    1.8,
     "stop_loss_atr":        0.9,
     "transaction_cost_pips": 1.5,
@@ -488,6 +496,12 @@ def get_pip_size(pair: str) -> float:
     if base in PIP_SIZES:
         return PIP_SIZES[base]
     return PIP_SIZES["default"]
+
+
+def price_to_pips(price_diff: float, pair: str) -> float:
+    """Convert a raw price difference to pips for ``pair``."""
+    pip = get_pip_size(pair)
+    return float(price_diff) / pip if pip > 0 else 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIZING + SCALING STRATEGY (BOTH COMBINED)
@@ -554,15 +568,15 @@ LATENCY = {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VALIDATION — EMBARGOING + PURGED K-FOLD
-# TODO: not yet consumed — train_gpu.py computes embargo via _embargo_bars() internally.
+# GPU path reads validation.* from YAML via gpu_cli → validation_embargo_bars.
+# _embargo_bars() uses max(yaml, seq_len+lookahead+delay). Keep stubs synced to run.yaml.
 # ─────────────────────────────────────────────────────────────────────────────
 VALIDATION = {
     "method":               "purged_embargo",
-    "n_splits":             5,
-    "purge_bars":           30,
-    # Legacy static default; GPU trainer uses training.train_gpu._embargo_bars()
-    # (seq_len + LABELING.lookahead_bars + execution_delay_bars) for splits.
-    "embargo_bars":         10,
+    "n_splits":             7,
+    "purge_bars":           120,
+    "embargo_bars":         60,
+    "min_train_size":       50_000,
     "train_window_bars":    50_000,
     "test_window_bars":     10_000,
 }
@@ -609,8 +623,9 @@ INFRA = {
 # GPU / AMP / PRECISION
 # ─────────────────────────────────────────────────────────────────────────────
 # amp_dtype: "auto" | "bf16" | "fp16" | "fp32"
-#   auto  → bf16 on Ada/Ampere (CC ≥ 8.0), fp16 on older GPUs, fp32 on CPU
-#   bf16  → BF16 Tensor Cores, no GradScaler needed, preferred on RTX 40-series
+#   auto  → force BF16 on all Ampere+ (CC ≥ 8.0); FP16 on older GPUs; FP32 on CPU.
+#           BF16 has full FP32 dynamic range and needs no GradScaler.
+#   bf16  → BF16 Tensor Cores (falls back to FP16 if unsupported)
 #   fp16  → FP16 Tensor Cores, GradScaler required to prevent underflow
 #   fp32  → full precision (baseline / debugging)
 #
@@ -618,8 +633,11 @@ INFRA = {
 #   83 °C  is a safe ceiling for laptop GPUs (throttles start ~87 °C on most).
 #   Set to 0 to disable thermal throttle (e.g. desktops with good cooling).
 #
-# torch_compile: enable torch.compile() for ~20–30 % extra throughput on
-#   PyTorch ≥ 2.0 with CUDA. Adds ~60 s compile time on first run.
+# torch_compile: enable torch.compile() by default for ~20–30 % extra
+#   throughput on PyTorch ≥ 2.0 + CUDA + Triton. Adds ~60 s compile time on
+#   first run. LSTM/GRU/RNN cells are left eager (torch.compiler.disable) so
+#   the rest of the model can still use inductor / reduce-overhead.
+#   Set to false to force eager mode.
 GPU = {
     "amp_dtype":              "auto",
     "thermal_limit_celsius":  83,
@@ -873,42 +891,39 @@ LABEL_REGIME = {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CURRICULUM TRAINING  —  variable sequence length + feature freeze schedule
+#
+# Schedule stubs must stay in sync with config/run.yaml (active). Feature name
+# lists live only in YAML — settings carries epoch_unfreeze / always_on only.
+# audit_settings_yaml_curriculum_drift() fails validate_run_config on drift.
 # ─────────────────────────────────────────────────────────────────────────────
 CURRICULUM = {
-    # A3: Variable-length sequence schedule
+    # A3: Sequence-length schedule (bars per sample) — matches run.yaml
     "seq_schedule": [
-        {"epoch_start": 0,  "epoch_end": 10, "seq_len": 30},
-        {"epoch_start": 10, "epoch_end": 20, "seq_len": 60},
-        {"epoch_start": 20, "epoch_end": 40, "seq_len": 90},
-        {"epoch_start": 40, "epoch_end": 999,"seq_len": 120},
+        {"epoch_start": 0, "seq_len": 80},
     ],
-    # A4: Feature group freeze schedule (unfreeze after epoch_unfreeze)
+    # A4: Feature group freeze schedule (unfreeze at epoch_unfreeze)
+    # Canonical feature lists: config/run.yaml → curriculum.feature_groups
     "feature_groups": {
-        "microstructure": {"epoch_unfreeze": 0,  "always_on": True},   # OFI, spread, TAR
-        "momentum":       {"epoch_unfreeze": 0,  "always_on": True},   # returns, RSI, MACD
-        "session":        {"epoch_unfreeze": 0,  "always_on": True},   # session clock
-        "volatility":     {"epoch_unfreeze": 3,  "always_on": False},  # ATR, vol regimes
-        "cross_asset":    {"epoch_unfreeze": 6,  "always_on": False},  # DXY, VIX, bonds
-        "macro":          {"epoch_unfreeze": 9,  "always_on": False},  # sentiment, COT
+        "microstructure":   {"epoch_unfreeze": 0,  "always_on": True},
+        "momentum":         {"epoch_unfreeze": 0,  "always_on": True},
+        "session":          {"epoch_unfreeze": 0,  "always_on": True},
+        "execution_cost":   {"epoch_unfreeze": 2,  "always_on": False},
+        "volatility":       {"epoch_unfreeze": 4,  "always_on": False},
+        "cross_asset":      {"epoch_unfreeze": 8,  "always_on": False},
+        "news":             {"epoch_unfreeze": 10, "always_on": False},
+        "macro":            {"epoch_unfreeze": 12, "always_on": False},
+        "market_regime":    {"epoch_unfreeze": 16, "always_on": False},
+        "higher_timeframe": {"epoch_unfreeze": 20, "always_on": False},
+        # label_quality: disabled in run.yaml (features not implemented)
     },
     # A2: Chunk-level early stopping
-    "chunk_early_stop_patience": 5,     # abort if Sharpe drops for K chunks in a row
-    "chunk_early_stop_min_batches": 100, # minimum batches before evaluating chunk Sharpe
+    "chunk_early_stop_patience": 3,     # abort if Sharpe drops for K chunks in a row
+    "chunk_early_stop_min_batches": 50,  # minimum batches before evaluating chunk Sharpe
 
-    # B: Difficulty curriculum — start on easy (liquid) samples, introduce harder ones later.
-    #
-    # Per-bar difficulty is the MAX score across four independent signals:
-    #   Session:  0=London/NY peak (07-17 + 13-21 UTC)  1=Asia (01-07) + late-NY (18-21)
-    #             2=rollover/off-hours (21-01 UTC)
-    #   Spread:   0=normal  1=spread>1.5×median  2=spread>2×median
-    #   News:     2=news_ok==0 (±15 min of high-impact release)
-    #             1=eco_surprise≠0 (release bar)
-    #   Vol spike: 2=vol_ok==0 (ATR>3×rolling mean — flash crash / spike)
-    #
+    # B: Difficulty curriculum — per-bar max of session/spread/news/vol signals.
+    # Active run.yaml opens at max_difficulty=2 (no staged ramp).
     "difficulty_schedule": [
-        {"epoch_start": 0,  "max_difficulty": 0},   # epochs  0-3:  London + NY peak only
-        {"epoch_start": 4,  "max_difficulty": 1},   # epochs  4-11: + Asia + wide-spread bars
-        {"epoch_start": 12, "max_difficulty": 2},   # epochs 12+:   + rollover + news windows + vol spikes
+        {"epoch_start": 0, "max_difficulty": 2},
     ],
     # Two-tier spread thresholds (medium / hard):
     "difficulty_spread_threshold":      1.5,   # spread/median > this → medium (1)
@@ -939,8 +954,8 @@ EXECUTION = {
 # CONFIG PREFLIGHT VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
 try:
-    from config.config_schema import TrainingSchema, SizingSchema, LiveRiskSchema
-    
+    from config.config_schema import LiveRiskSchema, SizingSchema, TrainingSchema
+
     # Parse dictionaries into validated models at runtime
     _ = TrainingSchema(**TRAINING)
     _ = SizingSchema(**SIZING)

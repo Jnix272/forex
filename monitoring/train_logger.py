@@ -13,6 +13,7 @@ Features
   • GPU temperature + memory tracking every epoch
   • NaN gradient detection
   • Frozen-training heartbeat watchdog (background thread)
+  • Optional sidecar process for async log shipping (monitoring/sidecar.py)
   • Zero hard dependencies beyond the stdlib + optional discord_alerts
 
 Public API
@@ -44,10 +45,10 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
     import matplotlib.pyplot as plt
@@ -75,23 +76,33 @@ HEARTBEAT_TIMEOUT_S   = float(os.getenv("TRAIN_HEARTBEAT_TIMEOUT_S", "1800"))  #
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _gpu_stats() -> Dict[str, Any]:
-    """Return current GPU 0 temperature (°C) and peak allocated memory (MB)."""
-    stats: Dict[str, Any] = {"gpu_temp_c": -1, "gpu_mem_mb": -1}
+def _gpu_stats() -> dict[str, Any]:
+    """Return GPU 0 util/temp/memory stats when NVML is available."""
+    stats: dict[str, Any] = {
+        "gpu_temp_c": -1,
+        "gpu_mem_mb": -1,
+        "gpu_util_pct": -1,
+        "gpu_mem_util_pct": -1,
+    }
     try:
         import pynvml  # type: ignore
         pynvml.nvmlInit()
         h = pynvml.nvmlDeviceGetHandleByIndex(0)
         stats["gpu_temp_c"] = int(pynvml.nvmlDeviceGetTemperature(
             h, pynvml.NVML_TEMPERATURE_GPU))
+        util = pynvml.nvmlDeviceGetUtilizationRates(h)
+        stats["gpu_util_pct"] = int(util.gpu)
+        stats["gpu_mem_util_pct"] = int(util.memory)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+        stats["gpu_mem_mb"] = int(mem.used / 1_000_000)
     except Exception:
         pass
     try:
         import torch  # type: ignore
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and stats["gpu_mem_mb"] < 0:
             stats["gpu_mem_mb"] = int(
                 torch.cuda.max_memory_allocated() / 1_000_000)
             torch.cuda.reset_peak_memory_stats()
@@ -110,9 +121,9 @@ def _fmt_metric(value: Any, fmt: str, suffix: str = "") -> str:
         return str(value)
 
 
-def _nan_in_gradients(model: Any) -> List[str]:
+def _nan_in_gradients(model: Any) -> list[str]:
     """Return names of parameters whose .grad contains NaN values."""
-    bad: List[str] = []
+    bad: list[str] = []
     try:
         import torch  # type: ignore
         for name, param in model.named_parameters():
@@ -189,7 +200,7 @@ class StreamToLogger:
             sys.__stderr__.write(buf)
             sys.__stderr__.flush()
             return
-            
+
         for line in buf.rstrip().splitlines():
             if line.strip():
                 self.logger.log(self.level, line.rstrip())
@@ -226,36 +237,38 @@ class TrainingLogger:
         discord:    Any  = None,
         heartbeat:  bool = True,
         verbose:    bool = True,
+        sidecar:    Any  = None,
     ):
         self.log_dir    = Path(log_dir)
         self.model_name = model_name
         self.run_name   = run_name or f"{model_name}_{datetime.now().strftime('%m%d_%H%M')}"
         self.verbose    = verbose
+        self.sidecar    = sidecar
 
         # Epoch-level accumulators (reset each epoch)
         self._ep_oom_count  = 0
         self._ep_nan_count  = 0
-        self._ep_nan_grads: List[str] = []
+        self._ep_nan_grads: list[str] = []
 
         # Session-level history (for summary)
-        self._epoch_history: List[Dict[str, Any]] = []
-        self._errors:        List[str] = []
-        self._warnings:      List[str] = []
+        self._epoch_history: list[dict[str, Any]] = []
+        self._errors:        list[str] = []
+        self._warnings:      list[str] = []
         self._start_ts       = time.monotonic()
         self._current_epoch  = 0
         self._total_epochs   = 0
 
         # Internal logger (populated by setup())
-        self._log:    Optional[logging.Logger] = None
-        self._jlog:   Optional[Any]            = None   # JSONL file handle
-        self._log_path: Optional[Path]         = None
+        self._log:    logging.Logger | None = None
+        self._jlog:   Any | None            = None   # JSONL file handle
+        self._log_path: Path | None         = None
 
         # Discord
         self._discord = discord
         self._discord_ready = False
 
         # Heartbeat watchdog
-        self._watchdog: Optional[_HeartbeatWatchdog] = None
+        self._watchdog: _HeartbeatWatchdog | None = None
         self._heartbeat_enabled = heartbeat
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -305,7 +318,7 @@ class TrainingLogger:
         sys.stderr = StreamToLogger(self._log, logging.ERROR)
 
         # ── JSONL event stream ───────────────────────────────────────────────
-        self._jlog = open(jsonl_path, "a", encoding="utf-8")  # noqa: WPS515
+        self._jlog = open(jsonl_path, "a", encoding="utf-8")
 
         # ── Discord ──────────────────────────────────────────────────────────
         self._init_discord()
@@ -348,12 +361,19 @@ class TrainingLogger:
                 h.flush()
                 h.close()
                 self._log.removeHandler(h)
-            
-            # Restore stdout/stderr if they are ours
-            if isinstance(sys.stdout, StreamToLogger):
-                sys.stdout = sys.__stdout__
-            if isinstance(sys.stderr, StreamToLogger):
-                sys.stderr = sys.__stderr__
+
+        # Flush sidecar remaining events
+        if self.sidecar is not None:
+            try:
+                self.sidecar.flush()
+            except Exception:
+                pass
+
+        # Restore stdout/stderr if they are ours
+        if isinstance(sys.stdout, StreamToLogger):
+            sys.stdout = sys.__stdout__
+        if isinstance(sys.stderr, StreamToLogger):
+            sys.stderr = sys.__stderr__
 
     # ─────────────────────────────────────────────────────────────────────────
     # CORE LOG METHODS
@@ -366,14 +386,14 @@ class TrainingLogger:
         self._warnings.append(msg)
         self._safe_log(logging.WARNING, msg)
 
-    def error(self, msg: str, exc: Optional[Exception] = None) -> None:
+    def error(self, msg: str, exc: Exception | None = None) -> None:
         full = self._format_exc(msg, exc)
         self._errors.append(full)
         self._safe_log(logging.ERROR, full)
         self._write_event("error", {"msg": msg, "exc": _exc_summary(exc)})
 
-    def critical(self, msg: str, exc: Optional[Exception] = None,
-                 discord_fields: Optional[Dict[str, str]] = None) -> None:
+    def critical(self, msg: str, exc: Exception | None = None,
+                 discord_fields: dict[str, str] | None = None) -> None:
         """Log at CRITICAL level and optionally send a Discord alert."""
         full = self._format_exc(msg, exc)
         self._errors.append(full)
@@ -387,7 +407,7 @@ class TrainingLogger:
     # ─────────────────────────────────────────────────────────────────────────
 
     def on_epoch_start(self, epoch: int, total_epochs: int,
-                       seq_len: Optional[int] = None) -> None:
+                       seq_len: int | None = None) -> None:
         """Call at the beginning of each epoch."""
         self._current_epoch = epoch
         self._total_epochs  = total_epochs
@@ -404,7 +424,7 @@ class TrainingLogger:
             "epoch": epoch + 1, "total": total_epochs, "seq_len": seq_len,
         })
 
-    def on_epoch_end(self, epoch: int, metrics: Dict[str, Any]) -> None:
+    def on_epoch_end(self, epoch: int, metrics: dict[str, Any]) -> None:
         """
         Call at the end of each epoch with a metrics dict.
 
@@ -415,7 +435,7 @@ class TrainingLogger:
             self._watchdog.tick()
 
         gpu = _gpu_stats()
-        rec: Dict[str, Any] = {
+        rec: dict[str, Any] = {
             "epoch":      epoch + 1,
             "train_loss": metrics.get("train_loss"),
             "val_loss":   metrics.get("val_loss"),
@@ -461,14 +481,14 @@ class TrainingLogger:
         """Call periodically during an epoch to log mid-epoch progress."""
         if self._watchdog:
             self._watchdog.tick()
-        
+
         pct = (batch_idx / max(1, total_batches)) * 100
         msg = f"[Epoch {epoch+1}] Batch {batch_idx}/{total_batches} ({pct:.1f}%) | Loss: {loss:.6f} | {elapsed_s:.1f}s"
         self.info(msg)
         self._write_event("batch_progress", {
             "epoch": epoch + 1, "batch": batch_idx, "total": total_batches, "loss": loss, "elapsed_s": elapsed_s
         })
-        
+
         # Only ping discord if we are exactly at 50% or 25/50/75% etc. We don't want to spam.
         # Let's say we send one at 50% exactly, or roughly 50%.
         if batch_idx > 0 and batch_idx == total_batches // 2:
@@ -518,7 +538,7 @@ class TrainingLogger:
                 "Action":  "Check LR, grad_clip, AMP dtype",
             }, ping_user=True)
 
-    def on_nan_gradient(self, epoch: int, param_names: List[str]) -> None:
+    def on_nan_gradient(self, epoch: int, param_names: list[str]) -> None:
         """Call after detecting NaN values in parameter gradients."""
         if not param_names:
             return
@@ -611,7 +631,7 @@ class TrainingLogger:
                 self._safe_log(logging.WARNING, f"[Plot] Failed to generate loss curve: {e}")
         self.close()
 
-    def on_rl_complete(self, stats: Dict[str, Any]) -> None:
+    def on_rl_complete(self, stats: dict[str, Any]) -> None:
         """Log RL episode summary metrics after train_agent finishes."""
         self._write_event("rl_complete", stats)
         self._safe_log(
@@ -675,7 +695,7 @@ class TrainingLogger:
                 safe_msg = msg.encode("ascii", errors="replace").decode("ascii")
                 self._log.log(level, safe_msg)
 
-    def _write_event(self, event: str, data: Dict[str, Any]) -> None:
+    def _write_event(self, event: str, data: dict[str, Any]) -> None:
         if self._jlog is None:
             return
         record = {"ts": _utcnow(), "event": event, "run": self.run_name,
@@ -686,7 +706,14 @@ class TrainingLogger:
         except Exception:
             pass
 
-    def _format_exc(self, msg: str, exc: Optional[Exception]) -> str:
+        # Also forward to sidecar for async shipping
+        if self.sidecar is not None:
+            try:
+                self.sidecar.metric(event, {**data, "run": self.run_name})
+            except Exception:
+                pass
+
+    def _format_exc(self, msg: str, exc: Exception | None) -> str:
         if exc is None:
             return msg
         tb = traceback.format_exc()
@@ -721,10 +748,10 @@ class TrainingLogger:
     def _discord_send(
         self,
         alert_type: str,
-        fields: Dict[str, str],
+        fields: dict[str, str],
         force: bool = False,
         ping_user: bool = False,
-        image_path: Optional[str] = None,
+        image_path: str | None = None,
     ) -> None:
         if not self._discord_ready or self._discord is None:
             return
@@ -743,7 +770,7 @@ class TrainingLogger:
 
         lines = [
             "═" * 72,
-            f"  TRAINING SESSION SUMMARY",
+            "  TRAINING SESSION SUMMARY",
             f"  Model   : {self.model_name}",
             f"  Run     : {self.run_name}",
             f"  Status  : {'CRASHED' if crashed else 'COMPLETE'}",
@@ -815,7 +842,7 @@ def _fmt_lr(v: Any) -> str:
         return str(v)
 
 
-def _exc_summary(exc: Optional[Exception]) -> str:
+def _exc_summary(exc: Exception | None) -> str:
     if exc is None:
         return ""
     return f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -861,7 +888,7 @@ if __name__ == "__main__":
 
         print(f"\n── Log ({log_file.stat().st_size} bytes) ──")
         print(log_file.read_text(encoding="utf-8")[:1200])
-        print(f"\n── Summary ──")
+        print("\n── Summary ──")
         print(summary.read_text(encoding="utf-8"))
         print(f"\n── JSONL events ({sum(1 for _ in jsonl.open())} lines) ──")
         for line in jsonl.open():

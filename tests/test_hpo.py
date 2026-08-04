@@ -7,40 +7,34 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
+from pretrain.multi_task import (
+    CORALLoss,
+    DomainDiscriminator,
+    MMDLoss,
+    MultiTaskPretrainer,
+    adapt_encoder_to_target,
+    byol_loss,
+    create_multi_task_pretrainer,
+    domain_adversarial_loss,
+    drift_loss,
+    forecast_loss,
+    grad_reverse,
+    masked_reconstruction_loss,
+    nt_xent_loss,
+    pretrain_multi_task,
+    vae_loss,
+)
 from training.hpo import (
-    HPOConfig,
-    TrialState,
-    PopulationBasedTraining,
-    HyperBandScheduler,
     AsyncSuccessiveHalvingScheduler,
     BOHBScheduler,
-    MultiFidelityASHAScheduler,
+    HPOConfig,
     HPOManager,
-    run_hpo_study,
+    HyperBandScheduler,
+    MultiFidelityASHAScheduler,
+    PopulationBasedTraining,
 )
-from pretrain.multi_task import (
-    DomainDiscriminator,
-    TimeSeriesAugmenter,
-    MMDLoss,
-    CORALLoss,
-    grad_reverse,
-    nt_xent_loss,
-    byol_loss,
-    masked_reconstruction_loss,
-    vae_loss,
-    forecast_loss,
-    drift_loss,
-    domain_adversarial_loss,
-    adapt_encoder_to_target,
-    create_multi_task_pretrainer,
-    pretrain_multi_task,
-    adapt_encoder_to_target,
-    MultiTaskPretrainer,
-)
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Population-Based Training
@@ -50,7 +44,7 @@ def test_pbt_initialization():
     """Test PBT initialization."""
     config = HPOConfig(population_size=4)
     pbt = PopulationBasedTraining(config)
-    
+
     assert len(pbt.population) == 0
     assert pbt.best_trial is None
 
@@ -59,10 +53,10 @@ def test_pbt_add_trial():
     """Test adding trials to population."""
     config = HPOConfig(population_size=4)
     pbt = PopulationBasedTraining(config)
-    
+
     for i in range(4):
         pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i+1), "batch_size": 32 * (i+1)})
-    
+
     assert len(pbt.population) == 4
 
 
@@ -70,16 +64,16 @@ def test_pbt_update_score():
     """Test updating trial scores."""
     config = HPOConfig(population_size=4)
     pbt = PopulationBasedTraining(config)
-    
+
     for i in range(4):
         pbt.add_trial(f"trial_{i}", {"lr": 1e-3})
-    
+
     # Update scores
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
     pbt.update_score("trial_2", 0.3, 10)
     pbt.update_score("trial_3", 0.9, 10)
-    
+
     # Best trial should be trial_3 with score 0.9
     assert pbt.best_trial is not None
     assert pbt.best_trial.trial_id == "trial_3"
@@ -90,16 +84,16 @@ def test_pbt_perturb_trial():
     """Test parameter perturbation."""
     config = HPOConfig(population_size=2)
     pbt = PopulationBasedTraining(config)
-    
+
     pbt.add_trial("trial_0", {"lr": 1e-3, "batch_size": 32})
     pbt.add_trial("trial_1", {"lr": 1e-4, "batch_size": 64})
-    
+
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
-    
+
     # Perturb the worse trial
     new_params = pbt.perturb_trial("trial_0")
-    
+
     assert "lr" in new_params
     assert "batch_size" in new_params
     # lr should be perturbed
@@ -110,17 +104,17 @@ def test_pbt_exploit_and_perturb():
     """Test exploit and perturb operation."""
     config = HPOConfig(population_size=4)
     pbt = PopulationBasedTraining(config)
-    
+
     for i in range(4):
         pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i+1)})
-    
+
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
     pbt.update_score("trial_2", 0.3, 10)
     pbt.update_score("trial_3", 0.9, 10)
-    
+
     donor_id, new_params = pbt.exploit_and_perturb("trial_2")
-    
+
     # Donor should be the best trial (trial_3 with score 0.9)
     assert donor_id == "trial_3"
     assert "lr" in new_params
@@ -130,17 +124,17 @@ def test_pbt_population_stats():
     """Test population statistics."""
     config = HPOConfig(population_size=3)
     pbt = PopulationBasedTraining(config)
-    
+
     pbt.add_trial("trial_0", {"lr": 1e-3})
     pbt.add_trial("trial_1", {"lr": 1e-4})
     pbt.add_trial("trial_2", {"lr": 1e-5})
-    
+
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
     pbt.update_score("trial_2", 0.3, 10)
-    
+
     stats = pbt.get_population_stats()
-    
+
     assert stats["population_size"] == 3
     assert stats["best_score"] == 0.8
     assert stats["worst_score"] == 0.3
@@ -151,17 +145,17 @@ def test_pbt_exploit_and_perturb():
     """Test exploit and perturb operation."""
     config = HPOConfig(population_size=3)
     pbt = PopulationBasedTraining(config)
-    
+
     pbt.add_trial("trial_0", {"lr": 1e-3})
     pbt.add_trial("trial_1", {"lr": 1e-3})
     pbt.add_trial("trial_2", {"lr": 1e-3})
-    
+
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
     pbt.update_score("trial_2", 0.3, 10)
-    
+
     donor_id, new_params = pbt.exploit_and_perturb("trial_2")
-    
+
     # Donor should be trial_1 (best score 0.8)
     assert donor_id == "trial_1"
     assert "lr" in new_params
@@ -179,7 +173,7 @@ def test_hyperband_scheduler_init():
         eta=3,
     )
     hb = HyperBandScheduler(config)
-    
+
     assert hb.s_max >= 0
     assert len(hb.brackets) >= 1
     assert hb.config.min_budget == 3
@@ -194,7 +188,7 @@ def test_asha_scheduler_init():
         brackets=1,
     )
     asha = AsyncSuccessiveHalvingScheduler(config)
-    
+
     assert asha.grace_period == 3
     assert asha.reduction_factor == 3
     assert len(asha.rungs) == 0
@@ -204,10 +198,10 @@ def test_asha_add_trial():
     """Test adding trials to ASHA."""
     config = HPOConfig(grace_period=3, reduction_factor=3)
     asha = AsyncSuccessiveHalvingScheduler(config)
-    
+
     asha.add_trial("trial_0", {"lr": 1e-3})
     asha.add_trial("trial_1", {"lr": 1e-4})
-    
+
     assert "trial_0" in asha.trial_states
     assert "trial_1" in asha.trial_states
     assert len(asha.rungs[0]) == 2
@@ -217,21 +211,57 @@ def test_asha_on_trial_result():
     """Test ASHA on_trial_result."""
     config = HPOConfig(grace_period=1, reduction_factor=2, mode="maximize")
     asha = AsyncSuccessiveHalvingScheduler(config)
-    
+
     asha.add_trial("trial_0", {"lr": 1e-3})
     asha.add_trial("trial_1", {"lr": 1e-4})
-    
+
     # Simulate results
     result_0 = {"val_sharpe": 0.8}
     result_1 = {"val_sharpe": 0.5}
-    
+
     # First results - both continue (only one trial in rung)
     action_0 = asha.on_trial_result("trial_0", result_0)
     assert action_0["action"] == "continue"
-    
-    # Second result - trial_1 has lower score, should be stopped (bottom 1/eta)
+
+    # Second result - trial_1 has lower score, should be stopped (not in top 1/η)
     action_1 = asha.on_trial_result("trial_1", result_1)
     assert action_1["action"] == "stop"
+
+    # Best survivor promotes on next report
+    action_0b = asha.on_trial_result("trial_0", {"val_sharpe": 0.85})
+    assert action_0b["action"] == "promote"
+    assert action_0b["next_rung"] == 1
+
+
+def test_asha_stops_all_non_top_fraction():
+    """ASHA must stop every trial outside top 1/η (not only the bottom slice)."""
+    config = HPOConfig(grace_period=1, reduction_factor=2, mode="maximize")
+    asha = AsyncSuccessiveHalvingScheduler(config)
+    scores = {"a": 1.0, "b": 0.8, "c": 0.4, "d": 0.1}
+    for tid in scores:
+        asha.add_trial(tid, {"lr": 1e-3})
+    # Warm up so the rung has η-sized cohort
+    for tid, s in scores.items():
+        action = asha.on_trial_result(tid, {"val_sharpe": s})
+    # Re-report mediocre "c" — with 4 trials, keep top 2 (a,b); c and d stop
+    action_c = asha.on_trial_result("c", {"val_sharpe": 0.4})
+    action_d = asha.on_trial_result("d", {"val_sharpe": 0.1})
+    assert action_c["action"] == "stop"
+    assert action_d["action"] == "stop"
+    action_a = asha.on_trial_result("a", {"val_sharpe": 1.0})
+    assert action_a["action"] == "promote"
+
+
+def test_hpo_manager_run_hpo():
+    """HPOManager.run_hpo must exist and return best_params."""
+    config = HPOConfig(n_trials=4, seed=0, mode="maximize")
+    manager = HPOManager(config)
+    assert hasattr(manager, "run_hpo")
+    out = manager.run_hpo(n_trials=4, algorithm="asha")
+    assert out["n_trials"] == 4
+    assert out["algorithm"] == "asha"
+    assert isinstance(out["best_params"], dict)
+    assert out["best_score"] is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,7 +276,7 @@ def test_bohb_scheduler_init():
         eta=3,
     )
     bohb = BOHBScheduler(config)
-    
+
     assert bohb.config == config
     assert bohb.hyperband is not None
     assert bohb.kde_good == {}
@@ -257,12 +287,12 @@ def test_bohb_observe():
     """Test BOHB observation recording."""
     config = HPOConfig(min_budget=3, max_budget=27, eta=3)
     bohb = BOHBScheduler(config)
-    
+
     # Add some observations
     bohb.observe("trial_0", 0, {"lr": 1e-3}, 0.8)
     bohb.observe("trial_1", 0, {"lr": 1e-4}, 0.5)
     bohb.observe("trial_2", 0, {"lr": 1e-3}, 0.9)
-    
+
     assert len(bohb.observations[0]) == 3
 
 
@@ -277,9 +307,9 @@ def test_mf_asha_init():
         {"name": "epochs", "min": 1, "max": 27, "eta": 3},
         {"name": "data_frac", "min": 0.1, "max": 1.0, "eta": 2},
     ]
-    
+
     mf_asha = MultiFidelityASHAScheduler(config, fidelity_dims)
-    
+
     assert len(mf_asha.fidelity_dims) == 2
     assert mf_asha.config == config
 
@@ -289,9 +319,9 @@ def test_mf_asha_add_trial():
     config = HPOConfig()
     fidelity_dims = [{"name": "epochs", "min": 1, "max": 10, "eta": 2}]
     mf_asha = MultiFidelityASHAScheduler(config, fidelity_dims)
-    
+
     mf_asha.add_trial("trial_0", {"lr": 1e-3})
-    
+
     assert "trial_0" in mf_asha.trial_states
     assert mf_asha.trial_states["trial_0"]["fidelity"]["epochs"] == 1
 
@@ -307,7 +337,7 @@ def test_hpo_manager_init():
         max_epochs=10,
     )
     manager = HPOManager(config)
-    
+
     assert manager.config == config
     assert manager.pbt is not None
     assert manager.hyperband is not None
@@ -320,9 +350,9 @@ def test_hpo_manager_sample_params():
     """Test parameter sampling."""
     config = HPOConfig(seed=42)
     manager = HPOManager(config)
-    
+
     params = manager._sample_initial_params()
-    
+
     assert "lr" in manager._sample_initial_params()
     assert "d_model" in manager._sample_initial_params()
     assert "batch_size" in manager._sample_initial_params()
@@ -332,7 +362,7 @@ def test_hpo_manager_create_study():
     """Test Optuna study creation."""
     config = HPOConfig()
     manager = HPOManager(config)
-    
+
     if True:  # OPTUNA_AVAILABLE
         study = manager.create_study(direction="maximize", sampler="tpe", pruner="hyperband")
         assert manager.study is not None
@@ -347,13 +377,13 @@ def test_pbt_integration():
     """Test PBT integration with HPOManager."""
     config = HPOConfig(population_size=3, max_epochs=5)
     manager = HPOManager(config)
-    
+
     # Initialize population
     for i in range(3):
         params = manager._sample_initial_params()
         trial_id = f"pbt_{i}"
         manager.pbt.add_trial(trial_id, params)
-    
+
     assert len(manager.pbt.population) == 3
 
 
@@ -361,7 +391,7 @@ def test_hyperband_integration():
     """Test HyperBand integration."""
     config = HPOConfig(min_budget=3, max_budget=9, eta=3)
     manager = HPOManager(config)
-    
+
     # HyperBand should be initialized
     assert manager.hyperband is not None
     assert len(manager.hyperband.brackets) >= 1
@@ -371,7 +401,7 @@ def test_asha_integration():
     """Test ASHA integration."""
     config = HPOConfig(grace_period=2, reduction_factor=2)
     manager = HPOManager(config)
-    
+
     assert manager.asha is not None
     assert manager.asha.grace_period == 2
     assert manager.asha.reduction_factor == 2
@@ -381,7 +411,7 @@ def test_bohb_integration():
     """Test BOHB integration."""
     config = HPOConfig(min_budget=3, max_budget=9, eta=3)
     manager = HPOManager(config)
-    
+
     assert manager.bohb is not None
     assert manager.bohb.hyperband is not None
 
@@ -390,16 +420,16 @@ def test_hpo_manager_state_dict():
     """Test HPOManager state dict."""
     config = HPOConfig(population_size=2)
     manager = HPOManager(config)
-    
+
     # Add some trials
     for i in range(2):
         params = manager._sample_initial_params()
         trial_id = f"trial_{i}"
         manager.pbt.add_trial(trial_id, params)
         manager.pbt.update_score(f"trial_{i}", 0.5 + i * 0.1, 10)
-    
+
     state = manager.state_dict()
-    
+
     assert "epoch" in state
     assert "config_mode" in state
     assert "difficulty" in state
@@ -410,9 +440,9 @@ def test_hpo_manager_state_dict():
 def test_hpo_factory():
     """Test HPO factory function."""
     X = np.random.randn(50, 10, 4).astype(np.float32)
-    
+
     trainer = create_multi_task_pretrainer(X, seq_len=10, n_features=3, device="cpu")
-    
+
     assert isinstance(trainer, MultiTaskPretrainer)
 
 
@@ -423,7 +453,7 @@ def test_hpo_factory():
 def test_run_hpo_study():
     """Test run_hpo_study factory function."""
     X = np.random.randn(10, 5, 4).astype(np.float32)
-    
+
     # This would fail without Optuna, but we can test the function signature
     try:
         trainer, history = pretrain_multi_task(
@@ -453,7 +483,7 @@ def test_adapt_encoder_to_target():
     )
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0  # shift
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="dann", epochs=2, lr=1e-3, device="cpu"
@@ -470,7 +500,7 @@ def test_adapt_encoder_fine_tune():
     )
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32)
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="fine_tune", epochs=2, lr=1e-3, device="cpu"
@@ -488,7 +518,7 @@ def test_mmd_loss():
     target = torch.randn(20, 8)
     mmd = MMDLoss(kernel="rbf", gamma=1.0)
     loss = mmd(source, target)
-    
+
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -501,7 +531,7 @@ def test_mmd_loss_same_distribution():
     target = X[10:]
     mmd = MMDLoss(kernel="rbf", gamma=1.0)
     loss = mmd(source, target)
-    
+
     assert loss.item() < 1.0
 
 
@@ -511,7 +541,7 @@ def test_coral_loss():
     target = torch.randn(20, 8)
     coral = CORALLoss()
     loss = coral(source, target)
-    
+
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -523,7 +553,7 @@ def test_coral_loss_same():
     target = X[10:]
     coral = CORALLoss()
     loss = coral(source, target)
-    
+
     assert loss.item() < 1.0
 
 
@@ -557,7 +587,7 @@ def test_nt_xent_loss():
     z1 = torch.randn(4, 16)
     z2 = torch.randn(4, 16)
     loss = nt_xent_loss(z1, z2, temperature=0.5)
-    
+
     assert loss.ndim == 0
     assert loss.item() > 0
 
@@ -566,7 +596,7 @@ def test_nt_xent_loss_perfect_match():
     """Test NT-Xent with perfect match."""
     z = F.normalize(torch.randn(4, 16), dim=-1)
     loss = nt_xent_loss(z, z, temperature=0.5)
-    
+
     assert loss.item() < 1.0
 
 
@@ -577,7 +607,7 @@ def test_byol_loss():
     z1 = torch.randn(4, 16)
     z2 = torch.randn(4, 16)
     loss = byol_loss(p1, p2, z1, z2)
-    
+
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -589,7 +619,7 @@ def test_masked_reconstruction_loss():
     target = torch.randn(B, T, F)
     mask = torch.zeros(B, T, F, dtype=torch.bool)
     mask[:, 2:5, :] = True
-    
+
     loss = masked_reconstruction_loss(recon, target, mask)
     assert loss.ndim == 0
     assert loss.item() >= 0
@@ -601,9 +631,9 @@ def test_vae_loss():
     target = torch.randn(4, 10, 3)
     mu = torch.randn(4, 16)
     logvar = torch.randn(4, 16)
-    
+
     loss, recon_loss, kl = vae_loss(recon, target, mu, logvar, beta=0.001)
-    
+
     assert loss.ndim == 0
     assert recon_loss.ndim == 0
     assert kl.ndim == 0
@@ -614,7 +644,7 @@ def test_forecast_loss():
     pred = torch.randn(4, 5, 3)
     target = torch.randn(4, 5, 3)
     loss = forecast_loss(pred, target)
-    
+
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -624,7 +654,7 @@ def test_drift_loss():
     clean = torch.randn(8, 16)
     drift = torch.randn(8, 16)
     loss = drift_loss(clean, drift, margin=1.0)
-    
+
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -635,7 +665,7 @@ def test_domain_adversarial_loss():
     domain_labels = torch.randint(0, 2, (10,))
     disc = torch.nn.Linear(16, 2)
     loss = domain_adversarial_loss(features, domain_labels, disc, lambda_=1.0)
-    
+
     assert loss.ndim == 0
 
 
@@ -674,7 +704,7 @@ def test_adapt_encoder_to_target():
     )
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="dann", epochs=2, lr=1e-3, device="cpu"
@@ -690,7 +720,7 @@ def test_adapt_encoder_fine_tune():
     )
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32)
-    
+
     adapted = adapt_encoder_to_target(
         encoder, source, target,
         method="fine_tune", epochs=2, lr=1e-3, device="cpu"
@@ -729,6 +759,7 @@ def test_build_optuna_search_unknown():
 def test_optuna_tune_hpo_scheduler_arg(monkeypatch):
     """--hpo-scheduler must be accepted by scripts.optuna_tune.parse_args."""
     import sys
+
     from scripts.optuna_tune import parse_args
     monkeypatch.setattr(sys, "argv", ["optuna_tune", "--model", "tft", "--hpo-scheduler", "asha", "--trials", "1"])
     args = parse_args()

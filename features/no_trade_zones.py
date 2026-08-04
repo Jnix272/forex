@@ -17,12 +17,12 @@ and meta-labeler from `triple_barrier_meta.py`.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. Learned Abstention Model
@@ -34,7 +34,7 @@ class AbstentionConfig:
     # Base model (sklearn-compatible, must have predict_proba)
     model: Any = None
     # Features to use for abstention prediction
-    features: Optional[List[str]] = None
+    features: list[str] | None = None
     # Target: 1 = should trade (profitable), 0 = should abstain
     # Derived from TBM labels: profitable if hit TP before SL
     min_samples: int = 500
@@ -64,12 +64,12 @@ class LearnedAbstentionModel:
         self.config = config
         self.model = config.model
         self._is_fitted = False
-        self._feature_names: List[str] = []
+        self._feature_names: list[str] = []
 
     def _prepare_features(
         self,
         X: pd.DataFrame,
-        primary_pred: Optional[np.ndarray] = None,
+        primary_pred: np.ndarray | None = None,
     ) -> np.ndarray:
         """Build feature matrix: base features + primary prediction + uncertainty proxies."""
         feat_list = []
@@ -122,7 +122,7 @@ class LearnedAbstentionModel:
         X: pd.DataFrame,
         tbm_labels: np.ndarray,
         primary_pred: np.ndarray,
-    ) -> "LearnedAbstentionModel":
+    ) -> LearnedAbstentionModel:
         """Train the abstention model."""
         primary = np.asarray(primary_pred, dtype=float).ravel()
         tbm = np.asarray(tbm_labels, dtype=int).ravel()
@@ -178,7 +178,7 @@ class LearnedAbstentionModel:
               f"n_train={len(X_train)}, n_val={len(X_val)}, pos_rate={y.mean():.3f}")
         return self
 
-    def _get_feature_names(self, X: pd.DataFrame) -> List[str]:
+    def _get_feature_names(self, X: pd.DataFrame) -> list[str]:
         names = []
         if self.config.features:
             names.extend(self.config.features)
@@ -191,7 +191,7 @@ class LearnedAbstentionModel:
     def predict_proba(
         self,
         X: pd.DataFrame,
-        primary_pred: Optional[np.ndarray] = None,
+        primary_pred: np.ndarray | None = None,
     ) -> np.ndarray:
         """Predict P(trade_profitable | features, primary_pred). Returns [0,1]."""
         if not self._is_fitted:
@@ -211,7 +211,7 @@ class LearnedAbstentionModel:
     def should_trade(
         self,
         X: pd.DataFrame,
-        primary_pred: Optional[np.ndarray] = None,
+        primary_pred: np.ndarray | None = None,
     ) -> np.ndarray:
         """Boolean mask: True where P(profitable) > threshold."""
         probs = self.predict_proba(X, primary_pred)
@@ -226,7 +226,7 @@ def conformal_abstention_scores(
     logits: np.ndarray,
     labels: np.ndarray,
     alpha: float = 0.10,
-) -> Tuple[np.ndarray, float, Dict]:
+) -> tuple[np.ndarray, float, dict]:
     """
     Compute conformal prediction sets and abstention scores.
 
@@ -273,7 +273,7 @@ def conformal_should_abstain(
     labels: np.ndarray,
     alpha: float = 0.10,
     abstain_on_ambiguous: bool = True,
-) -> Tuple[np.ndarray, Dict]:
+) -> tuple[np.ndarray, dict]:
     """
     Determine abstention based on conformal prediction sets.
 
@@ -397,8 +397,8 @@ class NoTradeZoneManager:
     def __init__(
         self,
         config: NoTradeConfig,
-        abstention_model: Optional[Any] = None,  # LearnedAbstentionModel instance
-        conformal_calibrator: Optional[Callable] = None,  # function(logits) -> (abstain, info)
+        abstention_model: Any | None = None,  # LearnedAbstentionModel instance
+        conformal_calibrator: Callable | None = None,  # function(logits) -> (abstain, info)
     ):
         self.config = config
         self.abstention_model = abstention_model
@@ -410,7 +410,7 @@ class NoTradeZoneManager:
         X: pd.DataFrame,
         tbm_labels: np.ndarray,
         primary_pred: np.ndarray,
-    ) -> "NoTradeZoneManager":
+    ) -> NoTradeZoneManager:
         """Fit the learned abstention model."""
         if self.abstention_model is None:
             abst_config = AbstentionConfig(
@@ -426,7 +426,7 @@ class NoTradeZoneManager:
         val_logits: np.ndarray,
         val_labels: np.ndarray,
         alpha: float = 0.10,
-    ) -> "NoTradeZoneManager":
+    ) -> NoTradeZoneManager:
         """Calibrate conformal prediction on validation set."""
         # Store calibration data for later use
         self._conformal_logits = val_logits
@@ -442,9 +442,9 @@ class NoTradeZoneManager:
         self,
         X: pd.DataFrame,
         primary_pred: np.ndarray,
-        tbm_labels: Optional[np.ndarray] = None,
-        val_logits: Optional[np.ndarray] = None,
-    ) -> Tuple[np.ndarray, Dict]:
+        tbm_labels: np.ndarray | None = None,
+        val_logits: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, dict]:
         """
         Compute unified no-trade mask.
 
@@ -526,12 +526,12 @@ class NoTradeZoneManager:
 def apply_no_trade_zones(
     features: pd.DataFrame,
     primary_pred: np.ndarray,
-    tbm_labels: Optional[np.ndarray] = None,
-    no_trade_config: Optional[NoTradeConfig] = None,
-    abstention_model: Optional[Any] = None,
-    val_logits: Optional[np.ndarray] = None,
-    val_labels: Optional[np.ndarray] = None,
-) -> Tuple[pd.DataFrame, np.ndarray, Dict]:
+    tbm_labels: np.ndarray | None = None,
+    no_trade_config: NoTradeConfig | None = None,
+    abstention_model: Any | None = None,
+    val_logits: np.ndarray | None = None,
+    val_labels: np.ndarray | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, dict]:
     """
     One-shot function to compute and apply no-trade zones to features.
 

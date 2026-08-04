@@ -4,23 +4,28 @@ Tests for Feature Store: registry, materialization, lineage, and convenience fun
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
 import pytest
 
 from data.feature_definitions import (
-    BUILTIN_FEATURES, REGISTRY, FeatureSource, FeatureType,
+    BUILTIN_FEATURES,
+    REGISTRY,
+    FeatureSource,
+    FeatureType,
     MaterializationStrategy,
 )
-from data.feature_store import compute_feature_hash
-from data.feature_store import FeatureStore, compute_data_hash
 from data.feature_materializers import (
-    PriceMaterializer, VolatilityMaterializer, MicrostructureMaterializer,
-    SessionMaterializer, get_materializer, materialize_feature,
+    MicrostructureMaterializer,
+    PriceMaterializer,
+    SessionMaterializer,
+    VolatilityMaterializer,
+    get_materializer,
+    materialize_feature,
 )
-
+from data.feature_store import FeatureStore, compute_data_hash, compute_feature_hash
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -36,7 +41,7 @@ def tmp_store(tmp_path) -> FeatureStore:
 def sample_bars_1min() -> pl.DataFrame:
     n = 500
     ts = [
-        datetime(2024, 1, 2, 8, 0, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 1, 2, 8, 0, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n)
     ]
     rng = np.random.default_rng(42)
@@ -109,7 +114,7 @@ class TestFeatureStore:
 
     def test_list_features_excludes_deprecated(self, tmp_store):
         # Temporarily mark a feature as deprecated
-        conn = tmp_store._lock  # noqa - we should use real sqlite
+        conn = tmp_store._lock
         import sqlite3
         conn = sqlite3.connect(tmp_store.db_path)
         conn.execute("UPDATE features SET deprecated = 1 WHERE name = 'close'")
@@ -154,13 +159,13 @@ class TestFeatureStore:
 
 class TestMaterialization:
     def test_is_materialized_returns_false_for_unmaterialized(self, tmp_store):
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
         assert not tmp_store.is_materialized("close", start, end)
 
     def test_store_materialization(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -171,8 +176,8 @@ class TestMaterialization:
         assert tmp_store.is_materialized("close", start, end)
 
     def test_load_feature_after_materialization(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -185,8 +190,8 @@ class TestMaterialization:
         assert len(loaded) == 2
 
     def test_get_materialized_ranges(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -200,8 +205,8 @@ class TestMaterialization:
         assert ranges[0][1] == end
 
     def test_get_latest_timestamp(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -213,8 +218,8 @@ class TestMaterialization:
         assert tmp_store.get_latest_timestamp("nonexistent") is None
 
     def test_materialize_duplicate_is_idempotent(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -235,8 +240,8 @@ class TestMaterialization:
 
 class TestJobQueue:
     def test_enqueue_and_list_pending(self, tmp_store):
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
         job_id = tmp_store.enqueue_materialization(
             "close", start, end, MaterializationStrategy.INCREMENTAL
         )
@@ -246,8 +251,8 @@ class TestJobQueue:
         assert pending[0]["feature_name"] == "close"
 
     def test_mark_job_started_and_done(self, tmp_store):
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
         job_id = tmp_store.enqueue_materialization("close", start, end)
         tmp_store.mark_job_started(job_id)
         tmp_store.mark_job_done(job_id)
@@ -255,8 +260,8 @@ class TestJobQueue:
         assert all(j["id"] != job_id for j in pending)
 
     def test_mark_job_failed(self, tmp_store):
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
         job_id = tmp_store.enqueue_materialization("close", start, end)
         tmp_store.mark_job_done(job_id, error="test error")
         pending = tmp_store.get_pending_jobs()
@@ -272,8 +277,8 @@ class TestPriceMaterializer:
         mat = PriceMaterializer(tmp_store)
         spec = tmp_store.get_feature("close")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "timestamp_utc" in result.columns
         assert "close" in result.columns
@@ -282,8 +287,8 @@ class TestPriceMaterializer:
         mat = PriceMaterializer(tmp_store)
         spec = tmp_store.get_feature("log_ret_1")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "log_ret_1" in result.columns
         # No NaNs (first row is null due to shift)
@@ -293,16 +298,16 @@ class TestPriceMaterializer:
         mat = PriceMaterializer(tmp_store)
         spec = tmp_store.get_feature("log_ret_5")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
 
     def test_spread_bps(self, sample_bars_1min, tmp_store):
         mat = PriceMaterializer(tmp_store)
         spec = tmp_store.get_feature("spread_bps")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "spread_bps" in result.columns
 
@@ -316,8 +321,8 @@ class TestVolatilityMaterializer:
         mat = VolatilityMaterializer(tmp_store)
         spec = tmp_store.get_feature("atr_6")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "atr_6" in result.columns
 
@@ -325,16 +330,16 @@ class TestVolatilityMaterializer:
         mat = VolatilityMaterializer(tmp_store)
         spec = tmp_store.get_feature("atr_20")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
 
     def test_rolling_vol_20(self, sample_bars_1min, tmp_store):
         mat = VolatilityMaterializer(tmp_store)
         spec = tmp_store.get_feature("rolling_vol_20")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
 
     def test_bollinger_upper_lower(self, sample_bars_1min, tmp_store):
@@ -342,11 +347,11 @@ class TestVolatilityMaterializer:
         upper_spec = tmp_store.get_feature("bollinger_upper_20")
         lower_spec = tmp_store.get_feature("bollinger_lower_20")
         upper = mat.compute(upper_spec, sample_bars_1min,
-                            datetime(2024, 1, 2, tzinfo=timezone.utc),
-                            datetime(2024, 1, 3, tzinfo=timezone.utc))
+                            datetime(2024, 1, 2, tzinfo=UTC),
+                            datetime(2024, 1, 3, tzinfo=UTC))
         lower = mat.compute(lower_spec, sample_bars_1min,
-                            datetime(2024, 1, 2, tzinfo=timezone.utc),
-                            datetime(2024, 1, 3, tzinfo=timezone.utc))
+                            datetime(2024, 1, 2, tzinfo=UTC),
+                            datetime(2024, 1, 3, tzinfo=UTC))
         assert upper is not None
         assert lower is not None
         assert all(u >= l for u, l in zip(upper["bollinger_upper_20"], lower["bollinger_lower_20"]))
@@ -357,8 +362,8 @@ class TestMicrostructureMaterializer:
         mat = MicrostructureMaterializer(tmp_store)
         spec = tmp_store.get_feature("ofi_20")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "ofi_20" in result.columns
 
@@ -366,8 +371,8 @@ class TestMicrostructureMaterializer:
         mat = MicrostructureMaterializer(tmp_store)
         spec = tmp_store.get_feature("obi_proxy")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "obi_proxy" in result.columns
 
@@ -375,8 +380,8 @@ class TestMicrostructureMaterializer:
         mat = MicrostructureMaterializer(tmp_store)
         spec = tmp_store.get_feature("hurst_120")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         # Hurst needs 120+ bars; may be None if window too short
         if result is not None:
             assert "hurst_120" in result.columns
@@ -385,16 +390,16 @@ class TestMicrostructureMaterializer:
         mat = MicrostructureMaterializer(tmp_store)
         spec = tmp_store.get_feature("iv_proxy_20")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
 
     def test_skew_proxy_20(self, sample_bars_1min, tmp_store):
         mat = MicrostructureMaterializer(tmp_store)
         spec = tmp_store.get_feature("skew_proxy_20")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "skew_proxy_20" in result.columns
 
@@ -404,8 +409,8 @@ class TestSessionMaterializer:
         mat = SessionMaterializer(tmp_store)
         spec = tmp_store.get_feature("hour_sin")
         result = mat.compute(spec, sample_bars_1min,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is not None
         assert "hour_sin" in result.columns
         # sin/cos should be bounded
@@ -414,30 +419,30 @@ class TestSessionMaterializer:
     def test_dow_encoding(self, sample_bars_1min, tmp_store):
         mat = SessionMaterializer(tmp_store)
         dow_sin = mat.compute(tmp_store.get_feature("dow_sin"), sample_bars_1min,
-                              datetime(2024, 1, 2, tzinfo=timezone.utc),
-                              datetime(2024, 1, 3, tzinfo=timezone.utc))
+                              datetime(2024, 1, 2, tzinfo=UTC),
+                              datetime(2024, 1, 3, tzinfo=UTC))
         dow_cos = mat.compute(tmp_store.get_feature("dow_cos"), sample_bars_1min,
-                              datetime(2024, 1, 2, tzinfo=timezone.utc),
-                              datetime(2024, 1, 3, tzinfo=timezone.utc))
+                              datetime(2024, 1, 2, tzinfo=UTC),
+                              datetime(2024, 1, 3, tzinfo=UTC))
         assert dow_sin is not None
         assert dow_cos is not None
 
     def test_session_flags(self, sample_bars_1min, tmp_store):
         mat = SessionMaterializer(tmp_store)
         asia = mat.compute(tmp_store.get_feature("session_asia"), sample_bars_1min,
-                           datetime(2024, 1, 2, tzinfo=timezone.utc),
-                           datetime(2024, 1, 3, tzinfo=timezone.utc))
+                           datetime(2024, 1, 2, tzinfo=UTC),
+                           datetime(2024, 1, 3, tzinfo=UTC))
         assert asia is not None
         assert asia["session_asia"].dtype == pl.Int32
 
     def test_is_monday_friday(self, sample_bars_1min, tmp_store):
         mat = SessionMaterializer(tmp_store)
         mon = mat.compute(tmp_store.get_feature("is_monday"), sample_bars_1min,
-                          datetime(2024, 1, 2, tzinfo=timezone.utc),
-                          datetime(2024, 1, 3, tzinfo=timezone.utc))
+                          datetime(2024, 1, 2, tzinfo=UTC),
+                          datetime(2024, 1, 3, tzinfo=UTC))
         fri = mat.compute(tmp_store.get_feature("is_friday"), sample_bars_1min,
-                          datetime(2024, 1, 2, tzinfo=timezone.utc),
-                          datetime(2024, 1, 3, tzinfo=timezone.utc))
+                          datetime(2024, 1, 2, tzinfo=UTC),
+                          datetime(2024, 1, 3, tzinfo=UTC))
         assert mon is not None
         assert fri is not None
 
@@ -468,8 +473,8 @@ class TestMaterializerDispatch:
         assert isinstance(mat, SessionMaterializer)
 
     def test_materialize_feature_end_to_end(self, sample_bars_1min, tmp_store):
-        start = datetime(2024, 1, 2, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, 10, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 2, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 2, 10, tzinfo=UTC)
         result = materialize_feature(tmp_store, "close", sample_bars_1min, start, end)
         assert result is not None
         assert "close" in result.columns
@@ -511,8 +516,8 @@ class TestMaintenance:
         tmp_store.vacuum()  # should just work
 
     def test_storage_stats_after_materialization(self, tmp_store):
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 9, tzinfo=UTC)
         df = pl.DataFrame({
             "timestamp_utc": [start, end],
             "close": [1.1000, 1.1005],
@@ -534,22 +539,22 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="timestamp_utc"):
             tmp_store._store_materialization(
                 "close", df,
-                datetime(2024, 1, 1, tzinfo=timezone.utc),
-                datetime(2024, 1, 2, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 1, 2, tzinfo=UTC),
                 MaterializationStrategy.EAGER_BATCH,
             )
 
     def test_load_unmaterialized_feature_returns_none(self, tmp_store):
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
         assert tmp_store.load_feature("nonexistent", start, end) is None
 
     def test_empty_bars_does_not_error(self, sample_bars_1min, tmp_store):
         mat = PriceMaterializer(tmp_store)
         empty = sample_bars_1min.head(0)  # empty frame with same schema
         result = mat.compute(tmp_store.get_feature("close"), empty,
-                             datetime(2024, 1, 2, tzinfo=timezone.utc),
-                             datetime(2024, 1, 3, tzinfo=timezone.utc))
+                             datetime(2024, 1, 2, tzinfo=UTC),
+                             datetime(2024, 1, 3, tzinfo=UTC))
         assert result is None or len(result) == 0
 
     def test_concurrent_feature_registry_queries(self, tmp_store):

@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from config.settings import resolve_checkpoint_paths, PRODUCTION_CHECKPOINT
+from config.settings import PRODUCTION_CHECKPOINT, resolve_checkpoint_paths
 
 
 def test_resolve_prefers_production(tmp_path):

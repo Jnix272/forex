@@ -1,6 +1,7 @@
-import polars as pl
-from pathlib import Path
 import os
+from pathlib import Path
+
+import polars as pl
 
 print("\n" + "="*50)
 print("  DATASET AUDIT ")

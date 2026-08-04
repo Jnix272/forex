@@ -21,8 +21,8 @@ in `triple_barrier_labeling.py`.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,7 +44,7 @@ class MetaLabelConfig:
     # Model for meta-classifier (any sklearn-compatible estimator)
     meta_model: any = None  # e.g., XGBClassifier, RandomForestClassifier
     # Features to use for meta-model (in addition to primary prediction)
-    meta_features: Optional[List[str]] = None  # column names from features DataFrame
+    meta_features: list[str] | None = None  # column names from features DataFrame
     # How to map primary predictions: -1/0/1 -> direction
     primary_threshold: float = 0.0  # primary prediction > thresh -> long
     # Target definition: trade is "good" if hits TP before SL
@@ -73,13 +73,13 @@ class MetaLabeler:
         self.config = config
         self.meta_model = config.meta_model
         self._is_fitted = False
-        self._feature_names: List[str] = []
+        self._feature_names: list[str] = []
         self._scaler = None
 
     def _prepare_meta_features(
         self,
         primary_pred: np.ndarray,
-        features: Optional[pd.DataFrame] = None,
+        features: pd.DataFrame | None = None,
     ) -> np.ndarray:
         """Construct meta-feature matrix: primary prediction + optional features."""
         primary = np.asarray(primary_pred, dtype=float).reshape(-1, 1)
@@ -92,8 +92,8 @@ class MetaLabeler:
         self,
         primary_pred: np.ndarray,
         labels: np.ndarray,
-        features: Optional[pd.DataFrame] = None,
-    ) -> "MetaLabeler":
+        features: pd.DataFrame | None = None,
+    ) -> MetaLabeler:
         """
         Train the meta-labeler.
 
@@ -173,7 +173,7 @@ class MetaLabeler:
               f"n_train={len(X_train)}, n_val={len(X_val)}")
         return self
 
-    def predict_proba(self, primary_pred: np.ndarray, features: Optional[pd.DataFrame] = None) -> np.ndarray:
+    def predict_proba(self, primary_pred: np.ndarray, features: pd.DataFrame | None = None) -> np.ndarray:
         """Predict P(profitable | primary_pred, features). Returns probabilities in [0,1]."""
         if not self._is_fitted:
             # Return zeros if not fitted (e.g., no trades to train on)
@@ -191,7 +191,7 @@ class MetaLabeler:
     def should_trade(
         self,
         primary_pred: np.ndarray,
-        features: Optional[pd.DataFrame] = None,
+        features: pd.DataFrame | None = None,
     ) -> np.ndarray:
         """Boolean mask: True where meta-model predicts P(profitable) > threshold."""
         probs = self.predict_proba(primary_pred, features)
@@ -205,13 +205,13 @@ class MetaLabeler:
 @dataclass
 class BarrierSearchSpace:
     """Search space for barrier parameters."""
-    profit_mult: Tuple[float, float] = (0.5, 3.0)   # profit_target_atr
-    stop_mult: Tuple[float, float] = (0.3, 2.0)     # stop_loss_atr
-    vertical_bars: Tuple[int, int] = (5, 40)        # lookahead_bars
+    profit_mult: tuple[float, float] = (0.5, 3.0)   # profit_target_atr
+    stop_mult: tuple[float, float] = (0.3, 2.0)     # stop_loss_atr
+    vertical_bars: tuple[int, int] = (5, 40)        # lookahead_bars
     # Optional: execution delay, pip size (if variable)
-    execution_delay_bars: Tuple[int, int] = (0, 3)
+    execution_delay_bars: tuple[int, int] = (0, 3)
     # Pip size (for JPY vs non-JPY)
-    pip_size: Optional[Tuple[float, float]] = None
+    pip_size: tuple[float, float] | None = None
 
 
 @dataclass
@@ -219,7 +219,7 @@ class BarrierSearchConfig:
     """Configuration for Bayesian barrier search."""
     search_space: BarrierSearchSpace = field(default_factory=BarrierSearchSpace)
     n_trials: int = 50
-    timeout: Optional[float] = None  # seconds
+    timeout: float | None = None  # seconds
     # Objective: "sharpe", "win_rate", "profit_factor", "expectancy"
     objective: str = "sharpe"
     # Minimum trades per trial
@@ -253,7 +253,7 @@ class BayesianBarrierOptimizer:
 
     def _objective(
         self,
-        trial: "optuna.Trial",
+        trial: optuna.Trial,
         bars: pd.DataFrame,
         features: pd.DataFrame,
         primary_pred_fn: Callable[[pd.DataFrame, pd.DataFrame], np.ndarray],
@@ -343,7 +343,7 @@ class BayesianBarrierOptimizer:
         bars: pd.DataFrame,
         features: pd.DataFrame,
         primary_pred_fn: Callable[[pd.DataFrame, pd.DataFrame], np.ndarray],
-    ) -> Dict[str, any]:
+    ) -> dict[str, any]:
         """
         Run Bayesian optimization to find best barrier parameters.
 
@@ -387,7 +387,7 @@ class BayesianBarrierOptimizer:
         }
 
     @property
-    def best_params(self) -> Optional[Dict]:
+    def best_params(self) -> dict | None:
         return self._best_params
 
 
@@ -399,12 +399,12 @@ def run_meta_tbm_pipeline(
     bars: pd.DataFrame,
     features: pd.DataFrame,
     primary_model,
-    meta_features: Optional[List[str]] = None,
+    meta_features: list[str] | None = None,
     meta_model: any = None,
-    tbm_params: Optional[Dict] = None,
+    tbm_params: dict | None = None,
     bayesian_search: bool = False,
-    bayesian_config: Optional[BarrierSearchConfig] = None,
-) -> Tuple[pd.DataFrame, MetaLabeler, Optional[BayesianBarrierOptimizer]]:
+    bayesian_config: BarrierSearchConfig | None = None,
+) -> tuple[pd.DataFrame, MetaLabeler, BayesianBarrierOptimizer | None]:
     """
     Full meta-labeling + TBM pipeline.
 
@@ -488,7 +488,7 @@ def evaluate_barrier_params(
     vertical_bars: int,
     primary_pred_fn: Callable,
     delay: int = 1,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Quick evaluation of a single parameter set. Returns metrics dict."""
     from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 

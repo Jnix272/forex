@@ -16,7 +16,6 @@ if str(_ROOT) not in sys.path:
 
 from scripts.backtest_model import run_backtest
 
-
 if __name__ == "__main__":
     if "--model" not in sys.argv:
         sys.argv.extend(["--model", "mamba"])

@@ -8,11 +8,13 @@ RL enhancements:
   4. HERBuffer            — Hindsight Experience Replay for sparse rewards
 """
 
-import numpy as np
 import collections
 import random
-from typing import Optional, List, Dict, Any
 import warnings
+from typing import Any
+
+import numpy as np
+
 warnings.filterwarnings("ignore")
 
 try:
@@ -72,8 +74,8 @@ class MultiAgentCoordinator:
 
     def __init__(
         self,
-        agents:      Dict[str, Any],   # pair -> DQNAgent | PPOAgent
-        pairs:       List[str],
+        agents:      dict[str, Any],   # pair -> DQNAgent | PPOAgent
+        pairs:       list[str],
         max_corr_exposure: float = 1.5, # Max sum of correlated lots
         global_feat_dim:   int   = 20,
         context_dim:       int   = 32,
@@ -89,7 +91,7 @@ class MultiAgentCoordinator:
             self.global_enc.to(torch.device(device))
 
         # Portfolio state
-        self.positions: Dict[str, float] = {p: 0.0 for p in pairs}
+        self.positions: dict[str, float] = dict.fromkeys(pairs, 0.0)
         self.equity     = 10_000.0
 
     def _corr_exposure(self, pair: str, direction: int) -> float:
@@ -110,9 +112,9 @@ class MultiAgentCoordinator:
 
     def select_actions(
         self,
-        observations: Dict[str, np.ndarray],
-        global_features: Optional[np.ndarray] = None,
-    ) -> Dict[str, int]:
+        observations: dict[str, np.ndarray],
+        global_features: np.ndarray | None = None,
+    ) -> dict[str, int]:
         """
         Get action for each pair's agent, applying portfolio-level risk check.
         Returns dict: pair -> action (0=Buy, 1=Hold, 2=Sell)
@@ -347,7 +349,7 @@ class HERBuffer:
         self.strategy = strategy
 
         # Episode buffer (cleared after each episode)
-        self._episode: List[dict] = []
+        self._episode: list[dict] = []
         # Replay buffer (persistent)
         self._buffer:  collections.deque = collections.deque(maxlen=capacity)
 
@@ -419,7 +421,7 @@ class HERBuffer:
 
         self._episode.clear()
 
-    def sample(self, batch_size: int) -> List[dict]:
+    def sample(self, batch_size: int) -> list[dict]:
         if len(self._buffer) < batch_size:
             return list(self._buffer)
         return random.sample(list(self._buffer), batch_size)

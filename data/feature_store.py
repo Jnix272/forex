@@ -11,24 +11,27 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import polars as pl
 
 from data.feature_definitions import (
-    FeatureRegistry, FeatureSpec, FeatureSource, FeatureType, MaterializationStrategy,
-    REGISTRY, BUILTIN_FEATURES
+    BUILTIN_FEATURES,
+    REGISTRY,
+    FeatureRegistry,
+    FeatureSource,
+    FeatureSpec,
+    FeatureType,
+    MaterializationStrategy,
 )
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # CONTENT HASHING (for deduplication / versioning)
 # ════════════════════════════════════════════════════════════════════════════
 
-def compute_feature_hash(spec: FeatureSpec, params: Dict = None) -> str:
+def compute_feature_hash(spec: FeatureSpec, params: dict = None) -> str:
     """Deterministic hash of feature definition + parameters."""
     content = {
         "name": spec.name,
@@ -58,41 +61,41 @@ class FeatureStore:
     - Parquet files for feature values (partitioned by date)
     - Thread-safe operations
     """
-    
+
     SCHEMA_VERSION = 1
-    
+
     def __init__(
         self,
-        root: Union[str, Path] = "data/feature_store",
+        root: str | Path = "data/feature_store",
         registry: FeatureRegistry = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.registry = registry or REGISTRY
-        
+
         # Paths
         self.db_path = self.root / "registry.db"
         self.data_root = self.root / "features"
         self.data_root.mkdir(parents=True, exist_ok=True)
-        
+
         # Thread safety
         self._lock = threading.RLock()
-        
+
         # Initialize
         self._init_db()
         self._sync_registry()
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # DATABASE INITIALIZATION
     # ──────────────────────────────────────────────────────────────────────
-    
+
     def _init_db(self) -> None:
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            
+
             # Schema version
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -100,7 +103,7 @@ class FeatureStore:
                     updated_at TEXT
                 )
             """)
-            
+
             # Feature definitions
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS features (
@@ -121,7 +124,7 @@ class FeatureStore:
                     UNIQUE(name, content_hash)
                 )
             """)
-            
+
             # Materialization tracking (which time ranges are computed)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS materializations (
@@ -137,7 +140,7 @@ class FeatureStore:
                     FOREIGN KEY (feature_name) REFERENCES features(name)
                 )
             """)
-            
+
             # Lineage / dependency graph
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS lineage (
@@ -148,7 +151,7 @@ class FeatureStore:
                     FOREIGN KEY (upstream) REFERENCES features(name)
                 )
             """)
-            
+
             # Materialization job queue
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS job_queue (
@@ -166,7 +169,7 @@ class FeatureStore:
                     FOREIGN KEY (feature_name) REFERENCES features(name)
                 )
             """)
-            
+
             # Stats / monitoring
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS feature_stats (
@@ -183,16 +186,16 @@ class FeatureStore:
                     FOREIGN KEY (feature_name) REFERENCES features(name)
                 )
             """)
-            
+
             conn.commit()
             conn.close()
-    
+
     def _sync_registry(self) -> None:
         """Upsert builtin features into registry DB."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
-            now = datetime.now(timezone.utc).isoformat()
-            
+            now = datetime.now(UTC).isoformat()
+
             for spec in self.registry.all():
                 content_hash = compute_feature_hash(spec)
                 conn.execute("""
@@ -212,22 +215,22 @@ class FeatureStore:
                     spec.version, json.dumps(spec.tags), spec.owner,
                     spec.created_at or now, now, int(spec.deprecated), content_hash
                 ))
-                
+
                 # Lineage
                 for dep in spec.dependencies:
                     conn.execute("""
                         INSERT OR IGNORE INTO lineage (downstream, upstream)
                         VALUES (?, ?)
                     """, (spec.name, dep))
-            
+
             conn.commit()
             conn.close()
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # FEATURE REGISTRY QUERIES
     # ──────────────────────────────────────────────────────────────────────
-    
-    def get_feature(self, name: str) -> Optional[FeatureSpec]:
+
+    def get_feature(self, name: str) -> FeatureSpec | None:
         """Get feature spec from DB (includes runtime params)."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -236,10 +239,10 @@ class FeatureStore:
                 "SELECT * FROM features WHERE name = ? AND deprecated = 0", (name,)
             ).fetchone()
             conn.close()
-            
+
             if not row:
                 return None
-            
+
             return FeatureSpec(
                 name=row["name"],
                 feature_type=FeatureType(row["feature_type"]),
@@ -254,25 +257,25 @@ class FeatureStore:
                 created_at=row["created_at"],
                 deprecated=bool(row["deprecated"]),
             )
-    
+
     def list_features(
         self, source: FeatureSource = None, tag: str = None, deprecated: bool = False
-    ) -> List[FeatureSpec]:
+    ) -> list[FeatureSpec]:
         """List features with optional filters."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
-            
+
             query = "SELECT * FROM features WHERE deprecated = ?"
             params = [int(deprecated)]
-            
+
             if source:
                 query += " AND source = ?"
                 params.append(source.value)
-            
+
             rows = conn.execute(query, params).fetchall()
             conn.close()
-            
+
             features = []
             for row in rows:
                 spec = FeatureSpec(
@@ -293,39 +296,39 @@ class FeatureStore:
                     continue
                 features.append(spec)
             return features
-    
-    def get_lineage(self, feature_name: str, direction: str = "both") -> Dict[str, List[str]]:
+
+    def get_lineage(self, feature_name: str, direction: str = "both") -> dict[str, list[str]]:
         """Get upstream/downstream dependencies."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             result = {"upstream": [], "downstream": []}
-            
+
             if direction in ("upstream", "both"):
                 rows = conn.execute(
                     "SELECT upstream FROM lineage WHERE downstream = ?", (feature_name,)
                 ).fetchall()
                 result["upstream"] = [r[0] for r in rows]
-            
+
             if direction in ("downstream", "both"):
                 rows = conn.execute(
                     "SELECT downstream FROM lineage WHERE upstream = ?", (feature_name,)
                 ).fetchall()
                 result["downstream"] = [r[0] for r in rows]
-            
+
             conn.close()
             return result
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # MATERIALIZATION
     # ──────────────────────────────────────────────────────────────────────
-    
+
     def _get_feature_path(self, feature_name: str, start: datetime, end: datetime) -> Path:
         """Generate Parquet path for feature time range."""
         date_str = start.strftime("%Y%m")
         feature_dir = self.data_root / feature_name
         feature_dir.mkdir(parents=True, exist_ok=True)
         return feature_dir / f"{feature_name}_{date_str}.parquet"
-    
+
     def is_materialized(
         self, feature_name: str, start: datetime, end: datetime
     ) -> bool:
@@ -338,8 +341,8 @@ class FeatureStore:
             """, (feature_name, start.isoformat(), end.isoformat())).fetchone()
             conn.close()
             return row is not None
-    
-    def get_materialized_ranges(self, feature_name: str) -> List[Tuple[datetime, datetime]]:
+
+    def get_materialized_ranges(self, feature_name: str) -> list[tuple[datetime, datetime]]:
         """Get all materialized time ranges for a feature."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -349,31 +352,31 @@ class FeatureStore:
             """, (feature_name,)).fetchall()
             conn.close()
             return [(datetime.fromisoformat(r[0]), datetime.fromisoformat(r[1])) for r in rows]
-    
+
     def load_feature(
         self, feature_name: str, start: datetime, end: datetime
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         """Load materialized feature data for time range."""
         if not self.is_materialized(feature_name, start, end):
             return None
-        
+
         # Find all parquet files covering the range
         ranges = self.get_materialized_ranges(feature_name)
         relevant = [r for r in ranges if r[0] <= end and r[1] >= start]
-        
+
         if not relevant:
             return None
-        
+
         dfs = []
         for r_start, r_end in relevant:
             path = self._get_feature_path(feature_name, r_start, r_end)
             if path.exists():
                 df = pl.read_parquet(path)
                 dfs.append(df)
-        
+
         if not dfs:
             return None
-        
+
         combined = pl.concat(dfs)
         # Filter to requested range
         if "timestamp_utc" in combined.columns:
@@ -381,52 +384,52 @@ class FeatureStore:
                 (pl.col("timestamp_utc") >= start) & (pl.col("timestamp_utc") <= end)
             )
         return combined.sort("timestamp_utc")
-    
+
     def materialize(
         self,
-        feature_names: Union[str, List[str]],
+        feature_names: str | list[str],
         start: datetime,
         end: datetime,
         strategy: MaterializationStrategy = MaterializationStrategy.EAGER_BATCH,
         force: bool = False,
-    ) -> Dict[str, pl.DataFrame]:
+    ) -> dict[str, pl.DataFrame]:
         """
         Materialize features for time range.
         Returns dict of feature_name -> DataFrame with timestamp_utc + feature column.
         """
         if isinstance(feature_names, str):
             feature_names = [feature_names]
-        
+
         # Resolve dependencies
         all_names = self.registry.resolve_dependencies(feature_names)
-        
+
         results = {}
         for name in all_names:
             if name in results:
                 continue
-            
+
             spec = self.get_feature(name)
             if not spec:
                 raise ValueError(f"Feature '{name}' not registered")
-            
+
             # Check if already materialized
             if not force and self.is_materialized(name, start, end):
                 df = self.load_feature(name, start, end)
                 if df is not None:
                     results[name] = df
                     continue
-            
+
             # Compute feature
             df = self._compute_feature(spec, start, end)
-            
+
             if df is not None and not df.is_empty():
                 # Store
                 self._store_materialization(name, df, start, end, strategy)
                 results[name] = df
-        
+
         return {k: results[k] for k in feature_names if k in results}
-    
-    def _compute_feature(self, spec: FeatureSpec, start: datetime, end: datetime) -> Optional[pl.DataFrame]:
+
+    def _compute_feature(self, spec: FeatureSpec, start: datetime, end: datetime) -> pl.DataFrame | None:
         """
         Compute feature from raw data or dependencies.
         This is where feature-specific logic lives.
@@ -434,18 +437,18 @@ class FeatureStore:
         # For now, delegate to the existing feature engineering pipeline
         # In production, each feature_type would have its own compute method
         from features.feature_engineering_pl import FeatureEngineer
-        
+
         # We need to build the full feature set then extract what we need
         # This is a simplified implementation - in production you'd compute each feature individually
         FeatureEngineer()
-        
+
         # Generate synthetic or load real bars for the time range
-        
+
         # This is a placeholder - actual implementation would load from data sources
         # For now, return None to indicate feature computation not implemented here
         # The actual computation happens in the feature engineering pipeline
         return None
-    
+
     def _store_materialization(
         self,
         feature_name: str,
@@ -456,14 +459,14 @@ class FeatureStore:
     ) -> None:
         """Store feature values as Parquet and record in DB."""
         path = self._get_feature_path(feature_name, start, end)
-        
+
         # Ensure timestamp_utc column exists
         if "timestamp_utc" not in df.columns:
             raise ValueError("Feature DataFrame must have 'timestamp_utc' column")
-        
+
         # Write Parquet
         df.write_parquet(path, compression="zstd")
-        
+
         # Compute stats
         feature_col = [c for c in df.columns if c != "timestamp_utc"][0]
         vals = df[feature_col].to_numpy()
@@ -480,13 +483,13 @@ class FeatureStore:
                 np.nanmean((vals - np.nanmean(vals))**4) / (np.nanstd(vals)**4 + 1e-12) - 3
             ),
         }
-        
+
         data_hash = compute_data_hash(df, feature_col)
-        
+
         with self._lock:
             conn = sqlite3.connect(self.db_path)
-            now = datetime.now(timezone.utc).isoformat()
-            
+            now = datetime.now(UTC).isoformat()
+
             conn.execute("""
                 INSERT OR REPLACE INTO materializations
                 (feature_name, start_ts, end_ts, path, rows, data_hash, created_at, strategy)
@@ -495,7 +498,7 @@ class FeatureStore:
                 feature_name, start.isoformat(), end.isoformat(),
                 str(path.relative_to(self.root)), len(df), data_hash, now, strategy.value
             ))
-            
+
             conn.execute("""
                 INSERT OR REPLACE INTO feature_stats
                 (feature_name, ts, mean, std, min, max, null_count, skew, kurtosis)
@@ -505,14 +508,14 @@ class FeatureStore:
                 stats["mean"], stats["std"], stats["min"], stats["max"],
                 stats["null_count"], stats["skew"], stats["kurtosis"]
             ))
-            
+
             conn.commit()
             conn.close()
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # JOB QUEUE (for async materialization)
     # ──────────────────────────────────────────────────────────────────────
-    
+
     def enqueue_materialization(
         self,
         feature_name: str,
@@ -524,7 +527,7 @@ class FeatureStore:
         """Add materialization job to queue."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             cursor = conn.execute("""
                 INSERT INTO job_queue (feature_name, start_ts, end_ts, strategy, priority, created_at, status)
                 VALUES (?, ?, ?, ?, ?, ?, 'pending')
@@ -533,8 +536,8 @@ class FeatureStore:
             conn.commit()
             conn.close()
             return job_id
-    
-    def get_pending_jobs(self, limit: int = 10) -> List[Dict]:
+
+    def get_pending_jobs(self, limit: int = 10) -> list[dict]:
         """Get next jobs to process."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -547,17 +550,17 @@ class FeatureStore:
             """, (limit,)).fetchall()
             conn.close()
             return [dict(r) for r in rows]
-    
+
     def mark_job_started(self, job_id: int) -> None:
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.execute(
                 "UPDATE job_queue SET status = 'running', started_at = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), job_id)
+                (datetime.now(UTC).isoformat(), job_id)
             )
             conn.commit()
             conn.close()
-    
+
     def mark_job_done(self, job_id: int, error: str = None) -> None:
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -565,24 +568,24 @@ class FeatureStore:
             conn.execute("""
                 UPDATE job_queue SET status = ?, finished_at = ?, error = ?
                 WHERE id = ?
-            """, (status, datetime.now(timezone.utc).isoformat(), error, job_id))
+            """, (status, datetime.now(UTC).isoformat(), error, job_id))
             conn.commit()
             conn.close()
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # INCREMENTAL / ON-DEMAND HELPERS
     # ──────────────────────────────────────────────────────────────────────
-    
-    def get_latest_timestamp(self, feature_name: str) -> Optional[datetime]:
+
+    def get_latest_timestamp(self, feature_name: str) -> datetime | None:
         """Get latest materialized timestamp for feature."""
         ranges = self.get_materialized_ranges(feature_name)
         if not ranges:
             return None
         return max(r[1] for r in ranges)
-    
+
     def needs_incremental_update(
         self, feature_name: str, lookback_bars: int = 100
-    ) -> Tuple[bool, Optional[datetime], Optional[datetime]]:
+    ) -> tuple[bool, datetime | None, datetime | None]:
         """
         Check if feature needs incremental update.
         Returns (needs_update, start, end) for incremental range.
@@ -590,33 +593,33 @@ class FeatureStore:
         latest = self.get_latest_timestamp(feature_name)
         if latest is None:
             return True, None, None  # Full materialization needed
-        
+
         # Check if new data exists beyond latest
         # This would query the data source - placeholder for now
         return False, None, None
-    
+
     # ──────────────────────────────────────────────────────────────────────
     # MAINTENANCE
     # ──────────────────────────────────────────────────────────────────────
-    
+
     def vacuum(self) -> None:
         """Compact database."""
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.execute("VACUUM")
             conn.close()
-    
-    def get_storage_stats(self) -> Dict:
+
+    def get_storage_stats(self) -> dict:
         """Get storage usage statistics."""
         total_size = 0
         feature_sizes = {}
-        
+
         for feature_dir in self.data_root.iterdir():
             if feature_dir.is_dir():
                 size = sum(f.stat().st_size for f in feature_dir.glob("*.parquet"))
                 feature_sizes[feature_dir.name] = size
                 total_size += size
-        
+
         return {
             "total_bytes": total_size,
             "total_mb": total_size / (1024 * 1024),
@@ -629,10 +632,10 @@ class FeatureStore:
 # CONVENIENCE FUNCTIONS
 # ════════════════════════════════════════════════════════════════════════════
 
-_DEFAULT_STORE: Optional[FeatureStore] = None
+_DEFAULT_STORE: FeatureStore | None = None
 
 
-def get_feature_store(root: Union[str, Path] = None) -> FeatureStore:
+def get_feature_store(root: str | Path = None) -> FeatureStore:
     """Get or create global feature store instance."""
     global _DEFAULT_STORE
     if _DEFAULT_STORE is None:
@@ -641,11 +644,11 @@ def get_feature_store(root: Union[str, Path] = None) -> FeatureStore:
 
 
 def materialize_features(
-    feature_names: Union[str, List[str]],
+    feature_names: str | list[str],
     start: datetime,
     end: datetime,
     strategy: MaterializationStrategy = MaterializationStrategy.EAGER_BATCH,
-) -> Dict[str, pl.DataFrame]:
+) -> dict[str, pl.DataFrame]:
     """Convenience function for materialization."""
     store = get_feature_store()
     return store.materialize(feature_names, start, end, strategy)
@@ -654,9 +657,9 @@ def materialize_features(
 if __name__ == "__main__":
     # Demo
     store = FeatureStore("data/feature_store_test")
-    
+
     # Register a test feature
-    from data.feature_definitions import FeatureSpec, FeatureType, FeatureSource, MaterializationStrategy
+    from data.feature_definitions import FeatureSource, FeatureSpec, FeatureType, MaterializationStrategy
     test_spec = FeatureSpec(
         name="test_feature",
         feature_type=FeatureType.NUMERIC,
@@ -667,7 +670,7 @@ if __name__ == "__main__":
         params={},
         tags=["test"],
     )
-    
+
     print(f"Feature store initialized at {store.root}")
     print(f"Builtin features: {len(BUILTIN_FEATURES)}")
     print(f"Storage stats: {store.get_storage_stats()}")

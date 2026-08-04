@@ -5,38 +5,45 @@ Incorporating High-Impact Macro, 3-Tier Sentiment,
 Formal Promotion Gates, and Real-Time Monitoring.
 Run: python main.py
 """
-import warnings, tempfile
+import tempfile
+import warnings
 from pathlib import Path
 
-import numpy as np, pandas as pd
+import numpy as np
+import pandas as pd
+
 warnings.filterwarnings("ignore")
 
 _ROOT = Path(__file__).resolve().parent   # repo root — used in final summary
 
 
-from data.data_ingestion import generate_synthetic_tick_data, ForexDataPipeline
-from features.feature_engineering import FeatureEngineer
-from labeling.rl_reward_labeling import compute_rl_reward_labels, align_labels_with_features
-from models.architectures import TORCH
 from config.settings import FEATURES
-
-from features.advanced_features import (AdvancedFeatureBuilder)
+from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
+from data.economic_calendar import EcoCalendarFeatureBuilder
+from features.advanced_features import AdvancedFeatureBuilder
+from features.feature_engineering import FeatureEngineer
+from features.finbert_sentiment import SentimentPipeline
+from features.macro_features import MacroYieldFeatureBuilder
+from labeling.rl_reward_labeling import align_labels_with_features, compute_rl_reward_labels
+from models.architectures import TORCH
 from models.ensemble import GrangerCausalityGraph
-from models.rl_advanced import CurriculumScheduler, SharpeRewardWrapper, HERBuffer
-from risk.execution import (RegimeConditionalKelly, AlmgrenChrissExecutor,
-    DrawdownAwareExitPolicy, PortfolioVaR)
-from monitoring.pipeline import (MonteCarloBacktest, SlippageCalibrator,
-    ShadowModeDeployer, WalkForwardReporter, LockboxEvaluator, ONNXExporter)
+from models.rl_advanced import CurriculumScheduler, HERBuffer, SharpeRewardWrapper
+from monitoring.demotion_monitor import DemotionMonitor
+from monitoring.discord_alerts import DiscordAlerter
+from monitoring.pipeline import (
+    LockboxEvaluator,
+    MonteCarloBacktest,
+    ONNXExporter,
+    ShadowModeDeployer,
+    SlippageCalibrator,
+    WalkForwardReporter,
+)
+from monitoring.prometheus_exporter import ForexPrometheusExporter
+from risk.execution import AlmgrenChrissExecutor, DrawdownAwareExitPolicy, PortfolioVaR, RegimeConditionalKelly
+from validation.mlflow_logger import MLflowModelLogger
 
 # v5 Governance & Monitoring
 from validation.promotion_gate import PromotionGate
-from validation.mlflow_logger import MLflowModelLogger
-from monitoring.demotion_monitor import DemotionMonitor
-from monitoring.prometheus_exporter import ForexPrometheusExporter
-from monitoring.discord_alerts import DiscordAlerter
-from data.economic_calendar import EcoCalendarFeatureBuilder
-from features.macro_features import MacroYieldFeatureBuilder
-from features.finbert_sentiment import SentimentPipeline
 
 
 def hdr(t, new=False):
@@ -70,12 +77,12 @@ def main():
 
     MLflowModelLogger(verbose=False)
     # logger.log_promotion("haelt_v5", res) # Commented to avoid side-effects in demo
-    print(f"  MLflow Archiving:    Ready (tracking: http://localhost:5000)")
+    print("  MLflow Archiving:    Ready (tracking: http://localhost:5000)")
 
     EcoCalendarFeatureBuilder(use_synthetic=True)
     MacroYieldFeatureBuilder()
-    print(f"  Economic Calendar:   Synthetic generator active (NFP, CPI, FOMC)")
-    print(f"  Yield Spreads:       FRED bridge ready (US10Y vs G10 Spreads)")
+    print("  Economic Calendar:   Synthetic generator active (NFP, CPI, FOMC)")
+    print("  Yield Spreads:       FRED bridge ready (US10Y vs G10 Spreads)")
 
     sent = SentimentPipeline(prefer_backend="vader", use_cache=False)
     score = sent.score_headlines(["Central Bank hints at rate hike next month"])
@@ -98,13 +105,13 @@ def main():
     hdr("A · ADVANCED FEATURES  (+7 feature groups)", new=True)
     afb = AdvancedFeatureBuilder()
     adv = afb.build(bars, base_features=feats)
-    print(f"  L2 order book (10 lvls)   book_imbalance, microprice, depth_ratio")
-    print(f"  Tick vol imbalance         TVI-5/20/60, tick direction, acceleration")
-    print(f"  Session clock              Tokyo/London/NY/Sydney + overlap flags")
-    print(f"  Correlation regime         rolling Pearson + breakdown detector")
-    print(f"  Hurst + Fractal dimension  trending / mean-reverting classifier")
-    print(f"  Options skew proxy         RV, risk-reversal proxy, IV term structure")
-    print(f"  COT positioning            institutional long/short bias")
+    print("  L2 order book (10 lvls)   book_imbalance, microprice, depth_ratio")
+    print("  Tick vol imbalance         TVI-5/20/60, tick direction, acceleration")
+    print("  Session clock              Tokyo/London/NY/Sydney + overlap flags")
+    print("  Correlation regime         rolling Pearson + breakdown detector")
+    print("  Hurst + Fractal dimension  trending / mean-reverting classifier")
+    print("  Options skew proxy         RV, risk-reversal proxy, IV term structure")
+    print("  COT positioning            institutional long/short bias")
     print(f"\n  → +{adv.shape[1]} advanced cols  |  "
           f"total {feats.shape[1] + adv.shape[1]} features × {len(adv):,} rows")
 
@@ -116,31 +123,32 @@ def main():
                        columns=["EURUSD","US10Y","WTI","COPPER","VIX"])
     adj = gc.compute_adjacency(ret, window=250)
     print(f"  Granger causality GNN     {adj.shape} | {int(adj.sum())} directed causal edges")
-    print(f"  Meta-learner ensemble     6 models → stacked MLP → weighted prediction")
-    print(f"                            regime features gate per-model trust")
-    print(f"  MC Dropout UQ             50 forward passes → confidence interval filtering")
-    print(f"                            suppresses ~15-25% low-confidence signals")
+    print("  Meta-learner ensemble     6 models → stacked MLP → weighted prediction")
+    print("                            regime features gate per-model trust")
+    print("  MC Dropout UQ             50 forward passes → confidence interval filtering")
+    print("                            suppresses ~15-25% low-confidence signals")
 
     if TORCH:
         import torch
+
         from models.ensemble import MultiTimeframeAttention
         F   = _width(X)
         m   = MultiTimeframeAttention(input_size=F, d_model=64, nhead=4)
         out = m([torch.randn(4, 60, F), torch.randn(4, 12, F), torch.randn(4, 4, F)])
         print(f"  Hierarchical multi-TF     1m+5m+15m -> fused logits {tuple(out.shape)} OK")
     else:
-        print(f"  Hierarchical multi-TF     1m+5m+15m gated attention fusion")
+        print("  Hierarchical multi-TF     1m+5m+15m gated attention fusion")
 
     # ── C. RL ENHANCEMENTS ────────────────────────────────────────────────────
     hdr("C · RL ENHANCEMENTS  (+4 training methods)", new=True)
 
     cs = CurriculumScheduler(total_episodes=500)
     ph = cs.current_phase
-    print(f"  Curriculum learning (4 stages):")
+    print("  Curriculum learning (4 stages):")
     print(f"    Current stage: {ph.get('name','low_vol')}  "
           f"progress={ph.get('progress',0):.0%}")
-    print(f"    low_vol → normal → news_events → full_data")
-    print(f"    Advances when validation Sharpe > 0.3 for 3 consecutive epochs")
+    print("    low_vol → normal → news_events → full_data")
+    print("    Advances when validation Sharpe > 0.3 for 3 consecutive epochs")
 
     srs    = SharpeRewardWrapper()
     pnls   = np.random.normal(0.001, 0.01, 100)
@@ -148,7 +156,7 @@ def main():
     raw_sr = float(np.mean(pnls) / (np.std(pnls) + 1e-9) * np.sqrt(252))
     shp_sr = float(np.mean(shaped) / (np.std(shaped) + 1e-9) * np.sqrt(252))
     print(f"\n  Sharpe reward shaping      raw Sharpe {raw_sr:.3f} → shaped {shp_sr:.3f}")
-    print(f"    Differential Sharpe (Moody & Saffell 1998) — O(1) per step")
+    print("    Differential Sharpe (Moody & Saffell 1998) — O(1) per step")
 
     her = HERBuffer(capacity=50_000, k=4)
     for i in range(30):
@@ -164,9 +172,9 @@ def main():
     n_her  = len(her._buffer) - n_real
     print(f"\n  HER (k=4)  {n_real} real transitions → "
           f"{len(her._buffer)} buffer entries (+{n_her} hindsight relabellings)")
-    print(f"    Failed trades relabelled → 4-8× more positive training signal")
-    print(f"\n  Multi-agent coordinator    1 PPO/DQN per pair + shared global encoder")
-    print(f"    Portfolio correlation cap: EUR+GBP corr > 0.85 → scale down new pos")
+    print("    Failed trades relabelled → 4-8× more positive training signal")
+    print("\n  Multi-agent coordinator    1 PPO/DQN per pair + shared global encoder")
+    print("    Portfolio correlation cap: EUR+GBP corr > 0.85 → scale down new pos")
 
     # ── D. RISK & EXECUTION ──────────────────────────────────────────────────
     hdr("D · RISK & EXECUTION  (+4 risk models)", new=True)
@@ -175,7 +183,7 @@ def main():
     # size(equity, win_prob, win_loss_r, returns, atr, corr_avg, hurst, corr_break)
     rck = RegimeConditionalKelly()
     dummy_rets = np.random.normal(0.001, 0.01, 100)
-    print(f"  Regime-conditional Kelly (base ¼-Kelly × regime multiplier):")
+    print("  Regime-conditional Kelly (base ¼-Kelly × regime multiplier):")
     scenarios = [
         (0.0,  0.62, "Trending, low vol, London     "),
         (0.2,  0.55, "Normal regime, NY session     "),
@@ -190,7 +198,7 @@ def main():
 
     # Almgren-Chriss — correct methods: estimate_impact_cost, optimal_schedule
     ac = AlmgrenChrissExecutor()
-    print(f"\n  Almgren-Chriss optimal execution:")
+    print("\n  Almgren-Chriss optimal execution:")
     for lots in [0.1, 0.5, 1.0, 2.0]:
         cost  = ac.estimate_impact_cost(lots)
         split = ac.should_split(lots)
@@ -202,7 +210,7 @@ def main():
     # Drawdown circuit breaker — correct: new_day(), update(equity, pnl)
     dae = DrawdownAwareExitPolicy()
     dae.new_day()
-    print(f"\n  Drawdown circuit breaker:")
+    print("\n  Drawdown circuit breaker:")
     for eq, pnl in [(9_800,-200), (9_400,-600), (9_000,-1000), (8_800,-1200)]:
         d  = dae.update(eq, pnl)
         dd = d.get("dd", 0.0) * 100
@@ -219,11 +227,11 @@ def main():
         pvar.update_returns("GBPUSD", float(r)*0.8 + np.random.randn()*0.0001)
     v  = pvar.parametric_var({"EURUSD": 0.5, "GBPUSD": 0.5}, equity=10_000)
     v2 = pvar.parametric_var({"EURUSD": 2.0, "GBPUSD": 2.0}, equity=10_000)
-    print(f"\n  Portfolio VaR (99% confidence):")
+    print("\n  Portfolio VaR (99% confidence):")
     print(f"    0.5 lots: {v['var_pct']:.4%} VaR | ${v['var_usd']:.4f} | "
           f"corr={v['correlation_avg']:.2f}")
     print(f"    2.0 lots: {v2['var_pct']:.4%} VaR | ${v2['var_usd']:.4f}")
-    print(f"    Stressed (all corr→0.9): included in CVaR estimate")
+    print("    Stressed (all corr→0.9): included in CVaR estimate")
 
     # ── E. INFRASTRUCTURE & BACKTESTING ──────────────────────────────────────
     hdr("E · INFRASTRUCTURE & BACKTESTING  (+7 tools)", new=True)
@@ -234,18 +242,18 @@ def main():
     mc     = MonteCarloBacktest(n_simulations=1_000)
     res_sh = mc.run(trade_rets, method="shuffle")
     res_bs = mc.run(trade_rets, method="bootstrap")
-    print(f"  Monte Carlo backtest (n=1,000):")
+    print("  Monte Carlo backtest (n=1,000):")
     print(f"    Shuffle    Sharpe 95% CI: {res_sh['sharpe_ci']}  "
           f"{res_sh['pct_positive_sharpe']:.0%} positive runs")
     print(f"    Bootstrap  Sharpe 95% CI: {res_bs['sharpe_ci']}  "
           f"{res_bs['pct_positive_sharpe']:.0%} positive runs")
-    print(f"    Tight CI = robust strategy.  Wide CI = mostly luck.")
+    print("    Tight CI = robust strategy.  Wide CI = mostly luck.")
 
     # Slippage calibrator
     sc = SlippageCalibrator()
     sc.fit_synthetic()
     print(f"\n  Slippage calibrator  α={sc.alpha:.5f}  β={sc.beta:.4f}")
-    print(f"    model: slippage_pips = α × (size/ADV)^β")
+    print("    model: slippage_pips = α × (size/ADV)^β")
     for lots in [0.1, 0.5, 1.0, 2.0]:
         print(f"    {lots:.1f} lot → {sc.predict(lots):.5f} pips")
 
@@ -256,7 +264,7 @@ def main():
         sm.step(int(rng.integers(0,3)), int(rng.integers(0,3)),
                 float(rng.normal(0.0002, 0.001)))
     promote, diag = sm.should_promote()
-    print(f"\n  Shadow mode deployer (500-bar evaluation):")
+    print("\n  Shadow mode deployer (500-bar evaluation):")
     print(f"    Live Sharpe:      {diag['live_sharpe']:.4f}")
     print(f"    Candidate Sharpe: {diag['cand_sharpe']:.4f}  "
           f"(Δ={diag['sharpe_improvement']:+.4f})")
@@ -272,9 +280,10 @@ def main():
     print(f"\n  Walk-forward HTML report → {html_path}")
 
     # ONNX exporter
-    print(f"\n  ONNX exporter:")
+    print("\n  ONNX exporter:")
     if TORCH:
         import torch
+
         from models.architectures import HAELTHybrid
         model = HAELTHybrid(input_size=_width(X), seq_len=60)
         exp   = ONNXExporter(export_dir=str(Path(tempfile.gettempdir()) / "exports"))
@@ -284,7 +293,7 @@ def main():
         except Exception as e:
             print(f"    Ready — install onnx to activate: {type(e).__name__}")
     else:
-        print(f"    pip install torch → export to ONNX → 3-5× faster CPU inference")
+        print("    pip install torch → export to ONNX → 3-5× faster CPU inference")
 
     # Lockbox
     lb = LockboxEvaluator(lockbox_start="2024-06-01", lockbox_end="2024-12-31",
@@ -293,32 +302,32 @@ def main():
                           index=pd.date_range("2023-01-01", periods=len(X),
                                               freq="1min", tz="UTC"))
     train_val, locked = lb.split(df_all)
-    print(f"\n  Lockbox evaluator (2024-H2 sealed test set):")
+    print("\n  Lockbox evaluator (2024-H2 sealed test set):")
     print(f"    Train/val:  {len(train_val):,} samples")
     print(f"    Lockbox:    {len(locked):,} samples  "
           f"← {'evaluated' if lb.is_locked else 'SEALED — break once before going live'}")
 
     # SHAP
-    print(f"\n  SHAP feature tracker:")
-    print(f"    pip install shap → DeepExplainer on 500-bar background set (~30s GPU)")
-    print(f"    Alert: top-5 feature shift > 30% between retrain cycles")
-    print(f"    Logs importance bar chart to W&B 'forex-scaling-model' project")
+    print("\n  SHAP feature tracker:")
+    print("    pip install shap → DeepExplainer on 500-bar background set (~30s GPU)")
+    print("    Alert: top-5 feature shift > 30% between retrain cycles")
+    print("    Logs importance bar chart to W&B 'forex-scaling-model' project")
 
     # Real-Time Monitoring (v5)
     hdr("F · REAL-TIME MONITORING  (+3 tools)", new=True)
     ForexPrometheusExporter(port=8000)
     # prom.start()  # Background server
-    print(f"  Prometheus Exporter: Exposing 15 metrics on :8000/metrics")
-    print(f"  Grafana Dashboard:   'Forex Scaling Model — Live' (13 panels loaded)")
+    print("  Prometheus Exporter: Exposing 15 metrics on :8000/metrics")
+    print("  Grafana Dashboard:   'Forex Scaling Model — Live' (13 panels loaded)")
 
     mon = DemotionMonitor(auto_rollback=False, verbose=False)
     for _ in range(50): mon.on_trade_closed(pnl=-10.0, equity=9900.0)
     alert = mon.on_bar(equity=9500.0)
-    print(f"  Demotion Monitor:    Page-Hinkley drift detector active")
+    print("  Demotion Monitor:    Page-Hinkley drift detector active")
     if alert: print(f"    ⚠️  ACTION TRIGGERED: {alert['triggers'][0]}")
 
     DiscordAlerter(verbose=False)
-    print(f"  Discord Alerter:     Webhook bridge ready (6 alert types)")
+    print("  Discord Alerter:     Webhook bridge ready (6 alert types)")
 
     # ── FINAL SUMMARY ─────────────────────────────────────────────────────────
     py_files = [

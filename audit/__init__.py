@@ -10,34 +10,34 @@ Two modules:
                       for a training run) stored alongside checkpoints.
 """
 
-from .lineage import DataLineage, LineageStep, ModelRegistryRecord, decision_trail, DecisionRecord
+from .lineage import DataLineage, DecisionRecord, LineageStep, ModelRegistryRecord, decision_trail
 from .manifest import (
-    compute_file_hash,
-    compute_dir_hash,
-    hash_inputs,
     capture_env,
-    git_info,
+    compute_dir_hash,
+    compute_file_hash,
     generate_manifest,
-    write_manifest,
-    verify_manifest,
+    git_info,
+    hash_inputs,
     regenerate_manifest,
+    verify_manifest,
     verify_manifests_in_tree,
+    write_manifest,
 )
 
 __all__ = [
     "DataLineage",
+    "DecisionRecord",
     "LineageStep",
     "ModelRegistryRecord",
-    "decision_trail",
-    "DecisionRecord",
-    "compute_file_hash",
-    "compute_dir_hash",
-    "hash_inputs",
     "capture_env",
-    "git_info",
+    "compute_dir_hash",
+    "compute_file_hash",
+    "decision_trail",
     "generate_manifest",
-    "write_manifest",
-    "verify_manifest",
+    "git_info",
+    "hash_inputs",
     "regenerate_manifest",
+    "verify_manifest",
     "verify_manifests_in_tree",
+    "write_manifest",
 ]

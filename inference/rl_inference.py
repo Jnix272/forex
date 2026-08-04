@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -19,7 +19,8 @@ from models.rl_agents import DQNAgent, PPOAgent
 from trading.inference_engines import BaseInferenceEngine
 from trading.live_actions import LiveAction, scaling_action_to_live_action
 
-def _resolve_rl_checkpoint(checkpoint_dir: Path, algo: str = "dqn") -> Optional[Path]:
+
+def _resolve_rl_checkpoint(checkpoint_dir: Path, algo: str = "dqn") -> Path | None:
     algo = str(algo).lower()
     for name in (f"rl_{algo}_best.pt", f"rl_{algo}_last.pt"):
         p = checkpoint_dir / name
@@ -44,15 +45,16 @@ class RLInferenceAgent(BaseInferenceEngine):
         supervised_checkpoint: str,
         model_name: str,
         seq_len: int = 60,
-        n_features: Optional[int] = None,
+        n_features: int | None = None,
         algo: str = "dqn",
-        device: Optional[Any] = None,
+        device: Any | None = None,
         initial_equity: float = 10_000.0,
         max_lots: float = 3.0,
     ):
         import torch
-        from training.train_gpu import _core_model
+
         from inference.pytorch_inference import load_pytorch_model
+        from training.train_gpu import _core_model
 
         self.algo = str(algo).lower()
         self.seq_len = int(seq_len)
@@ -138,7 +140,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         self,
         position_lots: float = 0.0,
         entry_price: float = 0.0,
-        equity: Optional[float] = None,
+        equity: float | None = None,
         holding_bars: int = 0,
         current_price: float = 0.0,
     ) -> None:
@@ -191,9 +193,9 @@ def build_rl_fast_agent(
     checkpoint_dir: Path,
     model_name: str,
     seq_len: int = 60,
-    n_features: Optional[int] = None,
+    n_features: int | None = None,
     algo: str = "dqn",
-) -> Optional[RLInferenceAgent]:
+) -> RLInferenceAgent | None:
     """Return RLInferenceAgent if rl_* checkpoint exists, else None."""
     ckpt_dir = Path(checkpoint_dir)
     rl_path = _resolve_rl_checkpoint(ckpt_dir, algo=algo)

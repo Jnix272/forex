@@ -18,10 +18,9 @@ Emits structured drift events consumable by monitoring.alerting.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -33,7 +32,7 @@ except Exception:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
@@ -66,7 +65,7 @@ def _wasserstein(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a[:n] - b[:n]))) if n else 0.0
 
 
-def _ks(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
+def _ks(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     if _HAS_SCIPY:
         stat, p = _sp_stats.ks_2samp(np.asarray(a), np.asarray(b))
         return float(stat), float(p)
@@ -92,7 +91,7 @@ class FeatureDriftResult:
     wasserstein: float
     drift: bool
 
-    def to_event(self) -> Dict:
+    def to_event(self) -> dict:
         return {
             "type": "feature_drift",
             "feature": self.feature,
@@ -105,14 +104,14 @@ class FeatureDriftResult:
 
 
 def check_feature_distribution_drift(
-    reference: Dict[str, np.ndarray],
-    live: Dict[str, np.ndarray],
+    reference: dict[str, np.ndarray],
+    live: dict[str, np.ndarray],
     psi_threshold: float = 0.2,
     ks_pvalue_threshold: float = 0.05,
     wasserstein_threshold: float = 0.05,
-) -> Dict:
+) -> dict:
     """Compare each feature's reference vs live distribution."""
-    results: List[FeatureDriftResult] = []
+    results: list[FeatureDriftResult] = []
     for name in reference:
         ref = np.asarray(reference[name], dtype=np.float64)
         lv = np.asarray(live.get(name, np.array([])), dtype=np.float64)
@@ -146,7 +145,7 @@ class ShapDriftResult:
     shift: float
     drift: bool
 
-    def to_event(self) -> Dict:
+    def to_event(self) -> dict:
         return {
             "type": "shap_drift",
             "feature": self.feature,
@@ -158,15 +157,15 @@ class ShapDriftResult:
 
 
 def check_shap_attribution_drift(
-    ref_importance: Dict[str, float],
-    live_importance: Dict[str, float],
+    ref_importance: dict[str, float],
+    live_importance: dict[str, float],
     shift_threshold: float = 0.25,
-) -> Dict:
+) -> dict:
     """Compare SHAP importance distributions (absolute mean |SHAP| per feature).
 
     ``ref_importance`` / ``live_importance`` map feature name → importance.
     """
-    results: List[ShapDriftResult] = []
+    results: list[ShapDriftResult] = []
     all_feats = set(ref_importance) | set(live_importance)
     ref_total = sum(abs(v) for v in ref_importance.values()) or 1e-9
     live_total = sum(abs(v) for v in live_importance.values()) or 1e-9
@@ -194,7 +193,7 @@ class ADWIN:
     def __init__(self, delta: float = 0.002, max_bucket_rows: int = 5, min_window: int = 30):
         self.delta = delta
         self.min_window = min_window
-        self._values: List[float] = []
+        self._values: list[float] = []
         self._changed = False
 
     def add(self, value: float) -> bool:
@@ -335,7 +334,7 @@ class StreamingDriftEvent:
     value: float
     ts: str = field(default_factory=_now_iso)
 
-    def to_event(self) -> Dict:
+    def to_event(self) -> dict:
         return {"type": "concept_drift", "detector": self.detector,
                 "state": self.state, "value": round(self.value, 6), "ts": self.ts}
 
@@ -356,10 +355,10 @@ class ConceptDriftTracker:
         self.ddm = DDM() if use_ddm else None
         self.eddm = EDDM() if use_eddm else None
         self.severity_state = severity_state
-        self._events: List[StreamingDriftEvent] = []
+        self._events: list[StreamingDriftEvent] = []
 
-    def add_error(self, error: bool, magnitude: float = 1.0) -> List[StreamingDriftEvent]:
-        events: List[StreamingDriftEvent] = []
+    def add_error(self, error: bool, magnitude: float = 1.0) -> list[StreamingDriftEvent]:
+        events: list[StreamingDriftEvent] = []
         val = magnitude if error else 0.0
         if self.adwin is not None and self.adwin.add(val):
             events.append(StreamingDriftEvent("ADWIN", "drift", self.adwin.get_estimation()))
@@ -382,9 +381,7 @@ class ConceptDriftTracker:
         for det in (self.adwin, self.pht, self.ddm, self.eddm):
             if det is None:
                 continue
-            if isinstance(det, ADWIN):
-                states.append(1.0 if det._changed else 0.0)
-            elif isinstance(det, PageHinkley):
+            if isinstance(det, ADWIN) or isinstance(det, PageHinkley):
                 states.append(1.0 if det._changed else 0.0)
             elif isinstance(det, DDM):
                 states.append(1.0 if det.state == "drift" else 0.0)
@@ -392,7 +389,7 @@ class ConceptDriftTracker:
                 states.append(1.0 if det.state == "drift" else 0.0)
         return float(np.mean(states)) if states else 0.0
 
-    def events(self) -> List[Dict]:
+    def events(self) -> list[dict]:
         return [e.to_event() for e in self._events]
 
 
@@ -406,7 +403,7 @@ def adversarial_validation(
     auc_threshold: float = 0.7,
     n_estimators: int = 100,
     max_depth: int = 3,
-) -> Dict:
+) -> dict:
     """Train a classifier to distinguish train vs live samples. AUC near 0.5 ⇒
     indistinguishable; AUC above threshold ⇒ drift.
 
@@ -435,8 +432,8 @@ def adversarial_validation(
 
     if _HAS_SKLEARN:
         clf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=0)
-        from sklearn.model_selection import cross_val_predict
         from sklearn.metrics import roc_auc_score
+        from sklearn.model_selection import cross_val_predict
         try:
             pred = cross_val_predict(clf, X, y, cv=5, method="predict_proba")[:, 1]
             auc = float(roc_auc_score(y, pred))
@@ -489,22 +486,22 @@ def _histogram_auc(X: np.ndarray, y: np.ndarray, nf: int) -> float:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def run_data_drift_check(
-    reference_features: Dict[str, np.ndarray],
-    live_features: Dict[str, np.ndarray],
-    ref_shap_importance: Optional[Dict[str, float]] = None,
-    live_shap_importance: Optional[Dict[str, float]] = None,
-    train_matrix: Optional[np.ndarray] = None,
-    live_matrix: Optional[np.ndarray] = None,
-    error_stream: Optional[Sequence[bool]] = None,
-    error_magnitudes: Optional[Sequence[float]] = None,
+    reference_features: dict[str, np.ndarray],
+    live_features: dict[str, np.ndarray],
+    ref_shap_importance: dict[str, float] | None = None,
+    live_shap_importance: dict[str, float] | None = None,
+    train_matrix: np.ndarray | None = None,
+    live_matrix: np.ndarray | None = None,
+    error_stream: Sequence[bool] | None = None,
+    error_magnitudes: Sequence[float] | None = None,
     psi_threshold: float = 0.2,
     ks_pvalue_threshold: float = 0.05,
     wasserstein_threshold: float = 0.05,
     shap_shift_threshold: float = 0.25,
     auc_threshold: float = 0.7,
-) -> Dict:
+) -> dict:
     """One-call data-drift audit emitting structured events for alerting."""
-    events: List[Dict] = []
+    events: list[dict] = []
 
     dist = check_feature_distribution_drift(
         reference_features, live_features, psi_threshold, ks_pvalue_threshold, wasserstein_threshold

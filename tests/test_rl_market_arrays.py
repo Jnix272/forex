@@ -45,6 +45,7 @@ def test_rl_env_nonzero_pnl_on_price_moves():
 
 def test_market_bar_arrays_align_with_sequences():
     import pandas as pd
+
     from features.feature_engineering import FeatureEngineer
     from training.train_gpu import _market_bar_arrays_from_feats
 
@@ -70,8 +71,9 @@ def test_market_bar_arrays_align_with_sequences():
 
 
 def test_require_rl_market_cache_raises_without_arrays(tmp_path):
-    from training.train_gpu import _require_rl_market_cache
     import pytest
+
+    from training.train_gpu import _require_rl_market_cache
 
     fake = str(tmp_path / "missing.zarr")
     with pytest.raises(RuntimeError, match="rebuild-cache"):

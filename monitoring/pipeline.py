@@ -12,11 +12,11 @@ Infrastructure + Backtesting upgrades (7 items):
 """
 
 import json
-import time
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -139,7 +139,7 @@ class ONNXExporter:
     def _quantize_int8(self, onnx_path: str) -> str:
         """Quantise ONNX model to INT8 for further 2× speedup."""
         try:
-            from onnxruntime.quantization import quantize_dynamic, QuantType
+            from onnxruntime.quantization import QuantType, quantize_dynamic
             q_path = onnx_path.replace(".onnx", "_int8.onnx")
             quantize_dynamic(onnx_path, q_path, weight_type=QuantType.QInt8)
             size_orig = Path(onnx_path).stat().st_size / 1e6
@@ -225,7 +225,7 @@ class ShadowModeDeployer:
                                                if candidate_signal == 2 else 0))
         self._bar_count += 1
 
-    def should_promote(self) -> Tuple[bool, dict]:
+    def should_promote(self) -> tuple[bool, dict]:
         """
         Determine if the candidate should replace the live model.
         Returns (promote, diagnostics).
@@ -325,7 +325,7 @@ class SHAPFeatureTracker:
 
     def __init__(
         self,
-        feature_names:   List[str],
+        feature_names:   list[str],
         n_background:    int  = 500,
         n_explain:       int  = 200,
         log_dir:         str  = None,
@@ -339,14 +339,14 @@ class SHAPFeatureTracker:
         self.log_dir       = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.alert_thresh  = alert_threshold
-        self._prev_top5:   Optional[List[str]] = None
+        self._prev_top5:   list[str] | None = None
 
     def compute(
         self,
         model:       "nn.Module",
         X:           np.ndarray,    # (N, seq_len, n_features)
         device:      str = "cpu",
-    ) -> Tuple[np.ndarray, pd.DataFrame]:
+    ) -> tuple[np.ndarray, pd.DataFrame]:
         """
         Compute SHAP values. Returns (shap_values, importance_df).
 
@@ -361,7 +361,8 @@ class SHAPFeatureTracker:
             print("[SHAP] torch required for DeepExplainer")
             return np.array([]), pd.DataFrame()
 
-        import torch, shap as shap_lib
+        import shap as shap_lib
+        import torch
         model.eval()
 
         idx_bg    = np.random.choice(len(X), min(self.n_bg, len(X)), replace=False)
@@ -447,7 +448,7 @@ class WalkForwardReporter:
         self,
         equity_curve:     pd.Series,
         trades:           pd.DataFrame,
-        feature_drift:    Optional[dict] = None,
+        feature_drift:    dict | None = None,
         model_name:       str = "model",
     ) -> str:
         """
@@ -638,8 +639,8 @@ class SlippageCalibrator:
     """
 
     def __init__(self):
-        self.alpha: Optional[float] = None
-        self.beta:  Optional[float] = None
+        self.alpha: float | None = None
+        self.beta:  float | None = None
         self._fitted = False
 
     def fit(
@@ -734,7 +735,7 @@ class LockboxEvaluator:
     def split(
         self,
         df: pd.DataFrame,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Split into (train_val, lockbox) without looking at lockbox."""
         mask = (df.index >= self.start) & (df.index <= self.end)
         lockbox   = df[mask]
@@ -761,7 +762,7 @@ class LockboxEvaluator:
                   f"Cannot evaluate again. Previous result: {prev}")
             return prev
 
-        print(f"\n[Lockbox] *** FINAL EVALUATION *** Breaking the seal...")
+        print("\n[Lockbox] *** FINAL EVALUATION *** Breaking the seal...")
         print(f"[Lockbox] Model: {model_name} | "
               f"Samples: {len(X_lockbox):,}")
 
@@ -777,7 +778,7 @@ class LockboxEvaluator:
 
         result = {
             "model":        model_name,
-            "date":         datetime.now(timezone.utc).isoformat(),
+            "date":         datetime.now(UTC).isoformat(),
             "lockbox_start": str(self.start.date()),
             "lockbox_end":   str(self.end.date()),
             "n_samples":    len(X_lockbox),

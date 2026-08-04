@@ -1,8 +1,9 @@
 import os
 import sys
-import yaml
-import polars as pl
 from pathlib import Path
+
+import polars as pl
+import yaml
 
 # Add project root to sys.path
 _ROOT = Path(__file__).resolve().parent.parent
@@ -11,17 +12,18 @@ if str(_ROOT) not in sys.path:
 
 from features.feature_engineering_pl import FeatureEngineer
 
+
 def load_config(config_path="config/run_normal.yaml"):
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 def run_pipeline():
     config = load_config()
     pairs = config["data"]["pairs"]
-    
+
     macro_path = config["news"].get("economic_calendar_file")
     news_path = config["news"].get("historical_news_file")
-    
+
     print("Loading external data...")
     # Load COT (we just pass the path to FeatureEngineer or load it)
     cot_path = "data/raw/cot/cot_financials_cleaned.parquet"
@@ -29,7 +31,7 @@ def run_pipeline():
         cot_df = pl.read_parquet(cot_path)
     else:
         cot_df = None
-        
+
     if macro_path and os.path.exists(macro_path):
         macro_df = pl.read_csv(macro_path, ignore_errors=True, try_parse_dates=True)
         if "timestamp_utc" in macro_df.columns:
@@ -43,7 +45,7 @@ def run_pipeline():
                 print("Failed to convert macro timestamp:", e)
     else:
         macro_df = None
-        
+
     if news_path and os.path.exists(news_path):
         news_path_obj = Path(news_path)
         if news_path_obj.suffix.lower() == ".parquet":
@@ -66,28 +68,28 @@ def run_pipeline():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for pair in pairs:
-        print(f"\n=========================================")
+        print("\n=========================================")
         print(f"Processing {pair}...")
-        print(f"=========================================")
-        
+        print("=========================================")
+
         # Load raw tick data using glob
         glob_path = f"data/raw/dukascopy/{pair}/*/*/*.parquet"
         print(f"Scanning tick data from {glob_path}...")
-        
+
         try:
             # We use scan_parquet to lazily load all tick data across the years
             ticks = pl.scan_parquet(glob_path)
-            
+
             # Fix schema from raw Dukascopy Pandas Parquets
             ticks = ticks.rename({
                 "__index_level_0__": "timestamp_utc",
                 "bid": "bid_price",
                 "ask": "ask_price"
             })
-            
+
             # Resample ticks into 1-minute OHLCV bars...
             print("Resampling ticks into 1-minute OHLCV bars...")
-            
+
             # Ensure timestamp is datetime and sorted
             # If the index was an integer, we might need to cast. Let's assume it's already datetime or parseable.
             ticks = ticks.sort("timestamp_utc")
@@ -103,23 +105,23 @@ def run_pipeline():
                 pl.col("ask_price").last().alias("ask_close"),
                 pl.col("bid_price").last().alias("bid_close"),
             ]).collect(engine="streaming")
-            
+
             # Fill forward any missing values if liquidity was 0 for a minute
             bars = bars.fill_null(strategy="forward")
-            
+
             print(f"Generated {len(bars):,} 1-minute bars for {pair}.")
-            
+
             # Map datasets to match FeatureEngineer.build() expectations
-            
+
             # Cross asset dict
             cross_asset_dict = {}
             if cot_df is not None:
                 cross_asset_dict["cot_net_hf"] = cot_df
-                
+
             # For macro/eco calendar, FeatureEngineer expects eco_act and eco_fc, but since macro_df has both actual and forecast, we just pass it to both to let it merge.
             eco_act = macro_df
             eco_fc = macro_df
-            
+
             # For news, FeatureEngineer expects `sentiment` DataFrame with 'sentiment' column
             sentiment_df = None
             if news_df is not None:
@@ -137,7 +139,7 @@ def run_pipeline():
             # Run Feature Engineering
             print("Running Feature Engineering Pipeline...")
             engineer = FeatureEngineer()
-            
+
             processed = engineer.build_chunked(
                 bars=bars,
                 cross_asset=cross_asset_dict,
@@ -146,12 +148,12 @@ def run_pipeline():
                 eco_fc=eco_fc,
                 chunk_size=50_000
             )
-            
+
             # Save the result
             out_file = out_dir / f"{pair}_features.parquet"
             processed.write_parquet(out_file)
             print(f"Successfully saved feature dataset to {out_file}")
-            
+
         except Exception as e:
             print(f"Error processing {pair}: {e}")
 

@@ -38,10 +38,8 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
-
 
 _DEFAULT_LOG_DIR = Path("logs/hard_examples")
 _MAX_OVERSAMPLE_RATIO = 2.0   # hard examples can at most double their share
@@ -74,13 +72,13 @@ class HardExampleMiner:
         self.max_ratio  = max_ratio
 
         # populated by collect()
-        self.hard_indices:    Optional[np.ndarray] = None
+        self.hard_indices:    np.ndarray | None = None
         self.hard_reasons:    list[str]            = []
         self.n_val:           int                  = 0
         self.n_hard:          int                  = 0
         self.metadata:        dict                 = {}
         # regime-aware tracking
-        self.regime_distribution: Optional[dict] = None
+        self.regime_distribution: dict | None = None
 
     # ── collection ───────────────────────────────────────────────────────────
 
@@ -89,13 +87,13 @@ class HardExampleMiner:
         val_indices: np.ndarray,
         predictions: np.ndarray,
         labels:      np.ndarray,
-        rewards:     Optional[np.ndarray] = None,
-        losses:      Optional[np.ndarray] = None,
-        regime_labels: Optional[np.ndarray] = None,
+        rewards:     np.ndarray | None = None,
+        losses:      np.ndarray | None = None,
+        regime_labels: np.ndarray | None = None,
         confidence_threshold: float = _CONFIDENCE_THRESHOLD,
-        boundary_threshold: Optional[float] = None,
+        boundary_threshold: float | None = None,
         loss_weight: float = 0.3,
-    ) -> "HardExampleMiner":
+    ) -> HardExampleMiner:
         """Identify hard examples from a validation pass.
 
         Parameters
@@ -296,7 +294,7 @@ class HardExampleMiner:
 
     # ── persistence ──────────────────────────────────────────────────────────
 
-    def save(self) -> Optional[Path]:
+    def save(self) -> Path | None:
         """Atomically write hard examples to .npz."""
         if self.hard_indices is None or self.n_hard == 0:
             print(f"[HardMiner] {self.model_name}: nothing to save.")
@@ -331,7 +329,7 @@ class HardExampleMiner:
                     pass
 
     @classmethod
-    def load(cls, path: str | Path) -> Optional[np.ndarray]:
+    def load(cls, path: str | Path) -> np.ndarray | None:
         """Load hard example indices from a saved .npz file."""
         p = Path(path)
         if not p.exists():
@@ -390,7 +388,7 @@ class HardExampleMiner:
     def find_latest(
         log_dir:    str | Path,
         model_name: str,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Return the most-recently-modified hard-example file for a model."""
         log_dir = Path(log_dir)
         if not log_dir.exists():

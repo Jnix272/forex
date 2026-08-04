@@ -16,13 +16,12 @@ embargo (excluding samples after test set).
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
-import pandas as pd
 from sklearn.model_selection import BaseCrossValidator
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. Base Classes & Utilities
@@ -38,8 +37,8 @@ class CVSplit:
     train_end: int
     val_start: int
     val_end: int
-    regime: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    regime: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _purge_indices(
@@ -95,12 +94,12 @@ class WalkForwardCV:
         embargo: Samples to embargo after validation
         expanding: If True, expanding window; if False, rolling window
     """
-    
+
     def __init__(
         self,
         n_splits: int = 5,
-        initial_train_size: Union[int, float] = 0.6,
-        step_size: Union[int, float] = None,
+        initial_train_size: int | float = 0.6,
+        step_size: int | float = None,
         purge: int = 0,
         embargo: int = 0,
         expanding: bool = True,
@@ -115,19 +114,19 @@ class WalkForwardCV:
         self.expanding = expanding
         self.min_train_size = min_train_size
         self.min_val_size = min_val_size
-    
-    def _resolve_size(self, size: Union[int, float], n: int) -> int:
+
+    def _resolve_size(self, size: int | float, n: int) -> int:
         """Resolve size as int or fraction of n."""
         if isinstance(size, float):
             return int(n * size)
         return int(size)
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate train/val splits."""
         n = len(X)
         if n <= 0:
@@ -170,11 +169,11 @@ class WalkForwardCV:
                 fold += 1
 
             train_end = val_end
-        
+
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return self.n_splits
-    
-    def get_splits_with_metadata(self, X, y=None) -> List[CVSplit]:
+
+    def get_splits_with_metadata(self, X, y=None) -> list[CVSplit]:
         """Get splits with metadata."""
         splits = []
         for i, (train_idx, val_idx) in enumerate(self.split(X)):
@@ -209,7 +208,7 @@ class CombCV:
         purge: Samples to purge between train and test
         embargo: Samples to embargo after test
     """
-    
+
     def __init__(
         self,
         n_groups: int = 10,
@@ -221,66 +220,70 @@ class CombCV:
         self.test_groups = test_groups
         self.purge = purge
         self.embargo = embargo
-        
+
         if test_groups >= n_groups:
             raise ValueError("test_groups must be < n_groups")
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate combinatorial purged splits."""
         n = len(X)
         group_size = n // self.n_groups
-        
+
         # Create group boundaries
         boundaries = np.arange(0, n + 1, group_size)
         if boundaries[-1] < n:
             boundaries = np.append(boundaries, n)
-        
+
         # Generate all combinations of test groups
-        from itertools import combinations
         group_indices = list(range(len(boundaries) - 1))
-        
+
         for test_group_combo in combinations(group_indices, self.test_groups):
             test_groups = set(test_group_combo)
-            
+
             # Build train and test indices
             train_idx_list = []
             test_idx_list = []
-            
+
             for i in range(len(boundaries) - 1):
                 start = boundaries[i]
                 end = boundaries[i + 1]
                 indices = np.arange(start, min(end, len(X)))
-                
+
                 if i in test_groups:
                     test_idx_list.append(indices)
                 else:
                     train_idx_list.append(indices)
-            
+
             if not train_idx_list or not test_idx_list:
                 continue
-            
+
             train_idx = np.concatenate(train_idx_list)
             test_idx = np.concatenate(test_idx_list)
-            
-            # Apply purge
-            if self.purge > 0:
-                # Find boundaries between train and test
+
+            # Purge + embargo: drop train samples near any test block so labels
+            # overlapping the test window cannot leak (AUD-001 / López de Prado).
+            if self.purge > 0 or self.embargo > 0:
+                keep = np.ones(len(train_idx), dtype=bool)
                 for test_block in test_idx_list:
-                    if len(train_idx_list) > 0:
-                        # Purge around test block
-                        pass  # Simplified - full implementation would track boundaries
-            
-            # Apply embargo
-            if self.embargo > 0:
-                pass  # Simplified
-            
+                    if len(test_block) == 0:
+                        continue
+                    t0 = int(np.min(test_block))
+                    t1 = int(np.max(test_block))
+                    ban_lo = t0 - int(self.purge)
+                    ban_hi = t1 + int(self.purge) + int(self.embargo)
+                    keep &= ~((train_idx >= ban_lo) & (train_idx <= ban_hi))
+                train_idx = train_idx[keep]
+
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                continue
+
             yield train_idx, test_idx
-    
+
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         from math import comb
         return comb(self.n_groups, self.test_groups)
@@ -304,12 +307,12 @@ class OnlineCV:
         purge: Purge distance
         expanding: If True, expanding window; else rolling
     """
-    
+
     def __init__(
         self,
-        initial_train: Union[int, float],
-        window: Union[int, float],
-        step: Union[int, float] = None,
+        initial_train: int | float,
+        window: int | float,
+        step: int | float = None,
         purge: int = 0,
         expanding: bool = True,
     ):
@@ -318,18 +321,18 @@ class OnlineCV:
         self.step = step
         self.purge = purge
         self.expanding = expanding
-    
-    def _resolve(self, size: Union[int, float], n: int) -> int:
+
+    def _resolve(self, size: int | float, n: int) -> int:
         if isinstance(size, float):
             return int(n * size)
         return int(size)
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         n = len(X)
         if n <= 0:
             return
@@ -371,7 +374,7 @@ class RegimeCV:
         purge: Purge distance
         shuffle: Whether to shuffle within regimes
     """
-    
+
     def __init__(
         self,
         n_splits: int = 5,
@@ -383,33 +386,33 @@ class RegimeCV:
         self.regime_labels = regime_labels
         self.purge = purge
         self.shuffle = shuffle
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         if self.regime_labels is None:
             raise ValueError("regime_labels required for RegimeCV")
-        
+
         n = len(X)
         if len(self.regime_labels) != n:
             raise ValueError("regime_labels length must match X")
-        
+
         unique_regimes = np.unique(self.regime_labels)
         n_regimes = len(unique_regimes)
-        
+
         # Build indices per regime
         regime_indices = {}
         for regime in unique_regimes:
             regime_indices[regime] = np.where(self.regime_labels == regime)[0]
-        
+
         if self.shuffle:
             rng = np.random.default_rng(42)
             for regime in unique_regimes:
                 rng.shuffle(regime_indices[regime])
-        
+
         # Calculate samples per fold per regime
         fold_sizes = {}
         for regime in unique_regimes:
@@ -418,12 +421,12 @@ class RegimeCV:
             remainder = n_regime % self.n_splits
             for i in range(remainder):
                 fold_sizes[regime][i] += 1
-        
+
         # Build folds
         for fold in range(self.n_splits):
             train_idx_list = []
             val_idx_list = []
-            
+
             for regime in unique_regimes:
                 indices = regime_indices[regime]
                 sizes = fold_sizes[regime]
@@ -437,7 +440,7 @@ class RegimeCV:
                 train_before = indices[:val_start]
                 train_after = indices[val_end:]
 
-                # Apply purge on the train segments adjacent to the val fold
+                # Intra-regime purge (fold adjacency within the regime's index list)
                 if self.purge > 0:
                     train_before = _purge_indices(train_before, purge_after=self.purge)
                     train_after = _purge_indices(train_after, purge_before=self.purge)
@@ -448,9 +451,25 @@ class RegimeCV:
             train_idx = np.concatenate(train_idx_list)
             val_idx = np.concatenate(val_idx_list)
 
+            # Global temporal purge: drop train samples within ``purge`` of any
+            # val index so cross-regime adjacency cannot leak across folds.
+            if self.purge > 0 and len(train_idx) > 0 and len(val_idx) > 0:
+                val_sorted = np.sort(val_idx)
+                keep = np.ones(len(train_idx), dtype=bool)
+                for i, t in enumerate(train_idx):
+                    j = int(np.searchsorted(val_sorted, t))
+                    dist = n
+                    if j < len(val_sorted):
+                        dist = min(dist, int(val_sorted[j] - t))
+                    if j > 0:
+                        dist = min(dist, int(t - val_sorted[j - 1]))
+                    if dist <= self.purge:
+                        keep[i] = False
+                train_idx = train_idx[keep]
+
             if len(train_idx) > 0 and len(val_idx) > 0:
                 yield train_idx, val_idx
-    
+
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return self.n_splits
 
@@ -471,13 +490,13 @@ class NestedCV:
         inner_cv: Inner CV splitter
         param_grid: Parameter grid to search
     """
-    
+
     def __init__(
         self,
         outer_cv: BaseCrossValidator,
         inner_cv: BaseCrossValidator,
         estimator_factory: Callable,
-        param_grid: Dict[str, List[Any]],
+        param_grid: dict[str, list[Any]],
         scoring: Callable = None,
     ):
         self.outer_cv = outer_cv
@@ -485,48 +504,47 @@ class NestedCV:
         self.estimator_factory = estimator_factory
         self.param_grid = param_grid
         self.scoring = scoring or (lambda y_true, y_pred: np.mean(y_true == y_pred))
-    
-    def fit(self, X, y) -> Dict[str, Any]:
+
+    def fit(self, X, y) -> dict[str, Any]:
         """Run nested CV and return best parameters and scores."""
-        from sklearn.model_selection import ParameterGrid
-        
+
         outer_scores = []
         best_params_per_fold = []
-        
+
         for fold, (train_idx, test_idx) in enumerate(self.outer_cv.split(X, y)):
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
-            
+
             # Inner CV for hyperparameter selection
             best_score = -np.inf
             best_params = None
-            
+
             for params in ParameterGrid(self.param_grid):
                 inner_scores = []
                 for inner_fold, (inner_train, inner_val) in enumerate(self.inner_cv.split(X_train, y_train)):
                     X_inner_train, X_inner_val = X_train[inner_train], X_train[inner_val]
                     y_inner_train, y_inner_val = y_train[inner_train], y_train[inner_val]
-                    
+
                     estimator = self.estimator_factory(**params)
                     estimator.fit(X_inner_train, y_inner_train)
                     y_pred = estimator.predict(X_inner_val)
                     score = self.scoring(y_inner_val, y_pred)
                     inner_scores.append(score)
-                
+
                 mean_score = np.mean(inner_scores)
                 if mean_score > best_score:
                     best_score = mean_score
                     best_params = params
-            
+
             # Evaluate best params on outer test fold
             best_estimator = self.estimator_factory(**best_params)
             best_estimator.fit(X_train, y_train)
             y_pred = best_estimator.predict(X_test)
             test_score = self.scoring(y_test, y_pred)
-            
+
             outer_scores.append(test_score)
             best_params_per_fold.append(best_params)
-        
+
         return {
             "outer_scores": outer_scores,
             "mean_score": np.mean(outer_scores),
@@ -551,7 +569,7 @@ class PurgedKFold:
         purge: Samples to purge between folds
         embargo: Samples to embargo after test fold
     """
-    
+
     def __init__(
         self,
         n_splits: int = 5,
@@ -561,13 +579,13 @@ class PurgedKFold:
         self.n_splits = n_splits
         self.purge = purge
         self.embargo = embargo
-    
+
     def split(
         self,
         X: np.ndarray,
         y: np.ndarray = None,
         groups: np.ndarray = None,
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         n = len(X)
         indices = np.arange(n)
         fold_size = n // self.n_splits
@@ -591,7 +609,7 @@ class PurgedKFold:
 
             if len(train_idx) > 0 and len(val_idx) > 0:
                 yield train_idx, val_idx
-    
+
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return self.n_splits
 
@@ -606,18 +624,18 @@ def evaluate_cv(
     y: np.ndarray,
     cv: BaseCrossValidator,
     scoring: Callable = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Evaluate estimator with CV, return scores and stats."""
     if scoring is None:
         scoring = lambda y_true, y_pred: np.mean(y_true == y_pred)
-    
+
     scores = []
     for train_idx, val_idx in cv.split(X, y):
         estimator.fit(X[train_idx], y[train_idx])
         y_pred = estimator.predict(X[val_idx])
         score = scoring(y[val_idx], estimator.predict(X[val_idx]))
         scores.append(score)
-    
+
     return {
         "scores": scores,
         "mean": np.mean(scores),
@@ -632,14 +650,14 @@ def cv_diagnostics(
     cv: BaseCrossValidator,
     X: np.ndarray,
     y: np.ndarray = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Diagnose CV split properties."""
     splits = list(cv.split(X))
     n_splits = len(splits)
-    
+
     train_sizes = [len(s[0]) for s in splits]
     val_sizes = [len(s[1]) for s in splits]
-    
+
     # Check for overlap
     overlap_count = 0
     for i, (train_i, val_i) in enumerate(splits):
@@ -649,7 +667,7 @@ def cv_diagnostics(
                 val_overlap = len(set(splits[i][1]) & set(splits[j][1]))
                 if train_overlap > 0 or val_overlap > 0:
                     overlap_count += 1
-    
+
     return {
         "n_splits": n_splits,
         "train_size_mean": np.mean(train_sizes),
@@ -668,13 +686,13 @@ def plot_cv_indices(cv, X, y=None, ax=None):
     except ImportError:
         warnings.warn("matplotlib required for plot_cv_indices")
         return
-    
+
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 6))
-    
+
     splits = list(cv.split(X))
     n_splits = len(splits)
-    
+
     for i, (train_idx, val_idx) in enumerate(splits):
         color_train = 'steelblue'
         color_val = 'coral'
@@ -682,13 +700,13 @@ def plot_cv_indices(cv, X, y=None, ax=None):
         if len(train_idx) > 0:
             ax.barh(i, len(X), left=0, height=0.8, color=color_train, alpha=0.5)
             for idx in np.where(np.isin(np.arange(len(X)), train_idx))[0]:
-                ax.axvspan(idx - 0.5, idx + 0.5, ymin=i/len(splits), ymax=(i+1)/len(splits), 
+                ax.axvspan(idx - 0.5, idx + 0.5, ymin=i/len(splits), ymax=(i+1)/len(splits),
                           color=color_train, alpha=0.3)
         if len(val_idx) > 0:
             for idx in val_idx:
                 ax.axvspan(idx - 0.5, idx + 0.5, ymin=i/len(splits), ymax=(i+1)/len(splits),
                           color=color_val, alpha=0.5)
-    
+
     ax.set_yticks(range(len(splits)))
     ax.set_yticklabels([f'Fold {i+1}' for i in range(len(splits))])
     ax.set_xlabel('Sample Index')
@@ -709,7 +727,7 @@ def create_cv(
     if cv_type == "walk_forward":
         return WalkForwardCV(n_splits=n_splits, **kwargs)
     elif cv_type == "comb":
-        return CombCV(n_groups=kwargs.get("n_groups", 10), 
+        return CombCV(n_groups=kwargs.get("n_groups", 10),
                       test_groups=kwargs.get("test_groups", 2),
                       purge=kwargs.get("purge", 0),
                       embargo=kwargs.get("embargo", 0))
@@ -733,22 +751,23 @@ def create_cv(
 
 from dataclasses import dataclass, field
 from itertools import combinations
+
 from sklearn.model_selection import ParameterGrid
 
 __all__ = [
     "CVSplit",
-    "WalkForwardCV",
     "CombCV",
-    "OnlineCV",
-    "RegimeCV",
     "NestedCV",
+    "OnlineCV",
     "PurgedKFold",
-    "evaluate_cv",
-    "cv_diagnostics",
-    "plot_cv_indices",
-    "create_cv",
-    "_purge_indices",
+    "RegimeCV",
+    "WalkForwardCV",
     "_embargo_indices",
+    "_purge_indices",
+    "create_cv",
+    "cv_diagnostics",
+    "evaluate_cv",
+    "plot_cv_indices",
 ]
 
 
@@ -756,25 +775,25 @@ if __name__ == "__main__":
     # Quick self-test
     X = np.random.randn(1000, 10)
     y = np.random.randint(0, 2, 1000)
-    
+
     # Walk forward
     cv = WalkForwardCV(n_splits=5, purge=5, embargo=5)
     splits = list(cv.split(X))
     print(f"WalkForwardCV: {len(splits)} splits")
-    
+
     # Purged K-Fold
     cv = PurgedKFold(n_splits=5, purge=10, embargo=5)
     splits = list(cv.split(np.zeros(1000)))
     print(f"PurgedKFold: {len(splits)} splits")
-    
+
     # Regime CV
     regimes = np.random.choice([0, 1, 2], 1000)
     cv = RegimeCV(n_splits=3, regime_labels=regimes)
     splits = list(cv.split(np.zeros(1000)))
     print(f"RegimeCV: {len(splits)} splits")
-    
+
     # Diagnostics
     diag = cv_diagnostics(cv)
     print(f"Diagnostics: {diag}")
-    
+
     print("All validation tests passed!")

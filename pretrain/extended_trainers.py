@@ -10,7 +10,6 @@ pretrain/extended_trainers.py — Additional self-supervised pretrain objectives
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -163,7 +162,7 @@ if TORCH:
             X: np.ndarray,
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent: bool = False,
         ) -> dict:
             if checkpoint_path is None:
@@ -247,7 +246,7 @@ if TORCH:
             lr: float = 1e-4,
             device: str = "cpu",
             seed=None,
-            aug: Optional[TimeSeriesAugmenter] = None,
+            aug: TimeSeriesAugmenter | None = None,
         ):
             import copy
 
@@ -364,7 +363,7 @@ if TORCH:
             X: np.ndarray,
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent: bool = False,
         ) -> dict:
             if checkpoint_path is None:
@@ -505,7 +504,7 @@ if TORCH:
             X: np.ndarray,
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent: bool = False,
         ) -> dict:
             if checkpoint_path is None:
@@ -628,7 +627,7 @@ if TORCH:
             X: np.ndarray,
             epochs: int = 50,
             batch_size: int = 256,
-            checkpoint_path: Optional[str] = None,
+            checkpoint_path: str | None = None,
             silent: bool = False,
         ) -> dict:
             if checkpoint_path is None:

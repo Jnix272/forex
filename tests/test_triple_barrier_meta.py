@@ -8,14 +8,12 @@ import pandas as pd
 import pytest
 
 from labeling.triple_barrier_meta import (
+    BarrierSearchConfig,
+    BarrierSearchSpace,
     MetaLabelConfig,
     MetaLabeler,
-    BarrierSearchSpace,
-    BarrierSearchConfig,
-    BayesianBarrierOptimizer,
     evaluate_barrier_params,
 )
-
 
 # ---------------------------------------------------------------------------
 # Meta-Labeling

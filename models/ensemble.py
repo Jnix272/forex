@@ -10,11 +10,12 @@ Model upgrades:
 
 from __future__ import annotations
 
-import numpy as np
 import json
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
 import warnings
+from pathlib import Path
+
+import numpy as np
+
 warnings.filterwarnings("ignore")
 
 try:
@@ -27,7 +28,7 @@ except ImportError:
 
 if TORCH:
 
-    def _base_pred_to_batch_vector(raw: object) -> "torch.Tensor":
+    def _base_pred_to_batch_vector(raw: object) -> torch.Tensor:
         """
         Base checkpoints are often MultiTaskWrapper, whose forward returns
         (direction_logits, return_hat, confidence). The meta-learner stacks
@@ -43,7 +44,7 @@ if TORCH:
                 and isinstance(raw[1], torch.Tensor)
             )
             t = raw[1] if multitask else first
-            
+
             # Recursive unwrap for nested tuples (e.g. Ensemble inside Ensemble or custom wrappers)
             if isinstance(t, (tuple, list)):
                 return _base_pred_to_batch_vector(t)
@@ -84,11 +85,11 @@ if TORCH:
 
         def __init__(
             self,
-            base_models: List[nn.Module],
+            base_models: list[nn.Module],
             context_dim: int = 32,
             hidden:      int = 64,
-            base_names:  Optional[List[str]] = None,
-            base_seq_lens: Optional[List[int]] = None,
+            base_names:  list[str] | None = None,
+            base_seq_lens: list[int] | None = None,
         ):
             super().__init__()
             self.bases    = nn.ModuleList(base_models)
@@ -120,7 +121,7 @@ if TORCH:
                 return x[:, -seq_len:, :]
             return x
 
-        def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """
             x: (B, seq_len, n_features)
             Returns: (prediction, weights) where weights.shape = (B, n_models)
@@ -139,7 +140,7 @@ if TORCH:
             output  = (weights * preds).sum(dim=1)               # (B,)
             return output, weights
 
-        def model_weights_summary(self, x: torch.Tensor) -> Dict[str, float]:
+        def model_weights_summary(self, x: torch.Tensor) -> dict[str, float]:
             """Return avg weight per model — useful for monitoring which models dominate."""
             _, w = self.forward(x)
             w_avg = w.mean(0).detach().cpu().numpy()
@@ -171,7 +172,7 @@ if TORCH:
             mask = torch.triu(torch.ones(n, n, device=preds.device), diagonal=1).bool()
             return corr[mask].mean()
 
-        def predict_with_disagreement(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        def predict_with_disagreement(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """
             Returns (weighted_output, disagreement_score).
             disagreement_score is calculated as the weighted standard deviation of the base predictions.
@@ -188,11 +189,11 @@ if TORCH:
             meta_in = torch.cat([context, preds], dim=1)
             weights = torch.softmax(self.meta(meta_in), dim=1)  # (B, n_models)
             output = (weights * preds).sum(dim=1)               # (B,)
-            
+
             # Weighted variance: sum(w_i * (x_i - mean)^2)
             variance = (weights * (preds - output.unsqueeze(1))**2).sum(dim=1)
             disagreement_score = torch.sqrt(variance + 1e-8)
-            
+
             return output, disagreement_score
 
 
@@ -206,13 +207,13 @@ if TORCH:
         using a simple uniform average (or median) to dramatically reduce variance.
         """
 
-        def __init__(self, fold_models: List[nn.Module], use_median: bool = False):
+        def __init__(self, fold_models: list[nn.Module], use_median: bool = False):
             super().__init__()
             self.bases = nn.ModuleList(fold_models)
             self.n_models = len(fold_models)
             self.use_median = use_median
 
-        def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """
             x: (B, seq_len, n_features)
             Returns: (prediction, standard_deviation)
@@ -231,10 +232,10 @@ if TORCH:
                 output, _ = preds.median(dim=1)
             else:
                 output = preds.mean(dim=1)
-                
+
             # Disagreement/Uncertainty (Standard Deviation across folds)
             uncertainty = preds.std(dim=1)
-            
+
             return output, uncertainty
 
 
@@ -245,7 +246,7 @@ if TORCH:
         def __init__(self, low_threshold: float = 0.5, high_threshold: float = 1.0):
             self.low_threshold = low_threshold
             self.high_threshold = high_threshold
-            
+
         def compute_size_multiplier(self, disagreement_score: float) -> float:
             if disagreement_score < self.low_threshold:
                 return 1.0
@@ -258,16 +259,16 @@ if TORCH:
     # ── Meta-learner training utility ────────────────────────────────────────
 
     def train_meta_learner(
-        meta:             "EnsembleMetaLearner",
-        loader:           "torch.utils.data.DataLoader",
+        meta:             EnsembleMetaLearner,
+        loader:           torch.utils.data.DataLoader,
         epochs:           int   = 10,
         lr:               float = 1e-3,
         diversity_weight: float = 0.1,
         device:           str   = "cpu",
         verbose:          bool  = True,
-        checkpoint_path:  Optional[str] = None,
-        checkpoint_meta:  Optional[Dict[str, object]] = None,
-    ) -> List[float]:
+        checkpoint_path:  str | None = None,
+        checkpoint_meta:  dict[str, object] | None = None,
+    ) -> list[float]:
         """
         Train only the EnsembleMetaLearner's context encoder and meta-network.
         Base model weights are frozen — only the weighting mechanism is learned.
@@ -275,11 +276,10 @@ if TORCH:
         Objective:
           L = MSE(weighted_ensemble_output, target)
             - diversity_weight × H(weights)        # maximise weight entropy
-            + diversity_weight × corr(base_preds)  # penalise correlated bases
 
         The entropy term prevents the meta-learner from collapsing to a single
-        model (degenerate 'ensemble of one'). The correlation term rewards the
-        meta-learner for up-weighting models that disagree with each other.
+        model (degenerate 'ensemble of one'). Base-model correlation is
+        informational only (bases are frozen; no gradient through them).
 
         When checkpoint_path is provided, writes a resumable "latest" checkpoint
         after every epoch and updates checkpoint_path whenever loss improves.
@@ -315,7 +315,7 @@ if TORCH:
         )
         opt       = torch.optim.Adam(trainable, lr=lr)
         criterion = nn.MSELoss()
-        history: List[float] = []
+        history: list[float] = []
 
         for ep in range(epochs):
             ep_loss = 0.0
@@ -350,12 +350,8 @@ if TORCH:
                 task_loss = criterion(output, yb)
 
                 # Diversity: maximise weight entropy (avoid collapse to one model)
-                # This provides gradient through `weights` which depend on meta-learner params
+                # Gradients flow through `weights` → meta-learner params (TM-004).
                 entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
-
-                # Correlation penalty as a constant regularizer (informational, no gradient)
-                with torch.no_grad():
-                    meta.diversity_loss(base_preds)
 
                 loss = task_loss - diversity_weight * entropy
                 loss.backward()
@@ -415,7 +411,7 @@ if TORCH:
         @torch.no_grad()
         def predict_with_uncertainty(
             self, x: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             """
             Returns (mean_pred, std_pred, confidence_score).
             confidence_score = 1 - normalized_std ∈ [0, 1]
@@ -441,14 +437,14 @@ if TORCH:
         More reliable than MC Dropout but requires N × training time.
         """
 
-        def __init__(self, models: List[nn.Module], device: str = "cpu"):
+        def __init__(self, models: list[nn.Module], device: str = "cpu"):
             self.models = models
             self.device = torch.device(device)
 
         @torch.no_grad()
         def predict(
             self, x: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             preds = torch.stack(
                 [_base_pred_to_batch_vector(m(x.to(self.device))) for m in self.models], dim=0
             )
@@ -461,7 +457,7 @@ if TORCH:
             self,
             x:         torch.Tensor,
             threshold: float = 0.5,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             """Return (signal, mask) where mask=1 for high-confidence predictions."""
             mean, _, conf = self.predict(x)
             mask = (conf > threshold).float()
@@ -492,7 +488,7 @@ if TORCH:
             nhead:         int = 4,
             n_tf_layers:   int = 2,
             dropout:       float = 0.1,
-            timeframes:    List[int] = [1, 5, 15],  # in minutes
+            timeframes:    list[int] = [1, 5, 15],  # in minutes
         ):
             super().__init__()
             self.tfs = timeframes
@@ -520,7 +516,7 @@ if TORCH:
                 nn.Linear(d_model, 1),
             )
 
-        def forward(self, x_list: List[torch.Tensor]) -> torch.Tensor:
+        def forward(self, x_list: list[torch.Tensor]) -> torch.Tensor:
             """
             x_list: list of (B, T_i, input_size) tensors, one per timeframe.
             All T_i can differ (15-min bars will have fewer rows).
@@ -656,7 +652,7 @@ if TORCH:
             self.head   = nn.Linear(hidden * n_nodes, 1)
             self.drop   = nn.Dropout(dropout)
             self.causal = GrangerCausalityGraph()
-            self._adj:  Optional[torch.Tensor] = None
+            self._adj:  torch.Tensor | None = None
             self._adj_update_count = 0
 
         def update_adjacency(
@@ -674,7 +670,7 @@ if TORCH:
         def forward(
             self,
             x:   torch.Tensor,   # (B, n_nodes, node_features)
-            adj: Optional[torch.Tensor] = None,
+            adj: torch.Tensor | None = None,
         ) -> torch.Tensor:
             adj = adj if adj is not None else self._adj
             h = self.embed(x)

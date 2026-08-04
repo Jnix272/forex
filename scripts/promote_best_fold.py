@@ -14,11 +14,12 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+
 def promote_best_fold(model_name: str, checkpoint_dir: str, metric: str = "sharpe"):
     ckpt_dir = Path(checkpoint_dir)
     use_sharpe = metric == "sharpe"
-    best_fold: Optional[int] = None
-    best_adjusted_score: Optional[float] = None
+    best_fold: int | None = None
+    best_adjusted_score: float | None = None
     folds_found = []
 
     print(f"[Promote] Scanning {ckpt_dir} for {model_name} folds with stability penalty...")
@@ -29,31 +30,31 @@ def promote_best_fold(model_name: str, checkpoint_dir: str, metric: str = "sharp
             # Extract fold index from filename
             fold_str = cfg_path.name.replace(f"{model_name}_fold", "").replace("_config.json", "")
             fi = int(fold_str)
-            
-            with open(cfg_path, "r", encoding="utf-8") as f:
+
+            with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            
+
             if use_sharpe:
                 raw_score = cfg.get("best_val_sharpe_proxy")
             else:
                 raw = cfg.get("best_val_loss")
                 raw_score = -raw if raw is not None else None # Negate so higher=better
-            
+
             train_val_gap = cfg.get("train_val_loss_gap", 0.0)
-            
+
             if raw_score is not None:
                 # Apply stability penalty (overfitting penalty)
                 gap_penalty = (train_val_gap * 0.1) if train_val_gap is not None and train_val_gap > 0 else 0.0
                 adjusted_score = raw_score - gap_penalty
-                
+
                 folds_found.append({
-                    "fold": fi, 
-                    "raw_score": raw_score, 
+                    "fold": fi,
+                    "raw_score": raw_score,
                     "train_val_loss_gap": train_val_gap,
                     "gap_penalty": gap_penalty,
                     "adjusted_score": adjusted_score
                 })
-                
+
                 if best_adjusted_score is None or adjusted_score > best_adjusted_score:
                     best_adjusted_score = adjusted_score
                     best_fold = fi
@@ -73,10 +74,10 @@ def promote_best_fold(model_name: str, checkpoint_dir: str, metric: str = "sharp
         return
 
     shutil.copy2(src, dst)
-    
+
     metric_label = "sharpe" if use_sharpe else "val_loss"
     winning_fold_data = next(f for f in folds_found if f['fold'] == best_fold)
-    
+
     print(f"{'='*60}")
     print(f"  SUCCESS: Fold {best_fold} promoted to selected_stable_fold!")
     print(f"  Metric: {metric_label}")
@@ -105,7 +106,7 @@ def main():
     p.add_argument("--dir", type=str, required=True, help="Directory containing checkpoints")
     p.add_argument("--metric", type=str, default="sharpe", choices=["sharpe", "loss"],
                    help="Metric to use for promotion (default: sharpe)")
-    
+
     args = p.parse_args()
     promote_best_fold(args.model, args.dir, args.metric)
 

@@ -11,11 +11,12 @@ Infrastructure & monitoring improvements:
 import json
 import time
 import warnings
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Optional
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List, Any, Tuple
-from datetime import datetime, timezone
 
 from config.settings import PATHS
 
@@ -106,7 +107,7 @@ class ONNXExporter:
             if ONNX:
                 m = onnx.load(onnx_path)
                 onnx.checker.check_model(m)
-                print(f"[ONNX] Model verified ✓")
+                print("[ONNX] Model verified ✓")
 
                 # Benchmark vs PyTorch
                 dummy = torch.randn(batch_size, seq_len, n_features)
@@ -201,7 +202,7 @@ class ShadowModeManager:
         self.ckpt_dir     = Path(checkpoint_dir)
         self.shadow_bars  = shadow_days * bars_per_day
 
-        self._records: List[dict] = []
+        self._records: list[dict] = []
         self._active   = False
         self._candidate_name = ""
 
@@ -210,7 +211,7 @@ class ShadowModeManager:
         self._records.clear()
         self._active = True
         self._candidate_name = candidate_name
-        self._start_time = datetime.now(timezone.utc)
+        self._start_time = datetime.now(UTC)
         print(f"[Shadow] Started shadow period for '{candidate_name}' | "
               f"{self.shadow_days} days / {self.shadow_bars} bars")
 
@@ -233,7 +234,7 @@ class ShadowModeManager:
             "agree":      int(live_signal == candidate_signal),
         })
 
-    def should_promote(self) -> Tuple[bool, dict]:
+    def should_promote(self) -> tuple[bool, dict]:
         """
         Evaluate whether the candidate model should replace production.
         Returns (should_promote, metrics_dict).
@@ -287,7 +288,7 @@ class ShadowModeManager:
         self._active = False
         return should, metrics
 
-    def save_report(self, path: Optional[str] = None):
+    def save_report(self, path: str | None = None):
         """Save shadow period records to JSON."""
         if not self._records: return
         p = path or str(self.ckpt_dir / f"shadow_{self._candidate_name}.json")
@@ -316,7 +317,7 @@ class SHAPMonitor:
 
     def __init__(
         self,
-        feature_names:   List[str],
+        feature_names:   list[str],
         n_samples:       int   = 1000,
         top_k:           int   = 10,
         shift_threshold: float = 0.30,   # Alert if top feature set changes by >30%
@@ -330,8 +331,8 @@ class SHAPMonitor:
         self.shift_thresh  = shift_threshold
         self.log_dir       = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._prev_top: Optional[set] = None
-        self._history: List[dict] = []
+        self._prev_top: set | None = None
+        self._history: list[dict] = []
 
     def _compute_gradient_shap(
         self,
@@ -445,7 +446,7 @@ class SHAPMonitor:
         # Save record
         record = {
             "cycle":       cycle,
-            "timestamp":   datetime.now(timezone.utc).isoformat(),
+            "timestamp":   datetime.now(UTC).isoformat(),
             "top_features": top_feats,
             "shift_alert": shift_alert,
         }
@@ -491,9 +492,9 @@ class WalkForwardReporter:
         self.report_dir = Path(report_dir)
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.pair = pair
-        self._trades:   List[dict] = []
-        self._equity:   List[float] = [10_000.0]
-        self._retrain_log: List[dict] = []
+        self._trades:   list[dict] = []
+        self._equity:   list[float] = [10_000.0]
+        self._retrain_log: list[dict] = []
 
     def record_trade(
         self,
@@ -521,10 +522,10 @@ class WalkForwardReporter:
         self._retrain_log.append({
             "cycle": cycle, "model": model,
             "sharpe": sharpe, "deployed": deployed,
-            "time": datetime.now(timezone.utc).isoformat(),
+            "time": datetime.now(UTC).isoformat(),
         })
 
-    def _metrics(self, trades: List[dict], equity: List[float]) -> dict:
+    def _metrics(self, trades: list[dict], equity: list[float]) -> dict:
         if not trades:
             return {"n_trades": 0}
 
@@ -554,10 +555,10 @@ class WalkForwardReporter:
     def generate_report(
         self,
         window_days: int = 30,
-        shap_records: Optional[List[dict]] = None,
+        shap_records: list[dict] | None = None,
     ) -> dict:
         """Generate and save the weekly performance report."""
-        now      = datetime.now(timezone.utc)
+        now      = datetime.now(UTC)
         fname    = f"report_{now.strftime('%Y%m%d')}"
 
         all_metrics  = self._metrics(self._trades, self._equity)
@@ -595,7 +596,7 @@ class WalkForwardReporter:
 
     def _save_html(self, report: dict, path: Path):
         m  = report["all_time"]
-        r  = report.get(f"last_30d", {})
+        r  = report.get("last_30d", {})
         html = f"""<!DOCTYPE html>
 <html><head><title>Forex Model Report</title>
 <style>body{{font-family:sans-serif;margin:40px;background:#f9f9f9}}

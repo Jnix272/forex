@@ -14,10 +14,11 @@ the time dimension for each feature:
 This gives CatBoost temporal awareness while keeping the input size manageable,
 while maintaining CatBoost's robust protection against target leakage.
 """
-import numpy as np
-import catboost as cb
-from typing import Union
 import warnings
+from typing import Union
+
+import catboost as cb
+import numpy as np
 
 try:
     import torch

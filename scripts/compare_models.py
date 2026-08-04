@@ -1,21 +1,23 @@
-import sys
 import json
+import sys
 import time
-import torch
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from datetime import datetime, timezone
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+
 # Add project root to path
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from training.train_gpu import build_model
+from backtesting.backtest import ForexScalingBacktest
 from models.ensemble import EnsembleMetaLearner
 from models.xgboost_model import XGBoostForecaster
-from backtesting.backtest import ForexScalingBacktest
+from training.train_gpu import build_model
 
 
 def _fold_stability(model_name: str, ckpt_path: str) -> dict:
@@ -106,7 +108,7 @@ def _param_count(model, model_name: str) -> int:
     if str(model_name).lower() in {"xgboost", "xgb"}:
         try:
             booster = model.model.get_booster()
-            return int(len(booster.get_dump()))
+            return len(booster.get_dump())
         except Exception:
             return 0
     try:
@@ -118,18 +120,18 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
     print(f"Evaluating {model_name}...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_key = str(model_name).lower()
-    
+
     # Load config to get architecture details
     cfg_path = Path(ckpt_path).with_name(Path(ckpt_path).name.replace(".pt", "").replace("_best", "_config") + ".json")
     if not cfg_path.exists():
         cfg_path = Path(ckpt_path).parent / f"{model_name}_fold0_config.json"
-    
+
     cfg = {}
     if cfg_path.exists():
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        
+
     n_features = int(cfg.get("n_features", X_tensor.shape[-1]))
-    
+
     class ModelConfig:
         def __init__(self):
             self.model = model_name
@@ -211,12 +213,12 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
                 logits = out[0]
             else:
                 logits = out
-                
+
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
             cls_idx = probs.argmax(axis=1)
             conf = probs.max(axis=1)
             all_conf.extend(conf.astype(float).tolist())
-            
+
             last_trade_i = -10**9
             for offset, c in enumerate(cls_idx):
                 i = start + offset
@@ -234,7 +236,7 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
                     action = 1
                     sl = price - 0.0015
                     tp = price + 0.0030
-                
+
                 if action != 0:
                     last_trade_i = i
                     trade_conf.append(float(conf[offset]))
@@ -321,7 +323,7 @@ if __name__ == "__main__":
 
     print(f"[Compare] Loading cached Zarr dataset from:\n  {ZARR_PATH}")
     z = zarr.open(str(ZARR_PATH), mode="r")
-    
+
     num_samples = min(20_000, int(z["X"].shape[0]))
     print(f"[Compare] Loading last {num_samples:,} already-scaled cached windows...")
     X_arr = np.array(z["X"][-num_samples:], dtype=np.float32)
@@ -419,7 +421,7 @@ if __name__ == "__main__":
     metrics_summary = {k: v["metrics"] for k, v in results.items()}
     baseline = metrics_summary.get("xgboost")
     comparison_report = {
-        "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "generated_at": datetime.now(UTC).isoformat() + "Z",
         "baseline": "xgboost",
         "must_beat_baseline": True,
         "promotion_rule": (

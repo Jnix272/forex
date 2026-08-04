@@ -7,10 +7,10 @@ promotion jobs, and recovery shells without importing torch/numpy/pandas.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
-
+from typing import Any
 
 REQUIRED_ARTIFACTS = (
     "train_summary.json",
@@ -38,7 +38,7 @@ class PromotionAuditConfig:
     calibration: CalibrationGateConfig = CalibrationGateConfig()
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -55,7 +55,7 @@ def _nested_get(data: Mapping[str, Any], *keys: str) -> Any:
     return cur
 
 
-def _model_name(*docs: Mapping[str, Any]) -> Optional[str]:
+def _model_name(*docs: Mapping[str, Any]) -> str | None:
     for doc in docs:
         for key in ("model", "model_name", "name"):
             value = doc.get(key)
@@ -67,7 +67,7 @@ def _model_name(*docs: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def _calibration_from(train_summary: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> Dict[str, Any]:
+def _calibration_from(train_summary: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> dict[str, Any]:
     calibration = train_summary.get("calibration")
     if isinstance(calibration, Mapping) and calibration:
         return dict(calibration)
@@ -91,7 +91,7 @@ def _gate_input_type(promotion_gate: Mapping[str, Any]) -> str:
     return "unknown"
 
 
-def _leaderboard_rank(diagnostics: Mapping[str, Any], model_name: Optional[str]) -> Optional[int]:
+def _leaderboard_rank(diagnostics: Mapping[str, Any], model_name: str | None) -> int | None:
     rows = diagnostics.get("leaderboard")
     if not isinstance(rows, list) or not model_name:
         return None
@@ -110,7 +110,7 @@ def _leaderboard_rank(diagnostics: Mapping[str, Any], model_name: Optional[str])
 def validate_priority2_promotion(
     artifact_dir: str | Path,
     config: PromotionAuditConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate the Priority 2 promotion artifact chain.
 
     Returns a JSON-serializable report with `ready_for_production`, per-gate
@@ -119,9 +119,9 @@ def validate_priority2_promotion(
     cfg = config or PromotionAuditConfig()
     root = Path(artifact_dir)
     reasons = []
-    gates: Dict[str, bool] = {}
-    docs: Dict[str, Dict[str, Any]] = {}
-    artifacts: Dict[str, str] = {}
+    gates: dict[str, bool] = {}
+    docs: dict[str, dict[str, Any]] = {}
+    artifacts: dict[str, str] = {}
 
     for filename in REQUIRED_ARTIFACTS:
         path = root / filename
@@ -155,9 +155,13 @@ def validate_priority2_promotion(
         reasons.append("promotion_gate.json: promoted is not true")
 
     gate_input = _gate_input_type(promotion_gate)
-    gates["gate_input_not_proxy"] = cfg.allow_proxy_gate or gate_input not in {"proxy", "label_proxy"}
+    _ok_inputs = {"execution_backtest", "execution", "full_backtest"}
+    gates["gate_input_not_proxy"] = cfg.allow_proxy_gate or gate_input in _ok_inputs
     if not gates["gate_input_not_proxy"]:
-        reasons.append("promotion_gate.json: proxy gate input cannot deploy without override")
+        reasons.append(
+            f"promotion_gate.json: gate_input_type={gate_input!r} "
+            f"(need execution_backtest; proxy/unknown cannot deploy without override)"
+        )
 
     deploy_status = str(deployment.get("status", "")).lower()
     gates["deployment_success"] = (deploy_status == "success") or not cfg.require_deployment_success
@@ -230,7 +234,7 @@ def write_priority2_promotion_report(
     artifact_dir: str | Path,
     output_path: str | Path | None = None,
     config: PromotionAuditConfig | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate artifacts and write `priority2_promotion_report.json`."""
     report = validate_priority2_promotion(artifact_dir, config=config)
     out = Path(output_path) if output_path else Path(artifact_dir) / "priority2_promotion_report.json"

@@ -8,8 +8,8 @@ trading, backtesting, shadow mode, and live execution share identical logic.
 Never hardcode risk numbers in this file — always reference LIVE_RISK or the
 constructor defaults that mirror it.
 """
+
 import numpy as np
-from typing import Optional, Dict
 
 try:
     from config.settings import LIVE_RISK as _LR
@@ -127,7 +127,7 @@ class SessionLimitsEnforcer:
     an existing open trade, so they are governed by ``max_lots`` and execution
     cost controls rather than consuming another ``max_open_trades`` slot.
     """
-    def __init__(self, session_limits: Optional[Dict] = None, stage: str = "scale"):
+    def __init__(self, session_limits: dict | None = None, stage: str = "scale"):
         # Load from MATURITY_LADDER if stage provided, else from LIVE_RISK
         try:
             from config.settings import MATURITY_LADDER as _ML
@@ -149,7 +149,7 @@ class SessionLimitsEnforcer:
             return "asia"
         return "off"
 
-    def check(self, hour_utc: int, open_lots: float, open_trades: int) -> Dict:
+    def check(self, hour_utc: int, open_lots: float, open_trades: int) -> dict:
         """
         Returns {"allowed": bool, "session": str, "max_lots": float, "max_trades": int}.
         Call before every order; block if allowed=False.
@@ -219,7 +219,7 @@ class PortfolioVaR:
         self.conf=confidence;self.horizon=horizon;self.pv=pip_value;self.max_var=max_var_pct
         from collections import deque as _deque
         self._deque = _deque
-        self._returns:Dict[str,_deque]={}
+        self._returns:dict[str,_deque]={}
 
     def update_returns(self,pair,ret):
         if pair not in self._returns: self._returns[pair]=self._deque(maxlen=500)

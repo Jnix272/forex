@@ -22,6 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
+
 load_dotenv(_ROOT / ".env", override=False)
 
 
@@ -232,6 +233,7 @@ def check_stooq() -> None:
     print("\n  [9] Stooq (free public data — no key needed)")
     try:
         import io
+
         import pandas as pd
         raw = _get("https://stooq.com/q/d/l/?s=^spx&i=d")
         df  = pd.read_csv(io.StringIO(raw.decode("utf-8", "replace")))

@@ -14,10 +14,10 @@ Also provides:
 
 import hashlib
 import json
-import subprocess
-from pathlib import Path
-from datetime import datetime, timezone
 import logging
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class DatasetManifest:
             "label_method": label_method,
             "sequence_length": seq_len,
             "schema_hash": schema_hash,
-            "cache_creation_time": datetime.now(timezone.utc).isoformat(),
+            "cache_creation_time": datetime.now(UTC).isoformat(),
             "git_commit": _git_commit(),
             "n_rows_per_pair": n_rows_per_pair or {},
             "n_rows_total": n_rows_total or 0,
@@ -109,7 +109,7 @@ class DatasetManifest:
         if not manifest_path.exists():
             raise FileNotFoundError("Missing dataset_manifest.json. Refusing to train.")
 
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         if manifest["sequence_length"] != expected_seq_len:
@@ -142,7 +142,7 @@ class DatasetManifest:
         log_path = self.cache_dir / "build_log.jsonl"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "event": event,
             "pair": pair,
             "chunk_idx": chunk_idx,
@@ -190,7 +190,7 @@ class DatasetManifest:
                 content = f"{shape}_{meta.serialized_size}"
             elif p.suffix == ".csv":
                 shape = (0, 0)
-                with open(p, "r") as f:
+                with open(p) as f:
                     header = f.readline()
                     content = header
                     line_count = sum(1 for _ in f) + 1
@@ -206,7 +206,7 @@ class DatasetManifest:
                 "fingerprint": fingerprint,
                 "shape": list(shape),
                 "path": str(p),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
             }
         except Exception as e:
             return {"error": str(e), "path": str(p)}
@@ -308,7 +308,7 @@ class DatasetManifest:
         info = {
             "lockbox_start": lockbox_start,
             "lockbox_end": lockbox_end,
-            "reserved_at": datetime.now(timezone.utc).isoformat(),
+            "reserved_at": datetime.now(UTC).isoformat(),
             "git_commit": _git_commit(),
         }
         with open(lockbox_path, "w", encoding="utf-8") as f:

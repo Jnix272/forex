@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class SidecarSpec:
     path: str | Path
     kind: str = "metadata"
     required: bool = True
-    max_age_seconds: Optional[float] = None
+    max_age_seconds: float | None = None
 
 
 def file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
@@ -34,7 +35,7 @@ def file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _as_relative(path: Path, root: Path) -> str:
@@ -48,8 +49,8 @@ def build_sidecar_index(
     artifact_root: str | Path,
     sidecars: Iterable[SidecarSpec],
     package_name: str = "artifact_package",
-    metadata: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a JSON-serializable index for sidecars under `artifact_root`."""
     root = Path(artifact_root)
     entries = []
@@ -85,8 +86,8 @@ def write_sidecar_index(
     sidecars: Iterable[SidecarSpec],
     output_path: str | Path | None = None,
     package_name: str = "artifact_package",
-    metadata: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write `sidecar_index.json` for the supplied sidecar specs."""
     root = Path(artifact_root)
     index = build_sidecar_index(root, sidecars, package_name=package_name, metadata=metadata)
@@ -103,15 +104,15 @@ def _entry_path(root: Path, entry: Mapping[str, Any]) -> Path:
 
 def validate_sidecar_index(
     index_path: str | Path,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Validate an existing sidecar index and return a pass/fail report."""
     path = Path(index_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     root = Path(data.get("artifact_root") or path.parent)
-    now_dt = now or datetime.now(timezone.utc)
+    now_dt = now or datetime.now(UTC)
 
-    gates: Dict[str, bool] = {}
+    gates: dict[str, bool] = {}
     reasons = []
     checked = []
     for entry in data.get("sidecars", []):

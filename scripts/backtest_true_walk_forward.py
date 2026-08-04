@@ -15,13 +15,20 @@ if str(_ROOT) not in sys.path:
 from backtesting.backtest import ForexScalingBacktest
 from config.settings import BACKTEST, FEATURES, active_checkpoint_dir
 from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile
-from data.data_ingestion import load_or_generate, ForexDataPipeline
+from data.data_ingestion import ForexDataPipeline, load_or_generate
 from data.news_feed import get_latest_headlines
 from features.advanced_features import AdvancedFeatureBuilder
 from features.feature_engineering import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
+from scripts.backtest_model import (
+    PIP_SIZES,
+    _batched_logits,
+    _checkpoint_state_dict,
+    _load_checkpoint_config,
+    _normalize_backtest_metrics,
+)
 from training.train_gpu import build_model
-from scripts.backtest_model import _batched_logits, _normalize_backtest_metrics, PIP_SIZES, _load_checkpoint_config, _checkpoint_state_dict
+
 
 def log(m: str) -> None:
     print(m, flush=True)
@@ -69,7 +76,7 @@ def get_fold_checkpoint(model: str, fold: int, checkpoint_dir: str) -> Path | No
         candidates = [
             base / f"{model}_fold{fold}_best.pt",
             base / model / f"{model}_fold{fold}_best.pt",
-            base / f"{model}_fold{fold}_ep10.pt", 
+            base / f"{model}_fold{fold}_ep10.pt",
             base / f"{model}_fold{fold}_ep5.pt"
         ]
         for p in candidates:
@@ -80,7 +87,7 @@ def get_fold_checkpoint(model: str, fold: int, checkpoint_dir: str) -> Path | No
 def run_true_walkforward():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log(f"=== True OOS Walk-Forward Backtester ===")
+    log("=== True OOS Walk-Forward Backtester ===")
     log(f"Model: {args.model}")
     log(f"Folds: {args.n_folds}")
     log(f"Period: {args.start} to {args.end}")
@@ -105,36 +112,36 @@ def run_true_walkforward():
     f_base = fe.build(base_bars)
     f_adv = afb.build(base_bars, base_features=f_base)
     features_df = pd.concat([f_base, f_adv], axis=1).reindex(base_bars.index).ffill().fillna(0.0)
-    
+
     n_samples = len(base_bars)
     edges = np.linspace(0, n_samples, args.n_folds + 2, dtype=np.int64)
-    
+
     all_signals = []
-    
+
     for k in range(args.n_folds):
         val_start_idx = int(edges[k + 1])
         val_end_idx = int(edges[k + 2])
-        
+
         inf_start_idx = max(0, val_start_idx - args.seq_len)
-        
+
         val_start_date = base_bars.index[val_start_idx]
         val_end_date = base_bars.index[val_end_idx - 1]
-        
+
         log(f"\n--- Fold {k} ---")
         log(f"Val slice: index {val_start_idx} to {val_end_idx}")
         log(f"Val dates: {val_start_date} to {val_end_date}")
-        
+
         ckpt_path = get_fold_checkpoint(args.model, k, args.checkpoint_dir)
         if not ckpt_path:
             log(f"WARNING: Could not find checkpoint for {args.model} fold {k}. Skipping this era!")
             continue
-            
+
         log(f"Loaded weights: {ckpt_path.name}")
-        
+
         cfg = _load_checkpoint_config(ckpt_path)
         # Default n_features for a single pair is typically 224
         n_features = int(cfg.get("n_features", 224))
-        
+
         model_kwargs = {
             "d_model": cfg.get("d_model", 256),
             "nhead": cfg.get("nhead", 8),
@@ -146,7 +153,7 @@ def run_true_walkforward():
         if "expert" in args.model.lower():
             model_kwargs["n_experts"] = cfg.get("n_experts", 4)
             model_kwargs["top_k"] = cfg.get("top_k", 2)
-            
+
         class Cfg:
             def __init__(self):
                 self.model = args.model
@@ -164,41 +171,41 @@ def run_true_walkforward():
                 self.momentum_window = 20
                 self._n_pairs = 1
                 self._f_per_pair = 224
-                
+
         model = build_model(args.model, n_features, Cfg()).to(device)
         state = torch.load(str(ckpt_path), map_location=device, weights_only=True)
         model.load_state_dict(_checkpoint_state_dict(state), strict=False)
         model.eval()
-        
+
         X_slice = features_df.iloc[inf_start_idx:val_end_idx].copy()
-        
+
         if sent is not None and "finbert_sentiment" not in X_slice.columns:
             try:
                 X_slice["finbert_sentiment"] = float(sent.score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
             except Exception:
                 X_slice["finbert_sentiment"] = 0.0
-                
+
         if X_slice.shape[1] < n_features:
             pad_cols = pd.DataFrame(0.0, index=X_slice.index, columns=[f"xpad_{i}" for i in range(n_features - X_slice.shape[1])])
             X_slice = pd.concat([X_slice, pad_cols], axis=1)
         elif X_slice.shape[1] > n_features:
             X_slice = X_slice.iloc[:, :n_features]
-            
+
         x_t = torch.tensor(np.nan_to_num(X_slice.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
-        
+
         with torch.no_grad():
             logits = _batched_logits(model, x_t, args.seq_len, args.inference_batch_size)
             probs = torch.softmax(logits, dim=-1).detach().cpu().numpy()
-            
+
         cls, conf = probs.argmax(axis=1), probs.max(axis=1)
-        
+
         pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
         last_signal_i = -10**9
         fold_signals = []
-        
+
         for off, c in enumerate(cls):
             i = inf_start_idx + args.seq_len + off
-            
+
             adj_min_conf = args.min_confidence
             if "regime_label" in X_slice.columns:
                 rl = float(X_slice["regime_label"].iloc[args.seq_len + off])
@@ -211,7 +218,7 @@ def run_true_walkforward():
                 continue
             if i - last_signal_i < max(1, args.min_gap_bars):
                 continue
-                
+
             price = float(base_bars["close"].iloc[i])
             if c == 0:
                 act = 2
@@ -247,7 +254,7 @@ def run_true_walkforward():
                     "confidence": win_prob,
                     "fold": k
                 })
-                
+
         all_signals.extend(fold_signals)
         log(f"Fold {k} generated {len(fold_signals)} trades.")
 
@@ -258,7 +265,7 @@ def run_true_walkforward():
     log(f"\nTotal trades stitched: {len(all_signals)}")
     sig_df = pd.DataFrame(all_signals).set_index("timestamp")
     sig_df = sig_df[~sig_df.index.duplicated(keep='first')].sort_index()
-    
+
     bt = ForexScalingBacktest(
         bars=base_bars.loc[sig_df.index[0]:],
         signals=sig_df,
@@ -271,24 +278,24 @@ def run_true_walkforward():
     bt.run()
     metrics = bt.performance_metrics()
     norm_metrics = _normalize_backtest_metrics(metrics)
-    
+
     out_dir = Path("backtests/true_walk_forward")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+
     bt.get_trade_log().to_csv(out_dir / f"{args.model}_OOS_{stamp}_trades.csv")
     bt.results_df.to_csv(out_dir / f"{args.model}_OOS_{stamp}_equity.csv")
     (out_dir / f"{args.model}_OOS_{stamp}_summary.json").write_text(
         json.dumps({
-            "model": args.model, 
-            "start": args.start, 
-            "end": args.end, 
+            "model": args.model,
+            "start": args.start,
+            "end": args.end,
             "folds_stitched": args.n_folds,
             "metrics": metrics
-        }, indent=2, default=str), 
+        }, indent=2, default=str),
         encoding="utf-8"
     )
-    
+
     log("\n=== TRUE OOS BACKTEST SUMMARY ===")
     log(f"Trades:       {norm_metrics['n_trades']}")
     log(f"Win Rate:     {norm_metrics['win_rate']:.2%}")

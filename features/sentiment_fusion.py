@@ -26,11 +26,10 @@ Features emitted per bar (all 0 when no events):
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. Financial NER — lightweight pattern extractor
@@ -55,7 +54,7 @@ _CENTRAL_BANKS = [
     r"\bBank of Canada\b", r"\bBOC\b", r"\bPBOC\b", r"\bPeople's Bank of China\b",
 ]
 
-_PATTERNS: Dict[str, List[re.Pattern]] = {
+_PATTERNS: dict[str, list[re.Pattern]] = {
     "rate_hike": [re.compile(r"\b(?:rate|interest)\s+hikes?\b", re.I),
                   re.compile(r"\bhikes?\s+(?:interest\s+)?rates\b", re.I),
                   re.compile(r"\b(?:hiked|raising|raise|raises)\s+(?:interest\s+)?rates\b", re.I),
@@ -81,7 +80,7 @@ _PATTERNS: Dict[str, List[re.Pattern]] = {
 _PAIR_RE = re.compile(r"\b(?:EUR|GBP|USD|JPY|CHF|AUD|NZD|CAD)/(?:EUR|GBP|USD|JPY|CHF|AUD|NZD|CAD)\b", re.I)
 
 
-def _compile_banks() -> List[re.Pattern]:
+def _compile_banks() -> list[re.Pattern]:
     return [re.compile(p, re.I) for p in _CENTRAL_BANKS]
 
 
@@ -138,7 +137,7 @@ _BEARISH = [
 ]
 
 
-def _compile_lexicon() -> List[re.Pattern]:
+def _compile_lexicon() -> list[re.Pattern]:
     return [re.compile(p, re.I) for p in _BULLISH], [re.compile(p, re.I) for p in _BEARISH]
 
 
@@ -171,7 +170,7 @@ def fit_topic_model(
     max_features: int = 500,
     seed: int = 0,
     top_k_words: int = 8,
-) -> Tuple[np.ndarray, List[List[str]]]:
+) -> tuple[np.ndarray, list[list[str]]]:
     """Fit a Tfidf+NMF topic model on the corpus.
 
     Returns (doc_topic_weights [n_docs, n_topics], top_words [n_topics, list]).
@@ -261,8 +260,8 @@ def build_sentiment_features(
     bar_ts: Sequence,
     source_col: str = "source",
     text_col: str = "text",
-    sent_col: Optional[str] = "sentiment",
-    cot_z: Optional[pl.Series] = None,
+    sent_col: str | None = "sentiment",
+    cot_z: pl.Series | None = None,
     lam: float = 0.05,
     dt_sec: float = 1800.0,
     n_topics: int = 4,
@@ -316,7 +315,7 @@ def build_sentiment_features(
     eidx = _events_to_bars(events, ts)
     valid = (eidx >= 0) & (eidx < n)
 
-    def _agg(mask: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _agg(mask: np.ndarray, vals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         E_sum = np.zeros(n)
         E_cnt = np.zeros(n)
         m = mask & valid
@@ -391,7 +390,7 @@ def build_sentiment_features(
 
 def _empty_feature_cols(n: int, n_topics: int) -> pl.DataFrame:
     """Zeroed schema for the no-events case (stable column names)."""
-    cols: Dict[str, pl.Series] = {
+    cols: dict[str, pl.Series] = {
         "sent_news": np.zeros(n), "sent_news_count": np.zeros(n),
         "sent_social": np.zeros(n), "sent_social_count": np.zeros(n),
         "sent_cot": np.zeros(n), "sent_fused": np.zeros(n),

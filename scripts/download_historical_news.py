@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import email.utils
 import json
 import os
 import random
@@ -34,14 +35,14 @@ import re
 import sys
 import threading
 import time
-import email.utils
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
 
 import requests
+
 _csv_limit = sys.maxsize
 while True:
     try:
@@ -250,7 +251,7 @@ PAIR_KEYWORDS: dict[str, list[str]] = {
 # ── Date helpers ----------------------------------------------------------------──────────────
 
 def _parse_date(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
 
 
 def _daterange(
@@ -518,12 +519,12 @@ def _coerce_timestamp(value: str) -> datetime | None:
         return None
     try:
         ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(UTC) if ts.tzinfo else ts.replace(tzinfo=UTC)
     except Exception:
         pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw[: len(fmt)], fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw[: len(fmt)], fmt).replace(tzinfo=UTC)
         except Exception:
             continue
     return None
@@ -538,7 +539,7 @@ def _coerce_feed_timestamp(value: str) -> datetime | None:
         parsed = email.utils.parsedate_to_datetime(str(value).strip())
         if parsed is None:
             return None
-        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except Exception:
         return None
 
@@ -773,11 +774,10 @@ class _IncrementalCSVWriter:
         deduped.sort(
             key=lambda r: (r["timestamp_utc"], r["event_type"], r["currency"], r["headline"])
         )
-        with self._lock:
-            with self.path.open("w", encoding="utf-8", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=self.fields)
-                writer.writeheader()
-                writer.writerows(deduped)
+        with self._lock, self.path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=self.fields)
+            writer.writeheader()
+            writer.writerows(deduped)
         return len(deduped)
 
 
@@ -1007,7 +1007,7 @@ def _gdelt_fetch_one_chunk(
             try:
                 ts = datetime.strptime(
                     seen.replace("Z", ""), "%Y%m%dT%H%M%S"
-                ).replace(tzinfo=timezone.utc)
+                ).replace(tzinfo=UTC)
             except Exception:
                 continue
             category = _event_category_from_text(title)
@@ -1039,7 +1039,7 @@ def _gdelt_fetch_one_chunk(
 
         articles = _articles_from_payload(payload)
         cap_hit = len(articles) >= int(max_records)
-        
+
         if depth == 0:
             label = f"{pair}{('/' + query_label) if query_label else ''} {ws.date()}->{we.date()}"
         else:
@@ -1062,13 +1062,13 @@ def _gdelt_fetch_one_chunk(
                 "recursively splitting",
                 flush=True,
             )
-            
+
             time.sleep(max(0.0, float(sleep_s)))
             left_rows, left_failures = _fetch_window_recursive(ws, left_end, depth + 1)
-            
+
             time.sleep(max(0.0, float(sleep_s)))
             right_rows, right_failures = _fetch_window_recursive(right_start, we, depth + 1)
-            
+
             return left_rows + right_rows, left_failures + right_failures
 
         indent = "  " * (depth + 1) if depth > 0 else "  "
@@ -1089,7 +1089,7 @@ def fetch_gdelt_pair(
     sleep_s: float,
     retries: int,
     split_on_cap: bool,
-    manifest: "_ProgressManifest | None",
+    manifest: _ProgressManifest | None,
     resume: bool,
     checkpoint_every: int,
     writer: _IncrementalCSVWriter | None,
@@ -1146,7 +1146,7 @@ def fetch_gdelt_pair(
             pool.submit(_process_chunk, cs, ce, i): (i, cs, ce)
             for i, (cs, ce) in enumerate(chunks)
         }
-        
+
         for future in as_completed(future_to_chunk):
             i, cs, ce = future_to_chunk[future]
             try:
@@ -1157,7 +1157,7 @@ def fetch_gdelt_pair(
                 if status == "dry":
                     fetch_count += 1
                     continue
-                
+
                 rows.extend(chunk_rows)
                 failures.extend(chunk_failures)
                 fetch_count += 1
@@ -1193,7 +1193,7 @@ def fetch_gdelt_pair(
                     if manifest is not None and pending_dates:
                         manifest.mark(pair, pending_dates)
                         pending_dates = set()
-                    
+
             except Exception as exc:
                 print(f"  [GDELT] Error processing chunk {cs.date()}->{ce.date()} for {pair}: {exc}", flush=True)
 
@@ -1613,7 +1613,7 @@ def run_post_download_sentiment(
 def main() -> int:
     args = parse_args()
     _GDELT_LIMITER.set_interval(args.gdelt_min_interval)
-    
+
     if wandb and os.getenv("WANDB_RUN_GROUP"):
         try:
             wandb.init(
@@ -1635,7 +1635,7 @@ def main() -> int:
     )
 
     # ── Resolve date range ----------------------------------------------------------------────
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
     if args.retry_failures:
         # --start/--end not required when retrying
         start_dt = end_dt = None
@@ -1658,10 +1658,10 @@ def main() -> int:
     )
     if args.include_official_feeds:
         sources.add("official")
-    
+
     gdelt_start_dt = start_dt
     if "gdelt" in sources and start_dt is not None:
-        gdelt_min_date = datetime(2017, 2, 15, tzinfo=timezone.utc)
+        gdelt_min_date = datetime(2017, 2, 15, tzinfo=UTC)
         if end_dt is not None and end_dt < gdelt_min_date:
             print(
                 f"[GDELT] No DOC 2.0 coverage before {gdelt_min_date.date()}; "
@@ -1689,7 +1689,7 @@ def main() -> int:
     # Pre-seed with existing rows if appending
     if (args.append or args.resume) and news_out.exists():
         print(
-            f"[News] Existing file detected — incremental append mode",
+            "[News] Existing file detected — incremental append mode",
             flush=True,
         )
         writer._ensure_header()  # don't overwrite
@@ -1917,7 +1917,7 @@ def main() -> int:
             flush=True,
         )
         print(
-            f"           Re-run with --retry-failures to attempt these again.",
+            "           Re-run with --retry-failures to attempt these again.",
             flush=True,
         )
 

@@ -12,7 +12,8 @@ except ImportError:
     _YAML = False
 
 from config.models import SUPPORTED_SUPERVISED
-from config.settings import CURRICULUM as SETTINGS_CURRICULUM, LIVE_RISK, SIZING
+from config.settings import CURRICULUM as SETTINGS_CURRICULUM
+from config.settings import LIVE_RISK, SIZING
 
 # Keep aligned with training.train_gpu loss choices + common eval aliases.
 SUPPORTED_LOSSES = frozenset({
@@ -370,15 +371,73 @@ def collect_config_issues(
     cfg_path = Path(getattr(args, "config", "config/run.yaml") or "config/run.yaml")
     if cfg_path.is_file() and _YAML:
         try:
-            with cfg_path.open("r", encoding="utf-8") as fh:
+            with cfg_path.open("r", encoding="utf-8-sig") as fh:
                 raw = _yaml.safe_load(fh) or {}
             teacher_ckpt = (raw.get("distillation") or {}).get("teacher_ckpt")
             if teacher_ckpt and not Path(str(teacher_ckpt)).expanduser().is_file():
                 warnings.append(f"distillation.teacher_ckpt missing on disk: {teacher_ckpt}")
             if bool((raw.get("optuna") or {}).get("applied")):
                 info.append("optuna.applied=true — auto-tuner records proposals but skips YAML mutations.")
+            # Curriculum / FEATURE_MASK consistency (mismatch C/D)
+            try:
+                from config.curriculum_audit import (
+                    audit_curriculum_feature_groups,
+                    audit_required_market_columns,
+                    audit_settings_yaml_curriculum_drift,
+                )
+                from config.feature_mask import FEATURE_MASK
+                curr = raw.get("curriculum") if isinstance(raw.get("curriculum"), dict) else {}
+                groups = curr.get("feature_groups") or {}
+                audit = audit_curriculum_feature_groups(
+                    schema=[k for k, v in FEATURE_MASK.items() if v],
+                    feature_groups=groups,
+                    feature_mask=FEATURE_MASK,
+                )
+                warnings.extend(audit.get("warnings") or [])
+                drift = audit_settings_yaml_curriculum_drift(
+                    SETTINGS_CURRICULUM,
+                    curr,
+                    yaml_path=str(cfg_path),
+                )
+                errors.extend(drift.get("errors") or [])
+                warnings.extend(drift.get("warnings") or [])
+                mkt = audit_required_market_columns(feature_mask=FEATURE_MASK)
+                warnings.extend(mkt.get("warnings") or [])
+                errors.extend(mkt.get("errors") or [])
+                # settings.py ↔ YAML shared-key mismatches (section parts)
+                try:
+                    from config.config_mismatch_audit import (
+                        audit_args_vs_yaml_mismatches,
+                        audit_settings_yaml_section_mismatches,
+                    )
+                    sec = audit_settings_yaml_section_mismatches(
+                        raw, yaml_path=str(cfg_path)
+                    )
+                    errors.extend(sec.get("errors") or [])
+                    warnings.extend(sec.get("warnings") or [])
+                    arg_m = audit_args_vs_yaml_mismatches(
+                        args, raw, yaml_path=str(cfg_path)
+                    )
+                    errors.extend(arg_m.get("errors") or [])
+                    warnings.extend(arg_m.get("warnings") or [])
+                except Exception as mism_exc:
+                    warnings.append(f"settings/YAML mismatch audit failed: {mism_exc}")
+                # Strategy block must actually parse (mismatch B regression guard)
+                strat = raw.get("strategy") if isinstance(raw.get("strategy"), dict) else {}
+                if not strat:
+                    warnings.append(
+                        f"{cfg_path}: strategy: block missing or not a mapping — "
+                        "profit_target_atr/stop_loss_atr/bar_freq will not load from YAML."
+                    )
+                else:
+                    for key in ("profit_target_atr", "stop_loss_atr", "bar_freq", "mode"):
+                        if key not in strat:
+                            warnings.append(f"{cfg_path}: strategy.{key} missing")
+            except Exception as audit_exc:
+                warnings.append(f"Curriculum/FEATURE_MASK audit failed: {audit_exc}")
         except Exception as exc:
-            warnings.append(f"Could not read {cfg_path} for extended checks: {exc}")
+            # YAML parse failure is blocking — do not train on silent defaults.
+            errors.append(f"Could not parse {cfg_path}: {exc}")
 
     if bool(getattr(args, "training_memory", True)) and not getattr(args, "all_models", False):
         warnings.append(

@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Optional
 
 import numpy as np
 import polars as pl
@@ -68,22 +68,22 @@ NEWS_CATEGORIES = [
 class HistoricalNewsBundle:
     """Polars-native news bundle for FeatureEngineer.build(...)."""
 
-    sentiment: Optional[pl.DataFrame] = None
-    news_events: Optional[list] = None
-    article_counts: Optional[pl.DataFrame] = None
-    eco_actual: Optional[pl.DataFrame] = None
-    eco_forecast: Optional[pl.DataFrame] = None
-    eco_prior: Optional[pl.DataFrame] = None
-    finbert_embeddings: Optional[np.ndarray] = None
-    category_flags: Optional[pl.DataFrame] = None
-    news_events_df: Optional[pl.DataFrame] = None
+    sentiment: pl.DataFrame | None = None
+    news_events: list | None = None
+    article_counts: pl.DataFrame | None = None
+    eco_actual: pl.DataFrame | None = None
+    eco_forecast: pl.DataFrame | None = None
+    eco_prior: pl.DataFrame | None = None
+    finbert_embeddings: np.ndarray | None = None
+    category_flags: pl.DataFrame | None = None
+    news_events_df: pl.DataFrame | None = None
 
 
 def empty_news_bundle() -> HistoricalNewsBundle:
     return HistoricalNewsBundle()
 
 
-def _build_category_flags(df: pl.DataFrame) -> Optional[pl.DataFrame]:
+def _build_category_flags(df: pl.DataFrame) -> pl.DataFrame | None:
     if (len(df) == 0) or "timestamp_utc" not in df.columns:
         return None
     if "event_category" in df.columns:
@@ -184,7 +184,9 @@ def _filter_relevant(df: pl.DataFrame, start, end, pair: str) -> pl.DataFrame:
 
 
 import duckdb
-def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_ts=None, end_ts=None) -> pl.DataFrame:
+
+
+def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None, end_ts=None) -> pl.DataFrame:
     paths = []
     if news_file:
         paths.append(Path(news_file))
@@ -203,7 +205,7 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
         paths.append(Path(os.getenv("ECONOMIC_CALENDAR_FILE", "")))
     else:
         paths.append(_DEFAULT_CAL_FILE)
-        
+
     frames = []
     for p in paths:
         if not p or not p.exists():
@@ -216,9 +218,9 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
                 if start_ts and end_ts:
                     s_str = start_ts.strftime('%Y-%m-%d %H:%M:%S')
                     e_str = end_ts.strftime('%Y-%m-%d %H:%M:%S')
-                    query = f"SELECT * FROM read_csv_auto('{str(p)}', ignore_errors=true) WHERE TRY_CAST(timestamp_utc AS TIMESTAMP) >= '{s_str}' AND TRY_CAST(timestamp_utc AS TIMESTAMP) <= '{e_str}'"
+                    query = f"SELECT * FROM read_csv_auto('{p!s}', ignore_errors=true) WHERE TRY_CAST(timestamp_utc AS TIMESTAMP) >= '{s_str}' AND TRY_CAST(timestamp_utc AS TIMESTAMP) <= '{e_str}'"
                 else:
-                    query = f"SELECT * FROM read_csv_auto('{str(p)}', ignore_errors=true)"
+                    query = f"SELECT * FROM read_csv_auto('{p!s}', ignore_errors=true)"
                 df_slice = con.execute(query).pl()
                 con.close()
                 if not (len(df_slice) == 0):
@@ -232,7 +234,7 @@ def _load_events(news_file: Optional[str], calendar_file: Optional[str], start_t
             s_str_pass = start_ts.strftime('%Y-%m-%d %H:%M:%S') if start_ts else None
             e_str_pass = end_ts.strftime('%Y-%m-%d %H:%M:%S') if end_ts else None
             frames.append(_normalise_columns(_read_table(p, start=s_str_pass, end=e_str_pass)))
-            
+
     frames = [f for f in frames if not (len(f) == 0)]
     if not frames:
         return pl.DataFrame()
@@ -268,8 +270,8 @@ def load_historical_news_bundle(
     pair: str,
     *,
     mode: str = "calendar",
-    news_file: Optional[str] = None,
-    calendar_file: Optional[str] = None,
+    news_file: str | None = None,
+    calendar_file: str | None = None,
 ) -> HistoricalNewsBundle:
     """Return historical news inputs for FeatureEngineer.build(...)."""
     mode = str(mode or "calendar").lower()
@@ -378,8 +380,8 @@ def collect_headlines_for_range(
     end: str,
     pairs: Iterable[str] = ("EURUSD", "GBPUSD", "USDJPY"),
     *,
-    news_file: Optional[str] = None,
-    calendar_file: Optional[str] = None,
+    news_file: str | None = None,
+    calendar_file: str | None = None,
 ) -> list[str]:
     """Return unique headline strings across the full date range.
 

@@ -13,10 +13,11 @@ the time dimension for each feature:
 
 This gives XGBoost temporal awareness while keeping the input size manageable.
 """
+import warnings
+from typing import Union
+
 import numpy as np
 import xgboost as xgb
-from typing import Union
-import warnings
 
 try:
     import torch

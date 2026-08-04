@@ -15,16 +15,16 @@ import os
 import platform
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 MANIFEST_VERSION = 1
 MANIFEST_FILENAME = "manifest.json"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def compute_file_hash(path: str, algo: str = "sha256", chunk: int = 1 << 20) -> str:
@@ -62,14 +62,14 @@ def _canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def hash_inputs(inputs: Dict[str, Any], algo: str = "sha256") -> str:
+def hash_inputs(inputs: dict[str, Any], algo: str = "sha256") -> str:
     """Deterministic hash of an arbitrary JSON-able input dict."""
     return hashlib.new(algo, _canonical_json(inputs).encode("utf-8")).hexdigest()
 
 
-def git_info(repo_root: Optional[str] = None) -> Dict[str, str]:
+def git_info(repo_root: str | None = None) -> dict[str, str]:
     """Best-effort git commit + branch capture."""
-    info: Dict[str, str] = {}
+    info: dict[str, str] = {}
     cwd = repo_root or os.getcwd()
     try:
         commit = subprocess.check_output(
@@ -89,18 +89,18 @@ def git_info(repo_root: Optional[str] = None) -> Dict[str, str]:
     return info
 
 
-def capture_env(include_gpu: bool = True) -> Dict[str, Any]:
+def capture_env(include_gpu: bool = True) -> dict[str, Any]:
     """Capture python / platform / library versions for reproducibility."""
-    env: Dict[str, Any] = {
+    env: dict[str, Any] = {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "executable": sys.executable,
     }
     try:
         import importlib.metadata as md
-        libs: Dict[str, str] = {}
+        libs: dict[str, str] = {}
         for name in ("numpy", "pandas", "polars", "scipy", "torch",
-                     "sklearn", "shap", "river", "xgboost", "lightgbm"):
+                     "sklearn", "shap", "river", "xgboost", "lightgbm", "catboost"):
             try:
                 libs[name] = md.version(name)
             except Exception:
@@ -124,14 +124,14 @@ def generate_manifest(
     run_dir: str,
     run_id: str,
     model: str,
-    params: Optional[Dict[str, Any]] = None,
-    dataset: Optional[Dict[str, Any]] = None,
-    seed: Optional[int] = None,
-    artifacts: Optional[Dict[str, str]] = None,
-    inputs: Optional[Dict[str, Any]] = None,
-    commit: Optional[str] = None,
-    env: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    params: dict[str, Any] | None = None,
+    dataset: dict[str, Any] | None = None,
+    seed: int | None = None,
+    artifacts: dict[str, str] | None = None,
+    inputs: dict[str, Any] | None = None,
+    commit: str | None = None,
+    env: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a reproducibility manifest dict.
 
     Parameters
@@ -147,7 +147,7 @@ def generate_manifest(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    artifact_hashes: Dict[str, Dict[str, str]] = {}
+    artifact_hashes: dict[str, dict[str, str]] = {}
     for name, path in (artifacts or {}).items():
         p = Path(path)
         if not p.is_absolute():
@@ -180,7 +180,7 @@ def generate_manifest(
     return manifest
 
 
-def write_manifest(manifest: Dict[str, Any], run_dir: str, filename: str = MANIFEST_FILENAME) -> str:
+def write_manifest(manifest: dict[str, Any], run_dir: str, filename: str = MANIFEST_FILENAME) -> str:
     """Write a manifest JSON next to the run's checkpoints."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def write_manifest(manifest: Dict[str, Any], run_dir: str, filename: str = MANIF
     return str(out)
 
 
-def verify_manifest(manifest: Dict[str, Any], run_dir: Optional[str] = None) -> Dict[str, Any]:
+def verify_manifest(manifest: dict[str, Any], run_dir: str | None = None) -> dict[str, Any]:
     """Verify a manifest's self-hash and artifact hashes.
 
     Returns a report with gates: ``hash_ok``, ``artifacts_ok`` and a boolean
@@ -198,15 +198,15 @@ def verify_manifest(manifest: Dict[str, Any], run_dir: Optional[str] = None) -> 
     """
     manifest = dict(manifest)
     stored_hash = manifest.pop("hash", "")
-    gates: Dict[str, bool] = {}
-    details: Dict[str, Any] = {}
+    gates: dict[str, bool] = {}
+    details: dict[str, Any] = {}
 
     recomputed = hash_inputs(manifest)
     gates["hash_ok"] = stored_hash == recomputed
     details["stored_hash"] = stored_hash
     details["recomputed_hash"] = recomputed
 
-    artifact_gates: Dict[str, bool] = {}
+    artifact_gates: dict[str, bool] = {}
     if run_dir is not None:
         run_dir = Path(run_dir)
         for name, entry in manifest.get("artifacts", {}).items():
@@ -235,7 +235,7 @@ def verify_manifest(manifest: Dict[str, Any], run_dir: Optional[str] = None) -> 
     }
 
 
-def _default_artifacts(run_dir: Path) -> Dict[str, str]:
+def _default_artifacts(run_dir: Path) -> dict[str, str]:
     """Guess artifact paths inside a checkpoint dir for regeneration."""
     names = ["production_best.pt", "production_prev.pt", "best_model.pt",
              "model_best.pt", "final.pt", "config.yaml", "train_summary.json"]
@@ -248,7 +248,7 @@ def _default_artifacts(run_dir: Path) -> Dict[str, str]:
 
 
 def regenerate_manifest(run_dir: str, run_id: str = "", model: str = "unknown",
-                        **kwargs: Any) -> Dict[str, Any]:
+                        **kwargs: Any) -> dict[str, Any]:
     """CLI/helper: rebuild a run's manifest from an existing checkpoint dir.
 
     Reuses existing inputs where a manifest is already present (so regenerating
@@ -256,9 +256,9 @@ def regenerate_manifest(run_dir: str, run_id: str = "", model: str = "unknown",
     """
     run_dir = Path(run_dir)
     manifest_path = run_dir / MANIFEST_FILENAME
-    existing: Dict[str, Any] = {}
+    existing: dict[str, Any] = {}
     if manifest_path.is_file():
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             existing = json.load(f)
 
     artifacts = _default_artifacts(run_dir)
@@ -281,13 +281,13 @@ def regenerate_manifest(run_dir: str, run_id: str = "", model: str = "unknown",
     return manifest
 
 
-def verify_manifests_in_tree(root: str) -> List[Dict[str, Any]]:
+def verify_manifests_in_tree(root: str) -> list[dict[str, Any]]:
     """Verify every manifest.json found under ``root`` (recursively)."""
-    reports: List[Dict[str, Any]] = []
+    reports: list[dict[str, Any]] = []
     root = Path(root)
     for m in sorted(root.rglob(MANIFEST_FILENAME)):
         try:
-            with open(m, "r", encoding="utf-8") as f:
+            with open(m, encoding="utf-8") as f:
                 manifest = json.load(f)
             report = verify_manifest(manifest, run_dir=str(m.parent))
             report["manifest_path"] = str(m)

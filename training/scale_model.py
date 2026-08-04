@@ -12,55 +12,54 @@ Usage:
 """
 
 import argparse
-import os
-import sys
 import copy
 import json
+import os
+import sys
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config.settings import PATHS, TRAINING
 from training.train_gpu import (
-    build_dataset_chunked,
     ZarrStreamDataset,
-    walk_forward_splits,
-    setup_device,
-    _class_weights_tensor,
-    _log_nan,
-    _ThreadPrefetchLoader,
-    _recover_nonfinite_training_state,
-    _gradients_are_finite,
     _apply_yaml_config,
+    _class_weights_tensor,
+    _gradients_are_finite,
+    _log_nan,
     _match_target_shape,
-    labels_to_class_index,
+    _recover_nonfinite_training_state,
+    build_dataset_chunked,
     build_model,
+    labels_to_class_index,
     run_preflight_sanity_checks,
+    setup_device,
+    walk_forward_splits,
 )
 
-from config.settings import TRAINING, PATHS
 
 def parse_args():
     p = argparse.ArgumentParser(description="Knowledge Distillation (Scale Model)")
     p.add_argument("--config", type=str, default=None,
                    help="YAML config to use as defaults, e.g. config/run_fast.yaml")
-    
+
     # Distillation specific
     p.add_argument("--teacher-model", type=str, required=True, help="Architecture of the teacher model")
     p.add_argument("--teacher-ckpt", type=str, required=True, help="Path to teacher weights (.pt)")
     p.add_argument("--student-model", type=str, required=True, help="Architecture of the new student model")
-    
-    p.add_argument("--alpha", type=float, default=0.5, 
+
+    p.add_argument("--alpha", type=float, default=0.5,
                    help="Weight of the distillation loss vs task loss (default 0.5)")
-    p.add_argument("--temperature", type=float, default=2.0, 
+    p.add_argument("--temperature", type=float, default=2.0,
                    help="Temperature for softening teacher logits in CrossEntropy distillation")
-                   
+
     # Standard training args (matching train_gpu.py)
     p.add_argument("--n-ticks", type=int, default=20_000_000)
     p.add_argument("--chunk-size", type=int, default=500_000)
@@ -119,7 +118,7 @@ def parse_args():
         _apply_yaml_config(p, pre.config)
 
     args = p.parse_args()
-    
+
     # Force FP32 if --no-amp is set
     if args.no_amp:
         args.amp = False
@@ -235,7 +234,7 @@ def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, t
     if args.multitask and (teacher_is_mt is not False):
         # student_out is (direction_logits, return_hat, confidence)
         s_dir, s_ret, s_conf = student_out
-        
+
         if isinstance(teacher_out, tuple):
             t_dir, t_ret, t_conf = teacher_out
         else:
@@ -244,25 +243,25 @@ def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, t
             t_dir = teacher_out if teacher_out.ndim > 1 else None
             t_ret = teacher_out if teacher_out.ndim <= 1 else None
             t_conf = None
-        
+
         # 1. Task loss (from true labels)
         task_loss = task_loss_fn(
-            s_dir, s_ret, s_conf, 
+            s_dir, s_ret, s_conf,
             labels_to_class_index(target), target
         )
-        
+
         # 2. Distillation loss (match the teacher)
         # Direction: KL Divergence with temperature scaling
         s_dir_log_prob = F.log_softmax(s_dir / temp, dim=-1)
         t_dir_prob = F.softmax(t_dir / temp, dim=-1)
         distill_dir = F.kl_div(s_dir_log_prob, t_dir_prob, reduction="batchmean") * (temp ** 2)
-        
+
         # Return/Confidence: Mean Squared Error matching
         distill_ret = F.mse_loss(s_ret, t_ret)
         distill_conf = F.mse_loss(s_conf, t_conf)
-        
+
         distill_loss = distill_dir + distill_ret + distill_conf
-        
+
     else:
         if student_out.ndim >= 2 and student_out.shape[-1] > 1:
             y_cls = labels_to_class_index(target)
@@ -282,17 +281,17 @@ def run_distillation():
     args = parse_args()
     dev, _, amp_dtype = setup_device(dtype_override=getattr(args, "dtype", "auto"))
     use_amp = bool(args.amp and dev.type == "cuda" and amp_dtype != torch.float32)
-    
+
     # 1. Build Data
     cache_path, n_samples, n_features, scaler = build_dataset_chunked(args)
     if n_samples == 0:
         print("[Distill] No data. Exiting.")
         return
-        
+
     from training.train_gpu import _embargo_bars, _purge_bars, _validation_method
     splits = walk_forward_splits(n_samples, 1, _embargo_bars(args), _purge_bars(args), _validation_method(args))
     train_idx, val_idx = splits[-1]
-    
+
     ds_train = ZarrStreamDataset(cache_path, train_idx, shuffle_chunks=True)
     train_nw_safe = 0 if os.name == "nt" else args.num_workers
     loader_train = DataLoader(
@@ -300,11 +299,11 @@ def run_distillation():
         prefetch_factor=args.prefetch_factor if train_nw_safe > 0 else None,
         pin_memory=(dev.type == "cuda" and os.name != "nt"), drop_last=True
     )
-    
+
     # Stability: On Windows, validation loader worker processes crash after long runs.
     # num_workers=0 runs loading in-process — safe and fast enough for validation.
     val_nw_safe = 0 if os.name == "nt" else args.num_workers
-    
+
     ds_val = ZarrStreamDataset(cache_path, val_idx, shuffle_chunks=False)
     loader_val = DataLoader(
         ds_val, batch_size=args.batch_size, num_workers=val_nw_safe,
@@ -312,11 +311,11 @@ def run_distillation():
         pin_memory=False, # Stability: don't pin for val on Windows
         drop_last=False
     )
-    
-    if train_nw_safe == 0:
-        loader_train = _ThreadPrefetchLoader(loader_train, prefetch=2)
-        loader_val = _ThreadPrefetchLoader(loader_val, prefetch=2)
-        
+
+    from training.gpu_datasets import wrap_loader_prefetch
+    loader_train = wrap_loader_prefetch(loader_train, args)
+    loader_val = wrap_loader_prefetch(loader_val, args)
+
     teacher_is_ensemble = str(args.teacher_model).lower() == "ensemble"
     if teacher_is_ensemble:
         teacher = _load_ensemble_teacher(args, n_features, args.seq_len, dev)
@@ -325,20 +324,20 @@ def run_distillation():
         ckpt = torch.load(args.teacher_ckpt, map_location="cpu")
         state_dict = _checkpoint_state_dict(ckpt)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        
+
         # Bug fix: Detect if teacher is multitask independently of student settings
         teacher_is_mt = _is_multitask_checkpoint(state_dict)
         t_args = copy.copy(args)
         t_args.multitask = teacher_is_mt
-        
+
         teacher = build_model(args.teacher_model, n_features, t_args)
         teacher.load_state_dict(state_dict, strict=False)
-        
+
         teacher.to(dev)
         teacher.eval()
         for param in teacher.parameters():
             param.requires_grad = False  # Freeze teacher
-        
+
     # 3. Initialize Student Model
     s_args = _student_args(args)
     student = build_model(args.student_model, n_features, s_args)
@@ -346,11 +345,11 @@ def run_distillation():
 
     # -- Preflight Checks ------------------------------------------------------
     run_preflight_sanity_checks(student, dev, loader_train, args)
-    
+
     # 4. Optimizer and Loss
     opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     grad_scaler = GradScaler(enabled=use_amp and amp_dtype == torch.float16)
-    
+
     if args.multitask:
         from models.architectures import MultiTaskLoss
         class_w = _class_weights_tensor(cache_path, train_idx, dev)
@@ -369,20 +368,19 @@ def run_distillation():
     print("\n[Distill] Starting Knowledge Distillation...")
     best_loss = float("inf")
     patience_ctr = 0
-    
+
     for epoch in range(1, args.epochs + 1):
         student.train()
         total_loss = 0.0
         batches = 0
-        
+
         for batch_idx, (Xb, yb) in enumerate(loader_train):
             Xb, yb = Xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)
-            
+
             # Get teacher predictions (no gradients)
-            with torch.no_grad():
-                with autocast(device_type=dev.type, dtype=amp_dtype, enabled=use_amp):
-                    t_out = _teacher_output(teacher(Xb), teacher_is_ensemble=teacher_is_ensemble)
-                    
+            with torch.no_grad(), autocast(device_type=dev.type, dtype=amp_dtype, enabled=use_amp):
+                t_out = _teacher_output(teacher(Xb), teacher_is_ensemble=teacher_is_ensemble)
+
             # Train student
             with autocast(device_type=dev.type, dtype=amp_dtype, enabled=use_amp):
                 s_out = student(Xb)
@@ -393,7 +391,7 @@ def run_distillation():
                 _recover_nonfinite_training_state(student, opt)
                 _log_nan(batch_idx, epoch, 1)
                 continue
-                
+
             do_step = (
                 ((batch_idx + 1) % max(1, int(args.grad_accum_steps)) == 0)
                 or (batch_idx + 1 == len(loader_train))
@@ -421,33 +419,33 @@ def run_distillation():
                     else:
                         _recover_nonfinite_training_state(student, opt)
                         _log_nan(batch_idx, epoch, 1)
-                    
+
             total_loss += loss.item() * max(1, int(args.grad_accum_steps))
             batches += 1
-            
+
         epoch_loss = total_loss / max(1, batches)
-        
+
         # Validation Loop
         student.eval()
         val_loss = 0.0
         val_batches = 0
-        
+
         with torch.no_grad():
             for X_val, y_val in loader_val:
                 X_val, y_val = X_val.to(dev, non_blocking=True), y_val.to(dev, non_blocking=True)
-                
+
                 with autocast(device_type=dev.type, dtype=amp_dtype, enabled=use_amp):
                     t_out_val = teacher(X_val)
                     t_out_val = _teacher_output(t_out_val, teacher_is_ensemble=teacher_is_ensemble)
                     s_out_val = student(X_val)
                     v_loss = distillation_loss_fn(s_out_val, t_out_val, y_val, task_loss_fn, args)
-                    
+
                 val_loss += v_loss.item()
                 val_batches += 1
-                
+
         epoch_val_loss = val_loss / max(1, val_batches)
         print(f"Epoch {epoch:03d} | Train Loss: {epoch_loss:.5f} | Val Loss: {epoch_val_loss:.5f}")
-        
+
         # Early Stopping logic based on Val Loss
         if epoch_val_loss < best_loss - 1e-4:
             best_loss = epoch_val_loss

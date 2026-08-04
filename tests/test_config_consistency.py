@@ -4,17 +4,24 @@ Catches naming mismatches, dead config, missing keys, and cross-file drift.
 """
 from __future__ import annotations
 
-import pytest
-import yaml
 from pathlib import Path
 
-from config.settings import (
-    TRAINING, DATA, LABELING, PRETRAIN, CROSS_ASSET, BACKTEST, LIVE_RISK, CURRICULUM,
-)
-from config.models import MODELS, SUPPORTED_SUPERVISED
-from config.feature_mask import FEATURE_MASK
-from config.strategy_profiles import STRATEGY_PROFILES
+import pytest
+import yaml
 
+from config.feature_mask import FEATURE_MASK
+from config.models import MODELS, SUPPORTED_SUPERVISED
+from config.settings import (
+    BACKTEST,
+    CROSS_ASSET,
+    CURRICULUM,
+    DATA,
+    LABELING,
+    LIVE_RISK,
+    PRETRAIN,
+    TRAINING,
+)
+from config.strategy_profiles import STRATEGY_PROFILES
 
 # ---------------------------------------------------------------------------
 # 1. YAML ↔ Python consistency
@@ -258,7 +265,9 @@ def test_strategy_seq_len_within_curriculum():
 # ---------------------------------------------------------------------------
 
 def test_config_package_reexports():
-    from config import TRAINING as T, MODELS as M, FEATURE_MASK as FM
+    from config import FEATURE_MASK as FM
+    from config import MODELS as M
+    from config import TRAINING as T
     assert T is TRAINING
     assert M is MODELS
     assert FM is FEATURE_MASK

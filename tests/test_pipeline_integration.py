@@ -4,18 +4,17 @@ Integration tests for Phase 4 — Full Pipeline: FeatureStore + DriftTracker + R
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
 import pytest
 
+import retraining.pipeline as pipeline_module
 from data.feature_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import DriftTracker
 from retraining.orchestrator import RetrainConfig, RetrainOrchestrator, RetrainReason
-import retraining.pipeline as pipeline_module
 from retraining.pipeline import FullPipeline, PipelineConfig, load_config_from_yaml
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -30,11 +29,11 @@ def seeded_store(tmp_path) -> FeatureStore:
     n_live = 2000
 
     base_ts = [
-        datetime(2024, 1, 1, 0, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 1, 1, 0, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n_base)
     ]
     live_ts = [
-        datetime(2024, 6, 1, 0, tzinfo=timezone.utc) + timedelta(minutes=i)
+        datetime(2024, 6, 1, 0, tzinfo=UTC) + timedelta(minutes=i)
         for i in range(n_live)
     ]
 
@@ -81,10 +80,10 @@ def seeded_store(tmp_path) -> FeatureStore:
 class TestStoreDriftIntegration:
     def test_drift_check_from_store(self, seeded_store):
         tracker = DriftTracker(seeded_store)
-        base_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        base_end = datetime(2024, 1, 2, tzinfo=timezone.utc)
-        live_start = datetime(2024, 6, 1, tzinfo=timezone.utc)
-        live_end = datetime(2024, 6, 2, tzinfo=timezone.utc)
+        base_start = datetime(2024, 1, 1, tzinfo=UTC)
+        base_end = datetime(2024, 1, 2, tzinfo=UTC)
+        live_start = datetime(2024, 6, 1, tzinfo=UTC)
+        live_end = datetime(2024, 6, 2, tzinfo=UTC)
 
         report = tracker.check_from_store(
             ["close", "atr_6"], base_start, base_end, live_start, live_end,
@@ -97,10 +96,10 @@ class TestStoreDriftIntegration:
 
     def test_drift_triggers_alerts(self, seeded_store):
         tracker = DriftTracker(seeded_store)
-        base_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        base_end = datetime(2024, 1, 2, tzinfo=timezone.utc)
-        live_start = datetime(2024, 6, 1, tzinfo=timezone.utc)
-        live_end = datetime(2024, 6, 2, tzinfo=timezone.utc)
+        base_start = datetime(2024, 1, 1, tzinfo=UTC)
+        base_end = datetime(2024, 1, 2, tzinfo=UTC)
+        live_start = datetime(2024, 6, 1, tzinfo=UTC)
+        live_end = datetime(2024, 6, 2, tzinfo=UTC)
 
         report = tracker.check_from_store(
             ["close", "atr_6"], base_start, base_end, live_start, live_end,
@@ -183,7 +182,7 @@ class TestFullPipeline:
         pipeline = FullPipeline(cfg)
         result = pipeline.run(skip_materialize=True)
         assert result["status"] in ("complete", "error")
-        if "drift_report" in result and result["drift_report"]:
+        if result.get("drift_report"):
             assert not result["drift_report"]["drift_detected"]
 
     def test_pipeline_materialize_and_drift(self, tmp_path):
@@ -200,7 +199,7 @@ class TestFullPipeline:
         rng = np.random.default_rng(42)
         n = 1000
         ts = [
-            datetime(2024, 1, 1, 8, tzinfo=timezone.utc) + timedelta(minutes=i)
+            datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
             for i in range(n)
         ]
         close = 1.1000 + np.cumsum(rng.normal(0, 0.0001, n))
@@ -215,8 +214,8 @@ class TestFullPipeline:
             "spread_pips": rng.uniform(0.5, 2.0, n),
         })
 
-        start = datetime(2024, 1, 1, 8, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, 10, tzinfo=timezone.utc)
+        start = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 10, tzinfo=UTC)
         result = pipeline.run(bars=bars, start=start, end=end, skip_materialize=False)
         assert result["status"] in ("complete", "error")
 
@@ -248,7 +247,7 @@ class TestFullPipeline:
             auto_materialize=False,
         )
         pipeline = FullPipeline(cfg)
-        end = datetime(2024, 2, 3, 12, tzinfo=timezone.utc)
+        end = datetime(2024, 2, 3, 12, tzinfo=UTC)
 
         result = pipeline.run(end=end, skip_materialize=True)
 

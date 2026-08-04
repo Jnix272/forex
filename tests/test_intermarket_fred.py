@@ -30,11 +30,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from data.cross_asset import (
+    _NO_YAHOO_FALLBACK,
     FRED_YIELD_SYMBOLS,
     STOOQ_SYMBOLS,
-    _NO_YAHOO_FALLBACK,
-    _read_stooq_daily,
     _read_fred_daily,
+    _read_stooq_daily,
     load_cross_asset_panel,
 )
 from features.macro_features import (

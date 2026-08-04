@@ -1,5 +1,6 @@
 """Leakage-resistant alignment for macro, news, COT and cross-asset observations."""
 from __future__ import annotations
+
 import pandas as pd
 
 
