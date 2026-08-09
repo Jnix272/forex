@@ -46,9 +46,44 @@ curriculum:
   difficulty_spread_threshold: 1.5
   difficulty_spread_threshold_hard: 2.0
   feature_groups:
+    # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
+    # values fit training.epochs=6 so staged groups actually unlock.
+    core:
+      always_on: true
+      epoch_unfreeze: 0
+      features:
+      - adx_14
+      - atr_6
+      - atr_20
+      - atr_60
+      - atr_ratio_6_20
+      - atr_ratio_20_60
+      - bb_upper
+      - bb_lower
+      - bb_width
+      - bb_pct
+      - breakout_pressure
+      - chop_index
+      - liquidity_vacuum
+      - obi_proxy
+      - price_ofi_div
+      - tar
+      - range_regime
+      - trend_regime
+      - vol_6
+      - vol_20
+      - vol_60
+      - vol_ratio_6_20
+      - vol_ratio_20_60
+      - expected_latency_ms
+      - eco_surprise_missing
+      - eco_surprise_staleness
+      - sentiment_decayed_missing
+      - sentiment_decayed_staleness
+      - yield_vol_20d
     cross_asset:
       always_on: false
-      epoch_unfreeze: 8
+      epoch_unfreeze: 3
       features:
       - spread_us_de
       - spread_us_jp
@@ -71,7 +106,7 @@ curriculum:
       - yield_curve_slope
     execution_cost:
       always_on: false
-      epoch_unfreeze: 2
+      epoch_unfreeze: 1
       features:
       - spread_pips
       - spread_zscore
@@ -81,7 +116,7 @@ curriculum:
       - cost_to_atr
     higher_timeframe:
       always_on: false
-      epoch_unfreeze: 20
+      epoch_unfreeze: 5
       features:
       - ret_5m
       - rsi_5m
@@ -113,11 +148,14 @@ curriculum:
     #   - rolling_false_breakout_rate_240
     macro:
       always_on: false
-      epoch_unfreeze: 12
+      epoch_unfreeze: 4
       features:
       - cot_net_hf
       - cot_net_comm
       - cot_extreme
+      - cot_hf_mom_4w
+      - yield_momentum_5d
+      - yield_momentum_20d
       - sentiment_raw
       - sentiment_decayed
       - fb_0
@@ -130,7 +168,7 @@ curriculum:
       - fb_7
     news:
       always_on: false
-      epoch_unfreeze: 10
+      epoch_unfreeze: 3
       features:
       - eco_surprise
       - eco_revision
@@ -143,7 +181,7 @@ curriculum:
       - cat_commentary
     market_regime:
       always_on: false
-      epoch_unfreeze: 16
+      epoch_unfreeze: 4
       features:
       - realized_vol_regime
       - trend_quality
@@ -162,9 +200,13 @@ curriculum:
       always_on: true
       epoch_unfreeze: 0
       features:
-      - yield_momentum_5d
-      - yield_momentum_20d
-      - cot_hf_mom_4w
+      - rsi_14
+      - macd
+      - macd_sig
+      - macd_hist
+      - ret_5
+      - ret_20
+      - ret_60
     session:
       always_on: true
       epoch_unfreeze: 0
@@ -176,13 +218,24 @@ curriculum:
       - london_ny
     volatility:
       always_on: false
-      epoch_unfreeze: 4
+      epoch_unfreeze: 2
       features:
       - vol_of_vol
       - volatility_regime
       - hurst_exponent
       - noise_to_signal_60
       - trailing_volatility_60
+      - vp_poc_pos
+      - vp_poc_dist
+      - vp_poc_share
+      - vp_vw_pos
+      - vp_skew
+      - vp_in_va
+      - vol_clock_pos
+      - vol_clock_ratio
+      - vol_clock_z
+      - vol_clock_pace
+      - vol_clock_hot
   # ── Sequence-length schedule (bars per sample) ──────────────────────────
   seq_schedule:
   - epoch_start: 0
@@ -281,12 +334,12 @@ drift_detection:
   live_window_days: 7
   monitored_features:
   - close
-  - log_ret_1
-  - log_ret_5
+  - ret_5
+  - ret_20
   - atr_6
   - atr_20
-  - rolling_vol_20
-  - ofi_20
+  - vol_20
+  - ofi
   psi_bins: 10
   psi_threshold: 0.2
   schedule_hours: 24
@@ -344,6 +397,7 @@ hardware:
   persistent_workers: true
   pin_memory: true
   prefetch_factor: 4
+  force_thread_prefetch: false
   profile: ''
   thread_prefetch_batches: 8
   torch_compile: true
@@ -426,7 +480,7 @@ pretrain:
   sample_windows: 4096
 # ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
 quick:
-  enabled: true
+  enabled: false
 # ── Scheduled retraining: periodic re-train + auto-promote on drift ─────────
 retraining:
   drift_feature_frac: 0.3
@@ -463,6 +517,12 @@ risk:
     asia:
       max_lots: 1.0
       max_open_trades: 3
+    asia_london:
+      max_lots: 1.5
+      max_open_trades: 4
+    london_ny:
+      max_lots: 2.0
+      max_open_trades: 6
     "off":
       max_lots: 0.0
       max_open_trades: 0

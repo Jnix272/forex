@@ -17,12 +17,18 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from inference._scaler_load import (
+    apply_inference_scaler,
+    load_inference_scaler,
+    scaler_feature_count,
+)
 from inference.onnx_inference import (
     _checkpoint_state_dict,
     _infer_features_from_state,
     _make_training_args,
     _read_training_config,
     _wrap_logits_output,
+    torch_load_safe,
 )
 from trading.inference_engines import BaseInferenceEngine
 
@@ -66,8 +72,26 @@ def load_pytorch_model(
     seq_len: int = 60,
     n_features: int | None = None,
     device: Any | None = None,
+    cache_path: str | None = None,
 ):
-    """Rebuild and load weights using the same path as ONNX export."""
+    """Rebuild and load weights using the same path as ONNX export.
+
+    Also loads the training-time ``StandardScaler`` (when discoverable) and
+    returns it as the 5th tuple element.  This closes the train/live contract
+    gap where the supervised pipeline z-scores features but inference fed raw
+    features to the model (audit 2026-08-07, finding #1).
+
+    The scaler is discovered via, in order:
+
+    1. an explicit ``cache_path`` argument from the caller, or
+    2. a ``cache_path`` key in the sidecar ``{checkpoint}_config.json`` file
+       that the training loop writes alongside the checkpoint.
+
+    Returns
+    -------
+    ``(model, n_features, seq_len, arch_name, scaler)`` — the scaler is
+    ``None`` when no scaler file was found (RL encoder-only path / demo).
+    """
     import torch
 
     ckpt_path = Path(checkpoint_path)
@@ -89,9 +113,10 @@ def load_pytorch_model(
         seq_len = int(cfg.get("seq_len", seq_len))
         model = XGBoostForecaster(num_classes=1, flatten_sequence=False)
         model.load_model(str(ckpt_path))
-        return model, n_features, seq_len, sidecar_model
+        scaler = None  # FIX: scaler was undefined
+        return model, n_features, seq_len, sidecar_model, scaler
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch_load_safe(ckpt_path, map_location="cpu")
     state_dict = _checkpoint_state_dict(ckpt)
 
     cfg_features = cfg.get("n_features")
@@ -106,6 +131,25 @@ def load_pytorch_model(
             f"Cannot infer n_features for {ckpt_path.name}. "
             "Pass --n-feat or retrain with sidecar config."
         )
+
+    # ── Train/live scaler + schema-hash parity ──────────────────────────────
+    # Audit 2026-08-07, finding #1: the supervised pipeline z-scores features
+    # but inference fed raw features to the model. We now load the persisted
+    # StandardScaler (when discoverable) and assert that the scaler's
+    # n_features matches the sidecar's n_features — schema-hash drift is a
+    # hard failure.
+    resolved_cache_path = cache_path or cfg.get("cache_path")
+    scaler = load_inference_scaler(resolved_cache_path)
+    if scaler is not None:
+        scaler_n = scaler_feature_count(scaler)
+        if scaler_n is not None and int(scaler_n) != int(n_features):
+            raise RuntimeError(
+                f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
+                f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
+                "feature-mask has drifted from when this checkpoint was trained — "
+                "either re-train against the new cache or rebuild the cache with "
+                "the original feature_mask."
+            )
 
     if sidecar_model == "ensemble":
         from models.ensemble import EnsembleMetaLearner
@@ -148,7 +192,7 @@ def load_pytorch_model(
         model.load_state_dict(state_dict, strict=False)
         model = _wrap_logits_output(model)
         model.eval()
-        return model, int(n_features), int(seq_len), sidecar_model
+        return model, int(n_features), int(seq_len), sidecar_model, scaler
 
     if cfg:
         from training.train_gpu import build_model as build_training_model
@@ -175,7 +219,7 @@ def load_pytorch_model(
     dev = device or _resolve_device()
     model.to(dev)
     model.eval()
-    return model, int(n_features), int(seq_len), sidecar_model
+    return model, int(n_features), int(seq_len), sidecar_model, scaler
 
 
 class PyTorchInferenceEngine(BaseInferenceEngine):
@@ -189,6 +233,7 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         n_features: int | None = None,
         hold_threshold: float = 0.45,
         device: Any | None = None,
+        cache_path: str | None = None,
     ):
         import torch
 
@@ -198,21 +243,39 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         self._obs_buffer = deque(maxlen=int(seq_len))
         self.device = device or _resolve_device()
 
-        self.model, self.n_features, self.seq_len, self.arch_name = load_pytorch_model(
-            self.checkpoint_path,
-            self.model_name,
-            seq_len=seq_len,
-            n_features=n_features,
-            device=self.device,
+        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = (
+            load_pytorch_model(
+                self.checkpoint_path,
+                self.model_name,
+                seq_len=seq_len,
+                n_features=n_features,
+                device=self.device,
+                cache_path=cache_path,
+            )
         )
         self._obs_buffer = deque(self._obs_buffer, maxlen=int(self.seq_len))
         self._torch = torch
         print(
             f"[PyTorch] Loaded {Path(checkpoint_path).name} | "
             f"arch={self.arch_name} | seq={self.seq_len} | "
-            f"n_feat={self.n_features} | device={self.device}"
+            f"n_feat={self.n_features} | scaler={'yes' if self.scaler is not None else 'no'}"
+            f" | device={self.device}"
         )
         self._warmup()
+
+    def _transform_window(self, window: np.ndarray) -> np.ndarray:
+        """Apply the training-time StandardScaler to a (T, F) live window.
+
+        Mirrors :func:`training.gpu_datasets._decompress_block` ordering:
+        NaN/Inf cleanup → scaler.transform → float32 cast. No-op when no
+        scaler was discovered (RL encoder-only path, demo) so existing callers
+        are unaffected.
+        """
+        arr = np.asarray(window, dtype=np.float32)
+        if self.scaler is None:
+            return arr
+        # apply_inference_scaler expects (..., F); we pass (T, F) directly.
+        return apply_inference_scaler(self.scaler, arr)
 
     def select_action(self, obs: np.ndarray) -> int:
         self._obs_buffer.append(np.asarray(obs, dtype=np.float32).reshape(-1))
@@ -224,8 +287,9 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         return int(proba.argmax())
 
     def predict_proba(self, window: np.ndarray) -> np.ndarray:
+        scaled = self._transform_window(window)
         x = self._torch.as_tensor(
-            window[np.newaxis], dtype=self._torch.float32, device=self.device
+            scaled[np.newaxis], dtype=self._torch.float32, device=self.device
         )
         with self._torch.no_grad():
             logits = self.model(x)
@@ -244,15 +308,19 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         model_name: str | None = None,
         seq_len: int | None = None,
         n_features: int | None = None,
+        cache_path: str | None = None,
     ) -> None:
         path = checkpoint_path or self.checkpoint_path
         name = model_name or self.model_name
-        self.model, self.n_features, self.seq_len, self.arch_name = load_pytorch_model(
-            path,
-            name,
-            seq_len=seq_len or self.seq_len,
-            n_features=n_features or self.n_features,
-            device=self.device,
+        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = (
+            load_pytorch_model(
+                path,
+                name,
+                seq_len=seq_len or self.seq_len,
+                n_features=n_features or self.n_features,
+                device=self.device,
+                cache_path=cache_path,
+            )
         )
         self.checkpoint_path = str(path)
         self.model_name = name

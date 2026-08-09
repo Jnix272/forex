@@ -12,6 +12,21 @@ import torch
 import torch.nn as nn
 
 from config.settings import PRETRAIN
+from training.direction_control import _coerce_auto_int
+from pretrain.contrastive import (
+    BYOLTrainer,
+    MaskedReconstructionTrainer,
+    RegimeAwareTSCLTrainer,
+    RepresentationCollapseError,
+    TimeSeriesAugmenter,
+    TSCLTrainer,
+)
+from pretrain.extended_trainers import (
+    ClusterContrastiveTrainer,
+    DriftContrastiveTrainer,
+    ForecastPretextTrainer,
+    VAESeqTrainer,
+)
 
 _HOST = None
 _BOUND = False
@@ -47,6 +62,11 @@ _HOST_DEPS = (
     'FEATURES',
     '_TRAIN_LOGGER',
     '_sharpe_ann_factor',
+    '_pbar',
+    '_trainable_max_index',
+    '_load_diff_array',
+    '_promotion_holdout_n',
+    '_multitask_head_in',
     'TimeSeriesAugmenter',
     'BYOLTrainer',
     'MaskedReconstructionTrainer',
@@ -209,10 +229,10 @@ def _read_pretrain_spans(
             while cursor < span_end:
                 end = min(span_end, cursor + read_step)
                 chunk_len = end - cursor
-                w_chunk = _crop_to_seq_len(np.asarray(x_reader[cursor:end]), seq_len)
+                w_chunk = _crop_to_seq_len(np.asarray(x_reader[cursor:end]), seq_len).copy()
                 np.nan_to_num(w_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
                 w_out[pos:pos + chunk_len] = w_chunk
-                y_chunk = np.asarray(y_reader[cursor:end], dtype=np.float32)
+                y_chunk = np.asarray(y_reader[cursor:end], dtype=np.float32).copy()
                 np.nan_to_num(y_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
                 y_out[pos:pos + chunk_len] = y_chunk
                 pos += chunk_len
@@ -569,11 +589,15 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 _he_data = json.loads(_he_path.read_text(encoding="utf-8"))
                 _he_indices = _he_data.get("indices", [])
                 if _he_indices:
-                    # convert indices into single-item spans to inject
-                    _valid_he = [i for i in _he_indices if 0 <= i < n_total]
-                    _he_spans = [(i, i+1) for i in _valid_he[:int(n_windows * 0.2)]] # max 20% hard examples
+                    # FIX: Validate hard example indices belong to trainable window
+                    # (not holdout or embargo) to prevent data leakage
+                    _trainable_end = int(n_total)  # n_total already capped by _trainable_max_index
+                    _valid_he = [i for i in _he_indices if 0 <= i < _trainable_end]
+                    if len(_valid_he) < len(_he_indices):
+                        print(f"[Pretrain] Discarded {len(_he_indices) - len(_valid_he)} hard examples outside trainable window (leakage prevention)")
+                    _he_spans = [(i, i+1) for i in _valid_he[:int(n_windows * 0.2)]]  # max 20% hard examples
                     if _he_spans:
-                        print(f"[Pretrain] Injected {len(_he_spans):,} hard examples from {len(_he_indices):,} total.")
+                        print(f"[Pretrain] Injected {len(_he_spans):,} hard examples from {len(_he_indices):,} total ({len(_valid_he)} valid).")
                         _hard_examples_injected += len(_he_spans)
                         spans.extend(_he_spans)
         except Exception as _he_e:
@@ -653,7 +677,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         try:
             _state = torch.load(ckpt, map_location=device, weights_only=True)
         except Exception:
-            _state = torch.load(ckpt, map_location=device)
+            _state = torch.load(ckpt, map_location=device, weights_only=True)
         _strict_load_report(_enc, _state, "PretrainResume", min_frac_loaded=0.6)
         _update_pretrain_report(args, {
             "status": "resume_loaded_existing",

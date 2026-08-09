@@ -13,7 +13,7 @@ def generate_test_data(checkpoint_path: str, model_name: str, batch_size: int = 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load PyTorch model
-    model, out_features, out_seq, arch = load_pytorch_model(
+    model, out_features, out_seq, arch, _scaler = load_pytorch_model(
         checkpoint_path, model_name, seq_len=seq_len, n_features=n_features, device=device
     )
     model.eval()

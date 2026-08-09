@@ -126,8 +126,9 @@ class BrokerBridge:
             self._ib = None
         self.connected = False
 
-    def execute_order(self, symbol: str, side: str, lot_size: float,
-                      limit_price: float = None) -> bool:
+    def execute_order(self, symbol, side: str, lot_size: float,
+                      limit_price: float = None,
+                      stop_loss: float = None, take_profit: float = None) -> bool:
         """Route an order to the execution engine."""
         self._require_connected("execute_order")
 
@@ -162,6 +163,10 @@ class BrokerBridge:
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
+            if stop_loss is not None:
+                request["sl"] = float(stop_loss)
+            if take_profit is not None:
+                request["tp"] = float(take_profit)
 
             result = mt5.order_send(request)
             if result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -181,6 +186,22 @@ class BrokerBridge:
             else:
                 order = MarketOrder(action, qty)
             trade = self._ib.placeOrder(contract, order)
+            if stop_loss is not None or take_profit is not None:
+                # Deliver SL/TP as child orders attached to the parent, so they
+                # survive engine restarts (fail-closed protection on IBKR).
+                opp = "SELL" if action == "BUY" else "BUY"
+                child_orders = []
+                if take_profit is not None:
+                    tp = LimitOrder(opp, qty, float(take_profit))
+                    tp.parent = order
+                    child_orders.append(tp)
+                if stop_loss is not None:
+                    sl = StopOrder(opp, qty, float(stop_loss))
+                    sl.parent = order
+                    child_orders.append(sl)
+                for child in child_orders:
+                    self._ib.placeOrder(contract, child)
+                    self._ib.sleep(0.2)
             self._ib.sleep(0.5)
             status = str(getattr(trade.orderStatus, "status", "") or "")
             if status in {"Cancelled", "Inactive", "ApiCancelled"}:
@@ -373,6 +394,58 @@ class BrokerBridge:
 
         raise BrokerNotImplementedError(
             f"BrokerBridge.get_latency() is not implemented for {self.broker}."
+        )
+
+    def get_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """Return (bid, ask) for ``symbol``. Fail-closed when disconnected."""
+        self._require_connected("get_bid_ask")
+
+        if self.broker == "MT5":
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                raise RuntimeError(f"MT5: no tick for {symbol}")
+            return float(tick.bid), float(tick.ask)
+
+        if self.broker == "IBKR":
+            contract = self._ibkr_fx_contract(symbol)
+            self._ib.qualifyContracts(contract)
+            tickers = self._ib.reqTickers(contract)
+            self._ib.sleep(0.3)
+            if not tickers:
+                raise RuntimeError(f"IBKR: no ticker for {symbol}")
+            t = tickers[0]
+            bid = float(getattr(t, "bid", 0) or 0)
+            ask = float(getattr(t, "ask", 0) or 0)
+            if bid <= 0 or ask <= 0:
+                mid = float(getattr(t, "close", 0) or getattr(t, "last", 0) or 0)
+                if mid <= 0:
+                    raise RuntimeError(f"IBKR: empty bid/ask for {symbol}")
+                return mid - 1e-5, mid + 1e-5
+            return bid, ask
+
+        raise BrokerNotImplementedError(
+            f"BrokerBridge.get_bid_ask() is not implemented for {self.broker}."
+        )
+
+    def get_account_equity(self) -> float:
+        """Account equity / NAV when the venue exposes it."""
+        self._require_connected("get_account_equity")
+        if self.broker == "MT5":
+            info = mt5.account_info()
+            if info is None:
+                raise RuntimeError("MT5: account_info() returned None")
+            return float(getattr(info, "equity", 0) or 0)
+        if self.broker == "IBKR":
+            vals = self._ib.accountValues()
+            for v in vals:
+                if str(getattr(v, "tag", "")) == "NetLiquidation" and str(getattr(v, "currency", "")) in ("", "USD", "BASE"):
+                    try:
+                        return float(v.value)
+                    except Exception:
+                        continue
+            raise RuntimeError("IBKR: NetLiquidation not found in accountValues")
+        raise BrokerNotImplementedError(
+            f"BrokerBridge.get_account_equity() is not implemented for {self.broker}."
         )
 
     def is_connected(self) -> bool:

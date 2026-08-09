@@ -13,7 +13,6 @@ from training.memory_management import (
     CheckpointPolicy,
     MemoryMonitor,
     PrefetchDataLoader,
-    SelectiveActivationOffloader,
     StreamingMemmapDataset,
     apply_gradient_checkpointing,
     checkpoint_sequential,
@@ -202,31 +201,6 @@ def test_memory_efficient_training_context():
         loss.backward()
 
     # Should complete without errors
-
-
-# ---------------------------------------------------------------------------
-# Activation Offloading
-# ---------------------------------------------------------------------------
-
-def test_selective_activation_offloader():
-    """Test SelectiveActivationOffloader."""
-    model = nn.Sequential(
-        nn.Linear(10, 20),
-        nn.ReLU(),
-        nn.Linear(20, 10),
-    )
-
-    offloader = SelectiveActivationOffloader(model, ["0", "2"])  # Linear layers
-    offloader.enable()
-
-    x = torch.randn(2, 10)
-    out = model(x)
-
-    # Should have offloaded activations
-    assert len(offloader._offloaded) > 0
-
-    offloader.disable()
-    assert len(offloader._offloaded) == 0
 
 
 # ---------------------------------------------------------------------------

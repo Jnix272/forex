@@ -28,13 +28,13 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import PATHS, TRAINING
+from training.gpu_losses import _match_target_shape
 from training.train_gpu import (
     ZarrStreamDataset,
     _apply_yaml_config,
     _class_weights_tensor,
     _gradients_are_finite,
     _log_nan,
-    _match_target_shape,
     _recover_nonfinite_training_state,
     build_dataset_chunked,
     build_model,
@@ -209,7 +209,7 @@ def _load_ensemble_teacher(args, n_features: int, seq_len: int, device: torch.de
         loaded_names.append(str(name))
 
     teacher = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=loaded_names).to(device)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     teacher.load_state_dict(_checkpoint_state_dict(ckpt), strict=False)
     teacher.eval()
     for param in teacher.parameters():
@@ -321,7 +321,7 @@ def run_distillation():
         teacher = _load_ensemble_teacher(args, n_features, args.seq_len, dev)
         teacher_is_mt = False
     else:
-        ckpt = torch.load(args.teacher_ckpt, map_location="cpu")
+        ckpt = torch.load(args.teacher_ckpt, map_location="cpu", weights_only=True)
         state_dict = _checkpoint_state_dict(ckpt)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 

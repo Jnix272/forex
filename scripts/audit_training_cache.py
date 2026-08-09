@@ -126,7 +126,34 @@ def _print_report(path: Path, report: dict[str, dict[str, object]]) -> int:
             f"min={stats['min']} max={stats['max']}"
         )
     print(f"  nonfinite_total={bad_total:,}")
-    return 0 if bad_total == 0 else 2
+
+    # Schema sidecar vs X feature width (TPA-K03 / curriculum freeze contract).
+    schema_code = 0
+    try:
+        import json
+        base = path if path.suffix == ".zarr" else _base_from_x_npy(path)
+        schema_path = Path(str(base) + "_feature_schema.json")
+        if schema_path.exists() and "X" in report:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            n_schema = len(schema) if isinstance(schema, list) else 0
+            x_shape = report["X"]["shape"]
+            n_feat = int(x_shape[-1]) if isinstance(x_shape, tuple) and x_shape else 0
+            if n_schema and n_feat and n_schema != n_feat:
+                print(
+                    f"  SCHEMA_MISMATCH schema_cols={n_schema} X_features={n_feat} "
+                    f"({schema_path.name})"
+                )
+                schema_code = 2
+            elif n_schema:
+                print(f"  schema_ok cols={n_schema} ({schema_path.name})")
+        elif "X" in report:
+            print("  schema_missing (no *_feature_schema.json)")
+            schema_code = 1
+    except Exception as exc:
+        print(f"  schema_check_failed: {exc}")
+        schema_code = 1
+
+    return max(0 if bad_total == 0 else 2, schema_code)
 
 
 def main() -> int:

@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from config.settings import PATHS
 from models.ensemble import EnsembleMetaLearner, train_meta_learner
+from training.cache_integrity import _trainable_max_index as _trainable_prefix_end
 from training.train_gpu import ZarrStreamDataset, _on_disk_sequence_count, build_model
 
 DEFAULT_CACHE = (
@@ -56,6 +57,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--div-weight", type=float, default=0.1)
     p.add_argument("--output", type=str, default=None, help="Best checkpoint path")
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    # Audit 2026-08-07 fix (finding E3): previously this script sampled
+    # ``rng.choice(total, ...)`` uniformly across the WHOLE cache, including
+    # the chronological promotion holdout that the base models were also
+    # trained on — same canonical leak as the triple-barrier meta-labeler's
+    # B4. The flags below drive the existing helpers
+    # ``cache_integrity._trainable_max_index`` and ``cv_splits._embargo_bars``
+    # so the meta-learner only sees the [0, _trainable) prefix; the
+    # [trainable, total) tail stays quarantined for the promotion gate.
+    p.add_argument("--promote-forward-frac", type=float, default=0.1,
+                   help="Chronological promotion-holdout fraction (default 0.1)")
+    p.add_argument("--embargo-bars", type=int, default=None,
+                   help="Override dynamic embargo gap; default uses seq_len + lookahead + delay")
     return p.parse_args()
 
 
@@ -167,7 +180,7 @@ def make_model_args(model_name: str, cfg: dict, state: dict, n_features: int, se
 
 
 def load_base_model(model_name: str, ckpt_path: Path, n_features: int, seq_len: int, device: torch.device):
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     state = checkpoint_state_dict(ckpt)
     cfg = load_training_config(model_name, ckpt_path)
     model_args = make_model_args(model_name, cfg, state, n_features, seq_len)
@@ -211,14 +224,35 @@ def main() -> int:
 
     total, seq_len, n_features = infer_cache_shape(cache_path)
     total = _on_disk_sequence_count(str(cache_path)) or total
-    n_meta = min(int(args.samples), int(total))
+
+    # Audit 2026-08-07, finding E3: the meta-learner must NOT see the
+    # chronological promotion holdout, because the base models were also
+    # trained on it. Compute the trainable prefix end (excludes both the
+    # promotion-holdout tail and the label-leakage embargo gap) and sample
+    # only from [0, _trainable). Mirrors the logic already used by the
+    # production path ``training/post_train.run_ensemble_meta:164-174``.
+    if args.embargo_bars is not None:
+        # Helper reads args.validation_embargo_bars; mirror the key.
+        setattr(args, "validation_embargo_bars", int(args.embargo_bars))
+    _trainable = int(_trainable_prefix_end(total, args))
+    if _trainable < 100:
+        log(f"[EnsembleMeta] Trainable prefix too small ({_trainable}); "
+            f"total={total}. Skipping meta training — re-run with a larger "
+            "cache or a smaller --promote-forward-frac.")
+        return 1
+    n_meta = min(int(args.samples), int(_trainable))
     rng = np.random.default_rng(int(args.seed))
-    meta_idx = np.sort(rng.choice(total, n_meta, replace=False))
+    meta_idx = np.sort(rng.choice(_trainable, n_meta, replace=False))
+    _holdout = total - _trainable - int(getattr(args, "validation_embargo_bars", 0) or 0)
+    _embargo = int(getattr(args, "validation_embargo_bars", 0) or 0) if args.embargo_bars is not None else 0
 
     device = torch.device(args.device)
     log(f"[EnsembleMeta] cache={cache_path}")
     log(f"[EnsembleMeta] samples={n_meta:,}/{total:,} | seq_len={seq_len} | n_features={n_features}")
-    log(f"[EnsembleMeta] device={device} | output={out}")
+    log(f"[EnsembleMeta] trainable_prefix=[0,{_trainable}) | holdout_tail=[{_trainable},"
+        f"{total}) | device={args.device} | output={out}")
+    if _embargo:
+        log(f"[EnsembleMeta] explicit embargo_bars={_embargo} applied between meta-train and holdout")
 
     bases = []
     names = []

@@ -37,7 +37,8 @@ class GPUBacktester:
         d_returns = self.xp.diff(d_prices) / d_prices[:-1]
 
         # BUG-007: Proper 1-bar lag — signal[i] trades return[i+1], not return[i].
-        # d_returns[1:] is the return from bar i+1 to i+2; signal[:-2] is the signal from bar i.
+        # d_returns[i] is the return from bar i to i+1. signal[i] is the signal from bar i.
+        # To execute at bar i+1 open, we need return from i+1 to i+2 = d_returns[i+1]
         d_positions = d_signals[:-2]
         d_returns = d_returns[1:]
 
@@ -46,7 +47,7 @@ class GPUBacktester:
 
         # Incorporate spread costs whenever position changes
         d_trades = self.xp.abs(self.xp.diff(d_positions, prepend=0))
-        d_costs = d_trades * (spread / d_prices[1:-1])
+        d_costs = d_trades * ((spread * 0.5) / d_prices[1:-1])
 
         # Net returns
         d_net_returns = d_strat_returns - d_costs

@@ -15,6 +15,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import RL
+from inference.onnx_inference import torch_load_safe
+from inference._scaler_load import apply_inference_scaler
 from models.rl_agents import DQNAgent, PPOAgent
 from trading.inference_engines import BaseInferenceEngine
 from trading.live_actions import LiveAction, scaling_action_to_live_action
@@ -62,7 +64,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         self.max_lots = float(max_lots)
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self._model, self.n_features, self.seq_len, self.arch_name = load_pytorch_model(
+        self._model, self.n_features, self.seq_len, self.arch_name, self._scaler = load_pytorch_model(
             supervised_checkpoint,
             model_name,
             seq_len=self.seq_len,
@@ -75,7 +77,7 @@ class RLInferenceAgent(BaseInferenceEngine):
             self._encoder.head = torch.nn.Identity()
         self._encoder.eval()
 
-        ckpt = torch.load(rl_checkpoint, map_location=self.device, weights_only=False)
+        ckpt = torch_load_safe(rl_checkpoint, map_location=self.device)
         meta_path = Path(rl_checkpoint).parent / f"rl_{self.algo}_best.json"
         obs_size = None
         n_actions = None
@@ -163,6 +165,9 @@ class RLInferenceAgent(BaseInferenceEngine):
             return int(LiveAction.HOLD)
 
         window = np.stack(list(self._feat_buffer), axis=0)
+        # Apply the training-time scaler (if available) — matches ZarrStreamDataset
+        if self._scaler is not None:
+            window = apply_inference_scaler(self._scaler, window)
         xb = torch.as_tensor(window[np.newaxis], dtype=torch.float32, device=self.device)
         with torch.no_grad():
             h = self._encoder(xb)
@@ -171,8 +176,10 @@ class RLInferenceAgent(BaseInferenceEngine):
             emb = h.float().cpu().numpy().reshape(-1)
 
         price = float(self._last_price) if getattr(self, "_last_price", 0) else 0.0
+        # Standard FX lot = 100,000 base currency units
+        STANDARD_LOT_SIZE = 100_000.0
         upnl = (
-            (price - self._entry_price) * self._position * 10_000.0
+            (price - self._entry_price) * self._position * STANDARD_LOT_SIZE
             if self._position != 0 and price > 0
             else 0.0
         )
@@ -185,7 +192,20 @@ class RLInferenceAgent(BaseInferenceEngine):
         ], dtype=np.float32)
         full_obs = np.concatenate([emb, agent_state]).astype(np.float32)
 
-        action = max(0, min(9, int(self._agent.select_action(full_obs))))
+        # I3 fix (2026-08-07): live inference must be deterministic.
+        # The PPO actor used to always sample, injecting stochasticity into
+        # position-sizing decisions. Pass greedy=True for PPO (DQN already
+        # has eps=0 set in __init__ at line 99, so it doesn't need this kwarg).
+        try:
+            # PPO exposes `greedy=` kwarg on select_action; DQN does not, so we
+            # guard with try/except to stay backward-compatible with DQN agents.
+            action_t = self._agent.select_action(full_obs, greedy=True)
+            # PPO returns (action, log_prob, value); DQN-style returns scalar
+            action_int = int(action_t[0]) if isinstance(action_t, tuple) else int(action_t)
+        except TypeError:
+            # DQN-style agent without greedy kwarg — fall through to default
+            action_int = int(self._agent.select_action(full_obs))
+        action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)
 
 

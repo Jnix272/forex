@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -219,3 +220,89 @@ def test_masked_reconstruction_checkpoint_and_diagnostics(tmp_path):
     assert np.isfinite(history["loss"][0])
     assert np.isfinite(diag["masked_mse"])
     assert np.isfinite(diag["embed_std"])
+
+
+def test_run_pretrain_host_binding_smoke(tmp_path):
+    """Regression test for the full pretrain_runner.run_pretrain path.
+
+    Catches host-binding gaps (e.g. missing _pbar / _trainable_max_index /
+    _load_diff_array / _promotion_holdout_n / _multitask_head_in) and the
+    read-only memmap crash in _read_pretrain_spans.
+    """
+    import shutil
+    import tempfile
+
+    from training import train_gpu as tg
+    from training.pretrain_runner import run_pretrain
+
+    class _TinyBackbone(nn.Module):
+        def __init__(self, n_features: int, d_model: int = 8):
+            super().__init__()
+            self.layers = nn.Sequential(
+                nn.Conv1d(n_features, d_model, kernel_size=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool1d(1),
+                nn.Flatten(),
+            )
+
+        def forward(self, x):
+            return self.layers(x.transpose(1, 2))
+
+    class _TinyModel(nn.Module):
+        def __init__(self, n_features: int, seq_len: int, d_model: int = 8):
+            super().__init__()
+            self.backbone = _TinyBackbone(n_features, d_model)
+            self.head = nn.Linear(d_model, 3)
+
+        def forward(self, x):
+            return self.head(self.backbone(x))
+
+    tmp = Path(tempfile.mkdtemp(prefix="pretrain_binding_", dir=tmp_path))
+    try:
+        args = argparse.Namespace(
+            model="transformer",
+            checkpoint_dir=str(tmp / "ckpt"),
+            seq_len=8,
+            pretrain_method="byol",
+            pretrain_epochs=1,
+            pretrain_batch=8,
+            pretrain_sample_windows=64,
+            pretrain_blocks_per_epoch=1,
+            pretrain_regime=False,
+            pretrain_max_epochs=0,
+            pretrain_min_epochs=0,
+            pretrain_handoff_patience=0,
+            pretrain_handoff_min_delta=0.0,
+            pretrain_handoff_loss=float("-inf"),
+            pretrain_projection_dim=8,
+            pretrain_pred_dim=8,
+            pretrain_ema_decay=0.99,
+            pretrain_lr=1e-3,
+            pretrain_temperature=0.5,
+            pretrain_augmentations=None,
+            force_pretrain=False,
+            resume=False,
+            use_multi_task_pretrainer=False,
+            seed=42,
+        )
+
+        cache_path = str(tmp / "cache")
+        n = 128
+        X = np.random.randn(n, 8, 4).astype(np.float32)
+        y = np.random.randn(n).astype(np.float32)
+        np.save(cache_path + "_X.npy", X)
+        np.save(cache_path + "_y.npy", y)
+
+        # Neutralize embargo/holdout helpers for the tiny dataset
+        tg._promotion_holdout_n = lambda n, args: 0
+        tg._embargo_bars = lambda args: 0
+        tg._trainable_max_index = lambda n, args: n
+        tg._load_diff_array = lambda cp, n: None
+
+        device = torch.device("cpu")
+        model = _TinyModel(n_features=4, seq_len=8).to(device)
+        result = run_pretrain(model, cache_path, n_features=4, args=args, device=device)
+        assert result is model
+        assert (tmp / "ckpt" / "contrastive_encoder.pt").exists()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

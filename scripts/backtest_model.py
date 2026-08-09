@@ -28,6 +28,30 @@ DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EU
 PIP_SIZES = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001, "EURGBP": 0.0001, "NZDUSD": 0.0001, "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01}
 
 
+def _pair_feature_dims(n_features: int, n_pairs: int = 1, cfg: dict | None = None) -> tuple[int, int]:
+    """Resolve (n_pairs, f_per_pair) from checkpoint config — never hardcode width."""
+    cfg = cfg or {}
+    n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or n_pairs or 1)
+    n_pairs = max(1, n_pairs)
+    fpp = cfg.get("_f_per_pair") or cfg.get("f_per_pair")
+    if fpp is not None:
+        return n_pairs, max(1, int(fpp))
+    return n_pairs, max(1, int(n_features) // n_pairs)
+
+
+def _fit_feature_width(frame: pd.DataFrame, width: int) -> pd.DataFrame:
+    """Pad or truncate feature columns to ``width`` (checkpoint n_features / f_per_pair)."""
+    width = max(1, int(width))
+    if frame.shape[1] >= width:
+        return frame.iloc[:, :width]
+    pad = pd.DataFrame(
+        0.0,
+        index=frame.index,
+        columns=[f"pad_{i}" for i in range(width - frame.shape[1])],
+    )
+    return pd.concat([frame, pad], axis=1)
+
+
 def log(m: str) -> None:
     print(m, flush=True)
 
@@ -63,6 +87,9 @@ def _normalize_backtest_metrics(metrics: dict) -> dict:
             "win_rate": 0.0,
             "max_drawdown": 0.0,
             "net_pnl": 0.0,
+            "gross_pnl": 0.0,
+            "total_commission": 0.0,
+            "profit_factor": 0.0,
             "total_return_pct": 0.0,
             "error": metrics.get("error", "No metrics") if isinstance(metrics, dict) else "No metrics",
         }
@@ -84,6 +111,9 @@ def _normalize_backtest_metrics(metrics: dict) -> dict:
         "win_rate": win_rate,
         "max_drawdown": max_dd,
         "net_pnl": float(metrics.get("net_pnl", metrics.get("net_pnl_usd", metrics.get("total_pnl_usd", 0.0))) or 0.0),
+        "gross_pnl": float(metrics.get("gross_pnl_usd", metrics.get("gross_pnl", 0.0)) or 0.0),
+        "total_commission": float(metrics.get("total_commission_usd", metrics.get("transaction_costs", 0.0)) or 0.0),
+        "profit_factor": float(metrics.get("profit_factor", 0.0) or 0.0),
         "total_return_pct": float(metrics.get("total_return_pct", 0.0) or 0.0),
         "error": "",
     }
@@ -191,9 +221,14 @@ def _checkpoint_state_dict(c):
 
 def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tensor:
     outs = []
-    for s in range(seq_len, len(x), max(1, bs)):
-        e = min(len(x), s + max(1, bs))
-        w = torch.stack([x[i - seq_len:i] for i in range(s, e)], dim=0)
+    if len(x) < seq_len:
+        return torch.empty((0, 3), device=x.device)
+    
+    # Use native unfold for sliding window batching
+    windows = x.unfold(0, seq_len, 1).transpose(1, 2)
+    for s in range(0, len(windows), max(1, bs)):
+        e = min(len(windows), s + max(1, bs))
+        w = windows[s:e]
         o = model(w)
         if isinstance(o, dict):
             o = o.get("direction_logits", o.get("logits", o.get("direction")))
@@ -203,8 +238,8 @@ def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tens
             # Scalar direction score -> synthesize 3-class logits [SELL, HOLD, BUY]
             o = torch.stack([-o, torch.zeros_like(o), o], dim=1)
         elif isinstance(o, torch.Tensor) and o.ndim == 2 and o.shape[1] == 1:
-            s = o.squeeze(1)
-            o = torch.stack([-s, torch.zeros_like(s), s], dim=1)
+            s_val = o.squeeze(1)
+            o = torch.stack([-s_val, torch.zeros_like(s_val), s_val], dim=1)
         outs.append(o.detach().cpu())
     return torch.cat(outs, dim=0)
 
@@ -338,15 +373,17 @@ def _load_ensemble_model(ckpt: Path, n_features: int, seq_len: int, device: torc
                 self.corr_window = 20
                 self.corr_window_long = 60
                 self.momentum_window = 20
-                self._n_pairs = max(1, n_features // 224)
-                self._f_per_pair = 224
+                bcfg = _load_checkpoint_config(bck) if bck else {}
+                self._n_pairs, self._f_per_pair = _pair_feature_dims(
+                    n_features, n_pairs=int(bcfg.get("_n_pairs") or meta.get("_n_pairs") or 1), cfg=bcfg or meta,
+                )
         bm = build_model(name, n_features, BCfg()).to(device)
-        bstate = torch.load(bck, map_location=device, weights_only=False)
+        bstate = torch.load(bck, map_location=device, weights_only=True)
         bm.load_state_dict(_checkpoint_state_dict(bstate), strict=False)
         bm.eval()
         bases.append(bm)
     em = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=base_names).to(device)
-    estate = torch.load(ckpt, map_location=device, weights_only=False)
+    estate = torch.load(ckpt, map_location=device, weights_only=True)
     em.load_state_dict(_checkpoint_state_dict(estate), strict=False)
     em.eval()
     return em
@@ -422,12 +459,23 @@ def run_backtest():
     ckpt_cfg = _load_checkpoint_config(ckpt)
     ensemble_manifest = _load_ensemble_manifest(ckpt) if args.model.lower() == "ensemble" else {}
     manifest_schema = ensemble_manifest.get("schema", {}) if isinstance(ensemble_manifest, dict) else {}
-    n_features = int(ckpt_cfg.get("n_features", args.n_pairs * 224))
+    n_pairs_arg = max(1, int(args.n_pairs))
+    default_width = int(ckpt_cfg.get("n_features") or 0)
+    n_features = int(
+        ckpt_cfg.get("n_features")
+        or (default_width if default_width > 0 else 0)
+        or 0
+    )
+    if args.model.lower() == "ensemble":
+        n_features = int(manifest_schema.get("n_features", n_features) or n_features)
     seq_len = int(ckpt_cfg.get("seq_len", args.seq_len))
     if args.model.lower() == "ensemble":
-        n_features = int(manifest_schema.get("n_features", n_features))
         seq_len = int(manifest_schema.get("seq_len", seq_len))
-    n_pairs = max(1, n_features // 224)
+    if n_features <= 0:
+        raise ValueError(
+            f"Checkpoint {ckpt} missing n_features — cannot pad/truncate to a hardcoded width."
+        )
+    n_pairs, f_per_pair = _pair_feature_dims(n_features, n_pairs=n_pairs_arg, cfg=ckpt_cfg)
 
     class Cfg:
         def __init__(self):
@@ -445,13 +493,13 @@ def run_backtest():
             self.corr_window_long = 60
             self.momentum_window = 20
             self._n_pairs = n_pairs
-            self._f_per_pair = 224
+            self._f_per_pair = f_per_pair
 
     if args.model.lower() == "ensemble":
         model = _load_ensemble_model(ckpt, n_features, seq_len, device)
     else:
         model = build_model(args.model, n_features, Cfg()).to(device)
-        state = torch.load(ckpt, map_location=device, weights_only=False)
+        state = torch.load(ckpt, map_location=device, weights_only=True)
         model.load_state_dict(_checkpoint_state_dict(state), strict=False)
         model.eval()
 
@@ -460,27 +508,44 @@ def run_backtest():
     sent = SentimentPipeline(prefer_backend="finbert", use_cache=True)
     pipeline = ForexDataPipeline(bar_freq=args.bar_freq)
 
+    # Pre-cache dataset per pair
+    cached_bars = {}
+    cached_features = {}
+    pair_list = DEFAULT_PAIRS[:n_pairs] if n_pairs > 1 else [args.pair]
+    
+    for p in pair_list:
+        try:
+            ticks = load_or_generate(source=args.source, pair=p, start=args.start, end=args.end, n_rows=2000000)
+            bars = pipeline.run(ticks)
+            if bars is not None and len(bars) > seq_len:
+                cached_bars[p] = bars
+                f_base = fe.build(bars)
+                f_adv = afb.build(bars, base_features=f_base)
+                f = pd.concat([f_base, f_adv], axis=1)
+                f = _fit_feature_width(f, f_per_pair)
+                f = f.reindex(bars.index).ffill().fillna(0.0)
+                cached_features[p] = f
+        except Exception as e:
+            log(f"Failed to load/cache data for {p}: {e}")
+
     wf_rows = []
     for idx, (ws, we) in enumerate(windows, start=1):
         log(f"[WF {idx}/{len(windows)}] {ws} -> {we}")
-        pair_list = DEFAULT_PAIRS[:args.n_pairs] if args.n_pairs > 1 else [args.pair]
         per_pair = []
         base_bars = None
         for p in pair_list:
-            ticks = load_or_generate(source=args.source, pair=p, start=ws, end=we, n_rows=100000)
-            bars = pipeline.run(ticks)
-            if bars is None or len(bars) <= args.seq_len:
+            if p not in cached_bars:
+                continue
+            b = cached_bars[p].loc[ws:we]
+            if len(b) <= seq_len:
                 log(f"[WF {idx}/{len(windows)}] {p}: no usable bars after cleaning; skipping window")
-                per_pair = []
-                break
+                continue
             if base_bars is None:
-                base_bars = bars
-            f = pd.concat([fe.build(bars), afb.build(bars, base_features=fe.build(bars))], axis=1)
-            f = f.iloc[:, :224] if f.shape[1] >= 224 else pd.concat([f, pd.DataFrame(0.0, index=f.index, columns=[f"pad_{i}" for i in range(224 - f.shape[1])])], axis=1)
-            f = f.reindex(base_bars.index).ffill().fillna(0.0)
-            per_pair.append(f)
+                base_bars = b
+            f_slice = cached_features[p].loc[ws:we]
+            per_pair.append(f_slice)
 
-        if not per_pair or base_bars is None or len(base_bars) <= args.seq_len:
+        if not per_pair or base_bars is None or len(base_bars) <= seq_len:
             continue
 
         X = pd.concat(per_pair, axis=1)
@@ -488,7 +553,7 @@ def run_backtest():
             X["finbert_sentiment"] = float(sent.score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
         except Exception:
             X["finbert_sentiment"] = 0.0
-        X = X.iloc[:, :n_features] if X.shape[1] >= n_features else pd.concat([X, pd.DataFrame(0.0, index=X.index, columns=[f"xpad_{i}" for i in range(n_features - X.shape[1])])], axis=1)
+        X = _fit_feature_width(X, n_features)
         if len(X) <= args.seq_len:
             log(f"[WF {idx}/{len(windows)}] not enough feature rows ({len(X)}) for seq_len={args.seq_len}; skipping")
             continue
@@ -513,11 +578,17 @@ def run_backtest():
         stop_pips = float(args.stop_pips)
         take_pips = float(args.take_pips)
         last_signal_i = -10**9
+        
+        # Pre-extract arrays for speed
+        regime_vals = X["regime_label"].values if "regime_label" in X.columns else None
+        close_vals = base_bars["close"].values
+        ts_vals = base_bars.index
+
         for off, c in enumerate(cls):
             i = seq_len + off
             adj_min_conf = args.min_confidence
-            if "regime_label" in X.columns:
-                rl = float(X["regime_label"].iloc[i])
+            if regime_vals is not None:
+                rl = float(regime_vals[i])
                 if rl > 0.5:
                     adj_min_conf = max(0.5, args.min_confidence - 0.05)
                 elif rl < -0.5:
@@ -529,7 +600,7 @@ def run_backtest():
                 continue
             if meta_ok is not None and not bool(meta_ok[off]):
                 continue
-            price = float(base_bars["close"].iloc[i])
+            price = float(close_vals[i])
             if c == 0:
                 act = 2
                 stop_loss = price + stop_pips * pip_size
@@ -564,7 +635,7 @@ def run_backtest():
                 dynamic_lots = max(0.01, dynamic_lots)
 
                 signals.append({
-                    "timestamp": base_bars.index[i],
+                    "timestamp": ts_vals[i],
                     "action": act,
                     "lots": dynamic_lots,
                     "stop_loss": stop_loss,
@@ -724,12 +795,10 @@ def run_execution_backtest(
             continue
         if base_bars is None:
             base_bars = bars
-        f = pd.concat([fe.build(bars), afb.build(bars, base_features=fe.build(bars))], axis=1)
-        if f.shape[1] >= 224:
-            f = f.iloc[:, :224]
-        else:
-            f = pd.concat([f, pd.DataFrame(0.0, index=f.index,
-                                           columns=[f"pad_{i}" for i in range(224 - f.shape[1])])], axis=1)
+        f_base = fe.build(bars)
+        f = pd.concat([f_base, afb.build(bars, base_features=f_base)], axis=1)
+        f_per_pair = max(1, int(n_features) // max(1, len(pair_list)))
+        f = _fit_feature_width(f, f_per_pair)
         f = f.reindex(base_bars.index).ffill().fillna(0.0)
         per_pair.append(f)
 
@@ -742,11 +811,21 @@ def run_execution_backtest(
                                        .score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
     except Exception:
         X["finbert_sentiment"] = 0.0
-    if X.shape[1] >= n_features:
-        X = X.iloc[:, :n_features]
-    else:
-        X = pd.concat([X, pd.DataFrame(0.0, index=X.index,
-                                       columns=[f"xpad_{i}" for i in range(n_features - X.shape[1])])], axis=1)
+    if X.shape[1] != n_features:
+        if X.shape[1] > n_features:
+            X = X.iloc[:, :n_features]
+        else:
+            X = pd.concat(
+                [
+                    X,
+                    pd.DataFrame(
+                        0.0,
+                        index=X.index,
+                        columns=[f"xpad_{i}" for i in range(n_features - X.shape[1])],
+                    ),
+                ],
+                axis=1,
+            )
     if len(X) <= seq_len:
         return _empty("not enough feature rows for seq_len")
 
@@ -762,13 +841,17 @@ def run_execution_backtest(
 
     signals = []
     last_signal_i = -10**9
+    
+    close_vals = base_bars["close"].values
+    ts_vals = base_bars.index
+
     for off, c in enumerate(cls):
         i = seq_len + off
         if conf[off] < min_confidence:
             continue
         if i - last_signal_i < max(1, int(min_gap_bars)):
             continue
-        price = float(base_bars["close"].iloc[i])
+        price = float(close_vals[i])
         if c == 0:
             act = 2
             stop_loss = price + stop_pips * pip_size
@@ -797,7 +880,7 @@ def run_execution_backtest(
         dynamic_lots = max(0.01, lots * max(0.0, kelly_k * kelly_frac))
 
         signals.append({
-            "timestamp": base_bars.index[i],
+            "timestamp": ts_vals[i],
             "action": act,
             "lots": dynamic_lots,
             "stop_loss": stop_loss,

@@ -26,7 +26,7 @@ The core architecture is built around regime-aware pretraining and continuous mo
    - **Risk Integrity**: Incorporates max drawdown circuit breakers and position limits.
    - Outputs comprehensive tear sheets via `pyfolio` alongside rich metrics (Sharpe, Sortino, hit rates, win-loss ratio).
 
-4. **Inference & Governance (`inference/`, `deployment/`)**
+4. **Inference & Governance (`inference/`, `retraining/`)**
    - Supports ONNX and PyTorch runtimes (`PyTorchInferenceEngine`).
    - `ShadowModeManager`: Manages the promotion of models via a strict governance protocol and MATURITY_LADDER logic before pushing them to live trading.
    - **`export_onnx.py`**: Utility to reliably export PyTorch checkpoints into statically compiled `.onnx` binaries for C++ execution, resolving dynamic sequence lengths and feature sizes.
@@ -47,8 +47,9 @@ The core architecture is built around regime-aware pretraining and continuous mo
    - **Model Cards**: Automatically generates a standardized <model_name>_model_card.json artifact for every trained model, tracking its architecture, training window, feature parity, label strategy, and cross-validation performance. This ensures strict tracking of model lineage and performance history prior to promotion.
 
 7. **Semantic Observability**
-   - **Discord Control Panel**: The Discord alerter enforces strict semantic alerting phases (e.g. 	raining_started, promotion_gate_passed, production_deploy_completed), directly embedding execution artifacts and ONNX schema hashes into the channel for a clean, auditable timeline.
-\n## Prerequisites
+   - **Discord Control Panel**: The Discord alerter enforces strict semantic alerting phases (e.g. `training_started`, `promotion_gate_passed`, `production_deploy_completed`), directly embedding execution artifacts and ONNX schema hashes into the channel for a clean, auditable timeline.
+
+## Prerequisites
 
 - **Environment**: Python 3.10+
 - **Hardware**: CUDA-capable GPU highly recommended for PyTorch pretraining and RL backpropagation. (Tested natively on Windows/WSL).
@@ -82,6 +83,42 @@ The core architecture is built around regime-aware pretraining and continuous mo
 
 4. **Backtesting**
    Test signals against the `ForexScalingBacktest` engine. Ensure you pass your `bars` (with bid/ask spread data) and generated `signals` containing `ScalingAction` states (e.g., `OPEN_LONG`, `SCALE_IN_50`).
+
+## Latest Updates (2026-08-09)
+
+### Test Suite Stabilization & Bug Fixes
+- Critical bugs fixed in iTransformer, ClusterContrastiveTrainer, ZarrStreamDataset, promotion gates, visualizer, and supervised loop
+- ✅ **The `supervised_loop.py` epoch loop is repaired** (2026-08-09): stripped all legacy adaptive-curriculum references, routed through `CurriculumManager`, wired `graph_pgd` auto-select for GNN models, applied per-sample curriculum weights to the loss, and switched `OneCycleLR` to `total_steps` mode. Training smoke test passes. See [`docs/FIXES.md`](docs/FIXES.md) for the full audit + verdicts.
+- Fixed `iTransformerScalper` LayerNorm shape mismatch when used with `MultiTaskWrapper`
+- Fixed `ClusterContrastiveTrainer.nt_xent` undefined variables
+- Fixed `_fit_fold_scaler` and `_decompress_block` StandardScaler 3D input handling
+- Fixed `ZarrStreamDataset` worker block splitting and scalar index handling
+- Fixed `_close_position` override_price parameter for stop/TP execution in backtest
+- Fixed `supervised_loop.py` indentation error in epoch loop
+
+### Data Quality & Observability (2026-08-09)
+- **Structured logging infrastructure** across entire data pipeline (replaces 20k+ bare print statements)
+- **Cross-asset per-asset logging** with full fallback chain visibility
+- **FRED dual-path visibility** - explicit logging of real vs synthetic data
+- **COT load unification** - single helper with logging for main + worker paths
+- **Regime detection structured logging** - success vs fallback tracking
+- **Pipeline standardization fix** - resolves `ColumnNotFoundError: unable to find column "mid"`
+
+### Phase 3 Architectural Replacements (2026-08-08)
+- **P3-1**: Replace AdversarialGenerator with PGD/FGSM/FreeLB gradient-based attacks — classes + factory done; `supervised_loop` wiring (`graph_pgd`) **pending**
+- **P3-2**: Migrate Curriculum to Composer/Lightning callbacks
+- **P3-3**: Migrate Pretraining to lightly-ssl / Solo-learn adapters
+- **P3-4**: Migrate RL to CleanRL / Stable-Baselines3 adapters
+- **P3-5**: Export scaler in ONNX graph (single artifact with fused normalization)
+
+### Seven Critical Audit Bugs Fixed (2026-08-08)
+- **R-1/R-2**: Parametric VaR covariance scaling (was wrong by ~10,000×)
+- **P1**: Promotion gate silent-default (net_pnl as gross_pnl, costs=0)
+- **A8/A9**: Causal conv padding (symmetric → asymmetric left-only)
+- **I3**: PPO greedy inference flag for deterministic evaluation
+- **A4**: Positional encoding for Transformer branches
+- **EWC**: Fisher diagonal normalization (divide by samples_processed)
+- **RA2**: HER self-match (strict future sampling)
 
 ## Changelog
 See [CHANGELOG.md](CHANGELOG.md) for the latest project updates and version history.

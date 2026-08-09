@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from backtesting.backtest import ScalingAction
+
 warnings.filterwarnings("ignore")
 
 try:
@@ -125,7 +127,7 @@ class MultiAgentCoordinator:
             with torch.no_grad():
                 gf = torch.tensor(global_features, dtype=torch.float32,
                                    device=self.device).unsqueeze(0)
-                context = self.global_enc(gf).cpu().numpy().squeeze()
+                context = self.global_enc(gf).cpu().numpy().squeeze(0)  # remove batch dim only; .squeeze() collapses scalar
 
         actions = {}
         for pair, agent in self.agents.items():
@@ -135,14 +137,26 @@ class MultiAgentCoordinator:
             if hasattr(agent, "select_action"):
                 raw_action = agent.select_action(aug_obs)
             else:
-                raw_action = 1  # Hold
+                raw_action = ScalingAction.HOLD.value
 
-            # Portfolio-level risk gate
-            direction = 1 if raw_action == 0 else (-1 if raw_action == 2 else 0)
+            # Portfolio-level risk gate — map 10-action space to direction.
+            # Only actions that INCREASE net directional exposure are gated:
+            #   OPEN_LONG(1)/OPEN_SHORT(2) open new positions;
+            #   SCALE_IN(3-5) add to the current position (direction = sign(pos));
+            #   HOLD(0), SCALE_OUT(6-8), CLOSE_ALL(9) reduce or hold exposure.
+            if raw_action == 1:
+                direction = 1
+            elif raw_action == 2:
+                direction = -1
+            elif raw_action in (3, 4, 5):
+                pos = self.positions.get(pair, 0.0)
+                direction = int(np.sign(pos))
+            else:
+                direction = 0
             if direction != 0:
                 corr_exp = self._corr_exposure(pair, direction)
                 if corr_exp >= self.max_corr:
-                    raw_action = 1  # Force HOLD
+                    raw_action = ScalingAction.HOLD.value  # Force HOLD
 
             actions[pair] = raw_action
         return actions
@@ -207,18 +221,31 @@ class CurriculumScheduler:
 
     def filter_bars(
         self,
-        features:   np.ndarray,    # (n_bars, n_features)
-        atr_col_idx: int = 0,      # Index of ATR column in features
-        avg_atr:    float = 0.0005,
+        features:    np.ndarray,    # (n_bars, n_features)
+        atr_col_idx: int = 0,       # Index of the ATR column in features
+        avg_atr:     float = 0.0,   # Expected to be in the SAME unit as features[:,atr_col_idx]
+                                    # (raw pips/price, NOT Z-scored). Pass 0.0 to auto-compute.
     ) -> np.ndarray:
         """
         Returns boolean mask of bars allowed in current curriculum phase.
+
+        ``avg_atr`` must be in the same unit as ``features[:, atr_col_idx]``.
+        If 0.0 (default), it is computed as the nanmean of the ATR column so
+        the threshold is always unit-consistent, regardless of normalisation.
         """
-        phase  = self.current_phase
-        max_a  = phase["atr_max_mult"]
+        phase = self.current_phase
+        max_a = phase["atr_max_mult"]
         if max_a == np.inf:
             return np.ones(len(features), dtype=bool)
-        atr    = np.abs(features[:, atr_col_idx])
+        atr = np.abs(features[:, atr_col_idx])
+        # Auto-compute avg_atr from the actual data when not supplied.
+        # This makes the comparison unit-agnostic: works for raw pips,
+        # Z-scored features, or any other scaling.
+        if avg_atr == 0.0:
+            finite_atr = atr[np.isfinite(atr)]
+            avg_atr = float(np.nanmean(finite_atr)) if len(finite_atr) > 0 else 1.0
+        if avg_atr <= 0.0:
+            avg_atr = 1.0  # safety: avoid division-by-zero in caller comparisons
         return atr <= max_a * avg_atr
 
     def log_phase(self, episode: int):
@@ -352,6 +379,9 @@ class HERBuffer:
         self._episode: list[dict] = []
         # Replay buffer (persistent)
         self._buffer:  collections.deque = collections.deque(maxlen=capacity)
+        # Cached list view of the deque for sampling; rebuilt only after the
+        # buffer composition changes (end_episode), not on every sample().
+        self._cache: list | None = None
 
     def store_transition(
         self,
@@ -396,15 +426,52 @@ class HERBuffer:
         n = len(ep)
         for t_idx, transition in enumerate(ep):
             for _ in range(self.k):
-                # Pick a future achieved state as the hindsight goal
+                # Pick a future achieved state as the hindsight goal.
+                # RA2 fix (2026-08-07, audit finding RA2): the "future" strategy
+                # previously used `random.randint(t_idx, n - 1)` — INCLUSIVE of
+                # `t_idx` itself. When `t_idx == future_idx` (a 1/n chance per
+                # sample on average, but ALWAYS the case for the final
+                # transition t_idx == n-1 since both endpoints coincide), the
+                # HER relabel becomes a self-match: `dist=0` deterministic, the
+                # `_hindsight_reward` evaluates to the trivial max (+1.0 for a
+                # tolerance-based reward), giving the agent a guaranteed
+                # positive reward for "free" without actually achieving a goal.
+                # Classic HER samples `t_idx+1 .. n-1` precisely to avoid this.
+                # For t_idx == n-1 (last transition), there are no future
+                # states to sample from — we SKIP the HER relabel for that
+                # transition rather than polluting the buffer with self-matches.
                 if self.strategy == "future":
-                    future_idx = random.randint(t_idx, n - 1)
+                    if t_idx + 1 >= n:
+                        # No future transitions in this episode — skip HER
+                        # relabel for this transition rather than self-match.
+                        break
+                    future_idx = random.randint(t_idx + 1, n - 1)
                 elif self.strategy == "episode":
+                    # "episode" strategy still samples any of 0..n-1 (the
+                    # whole episode, including past + future of t_idx). This
+                    # is explicitly HER "episode" mode and is by-design a
+                    # potential self-match source — callers should prefer
+                    # "future" mode for sparse-reward DQN.
                     future_idx = random.randint(0, n - 1)
+                    # Avoid the self-match: if we accidentally draw t_idx,
+                    # try once more before falling back to a clipped index.
+                    if future_idx == t_idx and n > 1:
+                        future_idx = random.randint(0, n - 1)
                 else:  # random
+                    if n <= 1:
+                        break
                     future_idx = random.randint(0, n - 1)
+                    if future_idx == t_idx:
+                        future_idx = (t_idx + 1) % n  # deterministically skip self
 
                 her_goal     = ep[future_idx]["achieved"]
+
+                # If the chosen "future achieved" coincides with the current
+                # achieved (e.g. price didn't move between t_idx and future_idx),
+                # the relabel would still be a degenerate self-match. Skip it.
+                if np.array_equal(her_goal, transition["achieved"]):
+                    continue
+
                 her_reward   = self._hindsight_reward(transition["achieved"], her_goal)
                 her_done     = future_idx == n - 1
 
@@ -420,11 +487,14 @@ class HERBuffer:
                 })
 
         self._episode.clear()
+        self._cache = None
 
     def sample(self, batch_size: int) -> list[dict]:
         if len(self._buffer) < batch_size:
             return list(self._buffer)
-        return random.sample(list(self._buffer), batch_size)
+        if self._cache is None:
+            self._cache = list(self._buffer)
+        return random.sample(self._cache, batch_size)
 
     def __len__(self):
         return len(self._buffer)

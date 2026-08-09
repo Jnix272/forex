@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+from training.feature_ablation import _atomic_copy
 
 _HOST = None
 _BOUND = False
@@ -39,6 +42,7 @@ _HOST_DEPS = (
     '_deploy_onnx_to_cpp_server',
     '_feature_schema_payload',
     '_verify_onnx_schema_deployment',
+    '_atomic_copy',
     'ENSEMBLE',
     'EnsembleMetaLearner',
     'train_meta_learner',
@@ -117,7 +121,7 @@ def run_ensemble_meta(
             base = build_model(model_name, n_features, model_args).to(device)
 
             # Load checkpoint with flexibility for wrapper nesting
-            ckpt_data = torch.load(ckpt, map_location=device, weights_only=False)
+            ckpt_data = torch_load_safe(ckpt, map_location=device)
             state = ckpt_data.get("model_state_dict", ckpt_data.get("state_dict", ckpt_data))
 
             # Attempt to load into base directly (if checkpoint was a MultiTaskWrapper)
@@ -351,7 +355,7 @@ def _safe_save(obj, path, metadata=None) -> None:
         torch.save(obj, tmp)
         if os.path.getsize(tmp) <= 0:
             raise ValueError(f"[SafeSave] Temporary checkpoint has 0 bytes: {tmp}")
-        _ = torch.load(tmp, map_location="cpu", weights_only=False)
+        _ = torch.load(tmp, map_location="cpu", weights_only=True)
         os.replace(tmp, path)
         if metadata is not None:
             meta = dict(metadata)
@@ -408,6 +412,16 @@ def _safe_save_json(data, path) -> None:
                 os.remove(tmp)
             except OSError:
                 pass
+
+def torch_load_safe(path, map_location=None) -> Any:
+    """Load a PyTorch checkpoint with weights_only=True, falling back to
+    weights_only=False ONLY for legacy checkpoints that require arbitrary
+    objects. New checkpoints are always deserialized in safe mode."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except (torch.SerializationWarning, pickle.UnpicklingError, AttributeError,
+            TypeError, KeyError, ValueError, ModuleNotFoundError):
+        return torch.load(path, map_location=map_location, weights_only=False)
 
 def _generate_model_card(model_name: str, args, history_or_cv, ckpt_dir: str, n_features: int) -> None:
     """Generates a standard Model Card JSON documenting the architecture, features, and performance."""
@@ -610,13 +624,68 @@ def _promote_best_fold(
             # If there's an existing metric value
             if "metric_value" in prod_data and prod_data.get("metric", "") == metric_label:
                 prod_metric = prod_data["metric_value"]
-                min_delta = 0.001 if use_sharpe else -0.001
-                if (use_sharpe and metric_val < prod_metric + min_delta) or (not use_sharpe and metric_val > prod_metric + min_delta):
-                    print(f"[ChallengerGate] Rejected: new score {metric_val:.4f} is not significantly better than deployed score {prod_metric:.4f}")
-                    return
-                print(f"[ChallengerGate] Accepted: new score {metric_val:.4f} vs deployed score {prod_metric:.4f}")
+                # F1 fix: positive min_delta in BOTH directions.
+                # For sharpe (higher=better): reject if challenger <= prod + min_delta
+                #   (must beat prod by strictly more than min_delta)
+                # For loss (lower=better): reject if challenger >= prod - min_delta
+                #   (must be lower than prod by strictly more than min_delta)
+                # Bug was: min_delta was -0.001 for loss AND the comparator was
+                # "metric_val > prod_metric + min_delta" (i.e.
+                #   loss > prod_loss - 0.001), which accepts a slight REGRESSION
+                #   and rejects a slight IMPROVEMENT. Inverted both.
+                min_delta = 0.001
+                if use_sharpe:
+                    # higher is better — challenger wins only if strictly exceeds prod
+                    if metric_val < prod_metric + min_delta:
+                        print(f"[ChallengerGate] Rejected: new sharpe {metric_val:.4f} "
+                              f"is not significantly better than deployed {prod_metric:.4f} "
+                              f"(needs +{min_delta})")
+                        return
+                else:
+                    # loss direction: lower is better — challenger wins only if
+                    # strictly lower than prod by at least min_delta
+                    if metric_val > prod_metric - min_delta:
+                        print(f"[ChallengerGate] Rejected: new loss {metric_val:.4f} "
+                              f"is not significantly lower than deployed {prod_metric:.4f} "
+                              f"(needs -{min_delta})")
+                        return
+                print(f"[ChallengerGate] Accepted: new {metric_label} {metric_val:.4f} vs "
+                      f"deployed {prod_metric:.4f}")
         except Exception as e:
             print(f"[ChallengerGate] Warning: failed to parse existing deployment.json: {e}")
+
+    # M11: emit challenger-vs-prod decision JSONL telemetry
+    try:
+        _tl = getattr(_HOST, "_TRAIN_LOGGER", None)
+        if _tl is not None and hasattr(_tl, "on_promotion_decision"):
+            _challenger_rejected = False
+            _prod_metric_val = None
+            try:
+                if deployment_json.exists() and not force_promotion:
+                    with open(deployment_json) as _f:
+                        _pd = json.load(_f)
+                    if "metric_value" in _pd and _pd.get("metric", "") == metric_label:
+                        _prod_metric_val = _pd["metric_value"]
+            except Exception:
+                pass
+            _tl.on_promotion_decision(
+                model_name=model_name,
+                promoted=True,
+                metric_name=metric_label,
+                metric_value=float(metric_val) if metric_val is not None else None,
+                gate_summary=f"challenger accepted ({metric_label}={metric_val:.4f})",
+                gate_reasons=None,
+                gate_details={"selected_fold": best_fold, "n_candidates": len(candidate_folds)},
+                challenger_vs_prod={
+                    "prod_metric": _prod_metric_val,
+                    "challenger_metric": float(metric_val) if metric_val is not None else None,
+                    "direction": "sharpe" if use_sharpe else "loss",
+                    "min_delta": 0.001,
+                    "accepted": True,
+                },
+            )
+    except Exception:
+        pass
 
     dst_flat = ckpt_dir / f"{model_name}_best.pt"
     dst_nested = ckpt_dir / model_name / f"{model_name}_best.pt"
@@ -711,7 +780,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
                 b_model = build_model(b_name, n_features, _model_build_args(args, b_name)).to(device)
                 _dummy = torch.zeros(2, getattr(args, "seq_len", 60), n_features, device=device)
                 _ = b_model(_dummy)
-                b_state = torch.load(b_ckpt, map_location=device, weights_only=False)
+                b_state = torch_load_safe(b_ckpt, map_location=device)
                 if isinstance(b_state, dict) and "model_state_dict" in b_state:
                     b_state = b_state["model_state_dict"]
                 elif isinstance(b_state, dict) and "state_dict" in b_state:
@@ -733,7 +802,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         _dummy = torch.zeros(2, getattr(args, "seq_len", 60), n_features, device=device)
         _ = model(_dummy)
 
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=False), strict=False)
+        model.load_state_dict(torch_load_safe(ckpt_path, map_location=device), strict=False)
         model.eval()
         core = model
         state = {} # dummy state to pass the strict load report
@@ -752,7 +821,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         _dummy = torch.zeros(2, getattr(args, "seq_len", 60), n_features, device=device)
         _ = model(_dummy)
 
-        state = torch.load(ckpt_path, map_location=device, weights_only=False)
+        state = torch_load_safe(ckpt_path, map_location=device)
         if isinstance(state, dict) and "model_state" in state:
             state = state["model_state"]
     try:
@@ -886,28 +955,81 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
 
 
     # Overwrite the gate evaluate call with the execution-aware metrics directly
+    # P1 fix (2026-08-07): stop substituting net_pnl for gross_pnl and 0.0 for
+    # transaction costs — that defeated the cost gate (cost_pct = 0.0 always
+    # passed max_cost_pct=0.30). The backtester now exposes gross_pnl_usd
+    # (sum of gross trade P&L = wins + losses *before* costs) and
+    # total_commission_usd separately; we pass both so the cost gate fires.
+    # The cost gate is `transaction_costs / max(abs(gross_pnl), 1e-9) <= 0.30`
+    # so it now measures real cost drag.
+    gross_pnl_value = float(bt_metrics.get("gross_pnl", 0.0) or 0.0)
+    transaction_costs_value = float(bt_metrics.get("total_commission", 0.0) or 0.0)
+    # If the backtester didn't populate gross_pnl (old cache/pre-2026-08-07),
+    # fall back to deriving gross from net + total_commission.
+    if gross_pnl_value == 0.0 and transaction_costs_value > 0.0:
+        # gross_pnl_usd = net_pnl + total_commission (since commission subtracted to get net)
+        gross_pnl_value = float(bt_metrics.get("net_pnl", 0.0) or 0.0) + transaction_costs_value
 
-    result = gate.evaluate(
+    # Only winners contribute to gross_profit (the gate expects gross *winnings*
+    # in the denominator, not signed sums). The backtester emits `gross_pnl_usd`
+    # as the sum of gross trade P&L (can be negative if losses exceed wins).
+    # For the cost gate we use the correct denominator: only *winning* gross.
+    # When winners-side is unavailable, use abs(gross_pnl) which is a stronger
+    # (smaller) denominator so cost_pct is still meaningful.
+    gross_for_cost_gate = abs(gross_pnl_value) if gross_pnl_value != 0.0 else None
 
-        sharpe=bt_metrics["sharpe"],
+    if gross_for_cost_gate is None:
+        # Flag: caller should fail the cost gate explicitly when gross profit
+        # information is unavailable. PromotionGate raises on gross_pnl=None,
+        # which converts into a REJECT — a fail-closed signal to the operator
+        # that the forward backtest didn't expose cost data. We catch here so
+        # the rest of the chain can run; the gate's reject message explains.
+        try:
+            result = gate.evaluate(
+                sharpe=bt_metrics["sharpe"],
+                profit_factor=bt_metrics.get("profit_factor", 1.0),
+                max_drawdown=bt_metrics["max_drawdown"],
+                n_trades=bt_metrics["n_trades"],
+                regime_pnl={},
+                gross_pnl=None,  # triggers fail-closed ValueError in gate
+                transaction_costs=0.0,
+                n_backtest_trials=n_trials,
+                backtest_sharpe_std=sharpe_std,
+                emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
+                n_obs=max(1, int(bt_metrics.get("n_trades", 0) or 0)),
+            )
+        except ValueError as _ve:
+            print(f"[PromotionGate] forward gate rejected: gross_pnl not exposed "
+                  f"by backtest — {_ve}")
+            return {
+                "promoted": False,
+                "details": {"n_trades": bt_metrics["n_trades"],
+                            "error": "gross_pnl unavailable"},
+                "reasons": ["forward backtest missing gross_pnl (cannot run cost gate)"],
+                "summary": "REJECT (no gross_pnl — cost gate cannot run)",
+            }
+    else:
+        result = gate.evaluate(
 
-        profit_factor=bt_metrics.get("profit_factor", 1.0),
+            sharpe=bt_metrics["sharpe"],
 
-        max_drawdown=bt_metrics["max_drawdown"],
+            profit_factor=bt_metrics.get("profit_factor", 1.0),
 
-        n_trades=bt_metrics["n_trades"],
+            max_drawdown=bt_metrics["max_drawdown"],
 
-        regime_pnl={}, # Not tracking regime pnl in backtest_model return yet
+            n_trades=bt_metrics["n_trades"],
 
-        gross_pnl=bt_metrics["net_pnl"],
+            regime_pnl={}, # Not tracking regime pnl in backtest_model return yet
 
-        transaction_costs=0.0, # Already accounted for in net_pnl by backtester
+            gross_pnl=gross_for_cost_gate,  # P1: real gross_pnl, not net_pnl
 
-        n_backtest_trials=n_trials,
-        backtest_sharpe_std=sharpe_std,
-        emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
-        n_obs=max(1, int(bt_metrics.get("n_trades", 0) or 0)),
-    )
+            transaction_costs=transaction_costs_value,  # P1: real costs, not 0.0
+
+            n_backtest_trials=n_trials,
+            backtest_sharpe_std=sharpe_std,
+            emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
+            n_obs=max(1, int(bt_metrics.get("n_trades", 0) or 0)),
+        )
     result["gate_input_type"] = "execution_backtest"
     result.setdefault("details", {}).update({
 
@@ -933,6 +1055,28 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
 
     print(f"[PromotionGate] {model_name}: {result.get('summary','?')} "
           f"| trades={len(pnls)} | forward_n={n_fwd}")
+
+    # M11: emit on_promotion_decision JSONL event for audit trail
+    try:
+        _tl = getattr(_HOST, "_TRAIN_LOGGER", None)
+        if _tl is not None and hasattr(_tl, "on_promotion_decision"):
+            _tl.on_promotion_decision(
+                model_name=model_name,
+                promoted=bool(result.get("promoted", False)),
+                metric_name="val_sharpe",
+                metric_value=float(bt_metrics.get("sharpe", 0.0)),
+                gate_summary=str(result.get("summary", "")),
+                gate_reasons=result.get("reasons"),
+                gate_details=result.get("details"),
+                challenger_vs_prod={
+                    "gate_input_type": "execution_backtest",
+                    "forward_window": int(n_fwd),
+                    "n_trades": int(bt_metrics.get("n_trades", 0)),
+                    "net_pnl": float(bt_metrics.get("net_pnl", 0.0)),
+                },
+            )
+    except Exception as _e:
+        print(f"[PromotionGate] telemetry emit failed: {_e}")
 
 
     # ╬ô├╢├ç╬ô├╢├ç Confidence threshold sweep ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç

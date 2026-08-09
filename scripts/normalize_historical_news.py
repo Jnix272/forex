@@ -70,7 +70,10 @@ def _category_expr() -> pl.Expr:
 
 
 def normalize_news(input_path: Path, output_path: Path) -> None:
-    df = pl.read_csv(input_path, infer_schema_length=10_000)
+    if input_path.suffix == '.parquet':
+        df = pl.read_parquet(input_path)
+    else:
+        df = pl.read_csv(input_path, infer_schema_length=10_000)
     required = ["timestamp_utc", "event_type", "currency", "headline", "url", "source"]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -109,7 +112,10 @@ def normalize_news(input_path: Path, output_path: Path) -> None:
         .sort("timestamp_utc")
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out.write_csv(output_path)
+    if output_path.suffix == '.parquet':
+        out.write_parquet(output_path)
+    else:
+        out.write_csv(output_path)
     print(f"normalized rows={out.height:,} -> {output_path}")
 
 

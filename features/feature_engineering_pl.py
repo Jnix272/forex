@@ -2,11 +2,15 @@
 features/feature_engineering.py  (v2 - Polars Edition)
 All microstructure + momentum + cross-asset + sentiment features using Polars Expressions.
 """
+import time
 from datetime import UTC
 
+import os
 import numpy as np
 import polars as pl
 from sklearn.linear_model import LogisticRegression
+
+from infrastructure.logging_utils import log_feature_build
 
 # === Polars Sanitize =======================================================================================-
 _SANITIZE_NO_CLIP = frozenset({
@@ -268,6 +272,15 @@ def hmm_regime_probs(n_states: int = 3, window: int = 60, feature: str = "close"
     for s in range(n_states):
         prob = (state == s).rolling_mean(window_size=window).alias(f"vol_regime_state_{s}_prob")
         exprs.append(prob)
+    # Labeling (dataset_builder) expects ``regime_class``; emit it on the
+    # volatility-bucket fallback path too when HMM/Numba is unavailable.
+    exprs.append(state.cast(pl.Int32).alias("regime_class"))
+    exprs.append(
+        pl.when(state == 0).then(pl.lit(-1.0))
+        .when(state == 2).then(pl.lit(1.0))
+        .otherwise(pl.lit(0.0))
+        .alias("regime_label")
+    )
     return exprs
 
 
@@ -382,17 +395,14 @@ def position_limit_flags(
 # ====================================================================================================================================================================================================================================
 
 def embedding_placeholders(dim: int = 8) -> list[pl.Expr]:
-    """Schema-compatible placeholder columns when no embeddings are available.
+    """Schema-compatible FinBERT placeholders when no embeddings are available.
 
-    PIPE-003: These should only be used as a last resort. The preferred path is:
-    1. Pre-compute FinBERT embeddings via `features/finbert_sentiment.py`
-    2. Store in `data/processed/finbert_embeddings.parquet`
-    3. Join via asof on timestamp_utc in FeatureEngineer.build()
+    Uses ``fb_*`` names to match FEATURE_MASK / curriculum.macro (not embed_*).
 
-    The FeatureEngineer.build() method already handles real finbert_embs when
-    passed as a parameter. These placeholders only fire when no embeddings exist.
+    PIPE-003: Prefer pre-computed FinBERT embeddings joined in FeatureEngineer.build().
+    These placeholders only fire when no embeddings exist.
     """
-    return [pl.lit(0.0).alias(f"embed_{i}") for i in range(dim)]
+    return [pl.lit(0.0).alias(f"fb_{i}") for i in range(dim)]
 
 
 def compute_finbert_embeddings(
@@ -857,6 +867,100 @@ def volume_weighted_momentum(window: int = 20) -> pl.Expr:
 
 
 # ====================================================================================================================================================================================================================================
+# VOLUME PROFILE / POINT OF CONTROL (POC)
+# ====================================================================================================================================================================================================================================
+
+def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int = 10) -> pl.DataFrame:
+    """Volume Profile / Point-of-Control (POC) features.
+
+    Approximates a rolling volume profile: prices are binned into ``n_bins``
+    equal-price slots on the axis between the trailing ``rolling_min(low)`` and
+    ``rolling_max(high)``, and bar volume is accumulated per slot over a
+    trailing ``window`` of bars.  Features describe where liquidity is
+    concentrated (POC), how far price sits from it, the width of the value
+    area, and the skew of the volume distribution.
+
+    Requires columns: ``open``, ``high``, ``low``, ``close``, ``volume``.
+    """
+    lo = pl.col("low").rolling_min(window)
+    hi = pl.col("high").rolling_max(window)
+    span = hi - lo + 1e-9
+    bin_expr = ((pl.col("close") - lo) / span * n_bins).floor().clip(0, n_bins - 1).cast(pl.Int64)
+
+    F = df.with_columns(bin_expr.alias("__vp_bin"))
+    b = pl.col("__vp_bin")
+    vol = pl.col("volume").cast(pl.Float64)
+
+    rolls = [
+        (pl.when(b == k).then(vol).otherwise(0.0).rolling_sum(window), k)
+        for k in range(n_bins)
+    ]
+    tot = vol.rolling_sum(window)
+
+    poc_bin = pl.concat_list([r for r, _ in rolls]).list.arg_max().cast(pl.Float64)
+    poc_vol = pl.max_horizontal([r for r, _ in rolls])
+    vw_mean = pl.sum_horizontal([k * r for r, k in rolls]) / (tot + 1e-9)
+    va_wstd = (pl.sum_horizontal([r * (k - vw_mean) ** 2 for r, k in rolls]) / (tot + 1e-9)).sqrt()
+    norm = max(1, n_bins - 1)
+
+    out = F.with_columns([
+        (poc_bin / norm).alias("vp_poc_pos"),
+        ((b.cast(pl.Float64) - poc_bin) / n_bins).alias("vp_poc_dist"),
+        (poc_vol / (tot + 1e-9)).alias("vp_poc_share"),
+        (vw_mean / norm).alias("vp_vw_pos"),
+        ((vw_mean / norm) - (poc_bin / norm)).alias("vp_skew"),
+        ((va_wstd / n_bins) * 10.0).alias("vp_va_width"),
+        pl.when((b.cast(pl.Float64) - poc_bin).abs() <= va_wstd).then(1.0).otherwise(0.0).alias("vp_in_va"),
+    ]).drop("__vp_bin")
+
+    for c in ("vp_poc_pos", "vp_poc_dist", "vp_poc_share", "vp_vw_pos",
+              "vp_skew", "vp_va_width", "vp_in_va"):
+        out = out.with_columns(pl.col(c).fill_null(0.0))
+    return out
+
+
+# ====================================================================================================================================================================================================================================
+# INTRADAY VOLATILITY CLOCK (time-of-day volatility seasonality)
+# ====================================================================================================================================================================================================================================
+
+def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_days: int = 7) -> pl.DataFrame:
+    """Intraday 'volatility clock' features.
+
+    Models the seasonal time-of-day volatility cycle.  Each bar's |return| is
+    compared against the trailing ``k_days``-of-same-minute-of-day mean and
+    std, and the running position in the current day's volatility budget is
+    tracked.  ``pace - pos`` is >0 when the day is running hot relative to its
+    seasonal clock.
+
+    ``day_period`` is the number of bars per day (1440 for 1-minute bars).
+    Requires columns: ``timestamp_utc`` (UTC), ``close``.
+    """
+    ret = (pl.col("close") / pl.col("close").shift(1)).log().abs()
+    mins_day = (pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60
+                + pl.col("timestamp_utc").dt.minute().cast(pl.Int32))
+    pos = mins_day / float(day_period)
+
+    refs = [ret.shift(day_period * k) for k in range(1, k_days + 1)]
+    ref_mean = pl.sum_horizontal(refs) / k_days
+    ref_std = (pl.sum_horizontal([r ** 2 for r in refs]) / k_days - ref_mean ** 2).clip(0.0, None).sqrt()
+    typical_daily = ret.rolling_mean(day_period * k_days) * float(day_period)
+    session_cum = ret.cum_sum().over(pl.col("timestamp_utc").dt.date())
+    pace = session_cum / (typical_daily + 1e-9)
+
+    out = df.with_columns([
+        pos.alias("vol_clock_pos"),
+        (ret / (ref_mean + 1e-9)).clip(0.0, 10.0).alias("vol_clock_ratio"),
+        ((ret - ref_mean) / (ref_std + 1e-9)).clip(-10.0, 10.0).alias("vol_clock_z"),
+        pace.clip(0.0, 10.0).alias("vol_clock_pace"),
+        (pace - pos).clip(-5.0, 10.0).alias("vol_clock_hot"),
+    ])
+    for c in ("vol_clock_pos", "vol_clock_ratio", "vol_clock_z",
+              "vol_clock_pace", "vol_clock_hot"):
+        out = out.with_columns(pl.col(c).fill_null(0.0))
+    return out
+
+
+# ====================================================================================================================================================================================================================================
 # REGIME-GATED / INTERACTION FEATURES (Improvements #3, #5)
 # ====================================================================================================================================================================================================================================
 
@@ -1106,7 +1210,7 @@ class CrossAssetFeatures:
         except Exception as e:
             print(f"[CrossAssetFeatures] WARNING: factor model failed: {e}")
 
-        return F.fill_null(strategy="forward").fill_null(strategy="backward").fill_null(0.0)
+        return F.fill_null(strategy="forward").fill_null(0.0)
 
     def _cross_asset_factors(self, F: pl.DataFrame) -> pl.DataFrame:
         """Append cross-asset PCA/ICA factors, Granger and lead-lag features.
@@ -1153,7 +1257,8 @@ def sentiment_decay(s_df: pl.DataFrame, lam: float = 0.1) -> pl.Series:
         return np.zeros(0, dtype=float)
     import pandas as pd
     ts_ns = pd.to_datetime(s_df["timestamp_utc"].to_numpy(), utc=True).asi8.astype(np.int64)
-    vals = np.nan_to_num(s_df["sentiment"].to_numpy().astype(float), nan=0.0)
+    # Fill null sentiment with 0 (neutral) before processing
+    vals = np.nan_to_num(s_df["sentiment_raw"].to_numpy().astype(float), nan=0.0)
     event_mask = vals != 0.0
     last_idx = np.maximum.accumulate(np.where(event_mask, np.arange(len(vals)), -1))
     dec = np.zeros(len(vals), dtype=float)
@@ -1213,11 +1318,16 @@ def sentiment_tiers(df: pl.DataFrame, decay_lam: float = 0.1, fb_dim: int = 8) -
     """Add three sentiment columns:
     1. raw sentiment (if present)
     2. decayed sentiment (exponential decay)
-    3. FinBERT projection to low   dim space.
+    3. FinBERT projection to low dim space.
+    
+    Null sentiment values are treated as 0/neutral.
     """
     # raw sentiment assumed in column "sentiment"
     if "sentiment" in df.columns:
-        df = df.with_columns([pl.col("sentiment").alias("sentiment_raw")])
+        # Fill null sentiment with 0 (neutral) before processing
+        df = df.with_columns([
+            pl.col("sentiment").fill_null(0.0).alias("sentiment_raw")
+        ])
         df = df.with_columns(pl.Series("sentiment_decayed", sentiment_decay(df, decay_lam)))
     else:
         df = df.with_columns([pl.lit(0.0).alias("sentiment_raw"), pl.lit(0.0).alias("sentiment_decayed")])
@@ -1273,19 +1383,29 @@ class RegimeGateClassifier:
             return pl.Series("regime_break_prob", prob)
 
         ok_idx = np.where(ok)[0]
-        fit_end = max(self.min_samples, int(len(ok_idx) * 0.70))
-        fit_idx = ok_idx[:fit_end]
-
-        if len(np.unique(y[fit_idx])) < 2:
-            score = (0.8 * X_pd["gold_break_z"].fillna(0) +
-                     0.5 * X_pd["risk_off_z"].fillna(0) +
-                     0.3 * X_pd["curve_chg_z"].abs().fillna(0))
-            prob = 1.0 / (1.0 + np.exp(-score.clip(-8, 8)))
-            return pl.Series("regime_break_prob", prob)
-
-        self.model.fit(X_pd.iloc[fit_idx].values, y[fit_idx])
         prob = np.zeros(len(F), dtype=np.float64)
-        prob[ok] = self.model.predict_proba(X_pd.loc[ok].values)[:, 1]
+        
+        # Baseline heuristic score for the entire series (fully causal)
+        score = (0.8 * X_pd["gold_break_z"].fillna(0) +
+                 0.5 * X_pd["risk_off_z"].fillna(0) +
+                 0.3 * X_pd["curve_chg_z"].abs().fillna(0))
+        prob[ok] = 1.0 / (1.0 + np.exp(-score.clip(-8, 8).values[ok]))
+
+        # Expanding window fit: fit up to i, predict [i, i+step)
+        step = max(self.min_samples, len(ok_idx) // 10)
+        
+        if step < len(ok_idx):
+            for i in range(step, len(ok_idx), step):
+                train_idx = ok_idx[:i]
+                test_idx = ok_idx[i:i+step] if i + step < len(ok_idx) else ok_idx[i:]
+                
+                if len(np.unique(y[train_idx])) >= 2:
+                    try:
+                        self.model.fit(X_pd.iloc[train_idx].values, y[train_idx])
+                        prob[test_idx] = self.model.predict_proba(X_pd.iloc[test_idx].values)[:, 1]
+                    except Exception:
+                        pass
+
         return pl.Series("regime_break_prob", prob)
 
 # ==================================================================================================================-
@@ -1384,7 +1504,13 @@ def add_spread_cost_features(df: pl.DataFrame, pair: str = "EURUSD", atr_col: st
         pl.Series("cost_to_atr", cost_to_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()),
     ])
 
-def add_market_regime_features(df: pl.DataFrame) -> pl.DataFrame:
+def add_market_regime_features(
+    df: pl.DataFrame,
+    *,
+    chop_window: int = 14,
+    regime_window: int = 240,
+    volatility_window: int = 120,
+) -> pl.DataFrame:
     """Add lightweight trend/chop/volatility regime features from past OHLC."""
     import pandas as pd
 
@@ -1412,19 +1538,20 @@ def add_market_regime_features(df: pl.DataFrame) -> pl.DataFrame:
     dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
     adx = dx.rolling(14, min_periods=5).mean()
 
-    chop_window = 14
+    chop_window = int(max(2, chop_window))
     tr_sum = tr.rolling(chop_window, min_periods=5).sum()
     range_hl = high.rolling(chop_window, min_periods=5).max() - low.rolling(chop_window, min_periods=5).min()
     chop = 100.0 * np.log10((tr_sum / (range_hl + 1e-9)).clip(lower=1e-9)) / np.log10(chop_window)
 
     atr_20 = tr.rolling(20, min_periods=5).mean()
-    vol_regime = atr_20 / (atr_20.rolling(240, min_periods=30).median() + 1e-9)
+    vol_regime = atr_20 / (atr_20.rolling(int(max(10, regime_window)), min_periods=30).median() + 1e-9)
     slope_20 = (close - close.shift(20)) / (atr_20 + 1e-9)
     trend_regime = ((adx > 25.0) & (slope_20.abs() > 0.5)).astype(float)
     range_regime = ((chop > 60.0) & (adx < 20.0)).astype(float)
 
+    vw = int(max(10, volatility_window))
     ret = np.log(close / close.shift(1))
-    acorr = ret.rolling(120, min_periods=30).corr(ret.shift(1)).clip(-1.0, 1.0)
+    acorr = ret.rolling(vw, min_periods=30).corr(ret.shift(1)).clip(-1.0, 1.0)
     hurst = (0.5 + 0.25 * acorr).clip(0.0, 1.0)
     noise_to_signal = ret.rolling(60, min_periods=10).std() / (ret.rolling(60, min_periods=10).mean().abs() + 1e-9)
     trailing_vol = ret.rolling(60, min_periods=10).std()
@@ -1556,7 +1683,7 @@ def compute_latency_feature(df: pl.DataFrame, latency_baseline_ms: float = 50.0,
     latency = np.full(n, latency_baseline_ms, dtype=np.float32)
     if atr_col in df.columns:
         atr_vals = df[atr_col].fill_null(strategy="forward").to_numpy()
-        med_atr = df[atr_col].fill_null(strategy="forward").rolling_median(atr_window_ref, min_samples=10).fill_null(strategy="backward").to_numpy()
+        med_atr = df[atr_col].fill_null(strategy="forward").rolling_median(atr_window_ref, min_samples=10).fill_null(0.0).to_numpy()
         atr_excess = np.maximum(0.0, atr_vals / np.maximum(med_atr, 1e-12) - 1.0)
         latency += latency_baseline_ms * 0.5 * atr_excess
 
@@ -1576,26 +1703,48 @@ class FeatureEngineer:
         self.vm=vol_mult; self.nb=news_buf; self.dl=decay_lam; self.fb=fb_dim
 
         try:
-            import yaml
-            with open("config/run.yaml") as f:
-                yaml_fs = yaml.safe_load(f).get("features", {})
-        except Exception:
-            yaml_fs = {}
-        try:
-            from config.settings import FEATURE_SCALES as FS
+            from config.settings import FEATURE_SCALES as FS, FEATURE_CACHE as FC
         except ImportError:
             FS = {}
+            FC = {}
+
+        # Prefer settings (already synced from --config by gpu_cli) over a
+        # hardcoded run.yaml path so run_ubuntu.yaml / Optuna configs stick.
+        yaml_fs = {}
+        yaml_fc = {}
+        _cfg_path = os.environ.get("FOREX_CONFIG") or os.environ.get("FOREX_RUN_CONFIG")
+        if _cfg_path:
+            try:
+                import yaml
+                with open(_cfg_path, encoding="utf-8") as f:
+                    _yaml_root = yaml.safe_load(f) or {}
+                yaml_fs = _yaml_root.get("features", {}) or {}
+                yaml_fc = _yaml_root.get("feature_cache", {}) or {}
+            except Exception:
+                yaml_fs, yaml_fc = {}, {}
 
         self.atr_ws = yaml_fs.get("atr_windows", FS.get("atr_windows", [self.atr_w, 20, 60]))
         self.vol_ws = yaml_fs.get("vol_windows", FS.get("vol_windows", [6, 20, 60]))
         self.ofi_ws = yaml_fs.get("ofi_windows", FS.get("ofi_windows", [5, 20, 60]))
         self.mom_ws = yaml_fs.get("momentum_windows", FS.get("momentum_windows", [5, 20, 60]))
         self.lags = yaml_fs.get("momentum_windows", FS.get("momentum_windows", lag_windows))
+        self.vwap_w = int(yaml_fs.get("vwap_window", FS.get("vwap_window", 60)))
+        self.chop_w = int(yaml_fs.get("chop_window", FS.get("chop_window", 14)))
+        self.vol_regime_w = int(yaml_fs.get("regime_window", FS.get("regime_window", 240)))
+        self.volatility_w = int(yaml_fs.get("volatility_window", FS.get("volatility_window", 120)))
+        _ca_cw = int(yaml_fs.get("corr_window", FS.get("corr_window", ca_corr_window)))
+        _ca_rw = int(yaml_fs.get("regime_window", FS.get("regime_window", ca_regime_window)))
         self.ca=CrossAssetFeatures(
-            corr_window=ca_corr_window,
-            regime_window=ca_regime_window,
+            corr_window=_ca_cw,
+            regime_window=_ca_rw,
             lags=ca_lags,
         )
+        # Feature-cache config (slow cols + ofi_z gate threshold)
+        _fc = yaml_fc if yaml_fc else FC
+        self.feature_cache_enabled = bool((_fc or {}).get("enabled", True))
+        self.ofi_z_threshold = float((_fc or {}).get("ofi_z_threshold", 2.0))
+        slow = list((_fc or {}).get("slow_cols") or [])
+        self.slow_cols = ["hurst_exponent" if c == "hurst" else c for c in slow]
         self.enable_regime_gate = bool(enable_regime_gate)
         self.enable_quality_gate = bool(enable_quality_gate)
         self.enable_no_trade_zones = bool(enable_no_trade_zones)
@@ -1606,7 +1755,7 @@ class FeatureEngineer:
         except Exception as e:
             print(f"[FeatureEngineering] WARNING: MacroYieldFeatureBuilder init failed: {e}")
             self._macro_builder = None
-
+        self._warned_finbert_placeholder = False
     def build_chunked(self, bars: pl.DataFrame, chunk_size: int = 50_000,
                       output_dir: str = None, **kwargs) -> pl.DataFrame:
         """DS-005: Process features in overlapping chronological chunks to bound RAM.
@@ -1721,13 +1870,24 @@ class FeatureEngineer:
             multi_level_obi(5)
         )
 
+        # Curriculum / FEATURE_MASK expect ``ofi_l2``. Real L2 books use
+        # order_book_imbalance_l2(); otherwise alias the OHLC proxy ``obi_l2``.
+        _l2_cols = ("bid_price_1", "ask_price_1", "bid_price_2", "ask_price_2",
+                    "bid_size_1", "ask_size_1")
+        if all(c in F.columns for c in _l2_cols):
+            F = F.with_columns([order_book_imbalance_l2()])
+        elif "obi_l2" in F.columns:
+            F = F.with_columns([pl.col("obi_l2").alias("ofi_l2")])
+        else:
+            F = F.with_columns([pl.lit(0.0).alias("ofi_l2")])
+
         # 2. Derived Features (Dependent on Base Features)
         tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
         vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume")).fill_null(1.0)
-        vwap = (tp * vol).rolling_sum(60) / vol.rolling_sum(60)
+        vwap = (tp * vol).rolling_sum(self.vwap_w) / vol.rolling_sum(self.vwap_w)
 
         # Volume-weighted features (Improvement #4)
-        vwap_bands_expr = vwap_bands(60, 2.0)
+        vwap_bands_expr = vwap_bands(self.vwap_w, 2.0)
 
         F = F.with_columns(
             vwap_bands_expr +
@@ -1762,7 +1922,12 @@ class FeatureEngineer:
 
         ac = f"atr_{self.atr_w}"
         F = add_spread_cost_features(F, pair=pair, atr_col=ac)
-        F = add_market_regime_features(F)
+        F = add_market_regime_features(
+            F,
+            chop_window=self.chop_w,
+            regime_window=self.vol_regime_w,
+            volatility_window=self.volatility_w,
+        )
 
         # Regime-gated features (Improvement #3) - create regime-specific variants
         existing = set(F.columns)
@@ -1787,19 +1952,38 @@ class FeatureEngineer:
 
         F = add_higher_timeframe_context(F)
 
+        # Volume Profile / POC + intraday volatility clock
+        F = add_volume_profile_features(F)
+        F = add_volatility_clock_features(F)
+
         # HMM Regime Detection + CPD (Regime Detection Upgrade)
         existing = set(F.columns)
         try:
             from features.regime_detection import detect_regimes_polars
+            _t0_reg = time.perf_counter()
             _reg = detect_regimes_polars(
                 F, close_col="close", n_states=3, window=60,
                 hurst_window=120, fractal_window=60, step=5,
             )
             F = F.with_columns(_reg)
-        except Exception:
+            log_feature_build(
+                "regime_detection", n_rows=F.height, n_cols=len(_reg.columns),
+                status="success", t0=_t0_reg,
+                note="detect_regimes_polars (HMM + Hurst + fractal)",
+            )
+        except Exception as _reg_exc:
             # Fall back to the legacy volatility-tercile bucket expressions if
-            # hmmlearn is unavailable.
+            # hmmlearn/Numba is unavailable — still emit regime_class.
+            print(
+                f"[FeatureEngineering] WARNING: detect_regimes_polars failed "
+                f"({type(_reg_exc).__name__}: {_reg_exc}); using vol-bucket regime_class"
+            )
             F = F.with_columns(hmm_regime_probs(3, 60))
+            log_feature_build(
+                "regime_detection", n_rows=F.height, n_cols=3,
+                status="fallback_vol_bucket", t0=time.perf_counter(),
+                exc=_reg_exc, note="hmmlearn/numba unavailable",
+            )
         F = F.with_columns(cpd_ret("close", 60))
         F = F.with_columns(regime_persistence(20))
 
@@ -1823,22 +2007,35 @@ class FeatureEngineer:
                     F = _join_asof_available(
                         F, emb_df.select(["timestamp_utc"] + emb_cols)
                     )
-                    rename_map = {c: f"embed_{i}" for i, c in enumerate(emb_cols) if not c.startswith("embed_")}
+                    # Normalize to fb_* (FEATURE_MASK / curriculum.macro contract).
+                    rename_map = {}
+                    for i, c in enumerate(emb_cols):
+                        if c.startswith("fb_"):
+                            continue
+                        rename_map[c] = f"fb_{i}"
                     if rename_map:
                         F = F.rename(rename_map)
-                    for i in range(8):
-                        col = f"embed_{i}"
+                    for i in range(self.fb):
+                        col = f"fb_{i}"
                         if col in F.columns:
                             F = F.with_columns(pl.col(col).fill_null(0.0))
                         else:
                             F = F.with_columns(pl.lit(0.0).alias(col))
                 else:
+                    if not self._warned_finbert_placeholder:
+                        print("[FeatureEngineering] WARNING: FinBERT embs missing timestamp_utc; using zero placeholders")
+                        self._warned_finbert_placeholder = True
                     F = F.with_columns(embedding_placeholders(8))
-            except Exception:
+            except Exception as e:
+                if not self._warned_finbert_placeholder:
+                    print(f"[FeatureEngineering] WARNING: FinBERT emb join failed ({e}); using zero placeholders")
+                    self._warned_finbert_placeholder = True
                 F = F.with_columns(embedding_placeholders(8))
         else:
+            if not self._warned_finbert_placeholder:
+                print("[FeatureEngineering] WARNING: no FinBERT embeddings provided; using zero placeholders")
+                self._warned_finbert_placeholder = True
             F = F.with_columns(embedding_placeholders(8))
-
         # Cross asset
         F = self.ca.build(F, cross_asset)
 
@@ -2048,17 +2245,23 @@ class FeatureEngineer:
             F = F.with_columns([pl.lit(0.0).alias(c) for c in missing_fb])
 
 
-        # Temporal
+        # Temporal / session clock features.
+        # Prefer DST-aware ``london_ny`` from bars when present; otherwise
+        # fixed-UTC fallback. ``asia_london`` stays labeling-only aux on bars
+        # (joined in dataset_builder) to avoid curriculum / FEATURE_MASK churn.
         import pandas as pd
         ts_pd = F["timestamp_utc"].to_pandas()
         h = ts_pd.dt.hour; m = ts_pd.dt.minute; tm = h * 60 + m
-        F = F.with_columns([
+        temporal = [
             pl.Series("time_sin", np.sin(2*np.pi*tm/1440)),
             pl.Series("time_cos", np.cos(2*np.pi*tm/1440)),
             pl.Series("day_sin", np.sin(2*np.pi*ts_pd.dt.dayofweek/5)),
             pl.Series("day_cos", np.cos(2*np.pi*ts_pd.dt.dayofweek/5)),
-            pl.Series("london_ny", ((h >= 13) & (h <= 17)).astype(float))
-        ])
+        ]
+        if "london_ny" not in F.columns:
+            # Fixed-UTC fallback (approximate under DST); bars DST path is preferred.
+            temporal.append(pl.Series("london_ny", ((h >= 13) & (h <= 17)).astype(float)))
+        F = F.with_columns(temporal)
 
         # Missingness
         tracked = ["sentiment_decayed", "eco_surprise", "buzz"]
@@ -2080,7 +2283,7 @@ class FeatureEngineer:
         n0 = len(F)
         F = F.drop(["actual", "forecast", "prior", "_eco_raw", "_eco_scale", "sentiment", "article_counts"], strict=False)
         F = F.drop_nulls(subset=[ac])
-        F = F.fill_null(strategy="forward").fill_null(strategy="backward").fill_null(0.0)
+        F = F.fill_null(strategy="forward").fill_null(0.0)
         if n0 > len(F):
             print(f"[Features] Dropped {n0 - len(F):,} NaN rows -> {len(F):,}  {len(F.columns)}")
 

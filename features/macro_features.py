@@ -45,6 +45,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
+from infrastructure.logging_utils import log_data_load
+
 # ── FRED series IDs ───────────────────────────────────────────────────────────
 # Daily: DGS10, DGS2 (US only — FRED provides these at daily frequency)
 # Monthly OECD: IRLTLT01XXM156N (all other countries — ffill to daily is fine)
@@ -205,18 +207,33 @@ class MacroYieldFeatureBuilder:
         end:   pd.Timestamp,
     ) -> dict[str, pd.Series]:
         """Load all yield series; fills any gaps with synthetic data."""
+        _t0 = time.perf_counter()
         if self._fred_key:
             try:
                 raw   = _fetch_all_yields(start, end, self._fred_key)
                 synth = _synthetic_yields(start, end)
+                n_real = 0
+                n_synth = 0
                 for k in raw:
                     if raw[k] is None or raw[k].empty:  # type: ignore[union-attr]
                         raw[k] = synth.get(k)
+                        n_synth += 1
+                    else:
+                        n_real += 1
+                log_data_load("fred_yields", f"FRED:{start}->{end}",
+                             n_rows=n_real, status="success" if n_real else "fallback_synthetic",
+                             t0=_t0, note=f"real={n_real}, synthetic={n_synth}")
                 return raw  # type: ignore[return-value]
             except Exception as e:
-                print(f"[MacroFeatures] FRED batch failed ({e}) — full synthetic")
+                log_data_load("fred_yields", f"FRED:{start}->{end}",
+                             n_rows=0, status="fallback_synthetic", t0=_t0, exc=e,
+                             note="batch failed")
 
-        return _synthetic_yields(start, end)
+        synth = _synthetic_yields(start, end)
+        log_data_load("fred_yields", f"synthetic:{start}->{end}",
+                     n_rows=len(synth), status="fallback_synthetic", t0=_t0,
+                     note="no FRED_API_KEY")
+        return synth
 
     def build(self, bars: pl.DataFrame) -> pl.DataFrame:
         """

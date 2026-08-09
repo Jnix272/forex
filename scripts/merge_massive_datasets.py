@@ -131,9 +131,13 @@ def merge_massive_datasets(
     if os.path.exists(tmp_output):
         os.remove(tmp_output)
 
-    con = duckdb.connect(database=':memory:')
+    db_path = 'data/raw/news/merge_db.duckdb'
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    con = duckdb.connect(database=db_path)
+    con.execute("PRAGMA threads=4;")
     con.execute("SET preserve_insertion_order=false;")
-    con.execute("PRAGMA memory_limit='4GB';")
+    con.execute("PRAGMA memory_limit='10GB';")
 
     # -------------------------------------------------------------------------
     # STEP 1: Filter, deduplicate, and write the final Parquet in one pass.
@@ -194,6 +198,11 @@ def merge_massive_datasets(
         queries.append(q)
 
     union_query = " UNION ALL ".join(queries)
+    
+    print("\n[STEP 1.1] Loading raw data into physical staging table...")
+    con.execute(f"CREATE TABLE raw_news AS SELECT * FROM ({union_query}) WHERE part_year >= {int(start_year)} AND part_year <= {int(end_year)};")
+    
+    print("\n[STEP 1.2] Deduplicating, sorting, and exporting to Parquet...")
     con.execute(f"""
         COPY (
             SELECT
@@ -207,8 +216,7 @@ def merge_massive_datasets(
                 ANY_VALUE(source) as source,
                 ANY_VALUE(url) as url,
                 ANY_VALUE(sentiment_score) as sentiment_score
-            FROM ({union_query})
-            WHERE part_year >= {int(start_year)} AND part_year <= {int(end_year)}
+            FROM raw_news
             GROUP BY timestamp_utc, dedupe_key
             ORDER BY timestamp_utc
         ) TO '{tmp_output}' (FORMAT PARQUET, COMPRESSION 'ZSTD');
@@ -226,6 +234,10 @@ def merge_massive_datasets(
                     shutil.rmtree(temp_dir)
         except Exception as e:
             print("Cleanup failed:", e)
+
+    con.close()
+    if os.path.exists('data/raw/news/merge_db.duckdb'):
+        os.remove('data/raw/news/merge_db.duckdb')
 
     elapsed = time.time() - start_time
     file_size_gb = os.path.getsize(output_parquet) / (1024**3)

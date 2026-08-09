@@ -349,15 +349,19 @@ def compute_heuristic_no_trade_score(
     ofi_q = pd.Series(ofi_q).ffill().fillna(np.abs(ofi_proxy).max()).values
     neutral_ofi = (np.abs(ofi_proxy) < ofi_q).astype(float)
 
-    # Choppy trend: low ADX or flat RSI
+    # Choppy trend: low ADX (using causal rolling 0.3 quantile) or flat RSI
     adx = features.get("adx_14", np.zeros(n))
     if isinstance(adx, pd.Series):
         adx = adx.values
     rsi = features.get("rsi_14", np.zeros(n))
     if isinstance(rsi, pd.Series):
         rsi = rsi.values
-    trend_unstable = ((adx < np.quantile(adx[adx>0], 0.3) if (adx>0).any() else True) &
-                      (np.abs(rsi - 50) < 10)).astype(float)
+
+    # Causal rolling quantile (D4 fix)
+    adx_s = pd.Series(adx)
+    adx_q = adx_s.replace(0, np.nan).rolling(window=200, min_periods=10).quantile(0.3).ffill().fillna(0).values
+    
+    trend_unstable = ((adx < adx_q) & (np.abs(rsi - 50) < 10)).astype(float)
 
     score = (low_vol + neutral_ofi + trend_unstable) / 3.0
     return np.clip(score, 0.0, 1.0)
@@ -556,22 +560,22 @@ def apply_no_trade_zones(
     else:
         learned_abstain = np.full(n, 0.5)
 
-# Conformal (if calibration provided)
-        conformal_abstain = np.full(n, 0.5)
-        conformal_info = {}
-        if val_logits is not None and val_labels is not None:
-            # Calibrate on val set, but we need to apply to main data
-            # For now, use the calibration info to set a global abstain rate
-            # In practice, you'd apply the calibrator to the main logits
-            conformal_abstain_cal, conformal_info = conformal_should_abstain(
-                val_logits, val_labels, alpha=0.10, abstain_on_ambiguous=True
-            )
-            # Use the average abstain rate for the main data (or apply calibrator to main logits if available)
-            if len(conformal_abstain_cal) == n:
-                conformal_abstain = conformal_abstain_cal.astype(float)
-            else:
-                # Use average abstain rate
-                conformal_abstain = np.full(n, float(conformal_abstain_cal.mean()))
+    # Conformal (if calibration provided)
+    conformal_abstain = np.full(n, 0.5)
+    conformal_info = {}
+    if val_logits is not None and val_labels is not None:
+        # Calibrate on val set, but we need to apply to main data
+        # For now, use the calibration info to set a global abstain rate
+        # In practice, you'd apply the calibrator to the main logits
+        conformal_abstain_cal, conformal_info = conformal_should_abstain(
+            val_logits, val_labels, alpha=0.10, abstain_on_ambiguous=True
+        )
+        # Use the average abstain rate for the main data (or apply calibrator to main logits if available)
+        if len(conformal_abstain_cal) == n:
+            conformal_abstain = conformal_abstain_cal.astype(float)
+        else:
+            # Use average abstain rate
+            conformal_abstain = np.full(n, float(conformal_abstain_cal.mean()))
 
     # Combine
     weights = np.array([0.3, 0.4, 0.3])

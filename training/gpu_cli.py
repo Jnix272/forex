@@ -15,9 +15,17 @@ import torch
 
 from config import settings as _settings
 from config.settings import (
+    CURRICULUM as SETTINGS_CURRICULUM,
+    DISTILLATION,
+    ENSEMBLE as SETTINGS_ENSEMBLE,
+    EXECUTION as SETTINGS_EXECUTION,
     HARDWARE_PROFILES,
+    MONITORING,
     PATHS,
     PRETRAIN,
+    RISK,
+    RL,
+    SIZING,
     TRAINING,
 )
 from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile
@@ -42,7 +50,8 @@ _HOST_DEPS = (
     'RISK',
     'RL',
     'SIZING',
-    '_GPU_CFG'
+    '_GPU_CFG',
+    '_get_pairs',
 )
 
 
@@ -130,8 +139,20 @@ _YAML_MAP = {
     "training.training_memory": "training_memory",
     "training.label_smoothing": "label_smoothing",
 
+    "training.use_mixup": "use_mixup",
+    "training.use_volatility_sampler": "use_volatility_sampler",
+    "training.max_bad_frac": "max_bad_frac",
+    "training.max_zero_frac": "max_zero_frac",
     "training.cross_asset_mode": "cross_asset_mode",
     "training.cross_asset_provider": "cross_asset_provider",
+    "maturity.stage":           "maturity_stage",
+    "features.chop_window":     "feat_chop_window",
+    "features.corr_window":     "feat_corr_window",
+    "features.regime_window":   "feat_regime_window",
+    "features.volatility_window": "feat_volatility_window",
+    "features.vwap_window":     "feat_vwap_window",
+    "rl.use_sharpe_reward":     "rl_use_sharpe_reward",
+    "rl.use_her":               "rl_use_her",
     "news.historical_mode":     "historical_news_mode",
     "news.historical_news_file": "historical_news_file",
     "news.economic_calendar_file": "economic_calendar_file",
@@ -160,6 +181,9 @@ _YAML_MAP = {
     "direction_training.min_pred_class_share": "direction_min_pred_class_share",
     "direction_training.max_pred_class_share": "direction_max_pred_class_share",
     "direction_training.min_recall": "direction_min_recall",
+    "direction_training.use_mixup": "use_mixup",
+    "direction_training.use_volatility_sampler": "use_volatility_sampler",
+    "direction_training.label_smoothing": "label_smoothing",
 
     "pretrain.enabled":         "pretrain",
     "pretrain.ablation":        "pretrain_ablation",
@@ -180,6 +204,7 @@ _YAML_MAP = {
     "pretrain.ema_decay":       "pretrain_ema_decay",
     "pretrain.sample_windows":  "pretrain_sample_windows",
     "pretrain.blocks_per_epoch": "pretrain_blocks_per_epoch",
+    "pretrain.read_windows":    "pretrain_read_windows",
     "pretrain.mask_prob":       "pretrain_mask_prob",
     "pretrain.recon_hidden_dim": "pretrain_recon_hidden_dim",
     "pretrain.latent_dim":      "pretrain_latent_dim",
@@ -217,6 +242,7 @@ _YAML_MAP = {
     "hardware.val_num_workers": "val_num_workers",
     "hardware.val_prefetch_factor": "val_prefetch_factor",
     "hardware.thread_prefetch_batches": "thread_prefetch_batches",
+    "hardware.force_thread_prefetch":  "force_thread_prefetch",
     "hardware.torch_compile":   "torch_compile",
     "hardware.torch_compile_mode": "torch_compile_mode",
     "data.zarr_cname":           "zarr_cname",
@@ -356,9 +382,60 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     if isinstance(cfg.get("execution"), dict):
         defaults["execution"] = cfg["execution"]
 
+    if isinstance(cfg.get("risk"), dict):
+        defaults["risk"] = cfg["risk"]
+
+    if isinstance(cfg.get("sidecar"), dict):
+        defaults["sidecar"] = cfg["sidecar"]
+
+    if isinstance(cfg.get("feature_cache"), dict):
+        defaults["feature_cache"] = cfg["feature_cache"]
+
+    if isinstance(cfg.get("maturity"), dict):
+        stage = cfg["maturity"].get("stage")
+        if stage is not None:
+            defaults["maturity_stage"] = stage
+
+    # Sync strategy ATR / lookahead into LABELING so workers that read
+    # settings.LABELING (not argparse) match YAML strategy.*
+    strategy = cfg.get("strategy") or {}
+    if isinstance(strategy, dict):
+        if strategy.get("profit_target_atr") is not None:
+            _settings.LABELING["profit_target_atr"] = float(strategy["profit_target_atr"])
+        if strategy.get("stop_loss_atr") is not None:
+            _settings.LABELING["stop_loss_atr"] = float(strategy["stop_loss_atr"])
+        if strategy.get("lookahead_bars") is not None:
+            _settings.LABELING["lookahead_bars"] = int(strategy["lookahead_bars"])
+
+    features_sec = cfg.get("features") or {}
+    if isinstance(features_sec, dict):
+        for k in (
+            "atr_windows", "vol_windows", "ofi_windows", "momentum_windows",
+            "vwap_window", "chop_window", "corr_window", "regime_window",
+            "volatility_window",
+        ):
+            if features_sec.get(k) is not None:
+                _settings.FEATURE_SCALES[k] = features_sec[k]
+
+    fc = cfg.get("feature_cache")
+    if isinstance(fc, dict):
+        _settings.FEATURE_CACHE.update(fc)
+        # Alias legacy slow_cols name
+        slow = list(_settings.FEATURE_CACHE.get("slow_cols") or [])
+        _settings.FEATURE_CACHE["slow_cols"] = [
+            "hurst_exponent" if c == "hurst" else c for c in slow
+        ]
+
+    maturity = cfg.get("maturity")
+    if isinstance(maturity, dict) and maturity.get("stage") is not None:
+        _settings.MATURITY["stage"] = str(maturity["stage"])
+
     pretrain_sec = cfg.get("pretrain") or {}
     if isinstance(pretrain_sec.get("augmentations"), dict):
         defaults["pretrain_augmentations"] = pretrain_sec["augmentations"]
+    if pretrain_sec.get("read_windows") is not None:
+        _settings.PRETRAIN["read_windows"] = int(pretrain_sec["read_windows"])
+        defaults["pretrain_read_windows"] = int(pretrain_sec["read_windows"])
 
     rl_sec = cfg.get("rl") or {}
     if isinstance(rl_sec.get("reward"), dict):
@@ -375,12 +452,88 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     print(f"[Config] Loaded {config_path}")
 
 
+# Alias map for legacy YAML regime_scale keys → LIVE_RISK / RegimeScale names.
+_REGIME_SCALE_ALIASES = {
+    "volatile": "crisis",
+    "ranging": "mean_rev",
+    "unknown": "normal",
+}
+
+
+def _apply_yaml_risk_to_live_risk(risk: dict) -> None:
+    """Deep-merge YAML ``risk:`` into ``settings.LIVE_RISK`` (session/regime aware)."""
+    lr = _settings.LIVE_RISK
+    scalar_keys = (
+        "kelly_fraction", "max_position_pct", "max_total_lots", "target_annual_vol",
+        "pip_risk_default", "max_drawdown_halt", "soft_drawdown_reduce", "daily_loss_limit",
+        "max_consecutive_losses", "recovery_bars", "atr_multiplier", "trail_activation_r",
+        "breakeven_at_r", "corr_crisis_threshold", "hurst_trending", "hurst_mean_rev",
+        "var_confidence",
+    )
+    for key in scalar_keys:
+        if key in risk and risk[key] is not None:
+            lr[key] = risk[key]
+
+    # pip_value in YAML is documentation for notional; map if LIVE_RISK ever grows it.
+    if "pip_value" in risk and "pip_risk_default" not in risk:
+        pass  # intentionally unused by LIVE_RISK; keep YAML for docs/RiskEngine extras
+
+    rs = risk.get("regime_scale")
+    if isinstance(rs, dict):
+        dest = dict(lr.get("regime_scale") or {})
+        for k, v in rs.items():
+            canon = _REGIME_SCALE_ALIASES.get(str(k), str(k))
+            dest[canon] = float(v)
+        lr["regime_scale"] = dest
+
+    sl = risk.get("session_limits")
+    if isinstance(sl, dict):
+        dest = dict(lr.get("session_limits") or {})
+        for session, limits in sl.items():
+            if not isinstance(limits, dict):
+                continue
+            base = dict(dest.get(session) or {})
+            for lk in ("max_lots", "max_open_trades"):
+                if lk in limits:
+                    base[lk] = limits[lk]
+            # Preserve hours_local / tz from LIVE_RISK defaults when YAML omits them.
+            dest[session] = base
+        lr["session_limits"] = dest
+    print(
+        "[Config] LIVE_RISK synced from YAML risk "
+        f"(kelly={lr.get('kelly_fraction')}, "
+        f"london_lots={(lr.get('session_limits') or {}).get('london', {}).get('max_lots')})"
+    )
+
+
 def _sync_runtime_config(args) -> None:
     """Apply YAML-only nested config blocks to modules that read config.settings."""
     execution = getattr(args, "execution", None)
     if isinstance(execution, dict):
         _settings.EXECUTION.update(execution)
         SETTINGS_EXECUTION.update(execution)
+
+    risk = getattr(args, "risk", None)
+    if isinstance(risk, dict):
+        _apply_yaml_risk_to_live_risk(risk)
+
+    # Strategy ATR → LABELING (CLI may override YAML after parse)
+    if getattr(args, "profit_target_atr", None) is not None:
+        _settings.LABELING["profit_target_atr"] = float(args.profit_target_atr)
+    if getattr(args, "stop_loss_atr", None) is not None:
+        _settings.LABELING["stop_loss_atr"] = float(args.stop_loss_atr)
+    if getattr(args, "lookahead_bars", None) is not None:
+        _settings.LABELING["lookahead_bars"] = int(args.lookahead_bars)
+
+    if getattr(args, "pretrain_read_windows", None) is not None:
+        _settings.PRETRAIN["read_windows"] = int(args.pretrain_read_windows)
+
+    if getattr(args, "maturity_stage", None):
+        _settings.MATURITY["stage"] = str(args.maturity_stage)
+
+    fc = getattr(args, "feature_cache", None)
+    if isinstance(fc, dict):
+        _settings.FEATURE_CACHE.update(fc)
 
     # hardware.torch_compile → settings.GPU (and bound _GPU_CFG if same dict)
     if getattr(args, "torch_compile", None) is not None:
@@ -403,6 +556,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Forex Model ΓÇö 20M Tick GPU Trainer")
     p.set_defaults(curriculum=SETTINGS_CURRICULUM)
     p.set_defaults(execution=SETTINGS_EXECUTION)
+    p.set_defaults(risk=None)
+    p.set_defaults(sidecar=None)
+    p.set_defaults(use_mixup=False)
+    p.set_defaults(use_volatility_sampler=False)
     p.add_argument("--config", type=str, default=None,
                    help="Path to a YAML run config (e.g. config/run.yaml). "
                         "Values are used as defaults; explicit CLI flags override them.")
@@ -685,7 +842,13 @@ def parse_args():
                    help="Force DataLoader persistent_workers=False.")
     p.add_argument("--thread-prefetch-batches", type=int, default=8,
                    help="Background-thread prefetch queue depth for train/val loaders "
-                        "(overlaps Zarr decompress + H2D with GPU compute; always on).")
+                        "(overlaps Zarr decompress + H2D with GPU compute; only applied "
+                        "when num_workers==0 or --force-thread-prefetch is set).")
+    p.add_argument("--force-thread-prefetch", dest="force_thread_prefetch",
+                   action="store_true", default=False,
+                   help="Layer the daemon-thread prefetch queue on top of DataLoader "
+                        "worker-process buffering even when num_workers>0. Useful for "
+                        "hiding GPU-step jitter on slow disks; trades ~2x pinned memory.")
     p.add_argument("--zarr-cname", type=str, default="auto",
                    help="Blosc codec for training-cache Zarr writes "
                         "(auto|lz4|zstd|zlib|...). auto = lz4@1 on Linux, zstd@3 elsewhere.")
@@ -881,8 +1044,7 @@ def parse_args():
                    help="A-H1: bars per RL episode (sub-window sampled at a random offset "
                         "each reset). 0 = full series each episode.")
     p.add_argument("--off-policy-rewards", action="store_true", default=False,
-                   help="Re-estimate RL episode rewards with IPS / doubly-robust "
-                        "estimators (Improvement #5) during training.")
+                   help="Log IPS/DR OPE estimates during RL (diagnostic only — does not train).")
     p.add_argument("--rl-encoder-obs", dest="rl_encoder_obs",
                    action=argparse.BooleanOptionalAction, default=True,
                    help="A-C3: use the frozen supervised encoder embedding as the RL "
@@ -892,6 +1054,12 @@ def parse_args():
                    help="Fraction of the RL window held out for validation rollouts.")
     p.add_argument("--rl-min-val-sharpe", type=float, default=-999.0,
                    help="Minimum validation Sharpe required to save rl_*_best.pt.")
+    p.add_argument("--rl-use-sharpe-reward", dest="rl_use_sharpe_reward",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Replace env P&L reward with rolling SharpeRewardWrapper during RL training.")
+    p.add_argument("--rl-use-her", dest="rl_use_her",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Enable Hindsight Experience Replay (HERBuffer) for DQN training.")
     p.add_argument("--rl-all-models", action="store_true", default=False,
                    help="With --all-models, run RL once per trained architecture subfolder.")
     p.add_argument("--deploy-rl", action="store_true",
@@ -900,6 +1068,16 @@ def parse_args():
     p.add_argument("--pretrain-temperature", type=float,
                    default=float(PRETRAIN.get("temperature", 0.5)),
                    help="Initial TSCL temperature (learnable during pretrain).")
+    p.add_argument("--pretrain-read-windows", type=int,
+                   default=int(PRETRAIN.get("read_windows", 64)),
+                   help="Zarr span read chunk size during pretrain loading.")
+    p.add_argument("--maturity-stage", type=str, default="paper",
+                   choices=["dev", "paper", "production"],
+                   help="Model maturity stage (gates live promotion expectations).")
+    p.add_argument("--max-bad-frac", type=float, default=0.05,
+                   help="Max fraction of bad rows allowed inside a training sequence window.")
+    p.add_argument("--max-zero-frac", type=float, default=0.80,
+                   help="Max fraction of all-zero feature rows allowed inside a sequence window.")
 
     # Fine-tune / warm-start (B-C2)
     p.add_argument("--finetune-warm-start", dest="finetune_warm_start",
@@ -1101,8 +1279,9 @@ def parse_args():
                    help="Explicit teacher checkpoint path for distillation")
     p.add_argument("--distill-weight", type=float, default=0.5,
                    help="Weight of distillation loss relative to supervised loss")
-    p.add_argument("--distill-temperature", type=float, default=2.0,
-                   help="Temperature for distillation (if applicable)")
+    p.add_argument("--distill-temperature", type=float,
+                   default=float(DISTILLATION.get("temperature", 2.0)),
+                   help="Temperature for distillation soft targets (KL).")
 
     # Advanced Training Mechanics (Phase 2)
     p.add_argument("--enable-ewc", action="store_true",
@@ -1114,9 +1293,20 @@ def parse_args():
                    help="Enable Prioritized Experience Replay (PER).")
 
     p.add_argument("--enable-adversarial", action="store_true",
-                   help="Enable Adversarial Market Generation (synthetic flash crashes/spread blowouts).")
+                   help="Enable adversarial training (PGD/FGSM/FreeLB) or legacy market shocks.")
+    p.add_argument("--adversarial-method", type=str, default="pgd",
+                   choices=["pgd", "fgsm", "freelb", "market_shock", "graph_pgd"],
+                   help="Adversarial method: pgd (Projected Gradient Descent), fgsm (Fast Gradient Sign), "
+                        "freelb (Free Large-Batch), market_shock (legacy random shocks), "
+                        "graph_pgd (graph-aware PGD for GNNs; auto-selected for model_name 'gnn').")
     p.add_argument("--adversarial-prob", type=float, default=0.01,
-                   help="Probability of injecting an adversarial shock per batch (default: 0.01).")
+                   help="Probability of applying adversarial attack per batch (default: 0.01).")
+    p.add_argument("--adversarial-eps", type=float, default=0.3,
+                   help="L-infinity perturbation budget epsilon (default: 0.3).")
+    p.add_argument("--adversarial-alpha", type=float, default=0.01,
+                   help="Step size for PGD/FreeLB (default: 0.01).")
+    p.add_argument("--adversarial-steps", type=int, default=7,
+                   help="Number of attack steps for PGD/FreeLB (default: 7).")
 
     # -- Risk engine (Improvement #1) — optional live/dry-run enforcement config --
     p.add_argument("--risk-config", type=str, default=None, metavar="PATH",
@@ -1179,10 +1369,50 @@ def parse_args():
         args.epochs = min(int(args.epochs), 8)
         args.pretrain_epochs = min(int(args.pretrain_epochs), 5)
         args.patience = min(int(args.patience), 4)
+        # Quick mode always disables ensemble/RL — make the override loud when YAML
+        # had them enabled so operators do not think a "full" pipeline ran.
+        _ens_was = bool(getattr(args, "train_ensemble", False))
+        _rl_was = bool(getattr(args, "rl_train", False))
         args.train_ensemble = False
         args.rl_train = False
+        if _ens_was or _rl_was:
+            print(
+                "[Quick] WARN: quick.enabled forced ensemble="
+                f"{'off (was on)' if _ens_was else 'off'} | "
+                f"rl={'off (was on)' if _rl_was else 'off'}. "
+                "Set quick.enabled: false in run.yaml for a full post-train path."
+            )
+        # reduce-overhead CUDAGraphs + tiny synthetic batches can RecursionError
+        # on teardown; keep quick smokes in eager mode.
+        args.torch_compile = False
+        # Rich live display teardown has been observed to RecursionError after
+        # TRAINING COMPLETE on short smoke runs — use tqdm-only progress.
+        args.no_rich = True
+        try:
+            from config import settings as _settings
+            _settings.GPU["torch_compile"] = False
+        except Exception:
+            pass
+        try:
+            if isinstance(_GPU_CFG, dict):
+                _GPU_CFG["torch_compile"] = False
+        except Exception:
+            pass
         # Keep curriculum within the quick-run seq_len so cache integrity
         # does not demand SETTINGS schedules up to 120 bars.
+        # Synthetic short windows (~80–200 bars from 10k–50k ticks) cannot
+        # form sequences when seq_len + lookahead_bars exceeds bar count
+        # (e.g. seq=64 + LH=30 on ~84 bars → zero samples).
+        if str(getattr(args, "data_source", "")).lower() == "synthetic":
+            _lh = int(getattr(args, "lookahead_bars", 30) or 30)
+            _delay = int(getattr(args, "execution_delay_bars", 1) or 1)
+            _cap = max(16, 48 - _lh // 2)  # keep headroom for LH=30 → seq≈32
+            if int(args.seq_len) > _cap:
+                print(
+                    f"[Quick] synthetic seq_len {args.seq_len} → {_cap} "
+                    f"(headroom for lookahead={_lh}+delay={_delay})"
+                )
+                args.seq_len = _cap
         cur = getattr(args, "curriculum", None)
         if isinstance(cur, dict):
             capped = []
@@ -1566,17 +1796,17 @@ def _member_training_args(base_args, model_name: str, member_idx: int, total_mem
     print(f"[EnsembleDiversity] {model_name}: seed={getattr(out, 'seed', None)} "
           f"lr={out.lr:.3e} dropout={out.dropout:.3f} (member {member_idx+1}/{total_members})")
     if getattr(out, "pretrain", False) or getattr(out, "ablate_pretrain", False):
-        if getattr(out, "pretrain_method", "") == PRETRAIN.get("method", "byol").lower():
-            if "haelt" in model_name.lower():
-                out.pretrain_method = "masked"
-            elif "mamba" in model_name.lower():
-                out.pretrain_method = "forecast"
-            elif "tft" in model_name.lower():
-                out.pretrain_method = "masked"
-            elif "gnn" in model_name.lower():
-                out.pretrain_method = "cluster"
-            elif "expert" in model_name.lower():
-                out.pretrain_method = "tscl"
+        if "haelt" in model_name.lower():
+            out.pretrain_method = "masked"
+        elif "mamba" in model_name.lower():
+            out.pretrain_method = "forecast"
+        elif "tft" in model_name.lower():
+            out.pretrain_method = "masked"
+        elif "gnn" in model_name.lower():
+            out.pretrain_method = "cluster"
+        elif "expert" in model_name.lower():
+            out.pretrain_method = "tscl"
+
 
     return out
 
@@ -1738,7 +1968,7 @@ def _load_cv_fold_entry(
     if ckpt_path is None:
         return None
     try:
-        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     except Exception:
         return None
     history = ck.get("history")

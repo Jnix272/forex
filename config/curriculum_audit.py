@@ -220,9 +220,19 @@ def format_audit_warnings(report: dict[str, Any], *, prefix: str = "[CurriculumA
 _BUILT_SCHEMA_ALLOWLIST: frozenset[str] = frozenset({
     "open", "high", "low", "close", "mid_close", "volume",
     "bid_close", "ask_close", "bid_open", "ask_open",
-    "timestamp_utc", "session", "regime", "regime_label", "regime_class",
-    "no_trade_score", "latency_ms", "pair",
+    "timestamp_utc", "session", "session_label", "regime", "regime_label", "regime_class",
+    "no_trade_score", "latency_ms", "expected_latency_ms", "pair",
+    # DST overlap aux (labeling-only; not required in X)
+    "asia_london",
 })
+
+# Aux columns required for regime-conditional RL labeling (not necessarily in X).
+_LABELING_AUX_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "session": ("session_label", "asia_london", "london_ny"),
+    "regime": ("regime_class", "regime_label"),
+    "latency": ("expected_latency_ms",),
+    "no_trade": ("no_trade_score",),
+}
 
 
 def audit_built_dataset_schema(
@@ -281,6 +291,18 @@ def audit_built_dataset_schema(
 
     errors.extend(mkt.get("errors") or [])
     warnings.extend(mkt.get("warnings") or [])
+
+    # Labeling aux: regime_class should be in the built frame for regime-conditional
+    # barriers; session_label may live only on bars (not in X) — warn if neither
+    # regime_class nor regime_label is present.
+    for role, candidates in _LABELING_AUX_CANDIDATES.items():
+        if role == "session":
+            continue  # attached on bars in dataset_builder, not required in X
+        if not any(c in name_set for c in candidates):
+            warnings.append(
+                f"Labeling aux '{role}' missing from built schema "
+                f"(tried {candidates}) — regime/latency labeling may degrade"
+            )
 
     mask = feature_mask or {}
     enabled = {str(k) for k, v in mask.items() if v}

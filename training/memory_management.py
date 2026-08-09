@@ -9,23 +9,22 @@ Components:
      background prefetching and Zarr chunk-aware sequential reads.
   2. GradientCheckpointing: Selective activation checkpointing for transformer/Mamba
      blocks with policy-based control (recompute vs store).
-  3. ActivationOffloading: Offload activations to CPU during forward, reload for backward.
-  4. MemoryProfiler: Context manager for tracking peak GPU/CPU memory usage.
+  3. MemoryProfiler: Context manager for tracking peak GPU/CPU memory usage.
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TypeVar
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, WeightedRandomSampler
 
 try:
     import zarr
@@ -58,10 +57,12 @@ class StreamingDatasetConfig:
 
 
 class StreamingMemmapDataset(Dataset):
-    """
-    Memory-mapped dataset for Zarr/NPY stores with optional zarr chunk-aware reading.
-    
-    Supports both random access (for shuffle) and sequential block reading.
+    """Map-style zero-copy streaming dataset backed by memory-mapped NPY or Zarr.
+
+    Reads rows lazily so only the requested tile is paged into memory. Supports
+    NPY memmap pairs (``_X.npy``/``_y.npy``) and Zarr groups containing ``X``/``y``
+    arrays. ``__getitem__`` maps a position ``i`` to sample ``indices[i]``. Picklable
+    for multiprocessing DataLoader workers (reopens storage on unpickle).
     """
 
     def __init__(
@@ -72,77 +73,65 @@ class StreamingMemmapDataset(Dataset):
         use_zarr_chunks: bool = False,
     ):
         self.cache_path = cache_path
-        self.indices = np.ascontiguousarray(np.asarray(indices, dtype=np.int64))
+        self.indices = np.asarray(indices, dtype=np.int64)
         self.chunk_size = chunk_size
         self.use_zarr_chunks = use_zarr_chunks
+        self._mode = "zarr" if self._is_zarr_group(cache_path) else "npy"
+        self._zarr_group = None
+        self._X_mem = None
+        self._y_mem = None
+        self._N = 0
+        self._open_storage()
 
-        # Detect storage backend
-        self.use_zarr = (
-            ZARR_AVAILABLE
-            and Path(cache_path).is_dir()
-            and ((Path(cache_path) / ".zgroup").exists() or (Path(cache_path) / "zarr.json").exists())
-        )
+    @staticmethod
+    def _is_zarr_group(cache_path: str) -> bool:
+        if not ZARR_AVAILABLE:
+            return False
+        try:
+            group = zarr.open_group(cache_path, mode="r")
+            return "X" in group and "y" in group
+        except Exception:
+            return False
 
-        if self.use_zarr:
-            self._z = zarr.open_group(cache_path, mode="r")
-            self.X_zarr = self._z["X"]
-            self.y_zarr = self._z["y"]
-            self.n_chunks = (self.X_zarr.shape[0] + chunk_size - 1) // chunk_size
-            self.X_mmap = None
-            self.y_mmap = None
+    def _open_storage(self):
+        if self._mode == "zarr":
+            self._zarr_group = zarr.open_group(self.cache_path, mode="r")
+            self._N = self._zarr_group["X"].shape[0]
         else:
-            npy_x = Path(cache_path) / "_X.npy"
-            npy_y = Path(cache_path) / "_y.npy"
-            # Ensure files exist
-            if not npy_x.exists():
-                raise FileNotFoundError(f"NPY file not found: {npy_x}. Cache path: {cache_path}")
-            if not npy_y.exists():
-                raise FileNotFoundError(f"NPY file not found: {npy_y}. Cache path: {cache_path}")
-            self.X_mmap = np.load(str(npy_x), mmap_mode="r")
-            self.y_mmap = np.load(str(npy_y), mmap_mode="r")
-            self.X_zarr = None
-            self.y_zarr = None
-            self.n_chunks = 0
+            self._X_mem = np.load(os.path.join(self.cache_path, "_X.npy"), mmap_mode="r")
+            self._y_mem = np.load(os.path.join(self.cache_path, "_y.npy"), mmap_mode="r")
+            self._N = self._X_mem.shape[0]
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_zarr_group"] = None
+        state["_X_mem"] = None
+        state["_y_mem"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._open_storage()
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
         real_idx = int(self.indices[idx])
-        if self.use_zarr:
-            X = np.array(self.X_zarr[real_idx], dtype=np.float32)
-            y = float(self.y_zarr[real_idx])
+        if real_idx < 0 or real_idx >= self._N:
+            raise IndexError(f"sample index {real_idx} out of range [0, {self._N})")
+        if self._mode == "zarr":
+            X = np.array(self._zarr_group["X"][real_idx], dtype=np.float32)
+            y = np.array(self._zarr_group["y"][real_idx], dtype=np.float32)
         else:
-            X = np.array(self.X_mmap[real_idx], dtype=np.float32)
-            y = float(self.y_mmap[real_idx])
+            X = np.array(self._X_mem[real_idx], dtype=np.float32)
+            y = np.array(self._y_mem[real_idx], dtype=np.float32)
         np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         y = float(np.nan_to_num(np.float32(y), nan=0.0, posinf=0.0, neginf=0.0))
         return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-    def __getstate__(self):
-        return {"cache_path": self.cache_path, "indices": self.indices,
-                "chunk_size": self.chunk_size, "use_zarr_chunks": self.use_zarr_chunks,
-                "use_zarr": self.use_zarr}
 
-    def __setstate__(self, state):
-        self.cache_path = state["cache_path"]
-        self.indices = state["indices"]
-        self.chunk_size = state["chunk_size"]
-        self.use_zarr_chunks = state["use_zarr_chunks"]
-        self.use_zarr = state["use_zarr"]
-        if self.use_zarr:
-            self._z = zarr.open_group(self.cache_path, mode="r")
-            self.X_zarr = self._z["X"]
-            self.y_zarr = self._z["y"]
-            self.X_mmap = None
-            self.y_mmap = None
-        else:
-            npy_x = Path(self.cache_path) / "_X.npy"
-            npy_y = Path(self.cache_path) / "_y.npy"
-            self.X_mmap = np.load(str(npy_x), mmap_mode="r")
-            self.y_mmap = np.load(str(npy_y), mmap_mode="r")
-            self.X_zarr = None
-            self.y_zarr = None
+
 
 
 class SequentialZarrDataset(IterableDataset):
@@ -180,13 +169,6 @@ class SequentialZarrDataset(IterableDataset):
         # Sorted indices for sequential access
         self.indices = np.sort(np.asarray(indices, dtype=np.int64))
 
-        # Assign disjoint slice to this worker
-        n = len(self.indices)
-        effective_workers = max(1, num_workers)
-        start = (n * worker_rank) // effective_workers
-        end = (n * (worker_rank + 1)) // effective_workers
-        self.worker_indices = self.indices[start:end]
-
         self.n_chunks = (self.X_zarr.shape[0] + chunk_size - 1) // chunk_size
 
         # Precompute chunk boundaries
@@ -194,9 +176,22 @@ class SequentialZarrDataset(IterableDataset):
         self.chunk_ends = np.minimum(self.chunk_starts + chunk_size, self.X_zarr.shape[0])
 
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_rank = worker_info.id
+            effective_workers = worker_info.num_workers
+        else:
+            worker_rank = 0
+            effective_workers = 1
+
+        n = len(self.indices)
+        start = (n * worker_rank) // effective_workers
+        end = (n * (worker_rank + 1)) // effective_workers
+        worker_indices = self.indices[start:end]
+
         # Group worker indices by zarr chunk
         chunk_to_indices = {}
-        for idx in self.worker_indices:
+        for idx in worker_indices:
             chunk_idx = idx // self.chunk_size
             if chunk_idx not in chunk_to_indices:
                 chunk_to_indices[chunk_idx] = []
@@ -277,21 +272,45 @@ class PrefetchDataLoader:
         return len(self.loader)
 
 
+class _IndexedDataset(Dataset):
+    """Wraps a map-style dataset so each batch row carries its sample index.
+
+    Training loops use the index to map per-sample losses back to priorities
+    (PER ``update_priorities``)."""
+
+    def __init__(self, base: Dataset):
+        self.base = base
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, idx):
+        X, y = self.base[idx]
+        return X, y, torch.tensor(idx, dtype=torch.long)
+
+
 class PrioritizedDataLoader(PrefetchDataLoader):
     """
     Prioritized Experience Replay (PER) DataLoader.
     Samples sequences proportionally to their Temporal Difference (TD) error or Loss.
+
+    Uses a ``WeightedRandomSampler`` over per-sample priorities (rebuild each
+    epoch so updated priorities take effect). Batches carry sample indices so
+    the training loop can call ``update_priorities``.
     """
     def __init__(self, dataset, batch_size: int, alpha: float = 0.6, beta: float = 0.4, **kwargs):
-        # Pass shuffle=False because we handle sampling manually if possible,
-        # but for simplicity in this wrapper we'll just track global priorities.
-        super().__init__(dataset, batch_size, **kwargs)
         self.alpha = alpha
         self.beta = beta
+        self.prefetch_factor = kwargs.pop("prefetch_factor", None)
 
         # Initialize uniform priorities
         self.priorities = torch.ones(len(dataset), dtype=torch.float32)
         self.max_priority = 1.0
+
+        # Wrap dataset to carry indices; PrefetchDataLoader sets up prefetch.
+        self._indexed_ds = _IndexedDataset(dataset)
+        super().__init__(self._indexed_ds, batch_size, shuffle=False, **kwargs)
+        self._reload_sampler()
 
     def update_priorities(self, indices: torch.Tensor, losses: torch.Tensor):
         """Update priorities based on training loss."""
@@ -302,9 +321,24 @@ class PrioritizedDataLoader(PrefetchDataLoader):
                 self.priorities[idx] = p
                 self.max_priority = max(self.max_priority, p)
 
+    def _reload_sampler(self):
+        """Rebuild the DataLoader with a WeightedRandomSampler over current priorities."""
+        self.loader = DataLoader(
+            self._indexed_ds,
+            batch_size=self.batch_size,
+            sampler=WeightedRandomSampler(
+                weights=self.priorities,
+                num_samples=len(self.priorities),
+                replacement=True,
+            ),
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=False,  # Fixed leak: don't persist workers if we recreate loader
+            prefetch_factor=self.prefetch_factor,
+        )
+
     def __iter__(self):
-        # In a full implementation, this overrides the sampler to use self.priorities.
-        # Here we just wrap the base iterator.
+        self._reload_sampler()
         return super().__iter__()
 
 
@@ -406,152 +440,6 @@ def checkpoint_sequential(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 3. Activation Offloading
-# ═════════════════════════════════════════════════════════════════════════════
-
-class ActivationOffloader:
-    """
-    Offloads activations to CPU during forward pass, reloads for backward.
-    
-    Useful when GPU memory is limited but CPU RAM is available.
-    Works by registering forward/backward hooks to move tensors between
-    GPU and CPU.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        offload_patterns: list[str] = None,
-        cpu_device: str = "cpu",
-        non_blocking: bool = True,
-    ):
-        self.model = model
-        self.cpu_device = torch.device(cpu_device)
-        self.non_blocking = non_blocking
-        self.offload_patterns = offload_patterns or ["encoder", "decoder", "transformer", "mamba"]
-        self._hooks = []
-        self._saved_activations = {}
-
-    def _should_offload(self, name: str) -> bool:
-        for pattern in self.offload_patterns:
-            if pattern in name:
-                return True
-        return False
-
-    def _forward_hook(self, module, input, output):
-        if isinstance(output, torch.Tensor):
-            # Save to CPU
-            module_name = str(module)
-            self._saved_activations[module_name] = output.detach().to(
-                self.cpu_device, non_blocking=self.non_blocking
-            )
-            # Return GPU tensor for continued forward pass
-            return output
-        elif isinstance(output, (tuple, list)):
-            # Handle tuple/list outputs
-            offloaded = []
-            for i, o in enumerate(output):
-                if isinstance(o, torch.Tensor):
-                    module_name = f"{module!s}_{i}"
-                    self._saved_activations[module_name] = o.detach().to(
-                        self.cpu_device, non_blocking=self.non_blocking
-                    )
-                    offloaded.append(o)
-                else:
-                    offloaded.append(o)
-            return tuple(offloaded) if isinstance(output, tuple) else offloaded
-        return output
-
-    def _backward_hook(self, module, grad_input, grad_output):
-        # Reload activations from CPU for gradient computation
-        # This is a simplified version; full implementation would need
-        # to reconstruct the computation graph
-        pass
-
-    def enable(self):
-        """Enable activation offloading."""
-        for name, module in self.model.named_modules():
-            if self._should_offload(name):
-                h = module.register_forward_hook(self._forward_hook)
-                self._hooks.append(h)
-
-    def disable(self):
-        """Disable activation offloading and clear saved activations."""
-        for h in self._hooks:
-            h.remove()
-        self._hooks.clear()
-        self._saved_activations.clear()
-
-    def __enter__(self):
-        self.enable()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disable()
-
-
-class SelectiveActivationOffloader:
-    """
-    More selective activation offloading using torch.autograd.Function.
-    
-    Wraps specific modules to offload their output activations to CPU
-    during forward, and reload during backward.
-    """
-
-    def __init__(self, model: nn.Module, module_names: list[str]):
-        self.model = model
-        self.module_names = set(module_names)
-        self._offloaded = {}
-
-    def _make_offload_wrapper(self, module: nn.Module, name: str):
-        original_forward = module.forward
-
-        def offload_forward(*args, **kwargs):
-            out = original_forward(*args, **kwargs)
-            if isinstance(out, torch.Tensor):
-                # Save to CPU
-                self._offloaded[name] = out.detach().to("cpu", non_blocking=True)
-                # Create a new tensor that will trigger reload on backward
-                return OffloadedTensor.apply(out, name, self._offloaded)
-            return out
-
-        module.forward = offload_forward
-
-    def enable(self):
-        for name, module in self.model.named_modules():
-            if name in self.module_names:
-                self._make_offload_wrapper(module, name)
-
-    def disable(self):
-        self._offloaded.clear()
-
-
-class OffloadedTensor(torch.autograd.Function):
-    """Autograd function for offloaded tensor: forward passes through, backward reloads from CPU."""
-
-    @staticmethod
-    def forward(ctx, tensor: torch.Tensor, name: str, storage: dict):
-        ctx.name = name
-        ctx.storage = storage
-        # Save to CPU
-        storage[name] = tensor.detach().to("cpu", non_blocking=True)
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Reload from CPU
-        name = ctx.name
-        storage = ctx.storage
-        if name in storage:
-            # The forward pass already saved the tensor
-            # We need the original tensor for gradient computation
-            # This is a simplified version - full implementation would
-            # need to recompute or properly save the forward graph
-            pass
-        return grad_output, None, None
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # 4. Memory Profiler
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -648,14 +536,12 @@ class MemoryMonitor:
 def memory_efficient_training(
     model: nn.Module,
     checkpoint_policy: CheckpointPolicy | None = None,
-    offload_modules: list[str] = None,
     enable_profiler: bool = False,
 ) -> Iterator[dict]:
     """
     Context manager for memory-efficient training setup.
     
-    Applies gradient checkpointing and activation offloading, yields
-    control, then cleans up.
+    Applies gradient checkpointing and yields control, then cleans up.
     
     Usage:
         with memory_efficient_training(model, checkpoint_policy=policy) as mem:
@@ -670,17 +556,15 @@ def memory_efficient_training(
     if checkpoint_policy is not None:
         apply_gradient_checkpointing(model, checkpoint_policy)
 
-    # Apply activation offloading
-    offloader = None
-    if offload_modules:
-        offloader = SelectiveActivationOffloader(model, offload_modules)
-        offloader.enable()
-
     try:
         yield {}
     finally:
-        if offloader:
-            offloader.disable()
+        if checkpoint_policy is not None:
+            for name, module in model.named_modules():
+                if hasattr(module, '_original_forward'):
+                    module.forward = module._original_forward
+                    delattr(module, '_original_forward')
+
         if enable_profiler and torch.cuda.is_available():
             peak = torch.cuda.max_memory_allocated() / 1e9
             print(f"[MemoryEfficientTraining] Peak GPU: {peak:.2f} GB")

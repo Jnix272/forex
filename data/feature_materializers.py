@@ -8,6 +8,7 @@ Each materializer handles a specific feature type (price, volatility, microstruc
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -182,7 +183,7 @@ class MicrostructureMaterializer(BaseMaterializer):
         if spec.name == "obi_proxy":
             # Order Book Imbalance proxy using volume
             return bars.select("timestamp_utc",
-                ((pl.col("tick_volume").shift(1) - pl.col("tick_volume")) / (pl.col("tick_volume") + 1e-12))
+                ((pl.col("volume") - pl.col("volume").shift(1)) / (pl.col("volume") + 1e-12))
                 .cum_sum().alias(spec.name)
             ).drop_nulls()
             # Note: cum_sum maps to OBI accumulation in the forex scaling logic
@@ -287,35 +288,145 @@ class SessionMaterializer(BaseMaterializer):
 
 
 class MacroMaterializer(BaseMaterializer):
-    """Compute macro-derived features (yield spreads, COT, DXY, VIX, etc.)."""
+    """Compute macro-derived features from cross-asset / FRED panels (not FX OHLC)."""
+
+    def _cache_dir(self) -> str:
+        import os
+        return os.environ.get(
+            "CROSS_ASSET_CACHE",
+            str(Path(getattr(self.store, "root", Path("data/feature_store"))) / "cross_asset_cache"),
+        )
+
+    def _load_panel(self, start: datetime, end: datetime) -> dict:
+        from data.cross_asset import load_cross_asset_panel
+
+        start_s = start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else str(start)[:10]
+        end_s = end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else str(end)[:10]
+        return load_cross_asset_panel(
+            start_s, end_s, cache_dir=self._cache_dir(), source="auto",
+        )
+
+    @staticmethod
+    def _series_to_frame(series, col: str) -> pl.DataFrame:
+        import pandas as pd
+
+        if series is None:
+            return pl.DataFrame()
+        if isinstance(series, pl.DataFrame):
+            return series
+        s = series if isinstance(series, pd.Series) else pd.Series(series)
+        if s is None or len(s) == 0:
+            return pl.DataFrame()
+        idx = pd.DatetimeIndex(s.index)
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        else:
+            idx = idx.tz_convert("UTC")
+        pdf = pd.DataFrame({"timestamp_utc": idx, col: s.to_numpy(dtype=float)})
+        return pl.from_pandas(pdf).drop_nulls()
+
+    def _align_to_bars(self, bars: pl.DataFrame, daily: pl.DataFrame, col: str) -> pl.DataFrame | None:
+        if daily.is_empty() or col not in daily.columns:
+            return None
+        if bars is None or bars.is_empty() or "timestamp_utc" not in bars.columns:
+            return daily.select("timestamp_utc", pl.col(col).alias(col)).drop_nulls()
+
+        left = bars.select("timestamp_utc").unique().sort("timestamp_utc")
+        right = daily.select("timestamp_utc", col).sort("timestamp_utc")
+        # Match timezone awareness between frames
+        left_tz = left["timestamp_utc"].dtype
+        try:
+            right = right.with_columns(pl.col("timestamp_utc").cast(left_tz))
+        except Exception:
+            pass
+        joined = left.join_asof(right, on="timestamp_utc", strategy="backward")
+        return joined.select("timestamp_utc", pl.col(col)).drop_nulls()
 
     def compute(
         self, spec: FeatureSpec, bars: pl.DataFrame, start: datetime, end: datetime
     ) -> pl.DataFrame | None:
-        bars = bars.sort("timestamp_utc")
+        bars = bars.sort("timestamp_utc") if bars is not None and not bars.is_empty() else bars
+        panel = self._load_panel(start, end)
 
         if spec.name == "yield_2y10y":
-            return bars.select("timestamp_utc",
-                ((pl.col("close") - pl.col("open")) / pl.col("close") * 10_000).abs().alias(spec.name)
-            ).drop_nulls()
-            # Placeholder: actual yield spread from external data source
+            daily = pl.DataFrame()
+            if "YIELD_CURVE_SLOPE" in panel and panel["YIELD_CURVE_SLOPE"] is not None:
+                daily = self._series_to_frame(panel["YIELD_CURVE_SLOPE"], "yield_2y10y")
+            elif "US10Y" in panel and "US2Y" in panel:
+                import pandas as pd
+                us10 = panel["US10Y"]
+                us2 = panel["US2Y"]
+                idx = us10.index.union(us2.index)
+                slope = us10.reindex(idx).ffill() - us2.reindex(idx).ffill()
+                daily = self._series_to_frame(slope.dropna(), "yield_2y10y")
+            if daily.is_empty():
+                # FRED / synthetic via MacroYieldFeatureBuilder (never FX OHLC).
+                from features.macro_features import MacroYieldFeatureBuilder
+                built = MacroYieldFeatureBuilder().build(
+                    bars if bars is not None else pl.DataFrame()
+                )
+                if (
+                    built is not None
+                    and not built.is_empty()
+                    and "yield_curve_slope" in built.columns
+                    and bars is not None
+                    and not bars.is_empty()
+                    and len(built) == bars.height
+                ):
+                    daily = bars.select("timestamp_utc").with_columns(
+                        built["yield_curve_slope"].alias("yield_2y10y")
+                    ).drop_nulls()
+                elif built is not None and not built.is_empty() and "yield_curve_slope" in built.columns:
+                    # Builder dropped timestamps; recover from load_yields panel.
+                    import pandas as pd
+                    start_ts = pd.Timestamp(start)
+                    end_ts = pd.Timestamp(end)
+                    yields = MacroYieldFeatureBuilder().load_yields(start_ts, end_ts)
+                    if "US10Y" in yields and "US2Y" in yields:
+                        idx = yields["US10Y"].index.union(yields["US2Y"].index)
+                        slope = (
+                            yields["US10Y"].reindex(idx).ffill()
+                            - yields["US2Y"].reindex(idx).ffill()
+                        ).dropna()
+                        daily = self._series_to_frame(slope, "yield_2y10y")
+            out = self._align_to_bars(bars, daily, "yield_2y10y")
+            if out is None or out.is_empty():
+                raise RuntimeError(
+                    "MacroMaterializer: yield_2y10y unavailable from cross-asset/FRED panel"
+                )
+            return out
 
         if spec.name == "usd_index":
-            return bars.select("timestamp_utc",
-                pl.col("close").alias("usd_index_close")
-            ).drop_nulls()
-            # Placeholder: actual DXY from external data source
+            if "DXY" not in panel or panel["DXY"] is None:
+                raise RuntimeError(
+                    "MacroMaterializer: usd_index requires DXY from cross-asset panel "
+                    "(stooq/yahoo). No FX-close alias."
+                )
+            daily = self._series_to_frame(panel["DXY"], "usd_index")
+            out = self._align_to_bars(bars, daily, "usd_index")
+            if out is None or out.is_empty():
+                raise RuntimeError("MacroMaterializer: usd_index panel empty after align")
+            return out
 
         if spec.name == "vix_close":
-            return bars.select("timestamp_utc",
-                pl.col("close").alias("vix_close_value")
-            ).drop_nulls()
+            if "VIX" not in panel or panel["VIX"] is None:
+                raise RuntimeError(
+                    "MacroMaterializer: vix_close requires VIX from cross-asset panel. "
+                    "No FX-close alias."
+                )
+            daily = self._series_to_frame(panel["VIX"], "vix_close")
+            out = self._align_to_bars(bars, daily, "vix_close")
+            if out is None or out.is_empty():
+                raise RuntimeError("MacroMaterializer: vix_close panel empty after align")
+            return out
 
         return None
 
     @property
     def requires_ohlcv(self) -> bool:
-        return True
+        # Macro series can materialize from the external panel alone; bars are
+        # optional alignment targets when provided.
+        return False
 
 
 class DefaultMaterializer(BaseMaterializer):

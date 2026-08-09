@@ -30,6 +30,7 @@ from config.settings import PATHS
 try:
     import torch
     import torch.nn as nn
+    from training.ema import ExponentialMovingAverage
     import torch.nn.functional as F
     TORCH = True
 except ImportError:
@@ -173,9 +174,9 @@ class TimeSeriesAugmenter:
             self.stats["shuffle"] += B
             try:
                 # Shuffle per-pair feature blocks when channel_chunk is set.
-                chunk = self.channel_chunk or 224
+                chunk = self.channel_chunk or F
                 if chunk < 8:
-                    chunk = 224
+                    chunk = max(8, F)
                 n_chunks = F // chunk
                 if n_chunks > 1:
                     i1, i2 = rng.choice(n_chunks, size=2, replace=False)
@@ -296,6 +297,8 @@ if TORCH:
 
         def nt_xent_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
             """NT-Xent contrastive loss (SimCLR formulation)."""
+            if z1.shape[0] != z2.shape[0]:
+                raise ValueError(f"Batch sizes must match (z1: {z1.shape[0]}, z2: {z2.shape[0]})")
             B = z1.shape[0]
             # Similarity/logits in fp32 for stability under AMP.
             z  = torch.cat([z1, z2], dim=0).float()    # (2B, D)
@@ -344,7 +347,15 @@ if TORCH:
                     if X_ref is not None and len(X_ref) >= 8:
                         sample = torch.as_tensor(X_ref[:32], dtype=torch.float32, device=self.device)
                     else:
-                        sample = torch.randn(32, 60, 224, device=self.device) * 0.1
+                        # Fall back to encoder input width when no reference batch.
+                        feat_dim = None
+                        for p in self.encoder.parameters():
+                            if p.ndim >= 2:
+                                feat_dim = int(p.shape[-1])
+                                break
+                        if feat_dim is None or feat_dim < 8:
+                            return False, 0.0, 0.0
+                        sample = torch.randn(32, 60, feat_dim, device=self.device) * 0.1
 
                     with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                         # Positive pairs for alignment (augmented views of same samples)
@@ -473,7 +484,11 @@ if TORCH:
                 if collapsed:
                     raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
 
-                metric = align + unif
+                # Early stopping tracks alignment (positive-pair closeness)
+                # alone; mixing in uniformity (align + unif) let the metric be
+                # dominated by the much larger uniformity scale and stop training
+                # while pairs were still poorly aligned.
+                metric = align
                 if metric < best_metric - 1e-4:
                     best_metric = metric
                     patience_counter = 0
@@ -571,11 +586,13 @@ if TORCH:
             ])
             loss_std = F.cross_entropy(sim, labels)
 
-            # Hard-negative margin loss: anchor should be farther from hard neg than pos
-            sim_ap = (z_a * z_p).sum(-1) / self.temp  # (B,)
-            sim_an = (z_a * z_n).sum(-1) / self.temp  # (B,)
+            # Hard-negative margin loss: operate on raw cosine similarities (NOT
+            # temperature-scaled), so the 0.2 margin has consistent geometric meaning
+            # regardless of the learnable temperature value.
+            sim_ap_raw = (z_a * z_p).sum(-1)  # (B,) — raw cosine similarity
+            sim_an_raw = (z_a * z_n).sum(-1)  # (B,)
             # Hinge: push anchor-negative similarity 0.2 below anchor-positive
-            margin_loss = F.relu(sim_an - sim_ap + 0.2).mean()
+            margin_loss = F.relu(sim_an_raw - sim_ap_raw + 0.2).mean()
 
             return loss_std + self.hard_neg_weight * margin_loss
 
@@ -658,7 +675,6 @@ if TORCH:
                 for start in batch_bar:
                     batch_idx = idx_perm[start: start + batch_size]
                     if len(batch_idx) < 4: continue
-                    X[batch_idx]
 
                     cur_progress = epoch / max(1, epochs)
                     reg_batch = reg[batch_idx]
@@ -744,7 +760,8 @@ if TORCH:
                 if collapsed:
                     raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
 
-                metric = align + unif
+                # Early stopping tracks alignment alone (see TSCLTrainer note).
+                metric = align
                 if metric < best_metric - 1e-4:
                     best_metric = metric
                     patience_counter = 0
@@ -1035,7 +1052,9 @@ if TORCH:
                           f" | unif={diag['unif']:.3f}"
                           f"  (1.0=random  <0.5=learning  <0.2=great)")
 
-                metric = diag["align"] + diag["unif"]
+                # Early stopping tracks alignment alone; the uniformity scale
+                # dominates align + unif and masked poorly-aligned pairs.
+                metric = diag["align"]
                 if metric < best_metric - 1e-4:
                     best_metric = metric
                     patience_counter = 0

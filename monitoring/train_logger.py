@@ -313,10 +313,6 @@ class TrainingLogger:
 
         self._log = logger
 
-        # ── Redirect stdout / stderr ─────────────────────────────────────────
-        sys.stdout = StreamToLogger(self._log, logging.INFO)
-        sys.stderr = StreamToLogger(self._log, logging.ERROR)
-
         # ── JSONL event stream ───────────────────────────────────────────────
         self._jlog = open(jsonl_path, "a", encoding="utf-8")
 
@@ -368,12 +364,6 @@ class TrainingLogger:
                 self.sidecar.flush()
             except Exception:
                 pass
-
-        # Restore stdout/stderr if they are ours
-        if isinstance(sys.stdout, StreamToLogger):
-            sys.stdout = sys.__stdout__
-        if isinstance(sys.stderr, StreamToLogger):
-            sys.stderr = sys.__stderr__
 
     # ─────────────────────────────────────────────────────────────────────────
     # CORE LOG METHODS
@@ -551,6 +541,24 @@ class TrainingLogger:
             "epoch": epoch + 1, "params": param_names[:10],
         })
 
+    def on_grad_norm(self, epoch: int, batch_idx: int, grad_norm: float,
+                     threshold: float = 50.0) -> None:
+        """Emit a JSONL event when the pre-clip gradient norm exceeds threshold.
+
+        Called from training loops BEFORE ``clip_grad_norm_`` so the value
+        reflects the true gradient magnitude (not the post-clip value which
+        is always ≤ grad_clip by construction).
+        """
+        self._write_event("grad_norm", {
+            "epoch": epoch + 1, "batch": batch_idx,
+            "grad_norm": float(grad_norm), "threshold": float(threshold),
+        })
+        if grad_norm > threshold * 2.0:
+            self.warning(
+                f"[Epoch {epoch+1}] High grad norm ({grad_norm:.2f}) at "
+                f"batch {batch_idx} (threshold {threshold})"
+            )
+
     def on_epoch_failure(self, epoch: int, exc: Exception) -> None:
         """Call when an entire epoch raises an unhandled exception."""
         tb  = traceback.format_exc()
@@ -576,6 +584,82 @@ class TrainingLogger:
                "Pausing training.")
         self.warning(msg)
         self._write_event("thermal_throttle", {"temp_c": temp_c, "limit_c": limit_c})
+
+    def on_promotion_decision(
+        self,
+        model_name: str,
+        promoted: bool,
+        metric_name: str,
+        metric_value: float | None,
+        gate_summary: str,
+        gate_reasons: list[str] | None = None,
+        gate_details: dict | None = None,
+        challenger_vs_prod: dict | None = None,
+    ) -> None:
+        """Emit a JSONL event when a promotion gate decision is made.
+
+        Parameters
+        ----------
+        model_name         : Name of the model being evaluated.
+        promoted          : True if model was promoted to production.
+        metric_name       : 'val_sharpe' or 'val_loss' (the metric direction).
+        metric_value      : The challenger's metric value.
+        gate_summary      : PromotionGate.evaluate()['summary'] string.
+        gate_reasons      : Per-gate pass/fail list.
+        gate_details      : Per-gate numeric details dict.
+        challenger_vs_prod: If applicable, dict with prod_metric, min_delta,
+                            accepted (bool), and direction ('sharpe'|'loss').
+        """
+        evt = {
+            "model": model_name,
+            "promoted": bool(promoted),
+            "metric_name": str(metric_name),
+            "metric_value": metric_value,
+            "gate_summary": str(gate_summary),
+            "gate_reasons": list(gate_reasons) if gate_reasons else [],
+            "gate_details": gate_details or {},
+            "challenger_vs_prod": challenger_vs_prod or {},
+        }
+        self._write_event("promotion_decision", evt)
+        verdict = "PROMOTE" if promoted else "REJECT"
+        self.info(
+            f"[PromotionGate] {model_name}: {verdict} | "
+            f"{metric_name}={metric_value} | {gate_summary}"
+        )
+        # Append to CSV log for audit trail
+        try:
+            csv_path = self.log_dir / "promotion_decisions.csv"
+            import csv as _csv
+            write_header = not csv_path.exists()
+            with open(csv_path, "a", encoding="utf-8", newline="") as f:
+                w = _csv.writer(f)
+                if write_header:
+                    w.writerow([
+                        "ts", "model", "promoted", "metric_name",
+                        "metric_value", "verdict_summary",
+                    ])
+                w.writerow([
+                    _utcnow(), model_name, bool(promoted),
+                    metric_name, metric_value, gate_summary,
+                ])
+        except Exception:
+            pass
+        # Discord alert on important transitions
+        if promoted:
+            self._discord_send("training_warning", {
+                "Event": "Model Promoted",
+                "Model": model_name,
+                "Metric": f"{metric_name}={metric_value}",
+                "Summary": gate_summary[:200] if isinstance(gate_summary, str) else str(gate_summary),
+            })
+        elif challenger_vs_prod and challenger_vs_prod.get("rejected"):
+            self._discord_send("training_warning", {
+                "Event": "Challenger Rejected",
+                "Model": model_name,
+                "Metric": f"{metric_name}={metric_value}",
+                "Prod": str(challenger_vs_prod.get("prod_metric")),
+                "Reason": str(challenger_vs_prod.get("reason", "")),
+            })
 
     def on_training_complete(
         self,

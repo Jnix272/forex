@@ -54,7 +54,8 @@ class MonteCarloBacktest:
     def run(
         self,
         trade_pnls:   np.ndarray,   # Array of per-trade P&L in USD
-        annual_factor: float = 252,  # Trading days per year
+        annual_factor: float | None = None,
+        trades_per_year: float | None = None,
     ) -> dict:
         """
         Resample trades N times, compute Sharpe + max drawdown per sample.
@@ -62,7 +63,12 @@ class MonteCarloBacktest:
         Parameters
         ----------
         trade_pnls : array of realized P&L per trade (not per bar)
-        annual_factor : for annualizing Sharpe
+        annual_factor : explicit annualization multiplier under the square root.
+            Prefer ``trades_per_year`` for trade-based P&Ls. When both are
+            None, Sharpe is left unannualized (factor=1) rather than pretending
+            each trade is a trading day (legacy ``annual_factor=252``).
+        trades_per_year : estimated closed trades per year; used when
+            ``annual_factor`` is None.
 
         Returns
         -------
@@ -76,37 +82,52 @@ class MonteCarloBacktest:
         if n < 2:
             return self._empty_result(n, "Need at least 2 closed trades for Monte Carlo")
 
+        if annual_factor is not None:
+            ann_factor = float(annual_factor)
+            ann_note = "annual_factor"
+        elif trades_per_year is not None:
+            ann_factor = float(trades_per_year)
+            ann_note = "trades_per_year"
+        else:
+            # Unannualized trade Sharpe — honest default for per-trade P&L.
+            ann_factor = 1.0
+            ann_note = "unannualized"
+
         # Facade: resample via evaluation.monte_carlo (Improvement #3).
         # block_length=1 reduces the block bootstrap to the historical
         # i.i.d. bootstrap-with-replacement over trades.
         idx = block_bootstrap_indices(n, block_length=1, n_bootstraps=self.n_sims, seed=self.seed)
 
-        sharpes = np.zeros(self.n_sims)
-        max_dds = np.zeros(self.n_sims)
+        # Vectorized 2D processing for all simulations at once
+        idx = np.asarray(idx) # shape: (n_sims, n)
+        pnls_2d = trade_pnls[idx] # shape: (n_sims, n)
+        
+        # Cumulative equity
+        eq = np.empty((self.n_sims, n + 1), dtype=np.float64)
+        eq[:, 0] = self.equity
+        eq[:, 1:] = self.equity + np.cumsum(pnls_2d, axis=1)
+        
+        # Sharpe ratio
+        rets = pnls_2d / self.equity
+        rets_mean = rets.mean(axis=1)
+        rets_std = rets.std(ddof=1, axis=1)
+        valid_std = rets_std > 1e-12
+        sharpes = np.zeros(self.n_sims, dtype=np.float64)
+        sharpes[valid_std] = (rets_mean[valid_std] / rets_std[valid_std]) * np.sqrt(ann_factor)
+        
+        # Max drawdown
+        peaks = np.maximum.accumulate(eq, axis=1)
+        dds = np.where(peaks > 0, (peaks - eq) / peaks, 1.0)
+        max_dds = dds.max(axis=1)
 
-        for i in range(self.n_sims):
-            pnl = trade_pnls[idx[i]]
-
-            # Cumulative equity
-            eq   = self.equity + np.cumsum(pnl)
-            eq   = np.concatenate([[self.equity], eq])
-
-            # Sharpe
-            rets    = pnl / self.equity
-            sharpe  = self._safe_sharpe(rets, annual_factor)
-            sharpes[i] = sharpe
-
-            # Max drawdown
-            peak    = np.maximum.accumulate(eq)
-            dd      = np.where(peak > 0, (peak - eq) / peak, 1.0)
-            max_dds[i] = float(dd.max())
-
-        lo  = (1 - self.conf) / 2
-        1 - lo
+        lo = (1 - self.conf) / 2
+        hi = 1.0 - lo
+        pct_lo = 100.0 * lo
+        pct_hi = 100.0 * hi
 
         # Original (unshuffled) stats
         orig_rets = trade_pnls / self.equity
-        orig_sharpe = self._safe_sharpe(orig_rets, annual_factor)
+        orig_sharpe = self._safe_sharpe(orig_rets, ann_factor)
         orig_eq  = self.equity + np.cumsum(trade_pnls)
         orig_eq  = np.concatenate([[self.equity], orig_eq])
         orig_peak = np.maximum.accumulate(orig_eq)
@@ -120,18 +141,22 @@ class MonteCarloBacktest:
             "n_simulations":     self.n_sims,
             "original_sharpe":   round(orig_sharpe, 4),
             "original_max_dd":   round(orig_dd, 4),
-            "sharpe_5th":        round(float(np.percentile(sharpes, 5)), 4),
+            "sharpe_5th":        round(float(np.percentile(sharpes, pct_lo)), 4),
             "sharpe_median":     round(float(np.percentile(sharpes, 50)), 4),
-            "sharpe_95th":       round(float(np.percentile(sharpes, 95)), 4),
+            "sharpe_95th":       round(float(np.percentile(sharpes, pct_hi)), 4),
             "sharpe_percentile": round(sharpe_pct, 4),
-            "max_dd_5th":        round(float(np.percentile(max_dds, 5)), 4),
+            "max_dd_5th":        round(float(np.percentile(max_dds, pct_lo)), 4),
             "max_dd_median":     round(float(np.percentile(max_dds, 50)), 4),
-            "max_dd_95th":       round(float(np.percentile(max_dds, 95)), 4),
+            "max_dd_95th":       round(float(np.percentile(max_dds, pct_hi)), 4),
             "prob_sharpe_above_1": round(float(np.mean(sharpes > 1.0)), 4),
             "prob_sharpe_above_0": round(float(np.mean(sharpes > 0.0)), 4),
-            "robust": bool(sharpe_pct > 0.75 and np.percentile(sharpes, 5) > 0.0),
+            "robust": bool(sharpe_pct > 0.75 and np.percentile(sharpes, pct_lo) > 0.0),
             "method": "bootstrap_with_replacement",
-            "warning": "",
+            "annualization": ann_note,
+            "annual_factor": ann_factor,
+            "warning": "" if ann_note != "unannualized" else (
+                "Sharpe is unannualized (per-trade). Pass trades_per_year to annualize."
+            ),
         }
 
         self._print_report(result)
@@ -229,14 +254,20 @@ class SlippageCalibrator:
         self.adv = adv_lots
         self.alpha_: float = 0.5    # Default impact coefficient
         self.beta_:  float = 0.5    # Default exponent (square-root)
-        self.session_factors: dict[str, float] = {
-            "london_ny": 1.0,   # Reference (tightest spreads)
-            "london":    1.15,
-            "ny":        1.20,
-            "tokyo":     1.60,
-            "sydney":    1.80,
-            "overnight": 2.50,
-        }
+        # Production keys only (asia/london/ny/asia_london/london_ny/off).
+        # Relative to london_ny via shared session_spread_mult / LABEL_REGIME.
+        try:
+            from trading.session_utils import default_session_slip_factors
+            self.session_factors: dict[str, float] = default_session_slip_factors()
+        except Exception:
+            self.session_factors = {
+                "london_ny":   1.0,
+                "london":      1.06,
+                "ny":          1.06,
+                "asia_london": 1.18,
+                "asia":        1.41,
+                "off":         1.76,
+            }
         self._fitted = False
 
     def fit(
@@ -251,15 +282,17 @@ class SlippageCalibrator:
           requested_price : requested entry price
           fill_price    : actual fill price
           direction     : +1 long / -1 short
-          session       : "london_ny" | "london" | etc.
+          session       : production key or legacy alias (tokyo→asia, overnight→off)
 
         Slippage = (fill_price - requested_price) × direction (negative = adverse)
         """
+        from trading.session_utils import normalize_session_name
+
         df = fills_df.copy()
         slip = (
             (df["fill_price"] - df["requested_price"]) * df["direction"] / 0.0001
         ).to_numpy(dtype=np.float64)
-        df["slip_pips"] = -np.minimum(slip, 0.0)  # Adverse slippage only
+        df["slip_pips"] = np.maximum(slip, 0.0)  # Adverse slippage only
         df = df[df["lots"] > 0.001]
 
         if len(df) < 10:
@@ -275,13 +308,15 @@ class SlippageCalibrator:
             self.alpha_ = float(np.exp(log_alpha))
             self.beta_  = float(np.clip(beta, 0.3, 1.0))
 
-            # Fit session multipliers
+            # Fit session multipliers (normalize legacy names onto production keys)
             if "session" in df.columns:
+                df = df.copy()
+                df["session"] = df["session"].map(normalize_session_name)
                 ref_slip = self.alpha_ * (1.0 / self.adv) ** self.beta_
                 for sess in pd.unique(df["session"]):
-                    sk = str(sess)
+                    sk = normalize_session_name(sess)
                     if sk not in self.session_factors:
-                        continue
+                        self.session_factors[sk] = 1.5
                     sess_slip = df[df["session"] == sess]["slip_pips"].mean()
                     if sess_slip > 0 and ref_slip > 0:
                         self.session_factors[sk] = float(sess_slip / ref_slip)
@@ -307,11 +342,19 @@ class SlippageCalibrator:
 
         Returns expected adverse slippage in pips.
         """
+        from trading.session_utils import normalize_session_name, session_spread_mult
+
         # Base impact
         impact = self.alpha_ * (lots / self.adv) ** self.beta_
 
-        # Session multiplier
-        sess_mult = self.session_factors.get(session, 1.5)
+        # Session multiplier (production keys + legacy aliases)
+        sk = normalize_session_name(session)
+        if sk in self.session_factors:
+            sess_mult = self.session_factors[sk]
+        else:
+            # Shared SoT relative to london_ny when factor table lacks the key
+            ref = float(session_spread_mult("london_ny") or 0.85)
+            sess_mult = float(session_spread_mult(sk)) / ref if ref else 1.5
 
         # Spread component (wider spread -> more slippage risk)
         spread_mult = 1.0 + 0.3 * max(spread_pips - 1.0, 0)
@@ -461,6 +504,7 @@ class LockboxTest:
         predictions:  np.ndarray,  # Model signals: +1, 0, -1
         returns:      np.ndarray,  # Actual forward returns
         trade_pnls:   np.ndarray | None = None,
+        annual_factor: float = 252 * 24 * 60, # Default to 1-min bars
         notes:        str = "",
     ) -> dict:
         """
@@ -488,10 +532,10 @@ class LockboxTest:
         directional_acc = float(np.mean(np.sign(predictions) == np.sign(returns)))
         strategy_rets   = predictions * returns
         std = strategy_rets.std(ddof=1) if len(strategy_rets) > 1 else 0.0
-        sharpe = float(strategy_rets.mean() / (std + 1e-9) * np.sqrt(252 * 24 * 60)) if std > 1e-12 else 0.0
+        sharpe = float(strategy_rets.mean() / (std + 1e-9) * np.sqrt(annual_factor)) if std > 1e-12 else 0.0
 
         # Max drawdown
-        cum_eq  = 10000 * (1 + np.cumsum(strategy_rets / 10000))
+        cum_eq  = 10000 * np.cumprod(1 + strategy_rets)
         peak    = np.maximum.accumulate(cum_eq)
         max_dd  = float(((peak - cum_eq) / peak).max())
 
@@ -575,13 +619,16 @@ if __name__ == "__main__":
         "requested_price": rng.uniform(1.085, 1.090, 200),
         "fill_price":      rng.uniform(1.085, 1.090, 200),
         "direction":       rng.choice([1,-1], 200),
-        "session":         rng.choice(["london_ny","london","ny","tokyo"], 200),
+        "session":         rng.choice(["london_ny", "london", "ny", "asia"], 200),
     })
     fills["fill_price"] += fills["direction"] * rng.uniform(0, 0.0002, 200)
     sc.fit(fills)
-    for lots, sess in [(0.1,"london_ny"),(1.0,"london_ny"),(3.0,"tokyo")]:
+    for lots, sess in [(0.1, "london_ny"), (1.0, "london_ny"), (3.0, "tokyo")]:
         slip = sc.predict(lots, spread_pips=1.1, session=sess)
         print(f"  Slippage {lots:.1f}L {sess}: {slip:.4f} pips")
+    # Legacy tokyo alias → asia production key
+    assert "tokyo" not in sc.session_factors or "asia" in sc.session_factors
+    assert sc.predict(1.0, session="tokyo") == sc.predict(1.0, session="asia")
 
     # Lockbox
     print()

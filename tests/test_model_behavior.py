@@ -149,11 +149,11 @@ class TestModelRobustness:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestMambaScalper:
-    """MambaScalper is an SSM — its correctness depends on causal left-to-right
-    processing and recurrent state propagation across timesteps."""
+    """MambaScalper uses causal Conv1d + gating — correctness depends on
+    left-to-right (causal) processing and local temporal pattern capture."""
 
     def _make_model(self, **kw) -> MambaScalper:
-        defaults = dict(input_size=F, d_model=32, d_state=8, d_conv=4,
+        defaults = dict(input_size=F, d_model=32, d_conv=4,
                         expand=2, num_layers=2, dropout=0.0)
         defaults.update(kw)
         return MambaScalper(**defaults).eval()

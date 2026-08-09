@@ -58,6 +58,43 @@ class HPOConfig:
     checkpoint_dir: str = "checkpoints/hpo"
     checkpoint_interval: int = 5
 
+    # Default search space used by HyperBand / BOHB suggest_params
+    search_space: dict[str, Any] = field(default_factory=lambda: {
+        "lr": {"type": "loguniform", "low": 1e-5, "high": 1e-2},
+        "dropout": {"type": "uniform", "low": 0.1, "high": 0.5},
+        "hidden_size": {"type": "choice", "values": [128, 256, 512]},
+        "batch_size": {"type": "choice", "values": [64, 128, 256, 512]},
+        "weight_decay": {"type": "loguniform", "low": 1e-6, "high": 1e-2},
+    })
+
+
+def _sample_search_space(rng: np.random.Generator, space: dict[str, Any]) -> dict[str, Any]:
+    """Draw one config from a typed search-space dict."""
+    params: dict[str, Any] = {}
+    for name, spec in (space or {}).items():
+        if not isinstance(spec, dict):
+            params[name] = spec
+            continue
+        t = str(spec.get("type", "uniform")).lower()
+        if t == "choice":
+            values = list(spec.get("values") or [])
+            if not values:
+                continue
+            params[name] = values[int(rng.integers(0, len(values)))]
+        elif t == "loguniform":
+            low = float(spec["low"])
+            high = float(spec["high"])
+            params[name] = float(np.exp(rng.uniform(np.log(low), np.log(high))))
+        elif t == "int":
+            low = int(spec["low"])
+            high = int(spec["high"])
+            params[name] = int(rng.integers(low, high + 1))
+        else:  # uniform
+            low = float(spec.get("low", 0.0))
+            high = float(spec.get("high", 1.0))
+            params[name] = float(rng.uniform(low, high))
+    return params
+
 
 @dataclass
 class TrialState:
@@ -229,7 +266,7 @@ class HyperBandScheduler:
             self.brackets.append(bracket)
 
     def suggest_params(self, trial_id: str, bracket_idx: int | None = None) -> dict[str, Any]:
-        return {}
+        return _sample_search_space(self._rng, self.config.search_space)
 
     def on_trial_result(self, trial_id: str, result: dict[str, Any]) -> dict[str, Any]:
         return {"action": "continue"}
@@ -238,7 +275,16 @@ class HyperBandScheduler:
         return None
 
     def get_next_trials(self) -> list[dict[str, Any]]:
-        return []
+        out = []
+        for i, bracket in enumerate(self.brackets):
+            tid = f"hb_s{bracket['s']}_{len(out)}"
+            out.append({
+                "trial_id": tid,
+                "bracket": i,
+                "budget": float(bracket["r"]),
+                "params": self.suggest_params(tid, bracket_idx=i),
+            })
+        return out
 
 
 class AsyncSuccessiveHalvingScheduler:
@@ -280,9 +326,11 @@ class AsyncSuccessiveHalvingScheduler:
                 break
 
         scored = [
-            (t["trial_id"], float(self.trial_states[t["trial_id"]].get("last_score", -float("inf"))))
+            # Use the rung-level score (stored in rungs[current_rung] entry) rather than
+            # last_score, which may reflect a higher rung and cause unfair cross-rung comparisons.
+            (t["trial_id"], float(t.get("score", -float("inf"))))
             for t in self.rungs[current_rung]
-            if "last_score" in self.trial_states[t["trial_id"]]
+            if t.get("score", -float("inf")) > -float("inf")
         ]
         # Need a full η-cohort before eliminating; otherwise every early report
         # would kill peers and waste the remaining budget.
@@ -342,7 +390,23 @@ class BOHBScheduler:
         }
 
     def suggest_params(self, rung: int = 0) -> dict[str, Any]:
-        return {}
+        """Sample from KDE of good configs when available, else search_space prior."""
+        good = self.kde_good.get(rung)
+        if good and good.get("configs"):
+            # Perturb a randomly chosen good config
+            base = dict(good["configs"][int(self._rng.integers(0, len(good["configs"])))])
+            prior = _sample_search_space(self._rng, self.config.search_space)
+            out = {}
+            for k, v in prior.items():
+                if k in base and isinstance(base[k], (int, float)) and isinstance(v, (int, float)):
+                    # Mix: 70% good + 30% prior noise
+                    out[k] = float(base[k]) * 0.7 + float(v) * 0.3
+                    if isinstance(base[k], int):
+                        out[k] = int(round(out[k]))
+                else:
+                    out[k] = base.get(k, v)
+            return out
+        return _sample_search_space(self._rng, self.config.search_space)
 
     def observe(self, trial_id: str, rung: int, config: dict, score: float) -> None:
         self.observations[rung].append((config, score))

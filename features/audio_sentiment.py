@@ -44,10 +44,17 @@ class AudioSentimentPipeline:
         Transcribes the audio and routes the text through the FinBERT pipeline.
         Returns a float between -1.0 (Hawkish/Bearish) and 1.0 (Dovish/Bullish).
         """
-        self.process_audio(audio_path)
+        transcript = self.process_audio(audio_path)
+        if not transcript:
+            self.logger.warning("Empty transcript — returning neutral sentiment")
+            return 0.0
 
-        # Here we would import and call the existing FinBERT pipeline from finbert_sentiment.py
-        # For now, return a placeholder neutral signal
-        self.logger.info("Routing transcript to FinBERT...")
-        sentiment_score = 0.0 # Placeholder
-        return sentiment_score
+        self.logger.info("Routing transcript to FinBERT/SentimentPipeline...")
+        try:
+            from features.finbert_sentiment import SentimentPipeline
+            pipe = SentimentPipeline()
+            score = float(pipe.score_headlines([transcript]))
+            return float(max(-1.0, min(1.0, score)))
+        except Exception as exc:
+            self.logger.error("Sentiment scoring failed (%s) — returning neutral", exc)
+            return 0.0

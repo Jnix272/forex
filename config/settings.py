@@ -250,17 +250,20 @@ SENTIMENT = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 TRAINING = {
-    "batch_size":       212,
-    "epochs":           100,
-    "patience":         10,
+    # Defaults mirrored from config/run.yaml (YAML wins when --config is used).
+    "batch_size":       512,
+    "epochs":           6,
+    "patience":         3,   # must be < post-warmup epochs so early-stop can fire
     "loss":             "sharpe_huber",  # matches config/run.yaml
     "huber_delta":      1.0,
     "asymmetric_sign_weight": 2.0,
-    "grad_clip":        1.0,
-    "weight_decay":     1e-4,
+    "grad_clip":        0.75,
+    "weight_decay":     0.001,
     "amp":              True,
     "val_split":        0.2,
     "seq_len":          80,              # matches config/run.yaml + curriculum
+    "lr_warmup_epochs": 2,               # matches config/run.yaml training.lr_warmup_epochs
+    "lr_schedule":      "warmup_cosine",
     "checkpoint_dir":   PATHS["checkpoints"],
     "walk_forward_folds": 6,
     "early_stop_metric": "sharpe",
@@ -268,8 +271,7 @@ TRAINING = {
     "onecycle_pct_start": 0.1,
     "onecycle_max_lr_mult": 10.0,
     # Gradient accumulation: effective_batch = batch_size × grad_accum_steps
-    # Dev default 2 (faster iteration); production run_ubuntu.yaml keeps 4.
-    "grad_accum_steps": 2,
+    "grad_accum_steps": 4,
     # Stochastic Weight Averaging: averages weights over last 25% of training
     "swa_enabled":      True,
     "swa_start_frac":   0.75,   # start at 75% of total epochs
@@ -362,6 +364,7 @@ PRETRAIN = {
     "ema_decay":        0.996,            # target-network EMA decay (BYOL)
     "sample_windows":   "auto",
     "blocks_per_epoch": "auto",
+    "read_windows":     64,               # Zarr span read chunk size (config/run.yaml pretrain.read_windows)
     "mask_prob":        0.20,             # used only if method="masked"
     "recon_hidden_dim": 512,              # masked / VAE / forecast decoder hidden size
     "latent_dim":       64,               # VAE latent size (method=vae)
@@ -376,10 +379,35 @@ PRETRAIN = {
         "dropout_prob":     0.1,
     },
     "pretrain_loss":    "huber",
-    "pretrain_epochs":  30,
+    # YAML uses pretrain.epochs / min_epochs; keep pretrain_epochs as the CLI alias.
+    "epochs":           3,                # matches config/run.yaml pretrain.epochs
+    "min_epochs":       1,                # matches config/run.yaml pretrain.min_epochs
+    "pretrain_epochs":  3,
     "pretrain_lr":      1e-4,
     "pretrain_batch":   256,
     "checkpoint":       PATHS["file_contrastive_encoder"],
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE CACHE — slow-changing columns (sentiment, COT, macro, hurst)
+# ─────────────────────────────────────────────────────────────────────────────
+FEATURE_CACHE = {
+    "enabled": True,
+    "ofi_z_threshold": 2.0,
+    "regime_window": 60,
+    "slow_cols": [
+        "sentiment_decayed",
+        "eco_surprise",
+        "hurst_exponent",
+        "cot_net_hf",
+    ],
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL MATURITY — gates live promotion (dev → paper → production)
+# ─────────────────────────────────────────────────────────────────────────────
+MATURITY = {
+    "stage": "paper",  # config/run.yaml maturity.stage
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -435,6 +463,10 @@ RL = {
         "n_steps":      2048,
         "n_epochs":     10,
         "gae_lambda":   0.95,
+        # Optional temporal backbone: LSTM over the last `hist_len` obs.
+        "use_lstm":     False,
+        "lstm_hidden":  128,
+        "hist_len":     32,
     },
     "dqn": {
         "gamma":         0.99,
@@ -463,8 +495,9 @@ LABELING = {
     "method":               "rl_reward",
     "lookahead_bars":       30,  # synced with strategy.lookahead_bars in config/run.yaml
 
-    "profit_target_atr":    1.8,
-    "stop_loss_atr":        0.9,
+    # Defaults match config/run.yaml strategy.profit_target_atr / stop_loss_atr
+    "profit_target_atr":    1.2,
+    "stop_loss_atr":        0.8,
     "transaction_cost_pips": 1.5,
     "pip_size":             0.0001,
     # Triple-barrier: Numba-accelerated scans (parallel over bars; auto fallback if Numba missing)
@@ -568,8 +601,8 @@ LATENCY = {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VALIDATION — EMBARGOING + PURGED K-FOLD
-# GPU path reads validation.* from YAML via gpu_cli → validation_embargo_bars.
-# _embargo_bars() uses max(yaml, seq_len+lookahead+delay). Keep stubs synced to run.yaml.
+# GPU path maps validation.* from YAML via gpu_cli (_YAML_MAP) onto
+# args.validation_* ; settings stubs are the no-YAML fallback. Keep synced to run.yaml.
 # ─────────────────────────────────────────────────────────────────────────────
 VALIDATION = {
     "method":               "purged_embargo",
@@ -647,8 +680,8 @@ GPU = {
     "cudnn_benchmark":        True,
 }
 
-# GOVERNANCE
-# TODO: not yet integrated — reserved for automated promotion/demotion policy.
+# GOVERNANCE — used by live demotion monitor, deployment promotion gates,
+# and capital-efficiency checks (see trading/live_engine.py, infrastructure/deployment.py).
 GOVERNANCE = {
     'min_sharpe_promote':    1.5,
     'min_sharpe_emergency':  1.3,
@@ -671,8 +704,8 @@ GOVERNANCE = {
     'min_sharpe_per_latency':   0.05,  # Sharpe / avg_latency_ms
 }
 
-# ALERTS
-# TODO: not yet integrated — reserved for Discord/notification infrastructure.
+# ALERTS — Discord webhook + Prometheus exporter for live_engine / demotion /
+# promotion / retrain / TCA events (DISCORD_WEBHOOK_URL from env).
 ALERTS = {
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
     "discord_min_interval_s": 300,
@@ -687,8 +720,8 @@ ALERTS = {
     "alert_on_tca_breach": True,
 }
 
-# MACRO_DATA
-# TODO: partially integrated — FRED key used by macro_features.py; other fields reserved.
+# MACRO_DATA — FRED/AlphaVantage keys + tick-clean / gap policy consumed by
+# features/macro_features.py, MacroMaterializer, and data cleaning paths.
 MACRO_DATA = {
     "fred_api_key": os.getenv("FRED_API_KEY", ""),
     "yield_momentum_windows": [5, 20],
@@ -756,10 +789,12 @@ MATURITY_LADDER = {
         "daily_loss_limit":   0.01,       # 1 % daily loss limit
         "max_total_lots":     0.5,
         "session_limits": {
-            "asia":   {"max_lots": 0.2, "max_open_trades": 1},
-            "london": {"max_lots": 0.5, "max_open_trades": 2},
-            "ny":     {"max_lots": 0.5, "max_open_trades": 2},
-            "off":    {"max_lots": 0.0, "max_open_trades": 0},  # no trading in off hours
+            "asia":        {"max_lots": 0.2, "max_open_trades": 1},
+            "london":      {"max_lots": 0.5, "max_open_trades": 2},
+            "ny":          {"max_lots": 0.5, "max_open_trades": 2},
+            "asia_london": {"max_lots": 0.3, "max_open_trades": 1},
+            "london_ny":   {"max_lots": 0.5, "max_open_trades": 2},
+            "off":         {"max_lots": 0.0, "max_open_trades": 0},  # no trading in off hours
         },
         "promote_min_sharpe": 1.4,
         "promote_min_trades": 200,
@@ -778,10 +813,12 @@ MATURITY_LADDER = {
         "size_increase_pct_per_week": 0.10,  # max 10 % size increase per week
         "freeze_logic_during_scale": True,    # no code changes while scaling
         "session_limits": {
-            "asia":   {"max_lots": 1.0, "max_open_trades": 3},
-            "london": {"max_lots": 3.0, "max_open_trades": 5},
-            "ny":     {"max_lots": 3.0, "max_open_trades": 5},
-            "off":    {"max_lots": 0.5, "max_open_trades": 1},
+            "asia":        {"max_lots": 1.0, "max_open_trades": 3},
+            "london":      {"max_lots": 3.0, "max_open_trades": 5},
+            "ny":          {"max_lots": 3.0, "max_open_trades": 5},
+            "asia_london": {"max_lots": 1.5, "max_open_trades": 3},
+            "london_ny":   {"max_lots": 3.0, "max_open_trades": 5},
+            "off":         {"max_lots": 0.5, "max_open_trades": 1},
         },
     },
 }
@@ -812,10 +849,13 @@ LIVE_RISK = {
     # PIPE-005 / ISSUE-005: Session windows now use zoneinfo tz-aware boundaries
     # that respect DST, defined by local open and close times.
     "session_limits": {
-        "asia":   {"max_lots": 1.0, "max_open_trades": 3, "hours_local": (time(9, 0), time(18, 0)),  "tz": ZoneInfo("Asia/Tokyo")},
-        "london": {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(8, 0), time(16, 30)), "tz": ZoneInfo("Europe/London")},
-        "ny":     {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(9, 30), time(16, 0)), "tz": ZoneInfo("America/New_York")},
-        "off":    {"max_lots": 0.5, "max_open_trades": 1, "hours_local": (time(18, 0), time(8, 0)), "tz": None},
+        "asia":        {"max_lots": 1.0, "max_open_trades": 3, "hours_local": (time(9, 0), time(18, 0)),  "tz": ZoneInfo("Asia/Tokyo")},
+        "london":      {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(8, 0), time(16, 30)), "tz": ZoneInfo("Europe/London")},
+        "ny":          {"max_lots": 3.0, "max_open_trades": 5, "hours_local": (time(9, 30), time(16, 0)), "tz": ZoneInfo("America/New_York")},
+        # Overlap policy keys (DST SoT); no private "overlap" string.
+        "asia_london": {"max_lots": 1.5, "max_open_trades": 3},
+        "london_ny":   {"max_lots": 3.0, "max_open_trades": 5},
+        "off":         {"max_lots": 0.5, "max_open_trades": 1, "hours_local": (time(18, 0), time(8, 0)), "tz": None},
     },
 
     # ── ATR stop parameters (mirrors RISK) ────────────────────────────────────
@@ -845,6 +885,10 @@ FEATURE_SCALES = {
     "ofi_windows":     [5, 20, 60],       # order-flow imbalance scales
     "momentum_windows": [5, 20, 60],      # return momentum
     "vwap_window":     60,                # VWAP lookback for breakout pressure
+    "chop_window":     14,                # Choppiness Index lookback
+    "corr_window":     60,                # cross-asset correlation window
+    "regime_window":   240,               # vol-regime median lookback
+    "volatility_window": 120,             # trailing volatility / autocorr window
     "spread_window":   120,               # median spread for liquidity vacuum
     "ofi_z_short":     20,                # OFI fast window for Z-score numerator
     "ofi_z_long":      120,               # OFI slow window for Z-score denominator
@@ -880,12 +924,32 @@ LABEL_REGIME = {
     # Vol regime boundaries (rolling vol percentiles)
     "high_vol_pct": 0.75,
     "low_vol_pct":  0.25,
-    # Session-specific transaction cost adjustments
+    # Session-specific transaction cost adjustments (cost first; horizon second).
+    # Overlap keys used when DST-aware asia_london / london_ny flags are set.
     "session_cost_scale": {
-        "asia":   1.2,   # wider spreads in Asia
-        "london": 0.9,   # tighter spreads at London open
-        "ny":     0.9,
-        "off":    1.5,   # very wide off-hours
+        "asia":         1.2,   # wider spreads in Asia
+        "london":       0.9,   # tighter spreads at London open
+        "ny":           0.9,
+        "asia_london":  1.0,   # Asia/London overlap — mid liquidity
+        "london_ny":    0.85,  # most liquid overlap
+        "off":          1.5,   # very wide off-hours
+    },
+    # Optional session → label-horizon gate (overlaps/liquid slightly shorter;
+    # asia/off slightly longer). Multiplied with barrier_scale horizon_mult.
+    "session_horizon_mult": {
+        "asia":         1.15,
+        "london":       1.0,
+        "ny":           1.0,
+        "asia_london":  0.95,
+        "london_ny":    0.90,
+        "off":          1.20,
+    },
+    # Wide spreads → shorter horizon (liquidity risk). Applied after session.
+    "spread_horizon": {
+        "z_wide":       1.5,   # spread_z above this → shorten
+        "wide_mult":    0.75,
+        "z_extreme":    2.5,   # very wide → much shorter
+        "extreme_mult": 0.50,
     },
 }
 
@@ -904,16 +968,17 @@ CURRICULUM = {
     # A4: Feature group freeze schedule (unfreeze at epoch_unfreeze)
     # Canonical feature lists: config/run.yaml → curriculum.feature_groups
     "feature_groups": {
+        "core":             {"epoch_unfreeze": 0,  "always_on": True},
         "microstructure":   {"epoch_unfreeze": 0,  "always_on": True},
         "momentum":         {"epoch_unfreeze": 0,  "always_on": True},
         "session":          {"epoch_unfreeze": 0,  "always_on": True},
-        "execution_cost":   {"epoch_unfreeze": 2,  "always_on": False},
-        "volatility":       {"epoch_unfreeze": 4,  "always_on": False},
-        "cross_asset":      {"epoch_unfreeze": 8,  "always_on": False},
-        "news":             {"epoch_unfreeze": 10, "always_on": False},
-        "macro":            {"epoch_unfreeze": 12, "always_on": False},
-        "market_regime":    {"epoch_unfreeze": 16, "always_on": False},
-        "higher_timeframe": {"epoch_unfreeze": 20, "always_on": False},
+        "execution_cost":   {"epoch_unfreeze": 1,  "always_on": False},
+        "volatility":       {"epoch_unfreeze": 2,  "always_on": False},
+        "cross_asset":      {"epoch_unfreeze": 3,  "always_on": False},
+        "news":             {"epoch_unfreeze": 3,  "always_on": False},
+        "macro":            {"epoch_unfreeze": 4,  "always_on": False},
+        "market_regime":    {"epoch_unfreeze": 4,  "always_on": False},
+        "higher_timeframe": {"epoch_unfreeze": 5,  "always_on": False},
         # label_quality: disabled in run.yaml (features not implemented)
     },
     # A2: Chunk-level early stopping

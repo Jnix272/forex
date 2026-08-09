@@ -1,65 +1,68 @@
 # Continue
 
-**Updated:** 2026-08-04  
-**Status:** Improvement backlog (items 1–7 + A1–D2 wiring) complete. Config consistency gates live. `train_gpu.py` split complete. Training-cache / loop perf remediations landed (Polars chunk path, FP16 Zarr, fused AdamW, Linux lz4).
+**Updated:** 2026-08-09  
+**Status SoT:** [`IMPROVEMENTS.md`](IMPROVEMENTS.md) — Done / Open / Other in one place.
+
+> ✅ **2026-08-09 (end of session):** the `supervised_loop.py` epoch loop is
+> **repaired** and the curriculum/adversarial consolidation is **complete**.
+> Legacy adaptive-curriculum references stripped (Task A); `graph_pgd`
+> auto-select wired for `model_name == "gnn"` (Task E); per-sample curriculum
+> weights applied to the loss via `_apply_curriculum_weights` (Task F);
+> `OneCycleLR` switched to `total_steps` mode (Task G); `HardExampleMiner`
+> leftovers cleaned (Task B). P0/P1 audit triaged in [`FIXES.md`](FIXES.md)
+> (5 code fixes + 10 already-fixed + 7 false-positives + 12 design-deferred).
+> Training smoke + 232 tests pass. Remaining open: §9.2 design-gaps (backtest
+> realism, portfolio limits) and §9.3 P2 tech-debt.
 
 ---
 
-## Living docs
+## Read first
 
-| Doc | Purpose |
-|-----|---------|
-| [`README.md`](README.md) | Docs index |
-| [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md) | Stage-by-stage training audit (current) |
-| [`CONFIG_CONSISTENCY.md`](CONFIG_CONSISTENCY.md) | Settings ↔ YAML ↔ curriculum ↔ dataset schema gates |
-| [`IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) | Longer roadmap |
-| [`NEWS_DATA_GUIDE.md`](NEWS_DATA_GUIDE.md) | News acquisition |
-| [`SESSION_REPORT.md`](SESSION_REPORT.md) | Session log |
-| [`archive/`](archive/) | Historical audit reports (read-only) |
-
----
-
-## Just landed
-
-- **Training cache / loop perf (2026-08-04 evening):**
-  - `_build_chunk`: stay Polars through FE → mask → align; pandas only for labeling APIs; HTF context is Polars (`group_by_dynamic` + `join_asof`).
-  - Zarr **X** stored as **FP16** (`ZARR_FEATURE_DTYPE`); labels/market sidecars FP32. Rebuild caches to benefit.
-  - `build_adamw()`: fused `torch.optim.AdamW` (apex fallback) in supervised loop + DivFT.
-  - Linux Zarr default **lz4@1** (`default_zarr_compression`); `run_ubuntu.yaml` + ubuntu hardware profiles match; `auto` elsewhere → platform pick.
-- **Module slice 26–36** (curriculum / GPU util): audited in [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md).
-  - `SharpeProxyLoss` + multitask Sharpe: softsign instead of `tanh`.
-  - YAML `distillation.student_model` → `--model` when KD enabled.
-- Config multi-part gates — see CONFIG_CONSISTENCY.
-- Docs cleaned: audits → `archive/`; this file is the short tracker.
-
-```bash
-uv run pytest tests/test_zarr_prefetch.py tests/test_fused_adamw.py tests/test_model_full_data_flow.py -q
-uv run python -m training.train_gpu --validate-config --config config/run.yaml
-```
-
----
-
-## train_gpu split (done)
-
-`training/train_gpu.py` **~2.2k lines** (was ~15k, −85%). Logic lives in focused modules
-(`dataset_builder`, `supervised_loop`, `gpu_cli`, `rl_runner`, …) with back-compat re-exports.
-Further cuts would only shrink `main()`.
-
-Smoke: `uv run pytest tests/test_training_smoke.py tests/test_cv.py -q`
+| Doc | Use |
+|-----|-----|
+| [`IMPROVEMENTS.md`](IMPROVEMENTS.md) | **Canonical** fixed vs open backlog |
+| [`CONFIG_CONSISTENCY.md`](CONFIG_CONSISTENCY.md) | Settings ↔ YAML ↔ curriculum ↔ schema gates |
+| [`SESSION_AUDIT.md`](SESSION_AUDIT.md) | Session/DST technical detail (status mirrored in IMPROVEMENTS) |
+| [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md) | Stage-by-stage training audit |
+| [`IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) | Longer data/HW roadmap |
+| [`SESSION_REPORT.md`](SESSION_REPORT.md) | Append-only session log |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | User-facing change history |
+| [`archive/`](archive/) | Historical audits (read-only) |
 
 ---
 
 ## Suggested next
 
-1. **Rebuild training Zarr** on Linux (FP16 X + lz4@1) before long runs — old FP32/zstd caches still readable.
-2. **Paper + promote a model**, then optional live (non-paper requires `promotion_gate.json`).
-3. **Optional:** wire `BrokerBridge` into `live_engine` (still paper/LMAX/OANDA today).
+1. **§9.2 P1 design-gaps** (see [`FIXES.md`](FIXES.md)): backtest execution realism (#16-18: partial-TP tracking, spread-aware stops, order-type-aware impact); conformal `apply_no_trade_zones` `main_logits` param (#19); macro forward-fill leakage test (#20); configurable numerics clip range (#22); news pipeline init-time FinBERT/Ollama load (#23); per-fold feature-quality monitor (#25); portfolio-level session limits (#27); emergency kill-switch design (#28); gradient checkpointing flag (#30); TrainingController crash checkpointing (#31); scaler checksum validation (#32); hard-example-miner temporal-separation test (#35).
+2. **§9.3 P2 tech-debt** (Week 3): Numba dedup, GPU backtester SL/TP, slippage calibration, LMAX FIX routing, FinBERT thread-safety, audio timeout, logging hygiene, `main.py` CLI, session-mapping/spread calibration, subprocess timeouts, missing scripts, heartbeat/JSONL rotation, Docker healthchecks/resource-limits, scaler-fusion convention sync, lot/notional convention sync, circuit-breaker coordination.
+3. **§8 remaining factory wiring** (opt-in): `create_curriculum_callback`, `create_pretrain_adapter`, `create_rl_adapter` factories exist + are unit-tested but are not called in the production pipeline (P3-2/P3-3/P3-4). `create_adversarial_attack` IS wired (P3-1, Task E).
+4. Rebuild training Zarr on Linux (FP16 X + lz4@1) before long runs — `lr*` / mask digests invalidate on LABEL_REGIME or FEATURE_MASK edits
+5. Paper + promote a model; non-paper live needs `promotion_gate.json`
+6. Set `FRED_API_KEY` (or fix Stooq) to exercise ~14 yield/cross-asset skips
+7. Exercise `--broker mt5` / `ibkr` against a paper terminal
 
-**Audit backlog cleared:** Top 5 + DS-002/PIT + tabular purged CV + pretrain guardrails + stage timings + GPU util + BrokerBridge + live promotion gate + curriculum/GPU util 26–36 + cache/loop perf above. See [`TRAINING_PIPELINE_AUDIT.md`](TRAINING_PIPELINE_AUDIT.md).
+```bash
+# Quick validation (loop is now green — no NameError)
+uv run pytest tests/ -q
+uv run python -m training.train_gpu --validate-config --config config/run.yaml
+# Session SoT / limits / slip names:
+.venv/bin/python3 -m pytest \
+  tests/test_session_sot_p1_p3_p4.py \
+  tests/test_risk_execution.py::TestSessionLimitsEnforcer -q
+# Phase 3 tests (all green post-repair):
+.venv/bin/python3 -m pytest \
+  tests/test_adversarial_generator.py \
+  tests/test_curriculum_callbacks.py \
+  tests/test_pretrain_adapter.py \
+  tests/test_rl_adapter.py -q
+```
 
 ---
 
-## Archive note
+## Just landed (pointer)
 
-Completed CONTINUE deliverables (Risk, Metrics, MC wiring, drift, audit, alerting, module wiring)
-are in CHANGELOG + SESSION_REPORT. Old `*_AUDIT_REPORT.md` / `FIXES_APPLIED.md` → [`archive/`](archive/).
+Full tables live in [`IMPROVEMENTS.md`](IMPROVEMENTS.md). Recent: P0–P2 audit remediations, dataset/label column fixes, dynamic LH + DST session P2, performance Numba/GPU sync, `train_gpu` split, config gates. Detail also in `CHANGELOG.md` / `SESSION_REPORT.md`.
+
+**Phase 3 Architectural Replacements (2026-08-08):** AdversarialGenerator → PGD/FGSM/FreeLB, Curriculum → Composer/Lightning callbacks, Pretraining → lightly-ssl/Solo-learn adapters, RL → CleanRL/SB3 adapters, ONNX scaler fusion. New files: `training/adversarial_generator.py`, `training/curriculum_callbacks.py`, `training/pretrain_adapter.py`, `training/rl_adapter.py` + 4 test files. Modified: `training/supervised_loop.py`, `training/gpu_cli.py`, `inference/onnx_inference.py`. See `SESSION_REPORT.md` for details.
+
+**2026-08-09 curriculum/adversarial consolidation (Improvements #1–4):** ✅ **complete.** `CurriculumManager` + `OnlineHardExampleMiner` adopted in-loop; `GraphAdversarialAttack` added and **wired** (auto-select for `gnn`); per-model `pretrain_method` done; legacy adaptive-curriculum loop body **removed**; `OneCycleLR` `total_steps` mode; per-sample curriculum weights **applied to the loss** via `_apply_curriculum_weights`. See [`FIXES.md`](FIXES.md) for the full audit + verdicts.

@@ -327,9 +327,15 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
 # RESAMPLING (tick -> OHLCV bars)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def resample_to_bars(df: pl.DataFrame, freq: str = "1min") -> pl.DataFrame:
+def resample_to_bars(df: pl.DataFrame, freq: str = "1min", pair: str = None, spread_cap_multiplier: float = 3.0) -> pl.DataFrame:
     """
     Resample tick data to OHLCV bars using Polars group_by_dynamic.
+    
+    Args:
+        df: Tick data DataFrame
+        freq: Bar frequency (e.g., "1min", "5min")
+        pair: Currency pair for pair-specific spread caps
+        spread_cap_multiplier: Cap spread at this multiple of median spread
     """
     if isinstance(df, pd.DataFrame):
         df = pl.from_pandas(df)
@@ -338,6 +344,27 @@ def resample_to_bars(df: pl.DataFrame, freq: str = "1min") -> pl.DataFrame:
         return pl.DataFrame()
 
     every = _pandas_freq_to_polars(freq)
+
+    # Ensure mid and spread exist (for downstream logic)
+    if "mid" not in df.columns:
+        df = df.with_columns(((pl.col("bid") + pl.col("ask")) / 2).alias("mid"))
+    if "spread" not in df.columns:
+        df = df.with_columns((pl.col("ask") - pl.col("bid")).alias("spread"))
+
+    # Apply spread cap before resampling for JPY pairs which have extreme spreads
+    if pair is not None and pair.endswith("JPY") and "spread" in df.columns:
+        median_spread = df["spread"].median()
+        if median_spread is not None and median_spread > 0:
+            cap = median_spread * spread_cap_multiplier
+            df = df.with_columns(
+                pl.col("spread").clip(upper_bound=cap).alias("spread")
+            )
+            # Recalculate mid based on capped spread
+            df = df.with_columns([
+                ((pl.col("bid") + pl.col("ask")) / 2).alias("mid"),
+                pl.col("ask") - pl.col("bid").alias("spread_check"),  # verify
+            ])
+            print(f"[Resample] {pair}: Applied spread cap of {cap:.5f} ({spread_cap_multiplier}x median)")
 
     bars = (
         df
@@ -533,6 +560,46 @@ def _filter_market_holidays(bars: pl.DataFrame) -> pl.DataFrame:
         ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 31))
     )
     return bars.filter(~_holiday_filter)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KNOWN DATA GAPS (EMBARGOES)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Known data gaps that should be embargoed (no training sequences should cross these)
+# Format: {pair: [(start_date, end_date, reason), ...]}
+KNOWN_DATA_GAPS = {
+    "GBPUSD": [
+        ("2018-11-23", "2019-01-02", "39-day hole: missing Dukascopy data Nov 2018 - Jan 2019"),
+    ],
+    "USDJPY": [
+        ("2009-06-01", "2009-06-30", "6.9-day hole: missing Dukascopy data June 2009"),
+    ],
+}
+
+def filter_embargo_gaps(df: pl.DataFrame, pair: str) -> pl.DataFrame:
+    """
+    Filter out bars that fall within known data gaps for a given pair.
+    Any sequence crossing these boundaries will see artificial price jumps.
+    """
+    if df.is_empty() or pair not in KNOWN_DATA_GAPS:
+        return df
+    
+    for start_str, end_str, reason in KNOWN_DATA_GAPS[pair]:
+        start_dt = pl.lit(pd.Timestamp(start_str, tz="UTC"))
+        end_dt = pl.lit(pd.Timestamp(end_str, tz="UTC"))
+        
+        # Filter out bars in the gap range
+        before_count = len(df)
+        df = df.filter(
+            ~((pl.col("timestamp_utc") >= start_dt) & (pl.col("timestamp_utc") <= end_dt))
+        )
+        after_count = len(df)
+        if before_count != after_count:
+            print(f"[Embargo] {pair}: Dropped {before_count - after_count} bars in known gap "
+                  f"{start_str} to {end_str} ({reason})")
+    
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -765,6 +832,7 @@ class ForexDataPipeline:
         session_mode: str = "fixed",     # "fixed" | "dst"
         add_session_label: bool = False,
         gap_policy: str = "drop",        # "drop" | "ffill" | "interpolate"
+        spread_cap_multiplier: float = 3.0,
     ):
         self.bar_freq = bar_freq
         self.frac_diff_order = frac_diff_order
@@ -775,6 +843,7 @@ class ForexDataPipeline:
         self.session_mode = str(session_mode).lower()
         self.add_session_label = bool(add_session_label)
         self.gap_policy = _cfg_str("gap_policy", gap_policy)
+        self.spread_cap_multiplier = spread_cap_multiplier
 
         h, m = map(int, session_start_utc.split(":"))
         self.session_start = h * 3600 + m * 60
@@ -790,11 +859,19 @@ class ForexDataPipeline:
             except Exception:
                 self._sessions = None
 
-    def run(self, df: pl.DataFrame) -> pl.DataFrame:
+    def run(self, df, pair: str = None) -> pl.DataFrame:
         print(f"[Pipeline] Raw tick rows: {len(df):,}")
 
+        import polars as pl
+        import pandas as pd
+        if isinstance(df, pd.DataFrame):
+            df = pl.from_pandas(df)
+
+        # Standardize: add mid/spread, clean bad ticks, ensure UTC, etc.
+        df = _standardize_dataframe(df)
+
         if self.bar_type == "time":
-            bars = resample_to_bars(df, freq=self.bar_freq)
+            bars = resample_to_bars(df, freq=self.bar_freq, pair=pair, spread_cap_multiplier=self.spread_cap_multiplier)
         elif self.bar_type in ("tick", "volume", "dollar"):
             thresh = self.info_bar_threshold
             _resamplers = {
@@ -808,6 +885,11 @@ class ForexDataPipeline:
                 f"Unknown bar_type: {self.bar_type} (time|tick|volume|dollar)"
             )
         print(f"[Pipeline] Bars after resampling ({self.bar_type}): {len(bars):,}")
+
+        # Apply known data gap embargoes BEFORE gap detection/interpolation
+        if pair is not None:
+            bars = filter_embargo_gaps(bars, pair)
+            print(f"[Pipeline] Bars after embargo filtering: {len(bars):,}")
 
         # Gap detection / interpolation before session filtering.
         if self.gap_policy != "drop" and len(bars) > 0:
@@ -823,10 +905,13 @@ class ForexDataPipeline:
             if self.session_mode == "dst" and self._sessions:
                 bars = self._apply_dst_sessions(bars)
                 if self.add_session_label:
-                    # _apply_dst_sessions already attaches a session_label.
+                    # _apply_dst_sessions already attaches session_label + overlaps.
                     pass
                 else:
-                    bars = bars.drop("session_label")
+                    _drop = [c for c in ("session_label", "asia_london", "london_ny")
+                             if c in bars.columns]
+                    if _drop:
+                        bars = bars.drop(_drop)
             else:
                 # Fixed-UTC window (legacy behavior).
                 bars = bars.with_columns(
@@ -839,6 +924,24 @@ class ForexDataPipeline:
                     (pl.col("timestamp_utc").dt.weekday() <= 5)
                 ).drop("_time_sec")
             print(f"[Pipeline] Bars after session filter: {len(bars):,}")
+        elif self.add_session_label and len(bars) > 0:
+            # Train path: keep all bars but attach DST session labels for
+            # regime labeling session_cost_scale (asia/london/ny/off).
+            if self.session_mode == "dst" and self._sessions:
+                bars = self._apply_dst_sessions(bars)
+            else:
+                hour = pl.col("timestamp_utc").dt.hour()
+                # Crude fixed-UTC overlaps (prefer DST path above when available).
+                bars = bars.with_columns([
+                    pl.when((hour >= 0) & (hour < 7)).then(pl.lit("asia"))
+                    .when((hour >= 7) & (hour < 13)).then(pl.lit("london"))
+                    .when((hour >= 13) & (hour < 21)).then(pl.lit("ny"))
+                    .otherwise(pl.lit("off"))
+                    .alias("session_label"),
+                    # Asia/London handoff ~07-08 UTC; London/NY ~13-17 UTC.
+                    (((hour >= 7) & (hour < 8)).cast(pl.Float64)).alias("asia_london"),
+                    (((hour >= 13) & (hour <= 17)).cast(pl.Float64)).alias("london_ny"),
+                ])
 
         if (len(bars) == 0):
             print("[Pipeline] Warning: No bars left after filtering. Returning empty DataFrame.")
@@ -862,13 +965,20 @@ class ForexDataPipeline:
 
         Session windows are defined in local time (zoneinfo) so UTC boundaries
         shift correctly across DST transitions in March / November.
+
+        Also attaches binary overlap flags ``asia_london`` / ``london_ny``
+        (simultaneous membership in both session windows). These do NOT replace
+        the exclusive primary ``session_label``.
         """
         sessions = self._sessions or {}
         if not sessions:
-            return bars.with_columns(pl.lit("off").alias("session_label"))
+            return bars.with_columns([
+                pl.lit("off").alias("session_label"),
+                pl.lit(0.0).alias("asia_london"),
+                pl.lit(0.0).alias("london_ny"),
+            ])
 
         ts = bars["timestamp_utc"]
-        label = pl.lit("off").cast(pl.Utf8).alias("session_label")
 
         # Build, for each session, a boolean mask of bars whose LOCAL time in
         # that session's timezone falls inside the session's local hours.
@@ -889,7 +999,8 @@ class ForexDataPipeline:
         for name, local in local_cols.items():
             base = base.with_columns(local.alias(f"_local_{name}"))
 
-        # For each session, set the label where local time is within hours_local.
+        # Per-session in-window masks (kept for overlap flags).
+        in_masks: dict[str, pl.Expr] = {}
         for name in list(local_cols.keys()):
             start_h, start_m = sessions[name]["hours_local"][0].hour, sessions[name]["hours_local"][0].minute
             end_h, end_m = sessions[name]["hours_local"][1].hour, sessions[name]["hours_local"][1].minute
@@ -898,9 +1009,26 @@ class ForexDataPipeline:
                 ((lt.dt.hour() > start_h) | ((lt.dt.hour() == start_h) & (lt.dt.minute() >= start_m))) &
                 ((lt.dt.hour() < end_h) | ((lt.dt.hour() == end_h) & (lt.dt.minute() <= end_m)))
             )
+            in_masks[name] = in_window
             base = base.with_columns(
                 pl.when(in_window).then(pl.lit(name)).otherwise(pl.col(col_name)).alias(col_name)
             )
+
+        # DST-aware overlap binaries (float 0/1 for numeric joins / labeling).
+        asia_london = (
+            (in_masks["asia"] & in_masks["london"]).cast(pl.Float64)
+            if "asia" in in_masks and "london" in in_masks
+            else pl.lit(0.0)
+        )
+        london_ny = (
+            (in_masks["london"] & in_masks["ny"]).cast(pl.Float64)
+            if "london" in in_masks and "ny" in in_masks
+            else pl.lit(0.0)
+        )
+        base = base.with_columns([
+            asia_london.alias("asia_london"),
+            london_ny.alias("london_ny"),
+        ])
 
         drop_cols = [f"_local_{n}" for n in local_cols]
         result = base.drop(["_ts"] + drop_cols).rename({col_name: "session_label"})

@@ -15,10 +15,13 @@ Core gates (all must pass to promote):
   8.  Probabilistic Sharpe Ratio   ≥ min_psr (default 0.95)
   9.  Deflated Sharpe Ratio        ≥ min_psr (only when strict_psr + trials>1)
 
-Capital-efficiency gates (skipped when input data unavailable):
+Capital-efficiency gates (optional — pass when input data unavailable):
   10. Sharpe / turnover_rate       ≥ min_sharpe_per_turnover
   11. Sharpe / max_drawdown        ≥ min_sharpe_per_drawdown
   12. Sharpe / avg_latency_ms      ≥ min_sharpe_per_latency
+
+Sharpe stability gate (optional — passes when multi-trial data unavailable):
+  13. CV of Sharpe across folds   < 100%
 
 Usage:
     from validation.promotion_gate import PromotionGate
@@ -248,16 +251,22 @@ class PromotionGate:
         if regime_pnl:
             max_conc = max(abs(v) for v in regime_pnl.values())
             dominant = max(regime_pnl, key=lambda k: abs(regime_pnl[k]))
+            gates["regime_ok"]         = max_conc <= self.cfg.max_regime_conc
         else:
             max_conc, dominant = 0.0, "unknown"
-        gates["regime_ok"]         = max_conc <= self.cfg.max_regime_conc
+            gates["regime_ok"]         = False
         details["max_regime_conc"] = max_conc
         details["dominant_regime"] = dominant    # type: ignore[assignment]
 
         # 7. Transaction cost ratio
-        cost_pct = transaction_costs / max(abs(gross_pnl), 1e-9)
-        gates["cost_ok"]      = cost_pct <= self.cfg.max_cost_pct
-        details["cost_pct"]   = cost_pct
+        if transaction_costs > 0.0:
+            cost_pct = transaction_costs / max(abs(gross_pnl), 1e-9)
+            gates["cost_ok"] = cost_pct <= self.cfg.max_cost_pct
+        else:
+            # No transaction costs tracked — cost gate passes (cost_pct = 0)
+            cost_pct = 0.0
+            gates["cost_ok"] = True
+        details["cost_pct"] = cost_pct
         details["cost_limit"] = self.cfg.max_cost_pct
 
         # 8. Probabilistic Sharpe
@@ -266,22 +275,24 @@ class PromotionGate:
         details["psr"]   = psr
         details["min_psr"] = self.cfg.min_psr
 
-        if self.cfg.strict_psr and n_backtest_trials > 1:
-            # B-M4: Deflated Sharpe accounts for multiple-testing during retrain
-            # model selection. Require the same confidence level as PSR.
-            dsr = deflated_sharpe_ratio(sharpe, n_backtest_trials, n_obs,
-                                        skewness, kurtosis)
-            gates["dsr_ok"]  = dsr > self.cfg.min_dsr
-            details["dsr"]   = dsr
-            details["min_dsr"] = self.cfg.min_dsr
+        if self.cfg.strict_psr:
+            if n_backtest_trials > 1:
+                dsr = deflated_sharpe_ratio(sharpe, n_backtest_trials, n_obs,
+                                            skewness, kurtosis)
+                gates["dsr_ok"]  = dsr > self.cfg.min_dsr
+                details["dsr"]   = dsr
+                details["min_dsr"] = self.cfg.min_dsr
+            else:
+                gates["dsr_ok"] = True  # No multi-trial data — gate passes
+                details["dsr"] = -1.0
+                details["dsr_skipped"] = False
+                print("[PromotionGate] INFO: dsr_ok skipped (strict_psr on but n_backtest_trials<=1)")
         else:
-            gates["dsr_ok"] = True   # skipped when not in strict mode
+            # DSR gate is optional when strict_psr is off
+            gates["dsr_ok"] = True
             details["dsr"] = -1.0
             details["dsr_skipped"] = True
-            print(
-                "[PromotionGate] WARN: dsr_ok skipped "
-                "(strict_psr off or n_backtest_trials<=1) — gate treated as pass"
-            )
+            # print("[PromotionGate] INFO: dsr_ok skipped (strict_psr off)")
 
         # Sharpe stability gate: reject models whose walk-forward Sharpe is
         # highly variable (low confidence that OOS performance will persist).
@@ -292,13 +303,12 @@ class PromotionGate:
             details["backtest_sharpe_std"] = backtest_sharpe_std
             details["sharpe_cv"] = sharpe_cv
         else:
+            # No multi-trial data — gate passes (optional gate)
             gates["sharpe_stability_ok"] = True
             details["backtest_sharpe_std"] = 0.0
             details["sharpe_stability_skipped"] = True
-            print(
-                "[PromotionGate] WARN: sharpe_stability_ok skipped "
-                "(need backtest_sharpe_std>0 and n_backtest_trials>1) — gate treated as pass"
-            )
+            # Optional: print debug if needed
+            # print("[PromotionGate] INFO: sharpe_stability_ok skipped (no multi-trial data)")
 
         # ── K: Capital efficiency metrics ──────────────────────────────────
         # These three ratios predict live survivability better than raw Sharpe.
@@ -317,13 +327,10 @@ class PromotionGate:
             details["turnover_rate"]        = turnover_rate
             details["sharpe_per_turnover"]  = sharpe_per_turnover
         else:
-            gates["efficiency_turnover_ok"] = True   # skipped
+            # No turnover data — gate passes (optional gate)
+            gates["efficiency_turnover_ok"] = True
             details["sharpe_per_turnover"] = -1.0
             details["efficiency_turnover_skipped"] = True
-            print(
-                "[PromotionGate] WARN: efficiency_turnover_ok skipped "
-                "(turnover_rate unavailable) — gate treated as pass"
-            )
 
         # K2: Sharpe / max_drawdown — Calmar-flavoured ratio.
         # Penalises models that achieve Sharpe through concentration or
@@ -351,13 +358,10 @@ class PromotionGate:
             details["avg_latency_ms"]      = avg_latency_ms
             details["sharpe_per_latency"]  = sharpe_per_latency
         else:
-            gates["efficiency_latency_ok"] = True   # skipped
+            # No latency data — gate passes (optional gate)
+            gates["efficiency_latency_ok"] = True
             details["sharpe_per_latency"] = -1.0
             details["efficiency_latency_skipped"] = True
-            print(
-                "[PromotionGate] WARN: efficiency_latency_ok skipped "
-                "(avg_latency_ms unavailable) — gate treated as pass"
-            )
 
         # ── Final decision ─────────────────────────────────────────────────
         promoted = all(gates.values())

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import polars as pl
 import pytest
+import sqlite3
 
 from data.feature_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import (
@@ -72,6 +73,26 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
         "timestamp_utc": live_ts,
         "feat_b": rng.normal(0, 1, n_live),
     })
+
+    # Register ad-hoc feature rows before storing materializations (the
+    # materializations FK references features(name); bypassing materialize()
+    # would deadlock the strict PRAGMA foreign_keys=ON enforced since 2026-08.)
+    for name in ("feat_a", "feat_b"):
+        fs_db = store.root / "registry.db"
+        with sqlite3.connect(str(fs_db)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            now_dt = datetime.now(UTC).isoformat()
+            conn.execute(
+                "INSERT OR IGNORE INTO features "
+                "(name, feature_type, description, source, transformation, "
+                " dependencies, params, version, tags, owner, "
+                " created_at, updated_at, deprecated, content_hash) "
+                "VALUES (?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?, ?, ?)",
+                (name, "test", "ad-hoc drift-test feature", "tests", "",
+                 "", "", 1, "", "tests",
+                 now_dt, now_dt, 0, name),
+            )
+            conn.commit()
 
     store._store_materialization(
         "feat_a", feat_a_base,

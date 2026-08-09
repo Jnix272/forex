@@ -34,14 +34,20 @@ def _embargo_bars(args) -> int:
     """A-H3: embargo gap (in samples) that must separate train from val so a
     training sample's forward-looking label cannot peek into the validation set.
 
-    Dynamic floor is always ``seq_len + lookahead_bars + execution_delay_bars``.
+    Dynamic floor is ``seq_len + effective_LH + execution_delay_bars``, where
+    effective_LH = base_LH * max(LABEL_REGIME barrier/session horizon_mults)
+    (trending barrier_scale can reach 1.5×; asia/off session stretch further).
     If ``validation.embargo_bars`` is set, use ``max(yaml, dynamic)`` so a short
     static YAML value cannot under-gap label horizons.
     """
+    from labeling.rl_reward_labeling import max_label_horizon_mult
+
     seq_len   = int(getattr(args, "seq_len", 60) or 60)
-    lookahead = int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 15)))
+    lookahead = int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30)))
     delay     = int(getattr(args, "execution_delay_bars", 1) or 0)
-    dynamic = max(1, seq_len + lookahead + delay)
+    # Clamp to longest regime/session-scaled horizon, not bare base LH.
+    effective_lh = max(1, int(lookahead * max_label_horizon_mult()))
+    dynamic = max(1, seq_len + effective_lh + delay)
     cfg_embargo = getattr(args, "validation_embargo_bars", None)
     if cfg_embargo is not None:
         return max(dynamic, int(cfg_embargo))
@@ -82,9 +88,9 @@ def embargo_purge_from_config(cfg: dict | None = None) -> tuple[int, int, str]:
         lookahead_bars=int(
             strategy.get(
                 "lookahead_bars",
-                labeling.get("lookahead_bars", LABELING.get("lookahead_bars", 15)),
+                labeling.get("lookahead_bars", LABELING.get("lookahead_bars", 30)),
             )
-            or 15
+            or LABELING.get("lookahead_bars", 30)
         ),
         execution_delay_bars=int(
             execution.get("delay_bars", execution.get("execution_delay_bars", 1)) or 0

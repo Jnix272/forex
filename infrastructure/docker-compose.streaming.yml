@@ -6,9 +6,9 @@ services:
     command:
       - redpanda
       - start
-      - --smp 1
-      - --memory 1G
-      - --reserve-memory 0M
+      - --smp 2
+      - --memory 2G
+      - --reserve-memory 256M
       - --overprovisioned
       - --node-id 0
       - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092

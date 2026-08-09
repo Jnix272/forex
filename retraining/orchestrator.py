@@ -106,7 +106,7 @@ class RetrainConfig:
     psi_threshold: float = 0.2
     drift_feature_frac: float = 0.3  # Fraction of features drifted to trigger
     xgboost_enabled: bool = True
-    promote_on_complete: bool = True
+    promote_on_complete: bool = False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -254,29 +254,31 @@ class ModelRegistry:
 
 def check_promotion_gates(metrics: dict[str, Any]) -> tuple[bool, list[str]]:
     """
-    Validate model metrics against promotion thresholds.
+    Validate model metrics against promotion thresholds using the strict PromotionGate.
     Returns (passed, reasons).
     """
-    reasons = []
-
-    sharpe = metrics.get("val_sharpe", 0)
-    if sharpe < MIN_SHARPE:
-        reasons.append(f"Sharpe {sharpe:.3f} < {MIN_SHARPE}")
-
-    profit_factor = metrics.get("profit_factor", 0)
-    if profit_factor < MIN_PROFIT_FACTOR:
-        reasons.append(f"Profit factor {profit_factor:.2f} < {MIN_PROFIT_FACTOR}")
-
-    max_dd = metrics.get("max_drawdown", 1)
-    if max_dd > MAX_DRAWDOWN:
-        reasons.append(f"Max drawdown {max_dd:.3f} > {MAX_DRAWDOWN}")
-
-    loss = metrics.get("val_loss", 1)
-    if loss > 1.0:
-        reasons.append(f"Val loss {loss:.4f} > 1.0")
-
-    passed = len(reasons) == 0
-    return passed, reasons
+    from validation.promotion_gate import PromotionGate
+    
+    gate = PromotionGate()
+    
+    res = gate.evaluate(
+        sharpe=metrics.get("val_sharpe", 0.0),
+        profit_factor=metrics.get("profit_factor", 0.0),
+        max_drawdown=metrics.get("max_drawdown", 1.0),
+        n_trades=metrics.get("n_trades", 0),
+        gross_pnl=metrics.get("gross_pnl", 0.0) if metrics.get("gross_pnl") is not None else 1.0,
+        transaction_costs=metrics.get("transaction_costs", 0.0),
+        n_obs=metrics.get("n_obs", 1),
+        n_backtest_trials=metrics.get("n_backtest_trials", 1),
+        backtest_sharpe_std=metrics.get("backtest_sharpe_std", 0.0),
+        regime_pnl=metrics.get("regime_pnl", {}),
+        skewness=metrics.get("skewness", 0.0),
+        kurtosis=metrics.get("kurtosis", 3.0),
+        turnover_rate=metrics.get("turnover_rate"),
+        avg_latency_ms=metrics.get("avg_latency_ms"),
+    )
+    
+    return res["promoted"], res["reasons"]
 
 
 # ════════════════════════════════════════════════════════════════════════════

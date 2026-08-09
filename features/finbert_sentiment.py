@@ -47,9 +47,15 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import logging
+import time
 
 import numpy as np
 import pandas as pd
+
+from infrastructure.logging_utils import log_data_load
+
+_log = logging.getLogger(__name__)
 
 # ── Cache paths ────────────────────────────────────────────────────────────────
 # Canonical location.  The stale root-level cache is merged in on first load.
@@ -79,14 +85,21 @@ def _load_cache() -> dict:
     After merging the stale file is deleted so it won't be read again.
     """
     cache: dict = {}
+    _t0 = time.perf_counter()
 
     # Load canonical cache
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, "rb") as f:
                 cache = pickle.load(f)
-        except Exception:
+            log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=len(cache),
+                          status="ok", t0=_t0, note=f"size_mb={CACHE_FILE.stat().st_size/1e6:.1f}")
+        except Exception as _e:
+            log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0,
+                          status="corrupt", t0=_t0, exc=_e, note="cache will be re-scored live")
             cache = {}
+    else:
+        log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0, status="skip_missing")
 
     # Merge stale root cache if it exists
     if _STALE_CACHE_FILE.exists() and _STALE_CACHE_FILE != CACHE_FILE:
@@ -103,21 +116,29 @@ def _load_cache() -> dict:
                     flush=True,
                 )
             _STALE_CACHE_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE),
+                          n_rows=merged, status="ok",
+                          note=f"into {len(cache)} total entries")
+        except Exception as _e:
+            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE),
+                          n_rows=0, status="error", exc=_e)
 
     return cache
 
 
 def _save_cache(cache: dict) -> None:
+    _t0 = time.perf_counter()
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CACHE_FILE.with_suffix(".pkl.tmp")
         with open(tmp, "wb") as f:
             pickle.dump(cache, f)
         os.replace(tmp, CACHE_FILE)
-    except Exception:
-        pass
+        log_data_load("finbert_cache_save", str(CACHE_FILE), n_rows=len(cache),
+                      status="ok", t0=_t0, note=f"size_mb={CACHE_FILE.stat().st_size/1e6:.1f}")
+    except Exception as _e:
+        log_data_load("finbert_cache_save", str(CACHE_FILE), n_rows=len(cache),
+                      status="error", t0=_t0, exc=_e)
 
 
 def _cache_key(text: str) -> str:
@@ -222,11 +243,14 @@ def _get_finbert():
     global _finbert_pipeline
     if _finbert_pipeline is None:
         from transformers import pipeline
+        import torch
+        device = 0 if torch.cuda.is_available() else -1
         _finbert_pipeline = pipeline(
             "text-classification",
             model=FINBERT_MODEL,
             truncation=True,
             max_length=512,
+            device=device,
         )
     return _finbert_pipeline
 
@@ -379,8 +403,31 @@ class SentimentPipeline:
                             results[idx] = future.result()
                         except Exception:
                             results[idx] = 0.0
+            elif backend == "finbert":
+                # Native GPU batching
+                texts_to_score = [text for idx, text in misses]
+                try:
+                    pipe = _get_finbert()
+                    short_texts = [t[:512] for t in texts_to_score]
+                    batch_res = pipe(short_texts, batch_size=256, truncation=True)
+                    
+                    with self._cache_lock:
+                        for (idx, text), res in zip(misses, batch_res):
+                            label = res["label"].lower()
+                            score = res["score"]
+                            final_score = LABEL_MAP.get(label, 0.0) * score
+                            results[idx] = final_score
+                            
+                            if self._use_cache:
+                                key = _cache_key(text)
+                                if key not in self._cache:
+                                    self._cache[key] = final_score
+                                    self._new_entries += 1
+                except Exception:
+                    for idx, text in misses:
+                        results[idx] = 0.0
             else:
-                # Sequential (FinBERT / VADER / single-worker Ollama)
+                # Sequential (VADER / single-worker Ollama)
                 for idx, text in misses:
                     results[idx] = self._score_with_backend(text, backend)
 

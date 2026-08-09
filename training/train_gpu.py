@@ -175,6 +175,21 @@ except ImportError:
 
 from training.gpu_cache_io import (
     ZARR,
+    _Blosc,
+    _ZARR_V3,
+    _atr_path,
+    _base_path,
+    _close_path,
+    _diff_path,
+    _pq_path,
+    _scaler_npz_path,
+    _spread_path,
+    _x_path,
+    _y_cls_path,
+    _y_path,
+    _zarr_create,
+    _zarr_open_group,
+    make_training_zarr_compressor,
 )
 
 if not ZARR:
@@ -218,11 +233,14 @@ try:
     from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
     TENSORBOARD = True
 except ImportError:
+    _SummaryWriter = None  # type: ignore[misc, assignment]
     TENSORBOARD = False
 
 try:
+    from monitoring.rich_display import _RichDisplay
     RICH_DISPLAY = True
 except Exception:
+    _RichDisplay = None  # type: ignore[misc, assignment]
     RICH_DISPLAY = False
 
 try:
@@ -282,8 +300,10 @@ _gpu_cli.bind_host(sys.modules[__name__])
 # -----------------------------------------------------------------------------
 
 try:
+    from monitoring.train_logger import TrainingLogger as _TrainingLogger
     _TRAIN_LOGGER_AVAILABLE = True
 except Exception:
+    _TrainingLogger = None  # type: ignore[misc, assignment]
     _TRAIN_LOGGER_AVAILABLE = False
 
 _TRAIN_LOGGER: Any | None = None   # TrainingLogger instance, set in supervised_train
@@ -331,6 +351,7 @@ from training.cache_integrity import (
     _clamp_n_samples_to_disk,
     _get_pairs,
     _promotion_holdout_n,
+    _trainable_max_index,
     _warn_multitask_cache_sidecars,
 )
 
@@ -475,9 +496,12 @@ _supervised_loop.bind_host(sys.modules[__name__])
 import training.pretrain_runner as _pretrain_runner
 from training.pretrain_runner import (
     _fold_history_summary,
+    _make_pretrain_span_plan,
+    _normalize_pretrain_method,
     _parse_pretrain_ablation_models,
     _pretrain_ablation_verdict,
     _read_json_dict,
+    _select_pretrain_trainer_class,
     _update_pretrain_report,
     run_pretrain,
 )
@@ -492,6 +516,8 @@ _pretrain_runner.bind_host(sys.modules[__name__])
 import training.rl_runner as _rl_runner
 from training.rl_runner import (
     _feature_schema_payload,
+    _rl_reward_weights,
+    _rl_train_val_slices,
     _verify_onnx_schema_deployment,
     run_rl,
 )
@@ -607,7 +633,125 @@ _feature_ablation.bind_host(sys.modules[__name__])
 
 
 
-from training.config_validate import validate_run_config
+# Explicit imports for backward compatibility with test modules
+from training.cache_integrity import (
+    _cache_has_multitask_sidecars,
+    _cache_length_snapshot,
+    _cache_target_col,
+    _delete_cache_artifacts,
+    _effective_window_days,
+    _get_cache_path,
+    _get_pairs,
+    _iter_date_windows,
+    _market_bar_arrays_from_feats,
+    _on_disk_sequence_count,
+    _postprocess_cache_integrity_check,
+    _promotion_holdout_n,
+    _real_data_window_days,
+    _require_rl_market_cache,
+    _resolve_cross_asset_source,
+    _resolve_pair_feat_indices,
+    _trainable_max_index,
+    _validate_cache_integrity,
+    _verify_dataset,
+    _warn_multitask_cache_sidecars,
+)
+from training.cv_splits import (
+    _build_cv_splits,
+    _embargo_bars,
+    _embargo_split,
+    _purge_bars,
+    _three_way_split,
+    _validation_method,
+)
+from training.dataset_builder import _build_chunk, _build_multipair_chunk
+from training.direction_control import (
+    _balanced_direction_indices,
+    _class_prior_array,
+    _class_prior_tensor,
+    _class_weights_tensor,
+    _coerce_auto_int,
+    _direction_class_index,
+    _direction_gate_failed,
+    _direction_preflight,
+    _direction_probe,
+    _direction_recall_from_confusion,
+    _gradients_are_finite,
+    _init_multitask_direction_bias,
+    _load_diff_array,
+    _load_feature_schema,
+    _read_y_cls_indices,
+    _recover_nonfinite_training_state,
+    _write_class_balance_failure,
+    labels_to_class_index,
+    _reward_to_class_index,
+)
+from training.ewc import ElasticWeightConsolidation, apply_ewc_loss
+from training.feature_ablation import (
+    _atomic_copy,
+    _build_feature_ablation_mask,
+    _feature_ablation_config,
+)
+from training.gpu_cli import (
+    _apply_yaml_config,
+    _model_build_args,
+    parse_args,
+    _normalize_architecture_profile,
+    _apply_model_profile,
+)
+from training.gpu_device import _crop_to_seq_len, _thermal_check
+from training.gpu_datasets import (
+    MemmapSequenceDataset,
+    _ThreadPrefetchLoader,
+    wrap_loader_prefetch,
+)
+
+from training.memory_management import PrioritizedDataLoader
+from training.curriculum import create_curriculum_manager
+from training.curriculum_controller import CurriculumController
+from training.model_factory import (
+    _core_model,
+    _is_uninitialized_parameter,
+    _multitask_head_in,
+    _strict_load_report,
+    build_model,
+)
+from training.post_train import _promote_best_fold, _safe_save
+from training.pretrain_runner import _run_multi_task_pretrain
+from training.rl_runner import _rl_reward_weights
+from training.supervised_loop import FeatureStabilityMonitor, _sanitize_batch_tensors, train_epoch, validate_epoch
+from training.config_validate import validate_run_config, _effective_max_seq_len
+from monitoring.sidecar import Sidecar
+from config.settings import LABELING
+
+# Settings aliases expected by gpu_cli host bind / older tests
+from config.settings import (
+    CURRICULUM as SETTINGS_CURRICULUM,
+    ENSEMBLE as SETTINGS_ENSEMBLE,
+    EXECUTION as SETTINGS_EXECUTION,
+    MONITORING,
+    RISK,
+    RL,
+    SIZING,
+)
+
+# Re-bind after late imports so child modules see symbols that were not
+# available during the first bind pass (compat re-exports above).
+for _mod in (
+    _gpu_device,
+    _gpu_cli,
+    _cache_integrity,
+    _model_factory,
+    _dataset_builder,
+    _cv_splits,
+    _direction_control,
+    _supervised_loop,
+    _pretrain_runner,
+    _rl_runner,
+    _post_train,
+    _feature_ablation,
+):
+    _mod.bind_host(sys.modules[__name__])
 
 # -----------------------------------------------------------------------------
 # MAIN
@@ -707,6 +851,16 @@ def main():
     apply_hardware_profile(args)
     _set_global_seed(getattr(args, "seed", None))
 
+    # Ensure structured `log_data_load` records reach stdout alongside the
+    # bare `print()` statements the rest of the pipeline uses. Nothing fancy:
+    # one-line INFO format keeps the run log readable and grep-able.
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(message)s",
+        force=False,
+    )
+
     # Expand user-home-relative paths (e.g. ~/forex_data) from config/CLI
     args.checkpoint_dir = str(Path(args.checkpoint_dir).expanduser())
     args.data_cache     = str(Path(args.data_cache).expanduser())
@@ -760,12 +914,7 @@ def main():
 
         _train_memory = None
 
-    # Import HardExampleMiner for post-validation hard-sample collection
-    try:
-        from training.hard_example_miner import HardExampleMiner as _HardMiner
-    except Exception:
-        _HardMiner = None
-
+    
     _all_pairs   = _get_pairs(args)
     _pairs_str   = ", ".join(_all_pairs)
     _embed_str   = (f"  embed={getattr(args,'pair_embed_dim',0)}d"
@@ -1229,7 +1378,7 @@ def main():
             try:
                 _best_ckpt = Path(model_args.checkpoint_dir) / f"{model_name}_best.pt"
                 if _best_ckpt.exists():
-                    _ckpt_data = torch.load(_best_ckpt, map_location=device, weights_only=False)
+                    _ckpt_data = torch.load(_best_ckpt, map_location=device, weights_only=True)
                     _eval_model = build_model(model_name, n_features, model_args).to(device)
                     _eval_model.load_state_dict(
                         _ckpt_data["model_state_dict"] if isinstance(_ckpt_data, dict) and "model_state_dict" in _ckpt_data
@@ -1360,45 +1509,6 @@ def main():
             except Exception as e:
                 print(f"[Discord] Failed to send training_completed: {e}")
 
-        # ΓöÇΓöÇ Hard-Example Mining ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-        # Collect samples where the model was confidently wrong during the last
-        # validation pass, so they can be lightly oversampled on the next run.
-        if _HardMiner is not None:
-            try:
-                _hem = _HardMiner(run_name=run_name, model_name=model_name)
-                # Reconstruct final val predictions for the single-split case.
-                # Walk-forward: use the last fold's history as a proxy (indices
-                # are not easily recoverable here without a re-pass, so we skip).
-                _do_mine = False
-                _mine_preds = _mine_labels = _mine_rewards = _mine_idx = None
-
-                if not model_args.walk_forward_cv and isinstance(history, dict):
-                    # Try loading cached val predictions if supervised_train wrote them
-                    _val_pred_path = model_artifact_dir / f"{model_name}_val_preds.npz"
-                    if _val_pred_path.exists():
-                        try:
-                            _vdata = np.load(_val_pred_path)
-                            _mine_preds   = _vdata["predictions"]
-                            _mine_labels  = _vdata["labels"]
-                            _mine_idx     = _vdata.get("indices", np.arange(len(_mine_preds)))
-                            _mine_rewards = _vdata.get("rewards", None)
-                            _do_mine = True
-                        except Exception as _lv:
-                            print(f"[HardMiner] Could not load val preds: {_lv}")
-
-                if _do_mine and _mine_preds is not None:
-                    _hem.collect(
-                        val_indices = _mine_idx,
-                        predictions = _mine_preds,
-                        labels      = _mine_labels,
-                        rewards     = _mine_rewards,
-                    )
-                    _hem.save()
-                else:
-                    print(f"[HardMiner] {model_name}: no val preds available for mining "
-                          f"(walk-forward={model_args.walk_forward_cv}); skipping.")
-            except Exception as _hm_e:
-                print(f"[HardMiner] Mining failed (non-fatal): {_hm_e}")
 
 
         try:

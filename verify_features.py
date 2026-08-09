@@ -1,7 +1,7 @@
 import os
 
 checks = {
-    '1. HardExampleMiner': 'miner.collect' in open('training/train_gpu.py', encoding='utf-8').read(),
+    '1. OnlineHardExampleMiner': '_online_miner.get_oversampled_indices' in open('training/supervised_loop.py', encoding='utf-8').read(),
     '2. Label Smoothing Config': 'label_smoothing: 0.05' in open('config/run.yaml', encoding='utf-8').read(),
     '3. MixUp Augmentation': 'MixupBatch' in open('training/train_gpu.py', encoding='utf-8').read(),
     '4. VolatilityStratifiedSampler': 'VolatilityStratifiedSampler' in open('training/train_gpu.py', encoding='utf-8').read(),

@@ -79,8 +79,9 @@ class DifficultyCurriculum:
 
     def _pace(self, epoch: int) -> float:
         """Compute current difficulty level based on pace function."""
-        # Estimate total epochs from advance_rate
-        total_epochs = int(1 / self.config.advance_rate)
+        # Guard against advance_rate=0 which would cause ZeroDivisionError
+        advance_rate = max(1e-6, self.config.advance_rate)
+        total_epochs = int(1 / advance_rate)
         e = min(epoch / max(1, total_epochs), 1.0)
         if self.config.pace_function == "linear":
             return self.config.start_level + e * (self.config.max_level - self.config.start_level)
@@ -89,7 +90,7 @@ class DifficultyCurriculum:
         elif self.config.pace_function == "sqrt":
             return self.config.start_level + (self.config.max_level - self.config.start_level) * np.sqrt(e)
         elif self.config.pace_function == "step":
-            n_steps = int(1 / self.config.advance_rate)
+            n_steps = int(1 / advance_rate)
             step = min(epoch // max(1, total_epochs // n_steps), n_steps - 1)
             return self.config.start_level + (self.config.max_level - self.config.start_level) * step / (n_steps - 1)
         else:
@@ -250,7 +251,7 @@ class SelfPacedLearning:
 @dataclass
 class LossWeightingConfig:
     """Configuration for loss-based sample weighting."""
-    # Weighting scheme: "inverse", "focal", "threshold", "softmax", "curriculum"
+    # Weighting scheme: "inverse", "focal", "threshold", "softmax"
     scheme: str = "focal"
     # Focal loss gamma
     focal_gamma: float = 2.0
@@ -277,7 +278,6 @@ class LossBasedWeighting:
     - "focal": weight = (1 - exp(-loss))^gamma
     - "threshold": weight = 1 if loss > threshold else 0.1
     - "softmax": weight = exp(loss / T) / sum(exp(loss / T))
-    - "curriculum": weight increases with epoch for hard examples
     
     Usage:
         weighting = LossBasedWeighting(config)
@@ -320,13 +320,6 @@ class LossBasedWeighting:
             T = self.config.temperature
             w = np.exp(L / T)
             w = w / (w.sum() + 1e-8) * len(L)
-        elif self.config.scheme == "curriculum":
-            # Progressively increase weight on hard examples
-            progress = min(epoch / 100, 1.0)
-            base_weight = np.ones_like(L)
-            hard_mask = np.percentile(L, 70) < L
-            base_weight[hard_mask] = 1 + progress * 4  # up to 5x
-            w = base_weight
         else:
             w = np.ones_like(L)
 
@@ -589,9 +582,21 @@ def compute_difficulty_scores(
     """
     n = len(labels)
     if method == "heuristic":
-        # Feature-based difficulty for financial data
-        # High volatility, wide spread, low volume = harder
-        pass
+        # Feature-based difficulty for financial data:
+        # Higher volatility (std across timesteps) = harder bar.
+        # Works on both 2D (samples, features) and 3D (samples, time, features) inputs.
+        if features.ndim == 3:
+            vol = features.std(axis=1).mean(axis=1)          # (N,)
+        elif features.ndim == 2:
+            vol = features.std(axis=1)                         # (N,)
+        else:
+            vol = np.abs(features).ravel()[:len(labels)]
+        vol = vol.astype(np.float64)
+        rng = vol.max() - vol.min()
+        if rng < 1e-9:
+            return np.full(len(labels), 0.5)
+        difficulty = (vol - vol.min()) / rng
+        return np.clip(difficulty, 0.0, 1.0)
 
     if method == "margin" and model is not None:
         with torch.no_grad():
@@ -618,15 +623,17 @@ def compute_difficulty_scores(
             return np.clip(difficulty, 0, 1)
 
     if method == "entropy":
-        # Label entropy (for soft labels or multi-class)
+        # Label entropy – only meaningful for soft/probabilistic labels.
         if labels.ndim > 1:
+            # Soft labels: proper entropy
             entropy = -np.sum(labels * np.log(labels + 1e-8), axis=1)
+            n_classes = labels.shape[1]
         else:
-            # Convert to one-hot
-            n_classes = len(np.unique(labels))
-            one_hot = np.eye(n_classes)[labels]
-            entropy = -np.sum(one_hot * np.log(one_hot + 1e-8), axis=1)
-        difficulty = entropy / np.log(labels.shape[1] if labels.ndim > 1 else len(np.unique(labels)))
+            # Hard integer labels: all samples have zero label entropy by definition.
+            # Fall back to uniform difficulty (0.5 for all).
+            return np.full(len(labels), 0.5)
+        denom = np.log(max(n_classes, 2))   # guard log(1) == 0
+        difficulty = entropy / denom
         return np.clip(difficulty, 0, 1)
 
     if method == "distance" and model is not None:

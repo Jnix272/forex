@@ -53,10 +53,31 @@ def sanitize_array(
     arr,
     *,
     fill_value: float = 0.0,
+    col_medians: np.ndarray | None = None,
     context: str = "array",
     clip_range: tuple[float, float] | None = (-20.0, 20.0),
 ) -> np.ndarray:
-    """Coerce to float32, replace non-finite / non-numeric with fill_value, optionally clip.
+    """Coerce to float32, replace non-finite / non-numeric with fill_value (or per-column
+    medians when ``col_medians`` is supplied), optionally clip.
+
+    Parameters
+    ----------
+    arr :
+        Input array-like.
+    fill_value :
+        Scalar fallback used when ``col_medians`` is None or a column has no
+        finite values to compute a median from.
+    col_medians :
+        1-D array of shape ``(n_cols,)`` with precomputed per-column medians of
+        the **finite** training values.  When supplied, each NaN/Inf cell is
+        replaced with its column's median instead of the global ``fill_value``.
+        This avoids encoding a false ``0`` signal for features where 0 is
+        meaningful (MACD, rate-of-change, ATR ratio, etc.).
+        Compute with: ``col_medians = np.nanmedian(np.where(np.isfinite(X), X, np.nan), axis=0)``
+    context :
+        Label used in the diagnostic print.
+    clip_range :
+        Optional ``(lo, hi)`` hard clip applied after fill.
 
     Empty strings and other non-numeric values (common in mixed Dukascopy
     columns) are coerced via ``pd.to_numeric(..., errors='coerce')`` instead of
@@ -79,7 +100,17 @@ def sanitize_array(
     bad_count = int(bad_mask.sum())
     if bad_count:
         print(f"[FiniteGuard] Sanitized {bad_count:,} non-finite values in {context}")
-        clean[bad_mask] = np.float32(fill_value)
+        if col_medians is not None and clean.ndim == 2:
+            # Per-column median fill: replace each NaN with that column's median.
+            # Fall back to fill_value for any column whose median is itself non-finite.
+            medians_f32 = np.asarray(col_medians, dtype=np.float32)
+            for col_idx in range(clean.shape[1]):
+                col_bad = bad_mask[:, col_idx]
+                if col_bad.any():
+                    med = medians_f32[col_idx] if col_idx < len(medians_f32) else np.float32(fill_value)
+                    clean[col_bad, col_idx] = med if np.isfinite(med) else np.float32(fill_value)
+        else:
+            clean[bad_mask] = np.float32(fill_value)
 
     if clip_range is not None:
         clean = np.clip(clean, clip_range[0], clip_range[1])

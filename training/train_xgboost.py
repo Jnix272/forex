@@ -133,14 +133,26 @@ def compute_sharpe(pred_dir: np.ndarray, y_ret: np.ndarray, bars_per_day: int = 
     """
     Annualised Sharpe from directional predictions + return targets.
 
-    pred_dir : predicted class (0=Short, 1=Flat, 2=Long) or probabilities
+    pred_dir : predicted class (0=Short, 1=Flat, 2=Long), probability array,
+               or continuous regression output (float).
     y_ret    : true continuous returns per bar
     """
-    if pred_dir.ndim == 2:
-        # Probability array -> argmax
-        pred_dir = pred_dir.argmax(axis=1)
-    # Map 0->-1, 1->0, 2->+1
-    signals = np.where(pred_dir == 2, 1.0, np.where(pred_dir == 0, -1.0, 0.0))
+    pred = np.asarray(pred_dir, dtype=np.float64)
+    if pred.ndim == 2:
+        # Probability array -> argmax class index
+        pred = pred.argmax(axis=1).astype(np.float64)
+
+    # Detect regression output: if values are not close to {0,1,2} integers,
+    # treat the raw float as a signed return forecast and map via sign().
+    unique_rounded = np.unique(np.round(pred))
+    is_class_labels = set(unique_rounded.tolist()).issubset({0.0, 1.0, 2.0})
+    if is_class_labels:
+        # Classification: 0->Short(-1), 1->Flat(0), 2->Long(+1)
+        signals = np.where(pred == 2, 1.0, np.where(pred == 0, -1.0, 0.0))
+    else:
+        # Regression: sign of predicted return gives direction
+        signals = np.sign(pred)
+
     pnl = signals * y_ret
     if pnl.std() < 1e-12:
         return 0.0
@@ -149,9 +161,15 @@ def compute_sharpe(pred_dir: np.ndarray, y_ret: np.ndarray, bars_per_day: int = 
 
 
 def compute_dir_accuracy(pred_dir: np.ndarray, y_dir: np.ndarray) -> float:
-    if pred_dir.ndim == 2:
-        pred_dir = pred_dir.argmax(axis=1)
-    return float((pred_dir == y_dir).mean())
+    pred = np.asarray(pred_dir, dtype=np.float64)
+    if pred.ndim == 2:
+        pred = pred.argmax(axis=1).astype(np.float64)
+    unique_rounded = np.unique(np.round(pred))
+    is_class_labels = set(unique_rounded.tolist()).issubset({0.0, 1.0, 2.0})
+    if is_class_labels:
+        return float((np.round(pred) == np.round(np.asarray(y_dir, dtype=np.float64))).mean())
+    # Regression: compare sign of prediction vs sign of true return
+    return float((np.sign(pred) == np.sign(np.asarray(y_dir, dtype=np.float64))).mean())
 
 # ---------------------------------------------------------------------------
 # Walk-forward folds (purged/embargoed via training.cv_splits)

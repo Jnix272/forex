@@ -139,8 +139,10 @@ def run_true_walkforward():
         log(f"Loaded weights: {ckpt_path.name}")
 
         cfg = _load_checkpoint_config(ckpt_path)
-        # Default n_features for a single pair is typically 224
-        n_features = int(cfg.get("n_features", 224))
+        n_features = int(cfg.get("n_features") or 0)
+        if n_features <= 0:
+            log(f"WARNING: {ckpt_path.name} missing n_features; skipping fold.")
+            continue
 
         model_kwargs = {
             "d_model": cfg.get("d_model", 256),
@@ -153,6 +155,9 @@ def run_true_walkforward():
         if "expert" in args.model.lower():
             model_kwargs["n_experts"] = cfg.get("n_experts", 4)
             model_kwargs["top_k"] = cfg.get("top_k", 2)
+
+        n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or 1)
+        f_per_pair = int(cfg.get("_f_per_pair") or cfg.get("f_per_pair") or max(1, n_features // max(1, n_pairs)))
 
         class Cfg:
             def __init__(self):
@@ -169,8 +174,8 @@ def run_true_walkforward():
                 self.corr_window = 20
                 self.corr_window_long = 60
                 self.momentum_window = 20
-                self._n_pairs = 1
-                self._f_per_pair = 224
+                self._n_pairs = n_pairs
+                self._f_per_pair = f_per_pair
 
         model = build_model(args.model, n_features, Cfg()).to(device)
         state = torch.load(str(ckpt_path), map_location=device, weights_only=True)
@@ -203,12 +208,16 @@ def run_true_walkforward():
         last_signal_i = -10**9
         fold_signals = []
 
+        regime_vals = X_slice["regime_label"].values if "regime_label" in X_slice.columns else None
+        close_vals = base_bars["close"].values
+        ts_vals = base_bars.index
+
         for off, c in enumerate(cls):
             i = inf_start_idx + args.seq_len + off
 
             adj_min_conf = args.min_confidence
-            if "regime_label" in X_slice.columns:
-                rl = float(X_slice["regime_label"].iloc[args.seq_len + off])
+            if regime_vals is not None:
+                rl = float(regime_vals[args.seq_len + off])
                 if rl > 0.5:
                     adj_min_conf = max(0.5, args.min_confidence - 0.05)
                 elif rl < -0.5:
@@ -219,7 +228,7 @@ def run_true_walkforward():
             if i - last_signal_i < max(1, args.min_gap_bars):
                 continue
 
-            price = float(base_bars["close"].iloc[i])
+            price = float(close_vals[i])
             if c == 0:
                 act = 2
                 stop_loss = price + args.stop_pips * pip_size
@@ -246,7 +255,7 @@ def run_true_walkforward():
                 dynamic_lots = max(0.01, dynamic_lots)
 
                 fold_signals.append({
-                    "timestamp": base_bars.index[i],
+                    "timestamp": ts_vals[i],
                     "action": act,
                     "lots": dynamic_lots,
                     "stop_loss": stop_loss,

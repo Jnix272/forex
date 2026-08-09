@@ -4,6 +4,7 @@ Extracted from ``training.train_gpu`` (see ``docs/CONTINUE.md``)."""
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import time
 import traceback
@@ -21,6 +22,7 @@ from data.cross_asset import load_cross_asset_panel
 from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
 from data.historical_news import collect_headlines_for_range, load_historical_news_bundle
 from data.sources import ForexDataManager
+from infrastructure.logging_utils import log_data_load
 from features.feature_engineering_pl import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
 from infrastructure.numerics import sanitize_array
@@ -31,47 +33,40 @@ from labeling.rl_reward_labeling import (
 from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 from training.gpu_cache_io import (
     ZARR as _ZARR_DEFAULT,
-)
-from training.gpu_cache_io import (
     ZARR_FEATURE_DTYPE,
     ZARR_LABEL_DTYPE,
-)
-from training.gpu_cache_io import (
+    _Blosc,
     _atr_path as _atr_path_default,
-)
-from training.gpu_cache_io import (
     _base_path as _base_path_default,
-)
-from training.gpu_cache_io import (
     _close_path as _close_path_default,
-)
-from training.gpu_cache_io import (
     _diff_path as _diff_path_default,
-)
-from training.gpu_cache_io import (
     _pq_path as _pq_path_default,
-)
-from training.gpu_cache_io import (
     _scaler_npz_path as _scaler_npz_path_default,
-)
-from training.gpu_cache_io import (
     _spread_path as _spread_path_default,
-)
-from training.gpu_cache_io import (
     _x_path as _x_path_default,
-)
-from training.gpu_cache_io import (
     _y_cls_path as _y_cls_path_default,
-)
-from training.gpu_cache_io import (
     _y_path as _y_path_default,
-)
-from training.gpu_cache_io import (
     _zarr_create as _zarr_create_default,
-)
-from training.gpu_cache_io import (
     _zarr_open_group as _zarr_open_group_default,
+    make_training_zarr_compressor,
 )
+from training.cache_integrity import (
+    _cache_has_multitask_sidecars,
+    _cache_target_col,
+    _delete_cache_artifacts,
+    _effective_window_days,
+    _get_cache_path,
+    _iter_date_windows,
+    _on_disk_sequence_count,
+    _postprocess_cache_integrity_check,
+    _real_data_window_days,
+    _resolve_cross_asset_source,
+    _validate_cache_integrity,
+    _validate_dataset_builder_reader_contract,
+    _verify_dataset,
+    _warn_multitask_cache_sidecars,
+)
+from data.dataset_manifest import DatasetManifest
 
 # Local module state (was train_gpu globals)
 _FIRST_CHUNK_COLS: list | None = None
@@ -130,6 +125,7 @@ _HOST_DEPS = (
     '_validate_cache_integrity',
     '_verify_dataset',
     '_postprocess_cache_integrity_check',
+    '_validate_dataset_builder_reader_contract',
     '_warn_multitask_cache_sidecars',
     '_cache_has_multitask_sidecars',
     '_market_bar_arrays_from_feats',
@@ -305,12 +301,29 @@ def _enforce_dataset_feature_schema(
         feature_mask=FEATURE_MASK,
     )
 
-    yaml_path = str(getattr(args, "config", "config/run.yaml") or "config/run.yaml")
-    yaml_cfg = load_yaml_config(yaml_path)
-    settings_report = audit_settings_yaml_section_mismatches(
-        yaml_cfg, yaml_path=yaml_path
-    )
-    args_report = audit_args_vs_yaml_mismatches(args, yaml_cfg, yaml_path=yaml_path)
+    # Only compare args↔YAML when this run actually loaded a config file.
+    # getattr(..., "config/run.yaml") would falsely flag argparse/strategy defaults
+    # against disk YAML when --config was never passed.
+    yaml_path = getattr(args, "config", None)
+    if yaml_path:
+        yaml_path = str(yaml_path)
+        yaml_cfg = load_yaml_config(yaml_path)
+        settings_report = audit_settings_yaml_section_mismatches(
+            yaml_cfg, yaml_path=yaml_path
+        )
+        args_report = audit_args_vs_yaml_mismatches(
+            args, yaml_cfg, yaml_path=yaml_path
+        )
+    else:
+        yaml_path = "(no --config)"
+        yaml_cfg = {}
+        settings_report = {
+            "errors": [],
+            "warnings": [],
+            "mismatches": [],
+            "parts": {},
+        }
+        args_report = {"errors": [], "warnings": [], "mismatches": []}
 
     parts = {
         "built_schema": {
@@ -452,6 +465,55 @@ def _maybe_enforce_feature_schema_early(args, cache_path: Path | str | None = No
     _enforce_dataset_feature_schema(
         args, list(_FIRST_CHUNK_COLS), cache_path, phase="first_chunk"
     )
+
+
+def _maybe_run_lookahead_guard(
+    args,
+    X_seq: np.ndarray,
+    close_seq: np.ndarray | None = None,
+) -> None:
+    """TPA-D04: one-shot structural lookahead check on the first built chunk."""
+    if getattr(args, "_lookahead_guard_checked", False):
+        return
+    if getattr(args, "lookahead_guard", None) is False:
+        return
+    if not bool(getattr(args, "integrity_gate", True)):
+        return
+    if X_seq is None or getattr(X_seq, "size", 0) == 0:
+        return
+    args._lookahead_guard_checked = True
+    try:
+        from features.lookahead_guard import LookaheadViolation, assert_no_lookahead
+
+        arr = np.asarray(X_seq)
+        if arr.ndim != 3 or arr.shape[0] < 64:
+            return
+        feats = arr[:, -1, :].astype(np.float64, copy=False)
+        names = list(_FIRST_CHUNK_COLS or []) or [f"f{i}" for i in range(feats.shape[1])]
+        names = names[: feats.shape[1]]
+        ts = np.arange(feats.shape[0], dtype=np.int64)
+        fwd = None
+        if close_seq is not None and len(close_seq) == feats.shape[0]:
+            closes = np.asarray(close_seq, dtype=np.float64).ravel()
+            fwd = np.full(len(closes), np.nan, dtype=np.float64)
+            denom = np.maximum(closes[:-1], 1e-12)
+            fwd[:-1] = (closes[1:] - closes[:-1]) / denom
+        report = assert_no_lookahead(
+            timestamps=ts,
+            features=feats,
+            feature_names=names,
+            forward_returns=fwd,
+            rolling_check=False,
+            permutation_check=False,
+        )
+        print(f"[LookaheadGuard] {report.summary()}")
+    except LookaheadViolation as exc:
+        raise RuntimeError(
+            f"Lookahead guard failed on first chunk: {exc}. "
+            "Pass --no-integrity-gate to skip (not recommended)."
+        ) from exc
+    except Exception as exc:
+        print(f"[LookaheadGuard] WARN: skipped ({type(exc).__name__}: {exc})")
 
 
 
@@ -1407,6 +1469,36 @@ def _sequence_quality_reason_masks(
 
 
 
+# ─── Unified COT loader (used by main, parallel-worker, and single-pair paths) ─
+# Hard-coded path matches the dataset-builder convention; the audit dated
+# 2026-08-07 flagged divergent (silent) loads across call sites.
+COT_PARQUET_PATH = Path("data/raw/cot/cot_financials_cleaned.parquet")
+
+
+def load_cot(path: Path | str | None = None) -> "pl.DataFrame | None":
+    """Load the COT financials parquet, logging row count + status on every call.
+
+    Returns None when the file is missing or unreadable. Polars is imported
+    lazily here so importing this module does not require polars (matches the
+    existing module-level lazy-import pattern used in `_build_chunk`).
+    """
+    p = Path(path) if path else COT_PARQUET_PATH
+    _t0 = time.perf_counter()
+    if not p.exists():
+        log_data_load("cot", str(p), n_rows=0, status="skip_missing")
+        return None
+    try:
+        import polars as pl
+        df = pl.read_parquet(p)
+        log_data_load("cot", str(p), n_rows=len(df), status="ok", t0=_t0,
+                       note=f"size_mb={p.stat().st_size/1e6:.1f}")
+        return df
+    except Exception as _e:
+        log_data_load("cot", str(p), n_rows=0, status="error", t0=_t0, exc=_e)
+        return None
+
+
+
 
 @dataclass(frozen=True)
 class ChunkResult:
@@ -1499,6 +1591,8 @@ def _build_chunk(
     historical_news_file: str | None = None,
     economic_calendar_file: str | None = None,
     cot_data: Any = None,
+    max_bad_frac: float | None = None,
+    max_zero_frac: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
 
     """
@@ -1529,9 +1623,15 @@ def _build_chunk(
     if "timestamp_utc" not in ticks_chunk.columns:
         return _chunk_result(*_empty, 0, _empty_time)
 
-    pipeline = ForexDataPipeline(bar_freq=str(bar_freq or "1min"), session_filter=False,
-                                  apply_frac_diff=False)
-    bars = pipeline.run(ticks_chunk)  # Polars DataFrame
+    pipeline = ForexDataPipeline(
+        bar_freq=str(bar_freq or "1min"),
+        session_filter=False,
+        apply_frac_diff=False,
+        session_mode="dst",
+        add_session_label=True,
+        spread_cap_multiplier=3.0,
+    )
+    bars = pipeline.run(ticks_chunk, pair=pair)  # Polars DataFrame
     if len(bars) < seq_len + 20:
         return _chunk_result(*_empty, 0, _empty_time)
 
@@ -1550,20 +1650,43 @@ def _build_chunk(
         news_file=historical_news_file,
         calendar_file=economic_calendar_file,
     )
+    # Pre-computed sentiment_score from historical_news_combined.parquet already
+    # populates news_bundle.sentiment via data/historical_news.py. The live override
+    # below only kicks in when (a) a SentimentPipeline is wired, and (b) the bundle
+    # has news rows WITHOUT a pre-computed score (URL-fallback rows are NULL there
+    # by design and must not be re-scored). See docs/NEWS_DATA_GUIDE.md §0.
     sent_pl = news_bundle.sentiment if news_bundle.sentiment is not None else None
-    if sent_pl is not None and sent_pl.height > 0 and sentiment_pipe is not None:
+    if sentiment_pipe is not None and news_bundle.news_events_df is not None and news_bundle.news_events_df.height > 0:
         try:
             news_pdf = news_bundle.news_events_df
-            if news_pdf is not None and news_pdf.height > 0:
-                news_df = news_pdf.to_pandas()
-                if "headline" in news_df.columns:
-                    news_df = news_df.rename(columns={"headline": "text", "summary": "description"})
-                scores = sentiment_pipe.predict(news_df)
+            cols = set(news_pdf.columns)
+            text_col = "headline" if "headline" in cols else ("text" if "text" in cols else None)
+            ts_col = "timestamp_utc" if "timestamp_utc" in cols else ("timestamp" if "timestamp" in cols else None)
+            if text_col is None or ts_col is None:
+                raise ValueError(f"news_pdf missing text/ts col; has={sorted(cols)}")
+            head_series = news_pdf[text_col].cast(pl.Utf8).fill_null("")
+            is_url = head_series.str.to_lowercase().str.starts_with("http")
+            is_blank = head_series.str.strip_chars().str.len_chars() == 0
+            mask = ~(is_url | is_blank)
+            if "sentiment_score" in cols:
+                pre = news_pdf["sentiment_score"].cast(pl.Float64)
+                mask = mask & pre.is_null()
+            to_score_idx = [i for i, m in enumerate(mask.to_list()) if m]
+            if to_score_idx:
+                headlines_all = head_series.to_list()
+                headlines = [headlines_all[i] for i in to_score_idx]
+                scores = sentiment_pipe.score_headlines_batch(headlines)
+                ts_all = news_pdf[ts_col].to_list()
                 sent_override = pd.DataFrame({
-                    "timestamp_utc": news_df.index if "timestamp_utc" not in news_df.columns else news_df["timestamp_utc"],
+                    "timestamp_utc": [ts_all[i] for i in to_score_idx],
                     "sentiment": scores,
                 })
-                sent_pl = pl.from_pandas(sent_override)
+                # augment the bundle sentiment (if any) with newly scored rows
+                new_pl = pl.from_pandas(sent_override)
+                if sent_pl is not None and sent_pl.height > 0:
+                    sent_pl = pl.concat([sent_pl, new_pl], how="vertical_relaxed")
+                else:
+                    sent_pl = new_pl
         except Exception as _sent_exc:
             print(f"[Chunk] sentiment override skipped: {_sent_exc}")
 
@@ -1585,8 +1708,7 @@ def _build_chunk(
     art_counts_pl = news_bundle.article_counts
     news_cats_pl = news_bundle.category_flags
 
-    F = fe.build(
-        bars,
+    _fe_kwargs = dict(
         cross_asset=cross_pl,
         sentiment=sent_pl,
         eco_act=eco_act_pl,
@@ -1600,6 +1722,25 @@ def _build_chunk(
         news_cats=news_cats_pl,
     )
 
+    # DS-002: when win_start is set, bars include warmup prefix — build with
+    # warmup context then keep only the target window (EMA/MACD cold-start safe).
+    if win_start:
+        import pandas as pd
+        ws_dt = pd.to_datetime(win_start, utc=True)
+        _ws_lit = pl.lit(ws_dt)
+        warmup_bars = bars.filter(pl.col("timestamp_utc") < _ws_lit)
+        target_bars = bars.filter(pl.col("timestamp_utc") >= _ws_lit)
+        if len(warmup_bars) > 0 and len(target_bars) >= seq_len + 10:
+            F = fe.build_with_warmup(target_bars, warmup_bars, **_fe_kwargs)
+            bars = target_bars
+        else:
+            F = fe.build(bars, **_fe_kwargs)
+            if len(target_bars) > 0:
+                F = F.filter(pl.col("timestamp_utc") >= _ws_lit)
+                bars = target_bars
+    else:
+        F = fe.build(bars, **_fe_kwargs)
+
     # Normalize join-key precision once (pandas bridges often emit μs).
     _ts_ns = pl.Datetime("ns", "UTC")
     F = F.with_columns(pl.col("timestamp_utc").cast(_ts_ns))
@@ -1607,11 +1748,6 @@ def _build_chunk(
 
     # Stay in Polars through mask / news_ok; only bridge to pandas for labeling
     # APIs that still require DatetimeIndex frames (one-way, never back to Polars).
-    if win_start:
-        ws_dt = pd.to_datetime(win_start, utc=True)
-        F = F.filter(pl.col("timestamp_utc") >= pl.lit(ws_dt))
-        bars = bars.filter(pl.col("timestamp_utc") >= pl.lit(ws_dt))
-
     from config.feature_mask import apply_feature_mask as _apply_fm
     F = _apply_fm(F)
     if "news_ok" in F.columns:
@@ -1632,6 +1768,24 @@ def _build_chunk(
         bars_pd = bars_pd.set_index("timestamp_utc")
     bars_pd.index.name = "timestamp"
     feats_pd = F.to_pandas().set_index("timestamp_utc")
+    # Labeling-only aux from bars (Utf8 / overlap floats) — keep out of X.
+    # session_label + asia_london are aux; london_ny may already be in F as the
+    # DST-aware (or fixed-UTC fallback) curriculum session feature.
+    _aux_join = [
+        c for c in ("session_label", "asia_london")
+        if c in bars_pd.columns and c not in feats_pd.columns
+    ]
+    if _aux_join:
+        feats_pd = feats_pd.join(bars_pd[_aux_join], how="left")
+    # If bars have DST london_ny and F still has crude/missing, prefer bars for
+    # labeling policy (cost/horizon); X already locked from F.
+    if "london_ny" in bars_pd.columns and "london_ny" in feats_pd.columns:
+        # Overwrite labeling view with DST-aware bars flag when available.
+        feats_pd["london_ny"] = bars_pd["london_ny"].reindex(feats_pd.index).fillna(
+            feats_pd["london_ny"]
+        )
+    elif "london_ny" in bars_pd.columns and "london_ny" not in feats_pd.columns:
+        feats_pd = feats_pd.join(bars_pd[["london_ny"]], how="left")
 
     if label_method == "triple_barrier":
         labels = compute_triple_barrier_labels(
@@ -1652,10 +1806,10 @@ def _build_chunk(
             feats_pd,
             lookahead_bars=int(lookahead_bars or LABELING["lookahead_bars"]),
             pip_size=LABELING["pip_size"],
-            session_col="session"       if "session"       in feats_pd.columns else None,
-            regime_col="regime"         if "regime"        in feats_pd.columns else None,
-            no_trade_col="no_trade_score" if "no_trade_score" in feats_pd.columns else None,
-            latency_col="latency_ms"    if "latency_ms"    in feats_pd.columns else None,
+            session_col="session_label"    if "session_label"    in feats_pd.columns else None,
+            regime_col="regime_class"     if "regime_class"     in feats_pd.columns else None,
+            no_trade_col="no_trade_score" if "no_trade_score"  in feats_pd.columns else None,
+            latency_col="expected_latency_ms" if "expected_latency_ms" in feats_pd.columns else None,
             execution_delay_bars=int(execution_delay_bars),
         )
     row_quality, row_drop_reasons, label_filter_counts, row_reason_masks = (
@@ -1721,8 +1875,9 @@ def _build_chunk(
         context="chunk features before scaling",
     )
 
-    # Sanitize: replace ±inf / NaN (can arise from log-return or cross-asset
-    # derived features) with 0 so StandardScaler.partial_fit never sees inf.
+    # Sanitize: replace +-inf / NaN (can arise from log-return or cross-asset
+    # derived features) with per-column medians so features where 0 is a
+    # meaningful signal (MACD, ROC, ATR ratio, etc.) are not corrupted.
     n_feat = X_arr.shape[1]
 
     if hasattr(scaler, 'n_features_in_') and scaler.n_features_in_ != n_feat:
@@ -1741,22 +1896,28 @@ def _build_chunk(
 
     _existing_feature_names = getattr(scaler, "feature_names_in_", None)
 
-    if _existing_feature_names is not None:
+    # Scaler fit removed here to prevent D3 leakage. Scaling should be fit per-fold.
+    # BUT: the schema/column order is fixed right here (cols is the canonical
+    # Polars feature order). Attach those names to the scaler so downstream
+    # `_build_multipair_feature_schema` can deserialise feature provenance for
+    # the multi-pair schema-JSON sidecar that the post-process integrity gate
+    # requires. `_set_scaler_feature_names` no-ops if names already attached.
+    # (FSBUG-2026-08-07: without this, _build_multipair_feature_schema returns
+    # [] because scaler.feature_names_in_ is None, so the schema JSON file is
+    # never written and the integrity gate fails with "Multi-pair feature
+    # schema missing" — see cache_integrity.py:529.)
+    if _existing_feature_names is None and cols:
+        _set_scaler_feature_names(scaler, cols)
 
-        try:
-
-            delattr(scaler, "feature_names_in_")
-
-        except Exception:
-
-            pass
-
-    scaler.partial_fit(X_arr)
-    _set_scaler_feature_names(scaler, cols)
+    # Compute per-column finite medians BEFORE the main sanitization pass.
+    # Any column with no finite values at all falls back to fill_value=0.0.
+    _finite_X = np.where(np.isfinite(X_arr), X_arr, np.nan)
+    _col_medians = np.nanmedian(_finite_X, axis=0)  # shape (n_feat,)
 
     X_arr = sanitize_array(
-        scaler.transform(X_arr),
-        context="chunk features after scaling",
+        X_arr,
+        col_medians=_col_medians,
+        context="chunk features unscaled",
     )
     X_arr = np.asarray(X_arr, dtype=np.float32)
 
@@ -1784,8 +1945,16 @@ def _build_chunk(
     if n_seq <= 0:
         return _chunk_result(*_empty, n_feat, _empty_time)
 
-    seq_ok = _sequence_quality_mask(X_arr, row_quality, seq_len)
-    seq_reason_masks = _sequence_quality_reason_masks(X_arr, row_quality, row_reason_values, seq_len)
+    seq_ok = _sequence_quality_mask(
+        X_arr, row_quality, seq_len,
+        max_bad_frac=float(max_bad_frac if max_bad_frac is not None else 0.05),
+        max_zero_frac=float(max_zero_frac if max_zero_frac is not None else 0.80),
+    )
+    seq_reason_masks = _sequence_quality_reason_masks(
+        X_arr, row_quality, row_reason_values, seq_len,
+        max_bad_frac=float(max_bad_frac if max_bad_frac is not None else 0.05),
+        max_zero_frac=float(max_zero_frac if max_zero_frac is not None else 0.80),
+    )
 
 
     X_seq  = np.lib.stride_tricks.sliding_window_view(
@@ -1913,6 +2082,8 @@ def _build_multipair_chunk(
     historical_news_file: str | None = None,
     economic_calendar_file: str | None = None,
     cot_data: Any = None,
+    max_bad_frac: float | None = None,
+    max_zero_frac: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Process raw ticks for P pairs into joint sequences.
@@ -1957,6 +2128,8 @@ def _build_multipair_chunk(
             historical_news_file=historical_news_file,
             economic_calendar_file=economic_calendar_file,
             cot_data=cot_data,
+            max_bad_frac=max_bad_frac,
+            max_zero_frac=max_zero_frac,
         )
         if len(chunk_result) == 10:
             (
@@ -2266,6 +2439,7 @@ def _parallel_window_worker(worker_args: dict):
             bb_window=FEATURES["bollinger_window"],
             bb_std=FEATURES["bollinger_std"],
             lag_windows=FEATURES["lag_windows"],
+            enable_no_trade_zones=True,
         )
         scalers = {p: StandardScaler() for p in pairs}
         mgr = ForexDataManager(verbose=False)
@@ -2305,18 +2479,11 @@ def _parallel_window_worker(worker_args: dict):
                 if _headlines:
                     sentiment_pipe.prefetch_headlines(_headlines)
                 del _headlines
-            except Exception:
-                pass
-
+            except Exception as _pf_err:
+                print(f"[Sentiment] prefetch skipped ({_pf_err})")
         cot_data = None
         if cot_data_path:
-            try:
-                import polars as pl
-                _cp = Path(cot_data_path)
-                if _cp.exists():
-                    cot_data = pl.read_parquet(_cp)
-            except Exception:
-                cot_data = None
+            cot_data = load_cot(cot_data_path)
 
         result = _build_multipair_chunk(
             pair_ticks, fe, scalers, seq_len, window_idx,
@@ -2334,6 +2501,8 @@ def _parallel_window_worker(worker_args: dict):
             historical_news_file=historical_news_file,
             economic_calendar_file=economic_calendar_file,
             cot_data=cot_data,
+            max_bad_frac=float(worker_args.get("max_bad_frac", 0.05)),
+            max_zero_frac=float(worker_args.get("max_zero_frac", 0.80)),
         )
         X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = result
 
@@ -2378,10 +2547,8 @@ def _build_multipair_dataset(
     cross_asset = None
     sentiment_pipe = None
     import polars as pl
-    cot_path = Path("data/raw/cot/cot_financials_cleaned.parquet")
-    cot_data = pl.read_parquet(cot_path) if cot_path.exists() else None
-    if cot_data is not None:
-        print(f"[MultiPair] Loaded COT data ({len(cot_data)} rows)")
+    cot_path = COT_PARQUET_PATH
+    cot_data = load_cot(cot_path)
     if str(getattr(args, "sentiment_mode", "finbert")).lower() != "off":
         try:
             pref = "finbert" if str(args.sentiment_mode).lower() == "finbert" else "vader"
@@ -2608,8 +2775,8 @@ def _build_multipair_dataset(
             from concurrent.futures import ProcessPoolExecutor, as_completed
             print(f"[MultiPair] Parallel window processing: {_pw_workers} processes")
 
-            _cot_path_str = str(Path("data/raw/cot/cot_financials_cleaned.parquet"))
-            _cot_path_exists = Path(_cot_path_str).exists()
+            _cot_path_str = str(COT_PARQUET_PATH)
+            _cot_path_exists = COT_PARQUET_PATH.exists()
 
             _worker_args_all = []
             for idx, ws, we in _pending:
@@ -2634,17 +2801,19 @@ def _build_multipair_dataset(
                     "historical_news_file": getattr(args, "historical_news_file", None),
                     "economic_calendar_file": getattr(args, "economic_calendar_file", None),
                     "cot_data_path": _cot_path_str if _cot_path_exists else None,
+                    "max_bad_frac": float(getattr(args, "max_bad_frac", 0.05)),
+                    "max_zero_frac": float(getattr(args, "max_zero_frac", 0.80)),
                 })
 
             _all_worker_scalers: dict[str, list] = {p: [] for p in pairs}
             _batch_sz = max(_pw_workers, 2)
             _n_errors = 0
 
-            for _b_start in range(0, len(_worker_args_all), _batch_sz):
-                _batch = _worker_args_all[_b_start:_b_start + _batch_sz]
-                _batch_results: dict[int, dict] = {}
+            with ProcessPoolExecutor(max_workers=_pw_workers) as _p_pool:
+                for _b_start in range(0, len(_worker_args_all), _batch_sz):
+                    _batch = _worker_args_all[_b_start:_b_start + _batch_sz]
+                    _batch_results: dict[int, dict] = {}
 
-                with ProcessPoolExecutor(max_workers=_pw_workers) as _p_pool:
                     _futures = {
                         _p_pool.submit(_parallel_window_worker, wa): wa["window_idx"]
                         for wa in _batch
@@ -2764,6 +2933,8 @@ def _build_multipair_dataset(
                         historical_news_file=getattr(args, "historical_news_file", None),
                         economic_calendar_file=getattr(args, "economic_calendar_file", None),
                         cot_data=cot_data,
+                        max_bad_frac=float(getattr(args, "max_bad_frac", 0.05)),
+                        max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
                     ))
                     if X_seq is None or X_seq.size == 0:
                         del pair_ticks
@@ -2821,6 +2992,8 @@ def _build_multipair_dataset(
                 historical_news_file=getattr(args, "historical_news_file", None),
                 economic_calendar_file=getattr(args, "economic_calendar_file", None),
                 cot_data=cot_data,
+                max_bad_frac=float(getattr(args, "max_bad_frac", 0.05)),
+                max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
             ))
             if X_seq is not None and X_seq.size > 0:
                 n_features     = n_feat
@@ -2869,6 +3042,8 @@ def _build_multipair_dataset(
             historical_news_file=getattr(args, "historical_news_file", None),
             economic_calendar_file=getattr(args, "economic_calendar_file", None),
             cot_data=cot_data,
+            max_bad_frac=float(getattr(args, "max_bad_frac", 0.05)),
+            max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
         ))
         if X_seq.size > 0:
             n_features    = n_feat
@@ -3049,7 +3224,7 @@ def _build_multipair_dataset(
             schema_hash="",
             feature_list=[],
             n_rows_total=total_samples,
-            lookahead_bars=int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 15))),
+            lookahead_bars=int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30))),
             embargo_bars=int(getattr(args, "embargo_bars", LABELING.get("embargo_bars", 60))),
             purge_bars=int(getattr(args, "purge_bars", 120)),
         )
@@ -3165,6 +3340,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             macd_fast=FEATURES["macd_fast"], macd_slow=FEATURES["macd_slow"],
             macd_signal=FEATURES["macd_signal"], bb_window=FEATURES["bollinger_window"],
             bb_std=FEATURES["bollinger_std"], lag_windows=FEATURES["lag_windows"],
+            enable_no_trade_zones=True,
         )
         cache_str, n_samples, n_features, scaler = _build_multipair_dataset(
             args, pairs, cache_path, fe,
@@ -3245,6 +3421,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         bb_window   = FEATURES["bollinger_window"],
         bb_std      = FEATURES["bollinger_std"],
         lag_windows = FEATURES["lag_windows"],
+        enable_no_trade_zones=True,
     )
     scaler  = StandardScaler()
     chunk_n     = 0
@@ -3254,10 +3431,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
 
     # Load COT data
     import polars as pl
-    cot_path = Path("data/raw/cot/cot_financials_cleaned.parquet")
-    cot_data = pl.read_parquet(cot_path) if cot_path.exists() else None
-    if cot_data is not None:
-        print(f"[Data] Loaded Smart Money COT data ({len(cot_data)} rows)")
+    cot_path = COT_PARQUET_PATH
+    cot_data = load_cot(cot_path)
 
     # Sentiment pipeline (single-pair path)
     sentiment_pipe = None
@@ -3381,6 +3556,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
                 historical_news_file = getattr(args, "historical_news_file", None),
                 economic_calendar_file = getattr(args, "economic_calendar_file", None),
                 cot_data = cot_data,
+                max_bad_frac = float(getattr(args, "max_bad_frac", 0.05)),
+                max_zero_frac = float(getattr(args, "max_zero_frac", 0.80)),
             ))
             del ticks_chunk
             gc.collect()
@@ -3393,6 +3570,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             continue
 
         _maybe_enforce_feature_schema_early(args, cache_path)
+        _maybe_run_lookahead_guard(args, X_seq, close_seq)
 
         n_features_total = n_feat
         n_samples_chunk = len(X_seq)
@@ -3635,6 +3813,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         from data.dataset_manifest import DatasetManifest
         _dm = DatasetManifest(str(Path(cache_path).parent))
         _dm.log_build_event("build_complete", n_rows=total_samples, n_features=n_features_total)
+        from training.cache_integrity import _compute_content_hash
         _dm.write_manifest(
             source=str(getattr(args, "data_source", "dukascopy")),
             pairs=_get_pairs(args),
@@ -3648,9 +3827,10 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             schema_hash=_scaler_feature_names(scaler) if scaler else "",
             feature_list=list(_scaler_feature_names(scaler)) if scaler else [],
             n_rows_total=total_samples,
-            lookahead_bars=int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 15))),
+            lookahead_bars=int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30))),
             embargo_bars=int(getattr(args, "embargo_bars", LABELING.get("embargo_bars", 60))),
             purge_bars=int(getattr(args, "purge_bars", 120)),
+            content_hash=_compute_content_hash(args),
         )
     except Exception as _m_err:
         _log_warn(f"[Manifest] write failed ({_m_err})")
@@ -3690,3 +3870,91 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
 
     return str(cache_path), total_samples, n_features_total, scaler
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MULTI-TIMEFRAME TENSOR BUILDER
+# Provides the missing data-pipeline link for models.ensemble.MultiTimeframeAttention.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_multitf_tensors(
+    X_seq: np.ndarray,
+    base_tf_minutes: int = 1,
+    target_tfs: "list[int] | None" = None,
+) -> "list[np.ndarray]":
+    """Downsample a 1-min ``X_seq`` into coarser timeframe views.
+
+    Produces a list of arrays that can be passed directly to
+    ``MultiTimeframeAttention.forward(x_list)``.  The algorithm is
+    **lookahead-free**: each coarser bar uses only the last 1-min bar within
+    its completed window, so a 5-min bar at index *i* corresponds to 1-min
+    bars ``[i-4, i]`` -- all of which have already closed by the time the
+    sequence ends.
+
+    Parameters
+    ----------
+    X_seq : np.ndarray
+        Shape ``(N, T, F)`` -- the standard sliding-window feature tensor
+        produced by ``dataset_builder``.  Each sample ``X_seq[n]`` is a
+        sequence of ``T`` 1-min bars ending at time ``t_n``.
+    base_tf_minutes : int
+        The bar frequency of ``X_seq`` in minutes (default 1).
+    target_tfs : list[int]
+        Target timeframes in minutes.  Defaults to ``[1, 5, 15]``.
+        Values must be multiples of ``base_tf_minutes``.
+
+    Returns
+    -------
+    list[np.ndarray]
+        One array per target timeframe, ordered as ``target_tfs``.
+        - ``[0]`` shape ``(N, T,       F)``  -- unchanged 1-min view
+        - ``[1]`` shape ``(N, T//5,    F)``  -- 5-min view (last bar of each 5)
+        - ``[2]`` shape ``(N, T//15,   F)``  -- 15-min view
+    """
+    if target_tfs is None:
+        target_tfs = [base_tf_minutes, 5, 15]
+
+    N, T, F = X_seq.shape
+    result = []
+
+    for tf in target_tfs:
+        stride = max(1, tf // base_tf_minutes)
+        if stride == 1:
+            result.append(X_seq.astype(np.float32, copy=False))
+            continue
+
+        # Take every stride-th bar starting from the last bar (index T-1)
+        # working backwards, then reverse so time is ascending.
+        # This picks the LAST bar of each completed coarser window -- no lookahead.
+        coarse_indices = list(range(T - 1, -1, -stride))[::-1]
+        if not coarse_indices:
+            coarse_indices = [T - 1]
+
+        coarse = X_seq[:, coarse_indices, :]   # (N, n_coarse, F)
+        result.append(np.ascontiguousarray(coarse, dtype=np.float32))
+
+    return result
+
+
+def build_multitf_dataset(
+    X_seq: np.ndarray,
+    y_seq: np.ndarray,
+    base_tf_minutes: int = 1,
+    target_tfs: "list[int] | None" = None,
+) -> "tuple[list[np.ndarray], np.ndarray]":
+    """Convenience wrapper: returns ``(tf_views, labels)`` ready for training.
+
+    The first element of ``tf_views`` is the full-resolution sequence.
+    Subsequent elements are downsampled coarser-timeframe views.
+
+    Usage with MultiTimeframeAttention::
+
+        tf_views, y = build_multitf_dataset(X_seq, y_seq)
+        import torch
+        x_list = [torch.from_numpy(v) for v in tf_views]
+        model = MultiTimeframeAttention(input_size=F)
+        pred = model(x_list)
+    """
+    if target_tfs is None:
+        target_tfs = [base_tf_minutes, 5, 15]
+    views = build_multitf_tensors(X_seq, base_tf_minutes=base_tf_minutes, target_tfs=target_tfs)
+    return views, y_seq

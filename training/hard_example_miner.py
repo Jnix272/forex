@@ -17,18 +17,12 @@ Enhancements
 
 Usage
 -----
-miner = HardExampleMiner(run_name="haelt_0611", model_name="haelt")
-miner.collect(
-    val_indices   = np.arange(1000),
-    predictions   = np.array([...]),   # shape (N,) or (N, C), float logits/probs
-    labels        = np.array([...]),   # shape (N,) int or float
-    rewards       = np.array([...]),   # shape (N,) float reward signal (optional)
-    losses        = np.array([...]),   # shape (N,) float per-sample loss (optional)
-    regime_labels = np.array([...]),   # shape (N,) int regime id (optional)
-)
-miner.save()
+miner = OnlineOnlineHardExampleMiner(n_samples=n_train_samples)
 
-# Next run:
+# During training, feed each batch's per-sample losses:
+miner.update_batch(sample_indices=batch_idx, per_sample_losses=per_sample_loss)
+
+# Next epoch, build the dataloader from the oversampled index set:
 base_idx = np.arange(n_train_samples)
 aug_idx  = miner.get_oversampled_indices(base_idx)
 """
@@ -46,359 +40,6 @@ _MAX_OVERSAMPLE_RATIO = 2.0   # hard examples can at most double their share
 _CONFIDENCE_THRESHOLD = 0.65  # min predicted probability to count as "confident"
 _WRONG_FRAC_CAP = 0.15        # cap hard examples at 15% of val set
 _BOUNDARY_THRESHOLD = 0.60    # max confidence to be considered "uncertain"
-
-
-class HardExampleMiner:
-    """Collects hard examples from validation and persists them for next run.
-
-    Parameters
-    ----------
-    run_name    : unique run identifier (used in filename)
-    model_name  : model being evaluated
-    log_dir     : directory for .npz output files
-    max_ratio   : maximum oversampling multiplier for hard examples
-    """
-
-    def __init__(
-        self,
-        run_name:   str,
-        model_name: str,
-        log_dir:    str | Path = _DEFAULT_LOG_DIR,
-        max_ratio:  float = _MAX_OVERSAMPLE_RATIO,
-    ):
-        self.run_name   = run_name
-        self.model_name = model_name
-        self.log_dir    = Path(log_dir)
-        self.max_ratio  = max_ratio
-
-        # populated by collect()
-        self.hard_indices:    np.ndarray | None = None
-        self.hard_reasons:    list[str]            = []
-        self.n_val:           int                  = 0
-        self.n_hard:          int                  = 0
-        self.metadata:        dict                 = {}
-        # regime-aware tracking
-        self.regime_distribution: dict | None = None
-
-    # ── collection ───────────────────────────────────────────────────────────
-
-    def collect(
-        self,
-        val_indices: np.ndarray,
-        predictions: np.ndarray,
-        labels:      np.ndarray,
-        rewards:     np.ndarray | None = None,
-        losses:      np.ndarray | None = None,
-        regime_labels: np.ndarray | None = None,
-        confidence_threshold: float = _CONFIDENCE_THRESHOLD,
-        boundary_threshold: float | None = None,
-        loss_weight: float = 0.3,
-    ) -> HardExampleMiner:
-        """Identify hard examples from a validation pass.
-
-        Parameters
-        ----------
-        val_indices  : original dataset indices for the validation samples
-        predictions  : model output — shape (N,) raw logits/scores OR
-                       (N, C) class probabilities
-        labels       : ground-truth — shape (N,) int or float
-        rewards      : optional per-sample reward signal (N,); positive = profit
-        losses       : optional per-sample loss values (N,) for loss-weighted mining
-        regime_labels: optional per-sample regime label (N,) int
-        confidence_threshold : min confidence to call a sample "confident"
-        boundary_threshold   : max confidence to call a sample "uncertain"
-                               (defaults to _BOUNDARY_THRESHOLD when None)
-        loss_weight  : fraction of selection driven by loss vs. confidence
-                       (0.0 = pure confidence error, 1.0 = pure loss)
-        """
-        val_indices = np.asarray(val_indices)
-        predictions = np.asarray(predictions, dtype=np.float32)
-        labels      = np.asarray(labels)
-        N           = len(val_indices)
-        self.n_val  = N
-
-        if boundary_threshold is None:
-            boundary_threshold = _BOUNDARY_THRESHOLD
-
-        hard_mask = np.zeros(N, dtype=bool)
-        reasons   = []
-
-        # ── 1a. high-confidence wrong predictions ──────────────────────────
-        try:
-            if predictions.ndim == 2:
-                pred_class = np.argmax(predictions, axis=1)
-                pred_conf  = predictions[np.arange(N), pred_class]
-            else:
-                pred_class = (predictions >= 0.5).astype(int)
-                pred_conf  = np.abs(predictions - 0.5) * 2.0
-
-            int_labels = labels.astype(int) if labels.dtype.kind in "iuf" else labels
-
-            wrong        = (pred_class != int_labels)
-            confident    = (pred_conf  >= confidence_threshold)
-            conf_wrong   = wrong & confident
-
-            n_conf_wrong = int(conf_wrong.sum())
-            if n_conf_wrong > 0:
-                hard_mask |= conf_wrong
-                reasons.append(
-                    f"confident_wrong: {n_conf_wrong} "
-                    f"(conf>={confidence_threshold:.2f})"
-                )
-        except Exception as e:
-            print(f"[HardMiner] confident-wrong pass failed: {e}")
-
-        # ── 1b. boundary/uncertainty mining ────────────────────────────────
-        try:
-            if predictions.ndim == 2:
-                max_conf = np.max(predictions, axis=1)
-            else:
-                max_conf = pred_conf  # already computed above
-
-            uncertain = (max_conf < boundary_threshold)
-            # only count uncertain samples that aren't already flagged
-            uncertain_new = uncertain & ~hard_mask
-
-            n_uncertain = int(uncertain_new.sum())
-            if n_uncertain > 0:
-                hard_mask |= uncertain_new
-                reasons.append(
-                    f"boundary_uncertain: {n_uncertain} "
-                    f"(max_conf<{boundary_threshold:.2f})"
-                )
-        except Exception as e:
-            print(f"[HardMiner] boundary-mining pass failed: {e}")
-
-        # ── 2. large missed reward opportunities ──────────────────────────
-        if rewards is not None:
-            try:
-                rewards_arr = np.asarray(rewards, dtype=np.float32)
-                if predictions.ndim == 2:
-                    pred_flat = np.argmax(predictions, axis=1).astype(float)
-                else:
-                    pred_flat = predictions.astype(np.float32)
-
-                reward_threshold = np.percentile(np.abs(rewards_arr), 85)
-                large_reward     = np.abs(rewards_arr) >= reward_threshold
-                pred_sign        = (pred_flat >= 0.5).astype(float) * 2 - 1
-                reward_sign      = np.sign(rewards_arr)
-                missed_dir       = (pred_sign * reward_sign < 0) & large_reward
-
-                n_missed = int(missed_dir.sum())
-                if n_missed > 0:
-                    hard_mask |= missed_dir
-                    reasons.append(
-                        f"missed_large_reward: {n_missed} "
-                        f"(|reward|>={reward_threshold:.4f})"
-                    )
-            except Exception as e:
-                print(f"[HardMiner] missed-reward pass failed: {e}")
-
-        # ── 3. loss-weighted ranking (re-ranks within existing mask) ──────
-        if losses is not None and loss_weight > 0.0:
-            try:
-                losses_arr = np.asarray(losses, dtype=np.float32).ravel()
-                if len(losses_arr) == N:
-                    # Normalise losses to [0, 1] across the full set
-                    _min_l, _max_l = float(losses_arr.min()), float(losses_arr.max())
-                    if _max_l > _min_l:
-                        loss_score = (losses_arr - _min_l) / (_max_l - _min_l)
-                    else:
-                        loss_score = np.zeros(N, dtype=np.float32)
-
-                    # Blend confidence error with loss score
-                    if predictions.ndim == 2:
-                        conf_score = pred_conf
-                    else:
-                        conf_score = np.abs(predictions - 0.5) * 2.0
-                    conf_score = np.clip(conf_score, 0.0, 1.0)
-
-                    # Blended score: high confidence wrong OR high loss
-                    wrong_float = wrong.astype(float) if 'wrong' in dir() else (pred_class != int_labels).astype(float)
-                    if 'wrong' not in dir():
-                        wrong_float = (pred_class != (labels.astype(int) if labels.dtype.kind in 'iuf' else labels)).astype(float)
-
-                    blend = (
-                        (1.0 - loss_weight) * conf_score * wrong_float
-                        + loss_weight * loss_score
-                    )
-
-                    # Re-rank hard candidates by blended score
-                    cap = max(1, int(N * _WRONG_FRAC_CAP))
-                    hard_positions = np.where(hard_mask)[0]
-                    if len(hard_positions) > cap:
-                        top_k = np.argsort(blend[hard_positions])[-cap:]
-                        hard_positions = hard_positions[top_k]
-                        # Rebuild mask from re-ranked subset
-                        new_mask = np.zeros(N, dtype=bool)
-                        new_mask[hard_positions] = True
-                        hard_mask = new_mask
-                        reasons.append(
-                            f"loss_ranked: capped at {cap} "
-                            f"(loss_weight={loss_weight:.2f})"
-                        )
-            except Exception as e:
-                print(f"[HardMiner] loss-weighted pass failed: {e}")
-
-        # ── cap at _WRONG_FRAC_CAP of val set ────────────────────────────
-        cap = max(1, int(N * _WRONG_FRAC_CAP))
-        hard_positions = np.where(hard_mask)[0]
-        if len(hard_positions) > cap:
-            try:
-                if predictions.ndim == 2:
-                    conf_at_hard = pred_conf[hard_positions]
-                else:
-                    conf_at_hard = np.abs(predictions[hard_positions] - 0.5) * 2.0
-                top_k = np.argsort(conf_at_hard)[-cap:]
-                hard_positions = hard_positions[top_k]
-            except Exception as e:
-                print(f"[HardMiner] WARNING: Fallback triggered on hard example sorting due to error: {e}")
-                hard_positions = hard_positions[:cap]
-
-        self.hard_indices = val_indices[hard_positions] if len(hard_positions) else np.array([], dtype=np.int64)
-        self.hard_reasons = reasons
-        self.n_hard       = len(self.hard_indices)
-
-        # ── regime-aware tracking ─────────────────────────────────────────
-        self.regime_distribution = None
-        if regime_labels is not None and len(hard_positions) > 0:
-            try:
-                regime_arr = np.asarray(regime_labels, dtype=np.int32).ravel()
-                if len(regime_arr) == N:
-                    hard_regimes = regime_arr[hard_positions]
-                    unique, counts = np.unique(hard_regimes, return_counts=True)
-                    self.regime_distribution = {
-                        int(k): int(v) for k, v in zip(unique, counts)
-                    }
-            except Exception as e:
-                print(f"[HardMiner] regime tracking failed: {e}")
-
-        self.metadata = {
-            "run_name":   self.run_name,
-            "model_name": self.model_name,
-            "n_val":      N,
-            "n_hard":     self.n_hard,
-            "frac_hard":  round(self.n_hard / max(N, 1), 4),
-            "reasons":    reasons,
-        }
-        if self.regime_distribution is not None:
-            self.metadata["regime_distribution"] = self.regime_distribution
-
-        print(
-            f"[HardMiner] {self.model_name}: "
-            f"{self.n_hard}/{N} hard examples "
-            f"({self.metadata['frac_hard']:.1%}) — "
-            + (", ".join(reasons) if reasons else "none found")
-        )
-        return self
-
-    # ── persistence ──────────────────────────────────────────────────────────
-
-    def save(self) -> Path | None:
-        """Atomically write hard examples to .npz."""
-        if self.hard_indices is None or self.n_hard == 0:
-            print(f"[HardMiner] {self.model_name}: nothing to save.")
-            return None
-
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self.log_dir / f"{self.run_name}_{self.model_name}_hard_examples.npz"
-
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".hard_{self.model_name}.", suffix=".tmp.npz",
-            dir=str(self.log_dir),
-        )
-        os.close(fd)
-        try:
-            np.savez_compressed(
-                tmp,
-                hard_indices = self.hard_indices,
-                n_val        = np.array([self.n_val]),
-                n_hard       = np.array([self.n_hard]),
-            )
-            os.replace(tmp, out_path)
-            print(f"[HardMiner] Saved {self.n_hard} hard examples -> {out_path}")
-            return out_path
-        except Exception as e:
-            print(f"[HardMiner] Save failed: {e}")
-            return None
-        finally:
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-
-    @classmethod
-    def load(cls, path: str | Path) -> np.ndarray | None:
-        """Load hard example indices from a saved .npz file."""
-        p = Path(path)
-        if not p.exists():
-            return None
-        try:
-            data = np.load(p)
-            return data["hard_indices"]
-        except Exception as e:
-            print(f"[HardMiner] Could not load {p}: {e}")
-            return None
-
-    # ── oversampling ─────────────────────────────────────────────────────────
-
-    def get_oversampled_indices(
-        self,
-        base_indices: np.ndarray,
-        oversample_factor: float = 1.5,
-    ) -> np.ndarray:
-        """Return base_indices with hard examples lightly repeated.
-
-        Parameters
-        ----------
-        base_indices      : normal training index array
-        oversample_factor : how many extra copies of each hard example (e.g.
-                            1.5 → each hard example appears 1.5× more often
-                            than average)
-
-        Returns
-        -------
-        Shuffled index array of the same dtype as base_indices.
-        """
-        if self.hard_indices is None or self.n_hard == 0:
-            return base_indices
-
-        factor = min(float(oversample_factor), self.max_ratio)
-        extra_count = max(0, int(self.n_hard * (factor - 1.0)))
-        if extra_count == 0:
-            return base_indices
-
-        rng        = np.random.default_rng()
-        extra_pool = np.tile(self.hard_indices, (extra_count // self.n_hard) + 2)
-        extra      = rng.choice(extra_pool, size=extra_count, replace=False)
-
-        augmented = np.concatenate([base_indices, extra])
-        rng.shuffle(augmented)
-        print(
-            f"[HardMiner] Oversampled {self.n_hard} hard examples "
-            f"(+{extra_count} copies, factor={factor:.2f}) "
-            f"-> total {len(augmented)} indices"
-        )
-        return augmented
-
-    # ── helpers ──────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def find_latest(
-        log_dir:    str | Path,
-        model_name: str,
-    ) -> Path | None:
-        """Return the most-recently-modified hard-example file for a model."""
-        log_dir = Path(log_dir)
-        if not log_dir.exists():
-            return None
-        candidates = sorted(
-            log_dir.glob(f"*_{model_name}_hard_examples.npz"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return candidates[0] if candidates else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -499,12 +140,12 @@ class ForgettingTracker:
 # ONLINE HARD-EXAMPLE MINER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class OnlineHardExampleMiner:
+class OnlineOnlineHardExampleMiner:
     """Tracks per-sample loss over epochs and identifies hard/forgotten samples
     during training, enabling online data augmentation.
 
-    Unlike :class:`HardExampleMiner` which operates on a single validation pass,
-    this miner maintains rolling per-sample statistics across *all* training
+    Unlike an offline pass that mines a single validation run, this miner
+    maintains rolling per-sample statistics across *all* training
     epochs so consistently difficult or forgotten samples can be oversampled
     before they cause overfitting.
 
@@ -564,8 +205,10 @@ class OnlineHardExampleMiner:
         self._loss_buffer[-1, indices[valid]] = losses[valid]
 
     def end_epoch(self) -> None:
-        """Finalise the current epoch: update forgetting tracker with epoch mean."""
-        epoch_losses = np.nanmean(self._loss_buffer, axis=0)
+        """Finalise the current epoch: update forgetting tracker with this epoch's losses."""
+        # Use only the current epoch's loss row, not a smoothed window average,
+        # so ForgettingTracker sees the correct per-epoch loss trajectory.
+        epoch_losses = self._loss_buffer[-1].copy()
         self._forgetting_tracker.update(epoch_losses)
 
     def get_hard_mask(self) -> np.ndarray:

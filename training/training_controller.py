@@ -142,7 +142,7 @@ class TrainingController:
                 pg["lr"] = max(1e-7, old * lr_mult)
                 applied["new_lr"] = float(pg["lr"])
             if scheduler is not None:
-                for attr in ("base_lrs", "_last_lr"):
+                for attr in ("base_lrs", "_last_lr", "initial_lrs", "max_lrs", "min_lrs"):
                     vals = getattr(scheduler, attr, None)
                     if isinstance(vals, list):
                         setattr(scheduler, attr, [v * lr_mult for v in vals])

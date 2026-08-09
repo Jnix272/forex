@@ -31,6 +31,108 @@ def _is_polars_frame(frame) -> bool:
     return pl is not None and isinstance(frame, pl.DataFrame)
 
 
+def _label_regime_cfg() -> dict:
+    try:
+        from config.settings import LABEL_REGIME as _LR
+        return _LR
+    except Exception:
+        return {}
+
+
+def max_label_horizon_mult(label_regime: dict | None = None) -> float:
+    """Largest multiplicative label horizon vs base LH (embargo / purge floor).
+
+    Embargo must cover ``base_LH * max(regime horizon_mults) * max(session
+    horizon_mults)`` — trending can reach 1.5× and asia/off can stretch further.
+    Spread gates only shorten, so they are ignored here.
+    """
+    lr = label_regime if label_regime is not None else _label_regime_cfg()
+    barrier = lr.get("barrier_scale") or {}
+    regime_m = 1.0
+    for cfg in barrier.values():
+        if isinstance(cfg, dict) and "horizon_mult" in cfg:
+            regime_m = max(regime_m, float(cfg["horizon_mult"]))
+    session_m = 1.0
+    for v in (lr.get("session_horizon_mult") or {}).values():
+        session_m = max(session_m, float(v))
+    return float(regime_m * session_m)
+
+
+def resolve_session_key(
+    session: str | None = None,
+    *,
+    asia_london: bool | float = False,
+    london_ny: bool | float = False,
+) -> str:
+    """Prefer DST overlap flags over exclusive primary session for policy lookup."""
+    if asia_london:
+        return "asia_london"
+    if london_ny:
+        return "london_ny"
+    if session is None:
+        return "default"
+    s = str(session).strip().lower()
+    return s if s else "default"
+
+
+def resolve_session_cost(
+    session: str | None = None,
+    *,
+    asia_london: bool | float = False,
+    london_ny: bool | float = False,
+    label_regime: dict | None = None,
+) -> float:
+    """Session / overlap transaction-cost scale (applied before horizon)."""
+    lr = label_regime if label_regime is not None else _label_regime_cfg()
+    scales = lr.get("session_cost_scale") or {}
+    key = resolve_session_key(session, asia_london=asia_london, london_ny=london_ny)
+    return float(scales.get(key, 1.0))
+
+
+def resolve_horizon(
+    base_lh: int,
+    regime: str | None = None,
+    session: str | None = None,
+    spread_z: float | None = None,
+    *,
+    asia_london: bool | float = False,
+    london_ny: bool | float = False,
+    regime_horizon_mult: float | None = None,
+    label_regime: dict | None = None,
+) -> int:
+    """Resolve per-bar label horizon from base LH × regime × session × spread.
+
+    Cost scaling is separate (``resolve_session_cost``); call that first when
+    both are needed. ``regime_horizon_mult`` overrides table lookup when the
+    caller already resolved barrier_scale for the bar.
+    """
+    lr = label_regime if label_regime is not None else _label_regime_cfg()
+    base = max(1, int(base_lh))
+    if regime_horizon_mult is not None:
+        r_hm = float(regime_horizon_mult)
+    else:
+        barrier = lr.get("barrier_scale") or {}
+        key = str(regime or "normal").lower()
+        cfg = barrier.get(key) or barrier.get("normal") or {}
+        r_hm = float(cfg.get("horizon_mult", 1.0)) if isinstance(cfg, dict) else 1.0
+
+    sess_key = resolve_session_key(session, asia_london=asia_london, london_ny=london_ny)
+    s_hm = float((lr.get("session_horizon_mult") or {}).get(sess_key, 1.0))
+
+    sp_hm = 1.0
+    if spread_z is not None and np.isfinite(spread_z):
+        sp = lr.get("spread_horizon") or {}
+        z = float(spread_z)
+        z_ext = float(sp.get("z_extreme", 2.5))
+        z_wide = float(sp.get("z_wide", 1.5))
+        if z >= z_ext:
+            sp_hm = float(sp.get("extreme_mult", 0.5))
+        elif z >= z_wide:
+            sp_hm = float(sp.get("wide_mult", 0.75))
+
+    return max(3, int(base * r_hm * s_hm * sp_hm))
+
+
 def _to_polars_with_timestamp(frame, timestamp_col: str = "timestamp_utc"):
     if pl is None:
         raise RuntimeError("Polars is required for Polars-native labeling inputs")
@@ -63,9 +165,9 @@ def compute_rl_reward_labels(
     bars:              pd.DataFrame,
     features:          pd.DataFrame,
     atr_col:           str   = "atr_6",
-    lookahead_bars:    int   = 10,
-    profit_atr_mult:   float = 1.5,
-    stop_atr_mult:     float = 1.0,
+    lookahead_bars:    int   = 30,   # match LABELING / strategy.lookahead_bars
+    profit_atr_mult:   float = 1.2,  # match LABELING.profit_target_atr
+    stop_atr_mult:     float = 0.8,  # match LABELING.stop_loss_atr
     tx_cost_pips:      float = 1.5,
     pip_size:          float = 0.0001,
     execution_delay_bars: int = 1,
@@ -210,7 +312,13 @@ def compute_rl_reward_labels(
         "optimal_side": optimal,
     })
     valid_s = pl.Series("valid_market", valid_market)
-    tail_cut = lookahead_bars + delay
+    # Tail cut: the base (non-regime) labeller stops producing labels at
+    # index n - lookahead_bars - delay (see loop bound above), so its tail
+    # length is exactly lookahead_bars + delay. The regime-scaled horizon
+    # max_label_horizon_mult() does NOT apply here — that belongs to the
+    # regime labeller (compute_rl_reward_labels_regime), which has a
+    # barrier_scale context. Referencing barrier_scale here was a bug.
+    tail_cut = lookahead_bars + max(0, int(execution_delay_bars))
     result_pl = result_pl.with_columns(valid_s)
     result_pl = result_pl.with_columns([
         pl.when(pl.col("valid_market")).then(pl.col("reward_long")).otherwise(0.0).alias("reward_long"),
@@ -258,13 +366,15 @@ def _compute_slippage_multiplier(
     mult = np.ones(n, dtype=np.float32)
 
     # Rolling median ATR
-    med_atr = pd.Series(atr).rolling(vol_window, min_periods=10).median().ffill().fillna(0.0).values
+    med_atr = pd.Series(atr).rolling(vol_window, min_periods=10).median().ffill().to_numpy(dtype=np.float32)
+    med_atr = np.where(np.isfinite(med_atr) & (med_atr > 0), med_atr, np.asarray(atr, dtype=np.float32))
     if med_atr.max() > 0:
         vol_ratio   = np.maximum(0.0, atr / np.maximum(med_atr, 1e-10) - 1.0)
         mult += vol_alpha * vol_ratio
 
     # Rolling median spread
-    med_spr = pd.Series(spread).rolling(spread_window, min_periods=10).median().ffill().fillna(0.0).values
+    med_spr = pd.Series(spread).rolling(spread_window, min_periods=10).median().ffill().to_numpy(dtype=np.float32)
+    med_spr = np.where(np.isfinite(med_spr) & (med_spr > 0), med_spr, np.asarray(spread, dtype=np.float32))
     if med_spr.max() > 0:
         spr_ratio   = np.maximum(0.0, spread / np.maximum(med_spr, 1e-10) - 1.0)
         mult += liq_alpha * spr_ratio
@@ -276,7 +386,7 @@ def compute_rl_reward_labels_regime(
     bars:              pd.DataFrame,
     features:          pd.DataFrame,
     atr_col:           str   = "atr_6",
-    lookahead_bars:    int   = 10,
+    lookahead_bars:    int   = 30,   # match LABELING / strategy.lookahead_bars
     profit_atr_mult:   float | None = None,
     stop_atr_mult:     float | None = None,
     pip_size:          float = 0.0001,
@@ -305,12 +415,14 @@ def compute_rl_reward_labels_regime(
     try:
         from config.settings import LABEL_REGIME as _LR
         from config.settings import NO_TRADE as _NT
+        _LR_full = dict(_LR)
         barrier_scale   = _LR["barrier_scale"]
         high_vol_pct    = _LR["high_vol_pct"]
         low_vol_pct     = _LR["low_vol_pct"]
         sess_cost_scale = _LR["session_cost_scale"]
         _NT["liquidity_vacuum_max"]
     except Exception:
+        _LR_full = {}
         barrier_scale   = {}
         high_vol_pct    = 0.75
         low_vol_pct     = 0.25
@@ -334,9 +446,9 @@ def compute_rl_reward_labels_regime(
         _LBL = {}
 
     if profit_atr_mult is None:
-        profit_atr_mult = float(_LBL.get("profit_target_atr", 1.8))
+        profit_atr_mult = float(_LBL.get("profit_target_atr", 1.2))
     if stop_atr_mult is None:
-        stop_atr_mult = float(_LBL.get("stop_loss_atr", 0.9))
+        stop_atr_mult = float(_LBL.get("stop_loss_atr", 0.8))
 
     close = bars["close"].reindex(features.index).ffill().values.astype(np.float64)
     if "ask_close" in bars.columns and "bid_close" in bars.columns:
@@ -389,24 +501,67 @@ def compute_rl_reward_labels_regime(
 
     # ── Regime arrays ─────────────────────────────────────────────────────────
     # Priority: explicit regime_col from features > ATR-quantile fallback.
-    # regime_col values (from RegimeGateClassifier / regime features):
-    #   "trending" | "high_vol" | "mean_rev" | "ranging" | "normal" | float break_prob
+    # regime_col values: integer 0=low_vol, 1=normal, 2=high_vol (from HMM regime_class)
+    # or string labels like "trending", "mean_rev", "ranging" (from RegimeGateClassifier).
     vol_series = pd.Series(atr, index=features.index)
     vol_q_hi   = vol_series.rolling(500, min_periods=50).quantile(high_vol_pct).values
     vol_q_lo   = vol_series.rolling(500, min_periods=50).quantile(low_vol_pct).values
 
     _use_regime_col = (regime_col is not None and regime_col in features.columns)
     if _use_regime_col:
-        regime_vals = features[regime_col].ffill().fillna("normal").values
+        # Map integer regime_class (0=low_vol, 1=normal, 2=high_vol) to string labels
+        _regime_int_map = {0.0: "low_vol", 1.0: "normal", 2.0: "high_vol"}
+        regime_vals = features[regime_col].ffill().values
+        regime_mapped = np.empty(len(regime_vals), dtype=object)
+        for idx in range(len(regime_vals)):
+            val = regime_vals[idx]
+            if isinstance(val, str):
+                regime_mapped[idx] = val.lower()
+            elif isinstance(val, (int, np.integer)):
+                regime_mapped[idx] = _regime_int_map.get(float(val), "normal")
+            elif isinstance(val, (float, np.floating)):
+                if np.isnan(val):
+                    regime_mapped[idx] = "normal"
+                else:
+                    regime_mapped[idx] = _regime_int_map.get(val, "normal")
+            else:
+                regime_mapped[idx] = str(val).lower()
+        regime_vals = regime_mapped
+        for idx in range(len(regime_vals)):
+            if regime_vals[idx] is None:
+                regime_vals[idx] = "normal"
     else:
         regime_vals = None
 
-    # Session cost multiplier
-    sess_mult = np.ones(n)
+    # Session / overlap cost multipliers (cost first; horizon resolved per bar).
+    # DST-aware overlap flags (asia_london, london_ny) take precedence over
+    # exclusive session_label when present (labeling-only aux columns).
+    _asia_london = np.zeros(n, dtype=bool)
+    _london_ny = np.zeros(n, dtype=bool)
+    if "asia_london" in features.columns:
+        _asia_london = np.asarray(features["asia_london"].fillna(0).values).astype(bool)
+    if "london_ny" in features.columns and features["london_ny"].dtype != object:
+        # Numeric overlap flag (DST from bars or FE); Utf8 session names ignored.
+        _london_ny = np.asarray(features["london_ny"].fillna(0).values).astype(bool)
+    # Prefer explicit overlap aux if FE kept crude london_ny in X and bars
+    # attached a separate overlap column under the same name — both are 0/1 floats.
+    sess_vals = None
     if session_col and session_col in features.columns:
         sess_vals = features[session_col].values
-        for i, s in enumerate(sess_vals):
-            sess_mult[i] = sess_cost_scale.get(str(s), 1.0)
+    sess_mult = np.ones(n)
+    for i in range(n):
+        s = str(sess_vals[i]) if sess_vals is not None else None
+        sess_mult[i] = resolve_session_cost(
+            s,
+            asia_london=_asia_london[i],
+            london_ny=_london_ny[i],
+            label_regime=_LR_full or {"session_cost_scale": sess_cost_scale},
+        )
+
+    # Spread z for horizon gate (optional)
+    _spread_z = None
+    if "spread_zscore" in features.columns:
+        _spread_z = features["spread_zscore"].fillna(0.0).values.astype(np.float64)
 
     # No-trade mask
     no_trade_mask = np.zeros(n, dtype=bool)
@@ -418,8 +573,15 @@ def compute_rl_reward_labels_regime(
     path_quality      = np.zeros(n, dtype=np.float32)  # B: path quality
     confidence_target = np.zeros(n, dtype=np.float32)  # B: drawdown risk proxy
 
+    # Max regime-scaled horizon for loop bounds (session/spread only shorten or
+    # stretch within max_label_horizon_mult).
+    _max_h = max(lookahead_bars, int(lookahead_bars * max_label_horizon_mult(
+        {"barrier_scale": barrier_scale,
+         "session_horizon_mult": _LR_full.get("session_horizon_mult", {})}
+    )))
+
     delay = max(0, int(execution_delay_bars))
-    for i in range(n - lookahead_bars - delay):
+    for i in range(n - _max_h - delay):
         entry_i = i + delay
         if not valid_market[i] or not valid_market[entry_i]:
             continue
@@ -432,7 +594,9 @@ def compute_rl_reward_labels_regime(
                 cfg = barrier_scale.get("high_vol", {"tp_atr_mult": profit_atr_mult * 1.33, "sl_atr_mult": stop_atr_mult * 1.66, "horizon_mult": 0.7})
             elif "mean_rev" in rv or "ranging" in rv:
                 # Mean reversion: tighter barriers, shorter horizon — trades resolve quickly
-                cfg = barrier_scale.get("mean_rev",  {"tp_atr_mult": profit_atr_mult * 0.66, "sl_atr_mult": stop_atr_mult * 0.88, "horizon_mult": 0.8})
+                cfg = barrier_scale.get("mean_rev",  {"tp_atr_mult": profit_atr_mult * 0.66, "sl_atr_mult": stop_atr_mult * 0.88, "horizon_mult": 0.5})
+            elif "low_vol" in rv or "low" in rv:
+                cfg = barrier_scale.get("low_vol",  {"tp_atr_mult": profit_atr_mult * 0.66, "sl_atr_mult": stop_atr_mult * 0.88, "horizon_mult": 1.3})
             elif "trending" in rv:
                 cfg = barrier_scale.get("trending", {"tp_atr_mult": profit_atr_mult * 1.33, "sl_atr_mult": stop_atr_mult * 1.33, "horizon_mult": 1.5})
             else:
@@ -448,7 +612,17 @@ def compute_rl_reward_labels_regime(
 
         tp_mult  = float(cfg["tp_atr_mult"])
         sl_mult  = float(cfg["sl_atr_mult"])
-        horizon  = max(3, int(lookahead_bars * float(cfg["horizon_mult"])))
+        _sess = str(sess_vals[entry_i]) if sess_vals is not None else None
+        _sz = float(_spread_z[entry_i]) if _spread_z is not None else None
+        horizon = resolve_horizon(
+            lookahead_bars,
+            session=_sess,
+            spread_z=_sz,
+            asia_london=_asia_london[entry_i],
+            london_ny=_london_ny[entry_i],
+            regime_horizon_mult=float(cfg["horizon_mult"]),
+            label_regime=_LR_full,
+        )
         # E: inflate tx cost by slippage multiplier (vol + liquidity premium)
         tx_cost  = 1.5 * pip_size * sess_mult[entry_i] * float(slippage_mult[entry_i])
         tx_pips  = tx_cost / pip_size
@@ -575,7 +749,7 @@ def compute_rl_reward_labels_regime(
     result.loc[~valid_market, "no_trade"] = 1
     result.loc[~valid_market, "optimal_side"] = "hold"
 
-    result.iloc[-(lookahead_bars + delay):] = np.nan
+    result.iloc[-(_max_h + delay):] = np.nan
     result = result.dropna()
 
     counts = pd.Series(result["label"]).value_counts()

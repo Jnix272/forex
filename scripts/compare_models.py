@@ -147,8 +147,12 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
             self.corr_window = 20
             self.corr_window_long = 60
             self.momentum_window = 20
-            self._n_pairs = 10
-            self._f_per_pair = 224
+            self._n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or 1)
+            self._f_per_pair = int(
+                cfg.get("_f_per_pair")
+                or cfg.get("f_per_pair")
+                or max(1, n_features // max(1, self._n_pairs))
+            )
 
     try:
         if model_key in {"xgboost", "xgb"}:
@@ -169,17 +173,17 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
                 if not bck.exists():
                     raise FileNotFoundError(f"Missing base checkpoint: {bck}")
                 bmodel = build_model(bn, n_features, ModelConfig()).to(device)
-                bstate = torch.load(bck, map_location=device, weights_only=False)
+                bstate = torch.load(bck, map_location=device, weights_only=True)
                 bmodel.load_state_dict(_checkpoint_state_dict(bstate), strict=False)
                 bmodel.eval()
                 bases.append(bmodel)
             model = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=base_names).to(device)
-            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
             model.load_state_dict(_checkpoint_state_dict(checkpoint), strict=False)
             model.eval()
         else:
             model = build_model(model_name, n_features, ModelConfig()).to(device)
-            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
             model.load_state_dict(_checkpoint_state_dict(checkpoint), strict=False)
             model.eval()
     except Exception as e:

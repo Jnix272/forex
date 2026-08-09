@@ -19,9 +19,12 @@ Known symbol corrections vs original:
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
+
+from infrastructure.logging_utils import log_data_load
 
 # ── Stooq symbol candidates (tried in order until one returns data) ───────────
 STOOQ_SYMBOLS: dict[str, list[str]] = {
@@ -135,7 +138,7 @@ def _read_stooq_daily(symbol: str) -> pd.Series | None:
     if len(df) < 2:    # single row is likely an error response
         return None
     s   = pd.to_numeric(df["Close"], errors="coerce")
-    idx = pd.to_datetime(df["Date"], utc=True, errors="coerce")
+    idx = pd.to_datetime(df["Date"], utc=True, errors="coerce") + pd.Timedelta(days=1)
     out = pd.Series(s.values, index=idx, name=symbol).dropna()
     if out.empty:
         return None
@@ -293,7 +296,9 @@ def load_cross_asset_panel(
     out: dict[str, pd.Series] = {}
 
     for asset, candidates in STOOQ_SYMBOLS.items():
+        _t0_asset = time.perf_counter()
         ser: pd.Series | None = None
+        used_provider = None
 
         provider_order = (
             ["stooq", "yahoo", "fred", "eodhd"] if source == "auto" else [source]
@@ -301,6 +306,7 @@ def load_cross_asset_panel(
 
         for provider in provider_order:
             if ser is not None and not ser.empty:
+                used_provider = provider
                 break
 
             if provider == "stooq":
@@ -313,6 +319,8 @@ def load_cross_asset_panel(
                         if ser is not None and not ser.empty:
                             _cache_write(cache_path, ser)
                     if ser is not None and not ser.empty:
+                        log_data_load("cross_asset_provider", f"{asset}/stooq/{sym}", 
+                                     n_rows=len(ser), status="success", t0=_t0_asset)
                         break
 
             elif provider == "yahoo":
@@ -328,6 +336,9 @@ def load_cross_asset_panel(
                     ser = _read_yahoo_daily(ysym, start, end)
                     if ser is not None and not ser.empty:
                         _cache_write(cache_path, ser)
+                if ser is not None and not ser.empty:
+                    log_data_load("cross_asset_provider", f"{asset}/yahoo/{ysym}", 
+                                 n_rows=len(ser), status="success", t0=_t0_asset)
 
             elif provider == "fred":
                 fsym = FRED_YIELD_SYMBOLS.get(asset)
@@ -339,20 +350,30 @@ def load_cross_asset_panel(
                     ser = _read_fred_daily(fsym, start, end)
                     if ser is not None and not ser.empty:
                         _cache_write(cache_path, ser)
+                if ser is not None and not ser.empty:
+                    log_data_load("cross_asset_provider", f"{asset}/fred/{fsym}", 
+                                 n_rows=len(ser), status="success", t0=_t0_asset)
 
             elif provider == "eodhd":
                 ser = _read_eodhd_daily(asset, start, end, cdir)
+                if ser is not None and not ser.empty:
+                    log_data_load("cross_asset_provider", f"{asset}/eodhd", 
+                                 n_rows=len(ser), status="success", t0=_t0_asset)
 
         if ser is None or ser.empty:
-            import logging
-            logging.getLogger(__name__).warning(
-                "CrossAsset: all providers failed for %s (tried %s)", asset, provider_order
-            )
+            log_data_load("cross_asset", asset, n_rows=0, status="all_providers_failed",
+                         note=f"tried={provider_order}", t0=_t0_asset)
             continue
+
+        # Shift index by 1 day to prevent look-ahead bias (daily close is known next day)
+        ser.index = ser.index + pd.Timedelta(days=1)
 
         # Clip to requested range; fall back to full series if no overlap
         clip = ser[(ser.index >= start_ts) & (ser.index <= end_ts)]
         out[asset] = clip if not clip.empty else ser
+        
+        log_data_load("cross_asset", asset, n_rows=len(out[asset]), status="success",
+                      t0=_t0_asset, note=f"provider={used_provider or provider}")
 
     # Derived: yield curve slope (US 10Y − US 2Y) — classic recession signal
     if "US10Y" in out and "US2Y" in out:

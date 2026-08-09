@@ -15,6 +15,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 warnings.filterwarnings("ignore")
 
@@ -32,7 +33,8 @@ if TORCH:
         """
         Base checkpoints are often MultiTaskWrapper, whose forward returns
         (direction_logits, return_hat, confidence). The meta-learner stacks
-        scalar predictions per model — use return_hat for multitask models.
+        scalar predictions per model — use return_hat for multitask models,
+        and a signed direction score for CE-only (B, 3) logits.
         """
         if isinstance(raw, (tuple, list)) and len(raw) > 0:
             first = raw[0]
@@ -65,6 +67,13 @@ if TORCH:
 
         if t.dim() > 1 and t.shape[-1] == 1:
             t = t.squeeze(-1)
+        # CE direction logits (B, 3): sell/hold/buy → signed score (buy − sell)
+        # Never flatten to (B*3,) — that breaks meta stacking.
+        elif t.dim() == 2 and t.shape[-1] == 3:
+            t = t[:, -1] - t[:, 0]
+        elif t.dim() > 1:
+            # Unexpected multi-dim head: reduce last axis (mean) to keep batch vector
+            t = t.mean(dim=tuple(range(1, t.dim())))
         return t.reshape(-1)
 
 
@@ -164,8 +173,8 @@ if TORCH:
             """
             # Standardise each model's column to zero-mean unit-variance
             p = preds - preds.mean(0, keepdim=True)
-            p = p / (p.std(0, keepdim=True) + 1e-8)   # (B, n_models)
-            # Pearson correlation matrix via inner product
+            p = p / (p.std(0, unbiased=True, keepdim=True) + 1e-8)   # (B, n_models)
+            # Pearson correlation matrix via inner product (sample correlation)
             corr = (p.T @ p) / max(p.shape[0] - 1, 1)  # (n_models, n_models)
             # Average of upper-triangle (off-diagonal) elements only
             n = corr.shape[0]
@@ -234,7 +243,7 @@ if TORCH:
                 output = preds.mean(dim=1)
 
             # Disagreement/Uncertainty (Standard Deviation across folds)
-            uncertainty = preds.std(dim=1)
+            uncertainty = preds.std(dim=1, unbiased=False)
 
             return output, uncertainty
 
@@ -422,9 +431,11 @@ if TORCH:
                     [_base_pred_to_batch_vector(self.model(x)) for _ in range(self.n_passes)], dim=0
                 )  # (n_passes, B)
                 mean = preds.mean(0)
-                std  = preds.std(0)
-                max_std = std.max().clamp(min=1e-6)
-                conf    = 1.0 - (std / max_std)
+                std  = preds.std(0, unbiased=False)
+                # Use a fixed normaliser (not batch-max) so single-sample inference
+                # returns a valid confidence score instead of always 0.0.
+                _CONF_MAX_STD = 0.1  # empirical cap; adjust via calibration
+                conf = (1.0 - (std / _CONF_MAX_STD)).clamp(0.0, 1.0)
                 return mean, std, conf
             finally:
                 self._disable_dropout()
@@ -448,9 +459,11 @@ if TORCH:
             preds = torch.stack(
                 [_base_pred_to_batch_vector(m(x.to(self.device))) for m in self.models], dim=0
             )
-            mean = preds.mean(0); std = preds.std(0)
-
-            conf = 1.0 - (std / std.max().clamp(min=1e-6))
+            mean = preds.mean(0); std = preds.std(0, unbiased=False)
+            # Use a fixed normaliser (not batch-max) so single-sample inference
+            # returns a valid confidence score instead of always 0.0.
+            _CONF_MAX_STD = 0.1  # empirical cap; adjust via calibration
+            conf = (1.0 - (std / _CONF_MAX_STD)).clamp(0.0, 1.0)
             return mean, std, conf
 
         def confidence_filter(
@@ -464,7 +477,9 @@ if TORCH:
             return mean * mask, mask
 
 
-    # ── 3. MULTI-TIMEFRAME ATTENTION ──────────────────────────────────────────
+    # ── 3. MULTI-TIMEFRAME ATTENTION ──────────────────────────────────────────────
+
+    from training.dataset_builder import build_multitf_tensors, build_multitf_dataset  # noqa: F401
 
     class MultiTimeframeAttention(nn.Module):
         """
@@ -479,6 +494,17 @@ if TORCH:
           1. Separate encoder per timeframe (shared weights to save params)
           2. Cross-timeframe attention: each timeframe attends to the others
           3. Fusion layer: concatenate attended representations -> prediction
+
+        Data pipeline
+        -------------
+        Use ``training.dataset_builder.build_multitf_tensors`` (also re-exported
+        from this module as ``build_multitf_tensors``) to produce the input list
+        from a standard 1-min ``X_seq`` array without any lookahead bias::
+
+            from training.dataset_builder import build_multitf_tensors
+            tf_views = build_multitf_tensors(X_seq)   # [x_1m, x_5m, x_15m]
+            x_list = [torch.from_numpy(v) for v in tf_views]
+            pred = model(x_list)                      # (B,)
         """
 
         def __init__(

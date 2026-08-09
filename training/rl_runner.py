@@ -35,6 +35,8 @@ _HOST_DEPS = (
     '_require_rl_market_cache',
     '_load_rl_market_from_cache',
     '_resolve_pair_feat_indices',
+    '_trainable_max_index',
+    '_atomic_copy',
     'build_model',
     '_model_build_args',
     'DQNAgent',
@@ -76,13 +78,32 @@ def _rl_reward_weights(args) -> dict:
     }
 
 def _rl_algo_kwargs(args, algo: str) -> dict:
-    """Merge settings.RL hyperparams with optional YAML overrides."""
+    """Merge settings.RL hyperparams with optional YAML overrides.
+
+    Filters to the agent ``__init__`` signature: the config uses display names
+    (``clip_epsilon``, ``entropy_coeff``, ``gae_lambda``…) that do not match the
+    PPO agent kwargs (``clip``, ``ent_c``, ``lam``…). Unfiltered this crashed
+    PPO construction with an unexpected-keyword TypeError.
+    """
+    import inspect as _inspect
     algo = str(algo).lower()
     base = dict(RL.get(algo, {}))
     override = getattr(args, "rl_algo_overrides", None) or {}
     if isinstance(override, dict) and algo in override and isinstance(override[algo], dict):
         base.update(override[algo])
-    return base
+    try:
+        from models.rl_agents import DQNAgent as _DQN, PPOAgent as _PPO
+    except ImportError:  # pragma: no cover - fall back to runtime-bound globals
+        _DQN = globals().get("DQNAgent")
+        _PPO = globals().get("PPOAgent")
+    cls = _DQN if algo == "dqn" else _PPO
+    if cls is None:
+        return base
+    _ALIASES = {"clip_epsilon": "clip", "entropy_coeff": "entropy_coef",
+                "value_coeff": "value_coef", "gae_lambda": "lam"}
+    base = {_ALIASES.get(k, k): v for k, v in base.items()}
+    valid = set(_inspect.signature(cls.__init__).parameters)
+    return {k: v for k, v in base.items() if k in valid}
 
 def _rl_train_val_slices(n_total: int, args) -> tuple[int, int, int, int]:
     """
@@ -204,7 +225,7 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
             f"no supervised checkpoint for {args.model} under {ckpt_dir}")
     model = build_model(args.model, n_features, args).to(device)
     core  = _core_model(model)
-    state = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state = torch.load(ckpt_path, map_location=device, weights_only=True)
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
     _strict_load_report(core, state, f"RLObsEncoder:{args.model}", min_frac_loaded=0.6)
@@ -624,9 +645,29 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         except Exception as _rce:
             print(f"[RL] Curriculum unavailable: {_rce}")
 
+    reward_sharpe = None
+    if bool(getattr(args, "rl_use_sharpe_reward", False)):
+        try:
+            from models.rl_agents import _SharpeRewardAdapter
+            reward_sharpe = _SharpeRewardAdapter()
+            print("[RL] SharpeRewardWrapper enabled (risk-adjusted step reward)")
+        except Exception as _sre:
+            print(f"[RL] SharpeReward unavailable: {_sre}")
+
+    her_buffer = None
+    if bool(getattr(args, "rl_use_her", False)) and _algo == "dqn":
+        try:
+            from models.rl_advanced import HERBuffer
+            her_buffer = HERBuffer(capacity=100_000, k=4)
+            print("[RL] HERBuffer enabled for DQN hindsight replay")
+        except Exception as _he:
+            print(f"[RL] HER unavailable: {_he}")
+
     returns = train_agent(
         agent, train_env, n_episodes=args.rl_episodes, agent_type=_algo,
         curriculum=_rl_curriculum,
+        reward_sharpe=reward_sharpe,
+        her_buffer=her_buffer,
         off_policy_rewards=bool(getattr(args, "off_policy_rewards", False)),
     )
 
@@ -635,9 +676,9 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         if _op_est:
             _dr = [e["dr_value"] for e in _op_est]
             _ips = [e["ips_value"] for e in _op_est]
-            print(f"[RL] Off-policy rewards (Improvement #5): "
+            print(f"[RL] Off-policy rewards (Improvement #5, diagnostic only): "
                   f"mean DR value={np.mean(_dr):.4f} | mean IPS value={np.mean(_ips):.4f} "
-                  f"over {len(_op_est)} episodes")
+                  f"over {len(_op_est)} episodes — does not train the policy")
 
     if val_n > 0:
         val_env = _build_rl_env(cache_path, train_start + val_start, val_n, n_features, args, device)

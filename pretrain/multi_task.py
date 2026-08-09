@@ -88,6 +88,7 @@ class MultiTaskPretrainConfig:
     da_weight: float = 0.1
     n_domains: int = 2  # source + target
     da_lambda: float = 1.0  # gradient reversal strength
+    da_kernel_gamma: float = 1.0  # RBF kernel width for MMD
 
     # Contrastive settings
     contrastive_temp: float = 0.5
@@ -383,8 +384,13 @@ def vae_loss(
     logvar: torch.Tensor,
     beta: float = 0.001,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """VAE loss: reconstruction + KL."""
-    recon_loss = F.mse_loss(recon, target)
+    """VAE loss: reconstruction + KL with matched reductions.
+
+    Both terms: sum over feature/latent dims, mean over batch.
+    This prevents the KL term from dominating when the reconstruction MSE uses
+    the global element-wise mean (which is ~latent_dim smaller than the KL sum).
+    """
+    recon_loss = F.mse_loss(recon, target, reduction='none').sum(dim=list(range(1, recon.ndim))).mean()
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
     loss = recon_loss + beta * kl
     return loss, recon_loss, kl
@@ -508,9 +514,17 @@ class MultiTaskPretrainer(nn.Module):
 
         # Domain adaptation
         self.discriminator = None
+        self.mmd_loss = None
+        self.coral_loss = None
         if config.use_domain_adaptation and config.n_domains > 1:
             if config.da_method == "dann":
                 self.discriminator = DomainDiscriminator(d_model, config.n_domains).to(self.device)
+                self.task_weights["domain"] = config.da_weight
+            elif config.da_method == "mmd":
+                self.mmd_loss = MMDLoss(kernel="rbf", gamma=config.da_kernel_gamma).to(self.device)
+                self.task_weights["domain"] = config.da_weight
+            elif config.da_method == "coral":
+                self.coral_loss = CORALLoss().to(self.device)
                 self.task_weights["domain"] = config.da_weight
 
         # Augmentation
@@ -637,17 +651,33 @@ class MultiTaskPretrainer(nn.Module):
         return drift_loss(clean, drift, self.config.drift_margin)
 
     def _compute_domain_loss(self, x: torch.Tensor, domain_labels: torch.Tensor) -> torch.Tensor:
-        """Compute domain adaptation loss."""
+        """Compute domain adaptation loss.
+
+        MMD/CORAL split the batch into source (domain 0) and target
+        (non-zero) groups and align their feature distributions. Falls back to
+        a differentiable zero when either group is empty.
+        """
         h = self._forward_encoder(x)
+        labels = domain_labels.reshape(-1)
 
         if self.config.da_method == "dann" and self.discriminator:
-            return domain_adversarial_loss(h, domain_labels, self.discriminator, self.config.da_lambda)
-        elif self.config.da_method == "mmd":
-            # Need source/target split - for now use all as source
-            return torch.tensor(0.0, device=self.device)
-        elif self.config.da_method == "coral":
-            return torch.tensor(0.0, device=self.device)
-        return torch.tensor(0.0, device=self.device)
+            return domain_adversarial_loss(h, labels, self.discriminator, self.config.da_lambda)
+
+        if self.config.da_method == "mmd" and self.mmd_loss is not None:
+            src = h[labels == 0]
+            tgt = h[labels != 0]
+            if src.numel() > 0 and tgt.numel() > 0:
+                return self.mmd_loss(src, tgt)
+            return h.sum() * 0.0
+
+        if self.config.da_method == "coral" and self.coral_loss is not None:
+            src = h[labels == 0]
+            tgt = h[labels != 0]
+            if src.numel() > 0 and tgt.numel() > 0:
+                return self.coral_loss(src, tgt)
+            return h.sum() * 0.0
+
+        return h.sum() * 0.0
 
     def _gradnorm_step(self, task_losses: dict[str, torch.Tensor]) -> torch.Tensor:
         """Apply GradNorm to balance task losses."""
@@ -664,9 +694,12 @@ class MultiTaskPretrainer(nn.Module):
         self.opt.zero_grad(set_to_none=True)
         grads = {}
         for name, loss in task_losses_filtered.items():
-            grad = torch.autograd.grad(loss, self.encoder.parameters(), retain_graph=True, create_graph=True)
+            # create_graph=False: we only need gradient norms for weight scaling,
+            # not higher-order derivatives. create_graph=True caused a memory leak
+            # because the graph was never freed (gradnorm_loss is not backpropped).
+            grad = torch.autograd.grad(loss, self.encoder.parameters(), retain_graph=True, create_graph=False)
             grad_norm = torch.cat([g.flatten() for g in grad if g is not None]).norm(2)
-            grads[name] = grad_norm
+            grads[name] = grad_norm.detach()
 
         # GradNorm: L_grad = sum_i |G_i - mean(G) * (L_i / mean(L))^alpha|
         grad_norms = torch.stack([grads[k] for k in task_losses_filtered])
@@ -788,7 +821,7 @@ class MultiTaskPretrainer(nn.Module):
         # Prepare domain labels tensor
         domain_labels_tensor = None
         if domain_labels is not None:
-            domain_labels = torch.as_tensor(domain_labels, dtype=torch.long)
+            domain_labels = torch.as_tensor(domain_labels, dtype=torch.long).to(self.device)
 
         for epoch in range(epochs):
             self._total_epochs += 1
@@ -977,9 +1010,29 @@ def adapt_encoder_to_target(
         encoder.train()
 
     if method == "fine_tune":
-        # Simple fine-tuning on target with same pretext tasks
-        # (requires defining a pretext task)
-        pass
+        # Unsupervised target adaptation: reconstruct next-step mean of target
+        # sequences through a small linear head on pooled encoder embeddings.
+        opt = optim.Adam(encoder.parameters(), lr=lr)
+        target_t = torch.as_tensor(target_data, dtype=torch.float32, device=device)
+        head = nn.Linear(encoder_dim, target_t.shape[-1]).to(device)
+        opt_h = optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=lr)
+        for _ in range(epochs):
+            emb = encoder(target_t)
+            if emb.ndim == 3:
+                # Predict last-bar features from prior context embedding
+                ctx = emb[:, :-1, :].mean(dim=1)
+                tgt = target_t[:, -1, :]
+            else:
+                ctx = emb
+                tgt = target_t.reshape(target_t.shape[0], -1)[:, : encoder_dim]
+                if tgt.shape[-1] != head.out_features:
+                    head = nn.Linear(ctx.shape[-1], tgt.shape[-1]).to(device)
+                    opt_h = optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=lr)
+            pred = head(ctx)
+            loss = F.mse_loss(pred, tgt.detach())
+            opt_h.zero_grad()
+            loss.backward()
+            opt_h.step()
     elif method == "dann":
         discriminator = DomainDiscriminator(encoder_dim, 2).to(device)
         opt = optim.Adam(
@@ -1022,6 +1075,26 @@ def adapt_encoder_to_target(
             opt.zero_grad()
             loss.backward()
             opt.step()
+    elif method in ("mmd", "coral"):
+        opt = optim.Adam(encoder.parameters(), lr=lr)
+        source_t = torch.as_tensor(source_data, dtype=torch.float32, device=device)
+        target_t = torch.as_tensor(target_data, dtype=torch.float32, device=device)
+        align = MMDLoss() if method == "mmd" else CORALLoss()
+        for _ in range(epochs):
+            s_emb = encoder(source_t)
+            t_emb = encoder(target_t)
+            if s_emb.ndim == 3:
+                s_emb = s_emb.mean(dim=1)
+            if t_emb.ndim == 3:
+                t_emb = t_emb.mean(dim=1)
+            loss = align(s_emb, t_emb)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    else:
+        raise ValueError(
+            f"Unknown domain-adapt method {method!r}; expected dann|mmd|coral|fine_tune"
+        )
 
     return encoder
 

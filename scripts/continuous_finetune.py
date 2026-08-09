@@ -36,11 +36,15 @@ def get_python_exe():
 
 
 def _label_horizon_bars() -> int:
+    """Base LH × max LABEL_REGIME horizon mults + delay (matches cv_splits floor)."""
     try:
         from config.settings import LABELING
-        lookahead = int(LABELING.get("lookahead_bars", 15))
+        from labeling.rl_reward_labeling import max_label_horizon_mult
+
+        lookahead = int(LABELING.get("lookahead_bars", 30))
         delay = int(LABELING.get("execution_delay_bars", 1))
-        return lookahead + delay
+        # Embargo must cover longest regime/session-scaled label horizon.
+        return max(1, int(lookahead * max_label_horizon_mult())) + delay
     except Exception:
         return 16
 

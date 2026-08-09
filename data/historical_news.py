@@ -9,8 +9,10 @@ onto FeatureEngineer.build(...) using Polars DataFrames.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -18,6 +20,10 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+
+from infrastructure.logging_utils import log_data_load
+
+_log = logging.getLogger(__name__)
 
 # Economic-calendar values arrive as unit-suffixed strings (e.g. ForexFactory:
 # "148K", "0.3%", "-5.9B"). Plain numeric casts coerce these to null.
@@ -118,7 +124,9 @@ def _pair_currencies(pair: str) -> set[str]:
 def _read_table(path: Path, start: str = None, end: str = None) -> pl.DataFrame:
     """PIPE-004: Uses lazy scanning for Parquet files to avoid OOM on large datasets."""
     if not path.exists():
+        log_data_load("historical_news_read", str(path), n_rows=0, status="skip_missing")
         return pl.DataFrame()
+    _t0 = time.perf_counter()
     if path.suffix.lower() in {".json", ".jsonl"}:
         if path.suffix.lower() == ".jsonl":
             rows = []
@@ -126,11 +134,15 @@ def _read_table(path: Path, start: str = None, end: str = None) -> pl.DataFrame:
                 line = line.strip()
                 if line:
                     rows.append(json.loads(line))
-            return pl.DataFrame(rows) if rows else pl.DataFrame()
+            df = pl.DataFrame(rows) if rows else pl.DataFrame()
+            log_data_load("historical_news_read", str(path), n_rows=len(df), status="ok", t0=_t0)
+            return df
         payload = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             payload = payload.get("events", payload.get("headlines", payload.get("rows", [])))
-        return pl.DataFrame(payload) if payload else pl.DataFrame()
+        df = pl.DataFrame(payload) if payload else pl.DataFrame()
+        log_data_load("historical_news_read", str(path), n_rows=len(df), status="ok", t0=_t0)
+        return df
     if path.suffix.lower() == ".parquet":
         # PIPE-004: lazy scan with predicate pushdown instead of eager read
         lf = pl.scan_parquet(path)
@@ -138,8 +150,14 @@ def _read_table(path: Path, start: str = None, end: str = None) -> pl.DataFrame:
             lf = lf.filter(pl.col("timestamp_utc") >= start)
         if end and "timestamp_utc" in lf.collect_schema().names():
             lf = lf.filter(pl.col("timestamp_utc") <= end)
-        return lf.collect()
-    return pl.read_csv(path, try_parse_dates=True, infer_schema_length=10_000)
+        df = lf.collect()
+        log_data_load("historical_news_read", str(path), n_rows=len(df), status="ok", t0=_t0,
+                       note=f"parquet scan start={start} end={end}")
+        return df
+    df = pl.read_csv(path, try_parse_dates=True, infer_schema_length=10_000)
+    log_data_load("historical_news_read", str(path), n_rows=len(df), status="ok", t0=_t0,
+                   note="csv")
+    return df
 
 
 def _normalise_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -198,20 +216,41 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
     augmented_news = Path(__file__).resolve().parent / "raw" / "news" / "historical_news_augmented.csv"
     if augmented_news.exists() and _DEFAULT_NEWS_FILE in paths:
         paths.append(augmented_news)
+        # Get row count for logging
+        try:
+            n_rows_aug = len(pd.read_csv(augmented_news))
+        except Exception:
+            n_rows_aug = 0
+        log_data_load(
+            "historical_news_augmented",
+            str(augmented_news),
+            n_rows=n_rows_aug,
+            status="ok",
+            note="auto-appended sibling of default parquet",
+        )
+    elif _DEFAULT_NEWS_FILE in paths and not augmented_news.exists():
+        log_data_load("historical_news_augmented", str(augmented_news), n_rows=0, status="skip_missing")
 
     if calendar_file:
         paths.append(Path(calendar_file))
     elif os.getenv("ECONOMIC_CALENDAR_FILE"):
         paths.append(Path(os.getenv("ECONOMIC_CALENDAR_FILE", "")))
     else:
+        _t0_cal = time.perf_counter()
+        cal_exists = _DEFAULT_CAL_FILE.exists()
+        log_data_load("eco_calendar", str(_DEFAULT_CAL_FILE), n_rows=0,
+                     status="ok" if cal_exists else "skip_missing", t0=_t0_cal,
+                     note="default path wired")
         paths.append(_DEFAULT_CAL_FILE)
 
     frames = []
     for p in paths:
         if not p or not p.exists():
+            log_data_load("historical_news_path", str(p), n_rows=0, status="skip_missing")
             continue
         # If it's a massive CSV file, use DuckDB to slice it!
         if p.suffix.lower() == ".csv":
+            _t0 = time.perf_counter()
             try:
                 con = duckdb.connect()
                 # If we have start and end, slice it directly from disk!
@@ -225,8 +264,12 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
                 con.close()
                 if not (len(df_slice) == 0):
                     frames.append(_normalise_columns(df_slice))
-            except Exception:
+                log_data_load("historical_news_path", str(p), n_rows=len(df_slice), status="ok",
+                              t0=_t0, note="duckdb slice")
+            except Exception as _e_duck:
                 # Fallback to standard read if duckdb fails
+                log_data_load("historical_news_path", str(p), n_rows=0, status="fallback",
+                              t0=_t0, exc=_e_duck, note="duckdb->polars")
                 s_str_pass = start_ts.strftime('%Y-%m-%d %H:%M:%S') if start_ts else None
                 e_str_pass = end_ts.strftime('%Y-%m-%d %H:%M:%S') if end_ts else None
                 frames.append(_normalise_columns(_read_table(p, start=s_str_pass, end=e_str_pass)))
@@ -237,6 +280,7 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
 
     frames = [f for f in frames if not (len(f) == 0)]
     if not frames:
+        log_data_load("historical_news_load", "<combined>", n_rows=0, status="skip_empty")
         return pl.DataFrame()
     df = pl.concat(frames, how="diagonal_relaxed")
     if "timestamp_utc" in df.columns:
@@ -244,6 +288,8 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
             pl.col("timestamp_utc").cast(pl.Utf8, strict=False)
             .str.to_datetime(time_unit="us", time_zone="UTC", strict=False)
         ).drop_nulls("timestamp_utc")
+    log_data_load("historical_news_load", "<combined>", n_rows=len(df), status="ok",
+                  note=f"{len(frames)} frames, pair_filter pending")
     return df
 
 
@@ -291,9 +337,18 @@ def load_historical_news_bundle(
     else:
         end_ts = end_ts.tz_convert("UTC")
 
+    _t0_bundle = time.perf_counter()
     raw = _load_events(news_file, calendar_file, start_ts=start_ts - pd.Timedelta(days=2), end_ts=end_ts)
     df = _filter_relevant(raw, start_ts - pd.Timedelta(days=2), end_ts, pair)
     if (len(df) == 0):
+        log_data_load(
+            "historical_news_bundle",
+            news_file or str(_DEFAULT_NEWS_FILE),
+            n_rows=0,
+            status="skip_empty",
+            t0=_t0_bundle,
+            note=f"pair={pair}, range=[{start_ts}, {end_ts}]",
+        )
         return empty_news_bundle()
 
     category_flags = _build_category_flags(df)
@@ -336,7 +391,12 @@ def load_historical_news_bundle(
 
     # DS-004: removed bag-of-words _sentiment_score fallback which inverts
     # signals for financial contexts (e.g. "weak dollar" = bullish EURUSD).
-    # When no pre-computed sentiment is available, use 0.0 (neutral) instead.
+    # DS-005 (2026-08-07): do NOT fill_null(0.0) on the per-row score column —
+    # URL-fallback / empty headlines carry a NULL parquet score by design
+    # (see docs/NEWS_DATA_GUIDE.md §0 step 2). Filling them with 0.0 silently
+    # dilutes real-news sentiment at every news timestamp when aggregating
+    # by mean. Instead, drop the null rows before aggregation so only
+    # genuinely-scored headlines contribute to the per-timestamp mean.
     target_col = None
     if "sentiment" in df.columns:
         target_col = "sentiment"
@@ -344,16 +404,29 @@ def load_historical_news_bundle(
         target_col = "sentiment_score"
 
     if target_col:
-        sent_col = pl.col(target_col).cast(pl.Float64, strict=False).fill_null(0.0)
+        scored_rows = df.filter(pl.col(target_col).cast(pl.Float64, strict=False).is_not_null())
+        if scored_rows.height > 0:
+            sentiment = (
+                scored_rows
+                .select("timestamp_utc", pl.col(target_col).cast(pl.Float64).alias("sentiment"))
+                .group_by("timestamp_utc")
+                .agg(pl.col("sentiment").mean().cast(pl.Float32))
+                .sort("timestamp_utc")
+            )
+        else:
+            sentiment = pl.DataFrame({"timestamp_utc": [], "sentiment": pl.Series([], dtype=pl.Float32)})
     else:
-        sent_col = pl.lit(0.0)
-
-    sentiment = (
-        df.select("timestamp_utc", sent_col.alias("sentiment"))
-        .group_by("timestamp_utc")
-        .agg(pl.col("sentiment").mean().cast(pl.Float32))
-        .sort("timestamp_utc")
-    )
+        sentiment = (
+            df.select("timestamp_utc", pl.lit(0.0).alias("sentiment"))
+            .group_by("timestamp_utc")
+            .agg(pl.col("sentiment").mean().cast(pl.Float32))
+            .sort("timestamp_utc")
+        )
+    # Ensure sentiment column exists with at least neutral values
+    if sentiment.height == 0:
+        # Create a neutral sentiment frame covering the date range
+        dates = df.select("timestamp_utc").unique().sort("timestamp_utc")
+        sentiment = dates.with_columns(pl.lit(0.0).alias("sentiment"))
     article_counts = (
         df.select("timestamp_utc")
         .group_by("timestamp_utc")

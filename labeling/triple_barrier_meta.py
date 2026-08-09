@@ -230,6 +230,10 @@ class BarrierSearchConfig:
     seed: int = 42
     # Pruner
     pruner: str = "median"  # "median", "hyperband", "none"
+    # Fraction of data used for barrier-search objective (rest held out to
+    # prevent the meta-labeler's hyperparameter search from leaking the
+    # out-of-sample window).
+    search_train_frac: float = 0.7
 
 
 class BayesianBarrierOptimizer:
@@ -281,15 +285,24 @@ class BayesianBarrierOptimizer:
             self.config.search_space.execution_delay_bars[1],
         )
 
-        # Get primary model predictions on this data
-        primary_pred = primary_pred_fn(bars, features)
+        # Temporal split: barrier search scores candidates on the in-sample
+        # (train) portion only so the meta-labeler's hyperparameters don't
+        # leak the held-out validation window.
+        _frac = float(getattr(self.config, "search_train_frac", 0.7))
+        _frac = min(max(_frac, 0.1), 0.95)
+        _split = int(len(bars) * _frac)
+        _bars = bars.iloc[:_split] if hasattr(bars, "iloc") else bars[:_split]
+        _features = features.iloc[:_split] if hasattr(features, "iloc") else features[:_split]
+
+        # Get primary model predictions on this (in-sample) data only
+        primary_pred = primary_pred_fn(_bars, _features)
 
         # Run TBM with candidate parameters
         from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 
         tbm_result = compute_triple_barrier_labels(
-            bars=bars,
-            features=features,
+            bars=_bars,
+            features=_features,
             profit_atr_mult=profit_mult,
             stop_atr_mult=stop_mult,
             vertical_bars=vertical_bars,
@@ -432,13 +445,18 @@ def run_meta_tbm_pipeline(
         )
         bayesian_opt = optimizer
         tbm_params = tbm_params or {}
-        tbm_params.update(optimizer.best_params)
+        best_p = dict(optimizer.best_params)
+        if "profit_mult" in best_p:
+            best_p["profit_atr_mult"] = best_p.pop("profit_mult")
+        if "stop_mult" in best_p:
+            best_p["stop_atr_mult"] = best_p.pop("stop_mult")
+        tbm_params.update(best_p)
 
     # Step 2: Run TBM with best/fixed parameters
     tbm_defaults = {
-        "profit_atr_mult": 1.8,
-        "stop_atr_mult": 0.9,
-        "vertical_bars": 20,
+        "profit_atr_mult": 1.2,
+        "stop_atr_mult": 0.8,
+        "vertical_bars": 30,
         "execution_delay_bars": 1,
     }
     tbm_defaults.update(tbm_params or {})

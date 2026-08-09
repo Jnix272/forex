@@ -99,13 +99,13 @@ FEATURE_MASK = {
     "distance_to_vwap_1h": True,
     "volatility_regime_1h": True,
 
-    # Temporal & Latency — offline training has no meaningful latency signal
+    # Temporal & Latency — enable for RL reward labeling (latency penalty)
     "time_sin": True,
     "time_cos": True,
     "day_sin": True,
     "day_cos": True,
     "london_ny": True,
-    "expected_latency_ms": False,
+    "expected_latency_ms": True,
 
     # Advanced groups — sparse / optional exotic cross-breaks off by default
     "carry_spot_forward": False,
@@ -173,7 +173,29 @@ FEATURE_MASK = {
     "yield_momentum_5d": True,
     "yield_momentum_20d": True,
     "yield_vol_20d": True,
+
+    # Volume profile / volatility clock (built by FeatureEngineer)
+    "vp_poc_pos": True,
+    "vp_poc_dist": True,
+    "vp_poc_share": True,
+    "vp_vw_pos": True,
+    "vp_skew": True,
+    "vp_in_va": True,
+    "vol_clock_pos": True,
+    "vol_clock_ratio": True,
+    "vol_clock_z": True,
+    "vol_clock_pace": True,
+    "vol_clock_hot": True,
 }
+
+# Always retained when present (market / join keys). Not curriculum-staged.
+# asia_london is labeling-only aux (dropped from X via drop_unlisted unless listed).
+_MASK_ALLOWLIST: frozenset[str] = frozenset({
+    "open", "high", "low", "close", "mid_close", "volume",
+    "bid_close", "ask_close", "bid_open", "ask_open",
+    "timestamp_utc", "pair", "session_label", "regime_class", "regime_label",
+    "no_trade_score",
+})
 
 
 def enabled_feature_names(mask: dict[str, bool] | None = None) -> list[str]:
@@ -188,17 +210,34 @@ def disabled_feature_names(mask: dict[str, bool] | None = None) -> list[str]:
     return [k for k, v in m.items() if not v]
 
 
-def apply_feature_mask(frame: Any, mask: dict[str, bool] | None = None) -> Any:
+def apply_feature_mask(
+    frame: Any,
+    mask: dict[str, bool] | None = None,
+    *,
+    drop_unlisted: bool = True,
+) -> Any:
     """
-    Drop columns whose mask entry is False.
+    Apply FEATURE_MASK to a frame.
 
-    Columns not listed in the mask are retained (price / aux columns).
-    Supports pandas and Polars DataFrames.
+    - Entries with ``False`` are always dropped.
+    - When ``drop_unlisted`` (default True for training builds), columns that are
+      neither mask-True nor in ``_MASK_ALLOWLIST`` are dropped so X matches the
+      declared feature contract (no silent candle/interaction extras).
     """
     m = mask if mask is not None else FEATURE_MASK
     if frame is None or not hasattr(frame, "columns") or not hasattr(frame, "drop"):
         return frame
-    drop = [c for c in list(frame.columns) if m.get(c) is False]
+    cols = list(frame.columns)
+    drop = [c for c in cols if m.get(c) is False]
+    if drop_unlisted:
+        keep = {k for k, v in m.items() if v} | _MASK_ALLOWLIST
+        # Multipair schemas use ``PAIR::feature`` — keep when base is allowed.
+        for c in cols:
+            if c in drop:
+                continue
+            base = c.split("::")[-1] if "::" in c else c
+            if base not in keep and c not in keep:
+                drop.append(c)
     if not drop:
         return frame
     # Polars: drop(*names); pandas: drop(columns=...)

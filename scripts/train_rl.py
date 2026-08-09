@@ -116,7 +116,7 @@ def main():
         model = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=names).to(device)
         ens_ckpt = resolve_checkpoint("ensemble_meta", ckpt_dir)
         if ens_ckpt:
-            model.load_state_dict(torch.load(ens_ckpt, map_location=device), strict=False)
+            model.load_state_dict(torch.load(ens_ckpt, map_location=device, weights_only=True), strict=False)
             logging.info(f"Loaded ensemble weights from {ens_ckpt}")
         else:
             logging.warning("No trained ensemble meta weights found. Using default initialization.")
@@ -148,7 +148,12 @@ def main():
     prices = prices[:min_len]
     atr = atr[:min_len]
     spreads = spreads[:min_len]
-    raw_x = raw_x[:min_len, -1, :]  # Take the last timestep's features
+    # raw_x may be 3D (N, T, F) when built with a sequence window, or 2D (N, F)
+    # when built without one.  Slice off the last timestep only for the 3D case.
+    if raw_x.ndim == 3:
+        raw_x = raw_x[:min_len, -1, :]  # Take the last timestep's features
+    else:
+        raw_x = raw_x[:min_len]         # Already (N, F) — use directly
 
     # Enrich the RL state: supervised signal + raw market features
     enriched_features = np.concatenate([signals, raw_x], axis=1)

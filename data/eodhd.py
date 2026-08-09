@@ -269,7 +269,7 @@ def _parse_cross_asset_response(data: list, asset: str) -> pd.Series | None:
     values = []
     for row in data:
         try:
-            ts  = pd.Timestamp(row["date"], tz="UTC")
+            ts  = pd.Timestamp(row["date"], tz="UTC") + pd.Timedelta(days=1)
             val = float(row.get("adjusted_close") or row.get("close") or 0)
             if val > 0:
                 dates.append(ts)

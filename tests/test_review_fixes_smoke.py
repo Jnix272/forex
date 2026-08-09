@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 
 def test_embargo_bars_includes_delay():
+    from labeling.rl_reward_labeling import max_label_horizon_mult
     from training.train_gpu import _embargo_bars
 
     class A:
@@ -26,7 +27,9 @@ def test_embargo_bars_includes_delay():
         lookahead_bars = 15
 
     e = _embargo_bars(A())
-    assert e == 60 + 15 + 2
+    # Embargo floor uses base_LH * max(LABEL_REGIME horizon mults), not bare LH.
+    eff_lh = int(15 * max_label_horizon_mult())
+    assert e == 60 + eff_lh + 2
 
 
 def test_multitask_class_index_from_direction_labels():
@@ -143,16 +146,17 @@ def test_alignment_keeps_direction_label_when_target_is_reward():
 
 
 def test_cache_integrity_rejects_missing_or_mismatched_direction_sidecars(monkeypatch):
+    import training.cache_integrity as ci
     import training.train_gpu as tg
 
     class Args:
         label_method = "rl_reward"
         ignore_manifest = True
 
-    monkeypatch.setattr(tg.Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(ci.Path, "is_dir", lambda self: False)
 
     monkeypatch.setattr(
-        tg,
+        ci,
         "_cache_length_snapshot",
         lambda cache_path: {"npy_X": 10, "npy_y": 10, "npy_diff": 10},
     )
@@ -161,7 +165,7 @@ def test_cache_integrity_rejects_missing_or_mismatched_direction_sidecars(monkey
     assert "missing y_cls" in reason
 
     monkeypatch.setattr(
-        tg,
+        ci,
         "_cache_length_snapshot",
         lambda cache_path: {"npy_X": 10, "npy_y": 10, "npy_y_cls": 10, "npy_diff": 9},
     )
@@ -173,15 +177,16 @@ def test_cache_integrity_rejects_missing_or_mismatched_direction_sidecars(monkey
 def test_postprocess_cache_integrity_check_fails_after_bad_processing(monkeypatch):
     import pytest
 
+    import training.cache_integrity as ci
     import training.train_gpu as tg
 
     class Args:
         label_method = "rl_reward"
         ignore_manifest = True
 
-    monkeypatch.setattr(tg.Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(ci.Path, "is_dir", lambda self: False)
     monkeypatch.setattr(
-        tg,
+        ci,
         "_cache_length_snapshot",
         lambda cache_path: {"npy_X": 10, "npy_y": 10, "npy_y_cls": 10, "npy_pq": 8},
     )
@@ -503,11 +508,14 @@ def test_multitask_balance_keeps_rare_buy_from_being_ignored():
 
 
 def test_balanced_direction_indices_uses_all_classes(monkeypatch):
+    import training.direction_control as dc
     import training.train_gpu as tg
 
     idx = np.arange(9, dtype=np.int64)
     y_cls = np.array([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=np.float32)
-    monkeypatch.setattr(tg, "_read_y_cls_indices", lambda cache_path, indices: y_cls[indices])
+    monkeypatch.setattr(
+        dc, "_read_y_cls_indices", lambda cache_path, indices: y_cls[indices]
+    )
 
     out = tg._balanced_direction_indices("cache", idx, total_samples=6, seed=7)
     out_labels = y_cls[out]

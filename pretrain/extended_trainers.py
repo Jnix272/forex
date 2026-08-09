@@ -125,7 +125,7 @@ if TORCH:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
             z = mu + eps * std
-            recon = self.decoder(z).view(-1, self.seq_len, self.n_features)
+            recon = self.decoder(z).contiguous().view(-1, self.seq_len, self.n_features)
             return recon, mu, logvar
 
         @torch.no_grad()
@@ -197,7 +197,7 @@ if TORCH:
                         continue
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
                     recon, mu, logvar = self._forward(x)
-                    recon_loss = F.mse_loss(recon, x)
+                    recon_loss = F.mse_loss(recon, x, reduction='none').sum(dim=list(range(1, recon.ndim))).mean()
                     kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
                     loss = recon_loss + self.beta * kl
                     if not torch.isfinite(loss):
@@ -294,7 +294,11 @@ if TORCH:
             self.cluster_labels = _kmeans_numpy(H, self.n_clusters, seed=int(self._seed or 0))
 
         def nt_xent(self, z1: torch.Tensor, z2: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-            """Supervised contrastive: only same-cluster pairs are positives."""
+            """Supervised contrastive: only same-cluster pairs are positives.
+
+            Vectorised O(B²) computation — the previous per-anchor python loop
+            was O(B) allocations and ~10× slower on GPU batches.
+            """
             B = z1.shape[0]
             z = torch.cat([z1, z2], dim=0).float()
             z = F.normalize(z, dim=-1, eps=1e-8)
@@ -302,25 +306,23 @@ if TORCH:
             mask = torch.eye(2 * B, device=self.device, dtype=torch.bool)
             sim = sim.masked_fill(mask, torch.finfo(sim.dtype).min)
             lab = torch.cat([labels, labels], dim=0)
-            pos = lab.unsqueeze(0) == lab.unsqueeze(1)
-            pos = pos & ~mask
-            # For each anchor, pick hardest negative among different-cluster
-            losses = []
-            for i in range(2 * B):
-                pos_idx = pos[i].nonzero(as_tuple=False).flatten()
-                if pos_idx.numel() == 0:
-                    continue
-                neg_mask = ~pos[i]
-                neg_mask[i] = False
-                if not neg_mask.any():
-                    continue
-                pos_sim = sim[i, pos_idx].mean()
-                neg_sim = sim[i, neg_mask].max()
-                losses.append(F.relu(neg_sim - pos_sim + 0.2))
-            if not losses:
+            same = lab.unsqueeze(0) == lab.unsqueeze(1)
+            pos = same & ~mask
+
+            # Compute positive/negative similarities on RAW cosine sim (not temp-scaled)
+            # so the 0.2 margin has consistent geometric meaning regardless of temperature.
+            sim_raw = torch.mm(z, z.T)  # raw cosine (z is already L2-normalized)
+            sim_raw = sim_raw.masked_fill(mask, torch.finfo(sim_raw.dtype).min)
+            pos_cnt = pos.sum(dim=1)
+            pos_sim = (sim_raw * pos).sum(dim=1) / pos_cnt.clamp_min(1)
+            neg_sim = sim_raw.masked_fill(same, torch.finfo(sim_raw.dtype).min).amax(dim=1)
+
+            losses = F.relu(neg_sim - pos_sim + 0.2)
+            valid = (pos_cnt > 0) & torch.isfinite(neg_sim)
+            if not valid.any():
                 # Keep a differentiable zero so callers can safely .backward().
                 return (z1.sum() + z2.sum()) * 0.0
-            return torch.stack(losses).mean()
+            return losses[valid].mean()
 
         @torch.no_grad()
         def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
@@ -481,7 +483,7 @@ if TORCH:
                 x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
                 prefix, target = self._split(x)
                 h = _encode_last(self.encoder, prefix)
-                pred = self.head(h).view(-1, self.horizon, self.n_features)
+                pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features)
                 mse = F.mse_loss(pred, target).item()
                 std = h.std(dim=0).mean().item()
                 out = {
@@ -516,7 +518,6 @@ if TORCH:
                     f"[Forecast] {epochs} ep | {N:,} windows | horizon={self.horizon} bars | "
                     f"batch={batch_size}"
                 )
-            self.opt.param_groups[0]["lr"]
             for epoch in range(epochs):
                 self._total_epochs += 1
                 idx_perm = np.random.permutation(N)
@@ -529,7 +530,7 @@ if TORCH:
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
                     prefix, target = self._split(x)
                     h = _encode_last(self.encoder, prefix)
-                    pred = self.head(h).view(-1, self.horizon, self.n_features)
+                    pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features)
                     loss = F.mse_loss(pred, target)
                     if not torch.isfinite(loss):
                         continue

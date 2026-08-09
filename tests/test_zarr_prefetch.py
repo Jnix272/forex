@@ -83,10 +83,11 @@ def test_zarr_feature_array_uses_float16(tmp_path: Path):
     np.testing.assert_allclose(X_read, X.astype(np.float16).astype(np.float32), rtol=1e-3)
 
 
-def test_wrap_loader_prefetch_always_wraps():
+def test_wrap_loader_prefetch_single_process():
+    """When ``num_workers == 0`` the prefetch thread is the only overlap layer — always wrap."""
     ds = TensorDataset(torch.randn(8, 2), torch.randn(8))
-    dl = DataLoader(ds, batch_size=2)
-    args = SimpleNamespace(thread_prefetch_batches=8, num_workers=4)
+    dl = DataLoader(ds, batch_size=2, num_workers=0)
+    args = SimpleNamespace(thread_prefetch_batches=8, num_workers=0)
     wrapped = wrap_loader_prefetch(dl, args)
     assert isinstance(wrapped, _ThreadPrefetchLoader)
     assert wrapped._prefetch == 8
@@ -95,3 +96,27 @@ def test_wrap_loader_prefetch_always_wraps():
     # consumes without hang
     batches = list(wrapped)
     assert len(batches) == 4
+
+
+def test_wrap_loader_prefetch_skips_when_workers_present():
+    """With ``num_workers > 0`` the DataLoader already buffers via worker
+    processes; layering the daemon-thread queue would just double-buffer
+    pinned tensors (50+ GB on large batch_size on depth 8) without overlap
+    benefit. Don't wrap unless the caller opts in via ``force_thread_prefetch``."""
+    ds = TensorDataset(torch.randn(8, 2), torch.randn(8))
+    dl = DataLoader(ds, batch_size=2, num_workers=4)
+    args = SimpleNamespace(thread_prefetch_batches=8, num_workers=4)
+    wrapped = wrap_loader_prefetch(dl, args)
+    assert wrapped is dl  # no wrapping
+
+
+def test_wrap_loader_prefetch_force_when_workers_present():
+    """Callers can opt back into the daemon-thread queue via
+    ``force_thread_prefetch=True`` (e.g. to hide GPU-step jitter on slow disks)."""
+    ds = TensorDataset(torch.randn(8, 2), torch.randn(8))
+    dl = DataLoader(ds, batch_size=2, num_workers=4)
+    args = SimpleNamespace(thread_prefetch_batches=4, num_workers=4,
+                           force_thread_prefetch=True)
+    wrapped = wrap_loader_prefetch(dl, args)
+    assert isinstance(wrapped, _ThreadPrefetchLoader)
+    assert wrapped._prefetch == 4

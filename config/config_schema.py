@@ -85,6 +85,8 @@ class TrainingSchema:
     swa_enabled: bool
     swa_start_frac: float
     swa_lr: float
+    lr_warmup_epochs: int = 2
+    lr_schedule: str = "warmup_cosine"
 
     def __post_init__(self):
         if self.batch_size <= 0:

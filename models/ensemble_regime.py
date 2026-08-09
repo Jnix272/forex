@@ -50,6 +50,9 @@ class RegimeEnsembleMetaLearner(nn.Module):
         self.regime_features = regime_features
         self.n_models = len(base_models)
         self.n_regimes = n_regimes
+        # Column indices resolved at construction time — stored so forward()
+        # does NOT rely on a fragile "last N columns" assumption.
+        self._regime_col_indices: list[int] | None = None  # set via register_feature_schema()
 
         # Regime classifier from features
         self.regime_classifier = nn.Sequential(
@@ -65,15 +68,37 @@ class RegimeEnsembleMetaLearner(nn.Module):
             for p in model.parameters():
                 p.requires_grad = False
 
-    def forward(self, x: torch.Tensor, regime_feats: torch.Tensor) -> tuple:
+    def register_feature_schema(self, all_feature_names: list[str]) -> None:
+        """Call once after construction to bind regime feature column indices.
+
+        This avoids the fragile ``xb[:, -1, -len(regime_features):]`` slice
+        that breaks silently when the feature schema changes.
+        """
+        self._regime_col_indices = [all_feature_names.index(f) for f in self.regime_features]
+
+    def forward(self, x: torch.Tensor, regime_feats: torch.Tensor | None = None) -> tuple:
         """
         x: (B, T, F) - input features
-        regime_feats: (B, len(regime_features)) - regime indicators at last timestep
+        regime_feats: (B, len(regime_features)) - regime indicators at last timestep.
+            If None, extracted from x using registered column indices.
         Returns: (ensemble_pred, model_weights, regime_probs)
         """
-        x.shape[0]
+        # Resolve regime features from x if not provided explicitly
+        if regime_feats is None:
+            if self._regime_col_indices is not None:
+                regime_feats = x[:, -1, self._regime_col_indices].to(x.device)
+            else:
+                # Fallback with loud warning — schema not registered
+                import warnings
+                warnings.warn(
+                    "RegimeEnsembleMetaLearner: feature schema not registered. "
+                    "Call register_feature_schema(all_feature_names) after construction. "
+                    "Falling back to last-N-columns slice which may be WRONG.",
+                    stacklevel=2,
+                )
+                regime_feats = x[:, -1, -len(self.regime_features):].to(x.device)
 
-        # Get base model predictions (no grad)
+        # Get base model predictions (no grad) — guard against NaN outputs
         with torch.no_grad():
             base_preds = []
             for model in self.base_models:
@@ -82,6 +107,9 @@ class RegimeEnsembleMetaLearner(nn.Module):
                     pred = pred[:, 2] - pred[:, 0]  # buy - sell logit
                 elif pred.dim() == 2 and pred.shape[1] == 1:
                     pred = pred.squeeze(-1)
+                # NaN guard: replace NaN/Inf with 0.0 so one bad model doesn't
+                # poison the weighted average of the entire ensemble.
+                pred = torch.where(torch.isfinite(pred), pred, torch.zeros_like(pred))
                 base_preds.append(pred)
             base_preds = torch.stack(base_preds, dim=1)  # (B, n_models)
 
@@ -110,12 +138,16 @@ def train_regime_ensemble(
     train_loader: torch.utils.data.DataLoader,
     val_loader: torch.utils.data.DataLoader,
     regime_features: list[str],
+    all_feature_names: list[str] | None = None,
     epochs: int = 10,
     device: str = "cuda",
     lr: float = 1e-3,
 ) -> RegimeEnsembleMetaLearner:
     """Train regime-weighted ensemble."""
     model = RegimeEnsembleMetaLearner(base_models, regime_features).to(device)
+    # Register column indices so forward() uses named lookup, not fragile slice
+    if all_feature_names is not None:
+        model.register_feature_schema(all_feature_names)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
     for epoch in range(epochs):
@@ -125,18 +157,20 @@ def train_regime_ensemble(
         for xb, yb, *extra in train_loader:
             xb, yb = xb.to(device), yb.to(device)
 
-            # Extract regime features from last timestep
-            regime_feats = xb[:, -1, -len(regime_features):].to(device)
-
-            pred, weights, regime_probs = model(xb, regime_feats)
+            # regime_feats extracted inside forward() via registered schema
+            pred, weights, regime_probs = model(xb)
 
             # MSE loss on continuous reward
             loss = F.mse_loss(pred, yb)
 
-            # Diversity regularization: encourage different weights per regime
-            regime_weights = model.get_regime_weights()
-            weight_entropy = -np.sum(regime_weights * np.log(regime_weights + 1e-8), axis=1).mean()
-            loss = loss - 0.01 * weight_entropy
+            # Diversity regularization: encourage different weights per regime.
+            # Fix E: compute entropy in pure PyTorch on the raw parameter so
+            # autograd can propagate gradients back to router.regime_weights.
+            # Old code used model.get_regime_weights() which returns a numpy array
+            # (detached from the graph), making this term a complete no-op.
+            regime_weights_t = F.softmax(model.router.regime_weights, dim=-1)  # (n_regimes, n_models)
+            weight_entropy = -(regime_weights_t * torch.log(regime_weights_t + 1e-8)).sum(dim=-1).mean()
+            loss = loss - 0.01 * weight_entropy  # gradients flow through regime_weights_t -> router.regime_weights
 
             opt.zero_grad()
             loss.backward()
@@ -151,8 +185,7 @@ def train_regime_ensemble(
         with torch.no_grad():
             for xb, yb, *extra in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                regime_feats = xb[:, -1, -len(regime_features):].to(device)
-                pred, _, _ = model(xb, regime_feats)
+                pred, _, _ = model(xb)  # regime_feats resolved inside forward()
                 val_losses.append(F.mse_loss(pred, yb).item())
 
         print(f"RegimeEnsemble Epoch {epoch}: train_loss={np.mean(train_losses):.4f} val_loss={np.mean(val_losses):.4f}")

@@ -19,6 +19,22 @@ import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
+try:
+    from monitoring.train_logger import TrainingLogger as _TrainingLogger
+except Exception:
+    _TrainingLogger = None
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD = True
+except ImportError:
+    TENSORBOARD = False
+
+try:
+    from tqdm.auto import tqdm as _pbar
+except ImportError:
+    def _pbar(it=None, **kw): return it
+
 from config.settings import (
     CURRICULUM as SETTINGS_CURRICULUM,
 )
@@ -116,9 +132,7 @@ _HOST_DEPS = (
     'Sidecar',
     'ElasticWeightConsolidation',
     'apply_ewc_loss',
-    'AdversarialGenerator',
     'PrioritizedDataLoader',
-    'HardExampleMiner',
     'run_preflight_sanity_checks',
     'CurriculumController',
     'create_curriculum_manager',
@@ -512,7 +526,6 @@ def run_diversity_finetune(
                            num_workers=0, drop_last=True)
 
     model_list = list(loaded_models.values())
-    list(loaded_models.keys())
 
     for ep in range(epochs):
         ep_task_loss = 0.0
@@ -826,10 +839,42 @@ def _maybe_warn_grad_norm(model, batch_idx: int) -> None:
         print(f"[Stability] WARNING: High grad norm ({total_norm:.2f}) at batch {batch_idx}")
 
 
+def _apply_curriculum_weights(loss, pred, yb, crit, classification, batch_idx_t, sample_weight_lookup):
+    """Fold per-sample curriculum weights into the batch loss as a weighted mean.
+
+    Only supported for single-output regression criteria that accept a
+    ``weight=`` kwarg (HuberLoss, AsymmetricDirectionalLoss, SharpeProxyLoss).
+    CE / multitask / tuple-output paths return the plain loss unchanged.
+    """
+    if classification or isinstance(pred, tuple):
+        return loss
+    try:
+        idx_np = batch_idx_t.detach().cpu().numpy()
+    except (AttributeError, RuntimeError):
+        return loss
+    try:
+        sw = torch.as_tensor(
+            np.asarray(sample_weight_lookup)[idx_np],
+            dtype=torch.float32,
+            device=batch_idx_t.device,
+        )
+    except (IndexError, ValueError, TypeError):
+        return loss
+    if sw.numel() == 0:
+        return loss
+    try:
+        weighted = crit(pred, yb, weight=sw)
+    except TypeError:
+        return loss
+    if not torch.isfinite(weighted):
+        return loss
+    return weighted
+
+
 def _build_train_loss(
     model, xb, yb, y_cls_b, y_conf_b, crit, classification, multitask, direction_only,
     teacher_model, distill_weight, ewc_module, ewc_lambda, loader, batch_idx_t,
-    online_miner, accum_steps,
+    online_miner, accum_steps, sample_weight_lookup=None,
 ):
     """Shared forward + loss assembly used by both AMP and non-AMP paths."""
     pred = model(xb)
@@ -838,6 +883,10 @@ def _build_train_loss(
         y_cls=y_cls_b, y_conf=y_conf_b, multitask=multitask,
         direction_only=direction_only,
     )
+    if sample_weight_lookup is not None and batch_idx_t is not None:
+        loss = _apply_curriculum_weights(
+            loss, pred, yb, crit, classification, batch_idx_t, sample_weight_lookup,
+        )
     _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classification, multitask)
     if hasattr(loader, "update_priorities") and batch_idx_t is not None:
         try:
@@ -897,6 +946,10 @@ def _prepare_train_batch(
     feature_mask: torch.Tensor | None,
     adversarial_gen,
     adversarial_feature_names: list[str] | None,
+    model=None,
+    crit=None,
+    classification: bool = False,
+    multitask: bool = False,
 ):
     """Unpack, sanitize, mask, and optionally adversarially perturb one batch.
 
@@ -925,11 +978,13 @@ def _prepare_train_batch(
         xb = xb * feature_mask
 
     if adversarial_gen is not None:
-        with torch.no_grad():
-            if adversarial_feature_names is not None:
+        try:
+            y_adv = y_cls_b if (classification or multitask) else yb
+            res = adversarial_gen(model, xb, y_adv, crit)
+            xb = res[0] if isinstance(res, (tuple, list)) else res
+        except TypeError:
+            with torch.no_grad():
                 xb = adversarial_gen(xb, adversarial_feature_names)
-            else:
-                xb = adversarial_gen(xb)
 
     return xb, yb, y_cls_b, y_conf_b, batch_idx_t
 
@@ -965,6 +1020,7 @@ def _train_batch(
     epoch: int,
     pbar,
     nan_skips: int,
+    sample_weight_lookup=None,
 ) -> tuple[str, float | None, int]:
     """Shared AMP/non-AMP train step: forward → backward → optional opt step.
 
@@ -977,7 +1033,7 @@ def _train_batch(
             model, xb, yb, y_cls_b, y_conf_b, crit, classification,
             multitask, direction_only, teacher_model, distill_weight,
             ewc_module, ewc_lambda, loader, batch_idx_t, online_miner,
-            accum_steps,
+            accum_steps, sample_weight_lookup=sample_weight_lookup,
         )
 
     if not torch.isfinite(loss):
@@ -1028,6 +1084,7 @@ def train_epoch(
     adversarial_feature_names: list[str] | None = None,
     ewc_module=None,
     ewc_lambda: float = 100.0,
+    sample_weight_lookup=None,
 ):
     """One training epoch via shared ``_prepare_train_batch`` / ``_train_batch``."""
     _ensure_bound()
@@ -1057,6 +1114,10 @@ def train_epoch(
                 feature_mask=_mask,
                 adversarial_gen=adversarial_gen,
                 adversarial_feature_names=adversarial_feature_names,
+                model=model,
+                crit=crit,
+                classification=classification,
+                multitask=multitask,
             )
             if prepared is None:
                 nan_skips += 1
@@ -1091,6 +1152,7 @@ def train_epoch(
                 epoch=epoch,
                 pbar=pbar,
                 nan_skips=nan_skips,
+                sample_weight_lookup=sample_weight_lookup,
             )
             if status != "ok" or loss_val is None:
                 continue
@@ -1851,7 +1913,7 @@ def supervised_train(
     # steps_per_epoch = ceil(batches / accum_steps) so the total cycle length
     # equals epochs ├ù optimizer-updates-per-epoch.
     _eff_steps = max(1, -(-len(train_dl) // _accum))   # ceiling div
-    _sched_kind = str(getattr(args, "lr_schedule", "onecycle")).strip().lower()
+    _sched_kind = str(getattr(args, "lr_schedule", "warmup_cosine")).strip().lower()  # Fix Item 4: default to warmup_cosine
     _total_steps = max(1, args.epochs * _eff_steps)
     if _sched_kind == "warmup_cosine":
         _warmup_ep = max(0, int(getattr(args, "lr_warmup_epochs", 3)))
@@ -1877,8 +1939,7 @@ def supervised_train(
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=max_lr,
-            epochs=args.epochs,
-            steps_per_epoch=_eff_steps,
+            total_steps=_total_steps,
             pct_start=float(getattr(args, "onecycle_pct_start", 0.1)),
             anneal_strategy="cos",
         )
@@ -1968,7 +2029,6 @@ def supervised_train(
     _resume_chunk_history: list | None  = None
     _resume_chunk_streak:  int | None   = None
     _resume_feat_state:    dict | None  = None
-    _resume_curriculum_state: dict | None = None
 
     if args.resume and last_path.exists():
         ck = torch.load(last_path, map_location=device)
@@ -2007,7 +2067,6 @@ def supervised_train(
                                              history.get("val_sharpe", [])))
         _resume_chunk_streak  = int(ck.get("chunk_worse_streak", 0))
         _resume_feat_state    = ck.get("feat_stability_state")
-        _resume_curriculum_state = ck.get("curriculum_state")
         print(f"[Resume] Loaded exact state from {last_path} (epoch {start_ep})")
     elif args.resume and best_path.exists() and fold_id is None:
         core = _core_model(model)
@@ -2028,11 +2087,7 @@ def supervised_train(
         no_improve = 0
         improved = False   # Initialize to avoid UnboundLocalError
         history  = {
-
             "train_loss": [], "val_loss": [], "dir_acc": [], "val_sharpe": [], "lr": [],
-
-            "seq_len": [], "difficulty_stage": [], "curriculum_stalls": [],
-
         }
 
     if use_direction_targets and start_ep == 0:
@@ -2046,11 +2101,9 @@ def supervised_train(
     _CURR = getattr(args, "curriculum", None)
     if not isinstance(_CURR, dict):
         _CURR = SETTINGS_CURRICULUM
-    _seq_schedule = _CURR.get("seq_schedule", [])
     _chunk_patience = int(_CURR.get("chunk_early_stop_patience", 3))
     _chunk_min_batches = int(_CURR.get("chunk_early_stop_min_batches", 50))
     _feat_groups = _CURR.get("feature_groups", {})
-    _adapt_cfg = _CURR.get("adaptation", {}) if isinstance(_CURR.get("adaptation", {}), dict) else {}
 
     # One-shot curriculum ↔ FEATURE_MASK ↔ schema consistency audit (mismatch C/D)
     try:
@@ -2092,73 +2145,8 @@ def supervised_train(
     except Exception as _audit_exc:
         _log_warn(f"[CurriculumAudit] skipped ({_audit_exc})")
 
-    _adapt_stable_window = max(2, int(_adapt_cfg.get("stable_window", 3)))
-
-    _adapt_min_stable_sharpe = float(_adapt_cfg.get("min_stable_sharpe", 0.05))
-
-    _adapt_collapse_min_peak = float(_adapt_cfg.get("collapse_min_peak", 0.25))
-
-    _adapt_collapse_drop = float(_adapt_cfg.get("collapse_drop", 0.15))
-
-    _adapt_advance_lr_mult = float(_adapt_cfg.get("advance_lr_mult", 0.85))
-
-    _adapt_collapse_lr_mult = float(_adapt_cfg.get("collapse_lr_mult", 0.80))
-
-    # P0/P1: new curriculum adaptation params
-    # collapse_reversal_threshold: single-epoch drop below this triggers stall (replaces hardcoded -0.1)
-    _adapt_reversal_threshold = float(_adapt_cfg.get("collapse_reversal_threshold", -0.10))
-    # recovery_window: consecutive stable epochs post-stall before unfreezing curriculum
-    _adapt_recovery_window = max(2, int(_adapt_cfg.get("recovery_window", 4)))
-    # min_epochs_per_stage: cooldown epochs required between any two advances
-    _adapt_min_epochs_per_stage = max(1, int(_adapt_cfg.get("min_epochs_per_stage", 3)))
-    # P2: EMA alpha for smoothed Sharpe signal used by the advance gate
-    # Raw val_sharpe remains for collapse detection (fast); EMA used for stability window
-    _adapt_ema_alpha = float(_adapt_cfg.get("sharpe_ema_alpha", 0.30))
-
-    # --- Schedule-floor helpers (P0: epoch_start as guaranteed minimum) ---
-    def _sched_floor_seq(ep: int) -> int:
-        """Return the minimum seq_len the schedule mandates at this epoch."""
-        if not _seq_schedule:
-            return args.seq_len
-        floor = int(_seq_schedule[0]["seq_len"])
-        for entry in _seq_schedule:
-            if ep >= int(entry.get("epoch_start", 0)):
-                floor = int(entry["seq_len"])
-        return floor
-
-    def _sched_floor_diff(ep: int) -> int:
-        """Return the minimum difficulty stage the schedule mandates at this epoch."""
-        if not _diff_schedule:
-            return 0
-        floor = int(_diff_schedule[0]["max_difficulty"])
-        for entry in _diff_schedule:
-            if ep >= int(entry.get("epoch_start", 0)):
-                floor = int(entry["max_difficulty"])
-        return floor
-
-
-    # -- Adaptive Curriculum State --
-    _active_seq_len = args.seq_len
-    if _seq_schedule:
-        _active_seq_len = int(_seq_schedule[0]["seq_len"])
-    if history.get("seq_len"):
-        _active_seq_len = history["seq_len"][-1]
-
-    _rolling_sharpes = []
-    _seq_frozen = False
-    _last_logged_seq_len = None
-    _last_logged_diff_stage = None
-
-    # P0/P1 state ΓÇö cooldown, recovery, stall tracking
-    _epochs_since_advance: int = 0          # epochs elapsed since last advance (cooldown)
-    _post_stall_stable_count: int = 0       # consecutive stable epochs after last stall (recovery)
-    # P2: EMA Sharpe state ΓÇö seeded from history tail on resume so continuity is preserved
-    _ema_hist = history.get("sharpe_ema", [])
-    _sharpe_ema: float | None = float(_ema_hist[-1]) if _ema_hist else None
-
-
     def _seq_len_for_epoch(ep: int) -> int:
-        return _active_seq_len
+        return args.seq_len
 
     def _unfreeze_features_for_epoch(model_ref, ep: int) -> None:
         """A4: Unfreeze parameter groups that correspond to slow feature layers."""
@@ -2191,12 +2179,6 @@ def supervised_train(
 
     # -- B: Difficulty curriculum ΓÇö load diff sidecar once, filter each epoch -
     _diff_arr = _load_diff_array(cache_path, n_samples)
-    _diff_schedule = _CURR.get("difficulty_schedule", [])
-    _active_diff_stage = 0
-    if _diff_schedule:
-        _active_diff_stage = int(_diff_schedule[0]["max_difficulty"])
-    if history.get("difficulty_stage"):
-        _active_diff_stage = history["difficulty_stage"][-1]
     _feature_schema = _load_feature_schema(cache_path, n_features)
     if _feature_schema is None:
         _log_warn("[Curriculum] Ordered feature schema sidecar missing; feature-group mask will use FEATURE_MASK only if lengths match.")
@@ -2259,67 +2241,7 @@ def supervised_train(
         _log_warn(f"[FeatureAblation] Report write failed: {_fa_e}")
 
 
-    def _difficulty_stage_for_epoch(ep: int) -> int:
-        return _active_diff_stage
-
-    _fold_class_prior_np = _class_prior_array(
-        cache_path, train_idx, use_direction_sidecar=True,
-    )
-    _log_info(
-        "[CurriculumCalibration] Full-fold S/H/B prior="
-        f"{_fold_class_prior_np[0]:.3f}/{_fold_class_prior_np[1]:.3f}/{_fold_class_prior_np[2]:.3f}"
-    )
-
-    def _calibrated_curriculum_subset(idx: np.ndarray, candidate: np.ndarray, ep: int, stage: int) -> np.ndarray:
-        """Reject curriculum subsets that distort the fold direction distribution."""
-        if len(candidate) >= len(idx):
-            return candidate
-        if len(candidate) < 50:
-            _log_warn(
-                f"[CurriculumCalibration] Epoch {ep+1}: stage={stage} has only "
-                f"{len(candidate):,}/{len(idx):,} samples; using full fold."
-            )
-            return idx
-        try:
-            cand_prior = _class_prior_array(
-                cache_path, candidate, use_direction_sidecar=True,
-            )
-            max_abs_delta = float(np.max(np.abs(cand_prior - _fold_class_prior_np)))
-            min_share = float(np.min(cand_prior))
-            max_delta_allowed = float((_CURR.get("calibration") or {}).get("max_class_prior_delta", 0.05))
-            min_share_allowed = float((_CURR.get("calibration") or {}).get("min_class_share", 0.05))
-            if max_abs_delta > max_delta_allowed or min_share < min_share_allowed:
-                _log_warn(
-                    "[CurriculumCalibration] Epoch "
-                    f"{ep+1}: rejecting stage={stage} subset; "
-                    f"subset prior S/H/B={cand_prior[0]:.3f}/{cand_prior[1]:.3f}/{cand_prior[2]:.3f}, "
-                    f"fold prior S/H/B={_fold_class_prior_np[0]:.3f}/{_fold_class_prior_np[1]:.3f}/{_fold_class_prior_np[2]:.3f}, "
-                    f"max_delta={max_abs_delta:.3f}. Using full fold."
-                )
-                return idx
-            _log_info(
-                "[CurriculumCalibration] Epoch "
-                f"{ep+1}: stage={stage} subset prior S/H/B="
-                f"{cand_prior[0]:.3f}/{cand_prior[1]:.3f}/{cand_prior[2]:.3f} "
-                f"({len(candidate):,}/{len(idx):,} samples)"
-            )
-        except Exception as _cal_exc:
-            _log_warn(f"[CurriculumCalibration] Epoch {ep+1}: failed ({_cal_exc}); using full fold.")
-            return idx
-        return candidate
-
-    def _apply_difficulty_filter(idx: np.ndarray, ep: int) -> np.ndarray:
-        """Filter training indices to only include samples at/below the epoch's difficulty level."""
-        if _diff_arr is None or not _diff_schedule:
-            return idx
-        max_diff = _difficulty_stage_for_epoch(ep)
-        if max_diff >= 2:
-            return idx   # all difficulties ΓÇö no filter needed
-        mask = _diff_arr[idx] <= max_diff
-        filtered = idx[mask]
-        if len(filtered) < 50:
-            return idx   # safety: never starve the dataloader
-        return _calibrated_curriculum_subset(idx, filtered, ep, max_diff)
+    
 
     # -- A: Feature stability monitor -----------------------------------------
     _feat_stability = FeatureStabilityMonitor(
@@ -2389,7 +2311,14 @@ def supervised_train(
         except Exception as _cs_exc:
             print(f"[Train] Warning: could not save crash checkpoint: {_cs_exc}")
 
+    # Initialize curriculum variables for reporting/fallback
+    _active_seq_len = args.seq_len
+    _active_diff_stage = 0
+    _seq_frozen = False
+    _last_logged_seq_len = -1
+    
     epoch_bar = _pbar(range(start_ep, args.epochs), desc=f"Train {model_name.upper()}", unit="ep") if _rich_display is None else range(start_ep, args.epochs)
+
 
     # -- Advanced Training Mechanics: EWC & Adversarial --
     _ewc = None
@@ -2424,13 +2353,23 @@ def supervised_train(
     _adv_feature_names = _feature_schema or list(getattr(args, "_feat_names", []) or [])
     if getattr(args, "enable_adversarial", False):
         try:
-            print(f"[Adversarial] Initializing Adversarial Market Generator (prob={getattr(args, 'adversarial_prob', 0.01)})")
-            _adversarial = AdversarialGenerator(
-                probability=getattr(args, "adversarial_prob", 0.01),
+            from training.adversarial_generator import create_adversarial_attack
+            _adv_method = str(getattr(args, "adversarial_method", "pgd") or "pgd").lower()
+            if model_name == "gnn" and _adv_method == "pgd":
+                _adv_method = "graph_pgd"
+            _adversarial = create_adversarial_attack(
+                method=_adv_method,
+                eps=float(getattr(args, "adversarial_eps", 0.3)),
+                alpha=float(getattr(args, "adversarial_alpha", 0.01)),
+                steps=int(getattr(args, "adversarial_steps", 7)),
+                probability=float(getattr(args, "adversarial_prob", 0.01)),
                 feature_names=_adv_feature_names or None,
             )
             _adversarial.train()
-            print(f"[Adversarial] Initialized successfully (n_features_named={len(_adv_feature_names)}).")
+            print(f"[Adversarial] Initialized method={_adv_method} "
+                  f"(eps={getattr(args, 'adversarial_eps', 0.3)}, "
+                  f"prob={getattr(args, 'adversarial_prob', 0.01)}, "
+                  f"n_features_named={len(_adv_feature_names)}).")
         except Exception as e:
             _adversarial = None
             print(f"[Adversarial] Failed to initialize (continuing without adversarial): {e}")
@@ -2440,29 +2379,6 @@ def supervised_train(
     _train_ctrl = TrainingController(report_dir=str(ckpt_dir))
     _train_ctrl.set_recipe(str(model_name))
     _ctrl_stop_early = False
-
-    # Restore curriculum runtime state from resume checkpoint (preferred) or history tail.
-    _v_sh_history: list = list(history.get("val_sharpe", []))
-    _curriculum_stalls: int = (history.get("curriculum_stalls", [0]) or [0])[-1]
-    _curriculum_events: list = []
-    if _resume_curriculum_state:
-        _seq_frozen = bool(_resume_curriculum_state.get("seq_frozen", False))
-        _rolling_sharpes = list(_resume_curriculum_state.get("rolling_sharpes", []))
-        _epochs_since_advance = int(_resume_curriculum_state.get("epochs_since_advance", 0))
-        _post_stall_stable_count = int(_resume_curriculum_state.get("post_stall_stable_count", 0))
-        if _resume_curriculum_state.get("sharpe_ema") is not None:
-            _sharpe_ema = float(_resume_curriculum_state["sharpe_ema"])
-        if _resume_curriculum_state.get("active_seq_len") is not None:
-            _active_seq_len = int(_resume_curriculum_state["active_seq_len"])
-        if _resume_curriculum_state.get("active_diff_stage") is not None:
-            _active_diff_stage = int(_resume_curriculum_state["active_diff_stage"])
-        _curriculum_stalls = int(_resume_curriculum_state.get("curriculum_stalls", _curriculum_stalls))
-        _curriculum_events = list(_resume_curriculum_state.get("curriculum_events", []))
-        _v_sh_history = list(_resume_curriculum_state.get("v_sh_history", _v_sh_history))
-        print(f"[Resume] Restored curriculum state: seq_len={_active_seq_len} "
-              f"diff_stage={_active_diff_stage} stalls={_curriculum_stalls} frozen={_seq_frozen}")
-    elif _curriculum_stalls > 0:
-        _seq_frozen = True
 
     # -- Unified CurriculumManager (Improvement #4) ---------------------------
     # Opt-in extra curriculum layer. Mirrors n_samples on the *train* fold so
@@ -2492,32 +2408,8 @@ def supervised_train(
         if _TRAIN_LOGGER is not None:
             _TRAIN_LOGGER.on_epoch_start(ep, total_epochs=args.epochs,
                                          seq_len=_seq_len_for_epoch(ep))
-        # -- A3: Apply adaptive curriculum seq_len -----------------------------
-        # P0: enforce epoch_start as a guaranteed floor ΓÇö schedule milestones are
-        # honoured even when the performance gate hasn't fired yet.
-        _floor_seq = _sched_floor_seq(ep)
-        if _floor_seq > _active_seq_len and not _seq_frozen:
-            _log_info(f"[Curriculum] Epoch {ep+1}: schedule floor raised seq_len "
-                      f"{_active_seq_len} ΓåÆ {_floor_seq} (epoch_start milestone)")
-            _curriculum_events.append({
-                "epoch": ep + 1, "type": "seq_len_schedule_floor",
-                "from_seq_len": int(_active_seq_len), "to_seq_len": int(_floor_seq),
-            })
-            _active_seq_len = _floor_seq
-            _epochs_since_advance = 0
-
-        _floor_diff = _sched_floor_diff(ep)
-        if _floor_diff > _active_diff_stage:
-            _log_info(f"[Curriculum] Epoch {ep+1}: schedule floor raised difficulty "
-                      f"{_active_diff_stage} ΓåÆ {_floor_diff} (epoch_start milestone)")
-            _curriculum_events.append({
-                "epoch": ep + 1, "type": "difficulty_schedule_floor",
-                "from_stage": int(_active_diff_stage), "to_stage": int(_floor_diff),
-            })
-            _active_diff_stage = _floor_diff
-            _epochs_since_advance = 0
-
-        curr_seq_len = _active_seq_len
+        curr_seq_len = _seq_len_for_epoch(ep)
+        _active_seq_len = curr_seq_len
 
         if _last_logged_seq_len != curr_seq_len:
 
@@ -2610,7 +2502,13 @@ def supervised_train(
 
         # Reset frozen features if difficulty stage increased
         # -- B: Difficulty curriculum ΓÇö rebuild dataloader with filtered indices --
-        ep_train_idx = _apply_difficulty_filter(train_idx, ep)
+        ep_train_idx = train_idx
+        if _curriculum_mgr is not None:
+            _cm_mask = _curriculum_mgr.get_inclusion_mask(ep)
+            # Apply mask to ep_train_idx by intersecting with allowed indices
+            _allowed = np.where(_cm_mask)[0]
+            ep_train_idx = np.intersect1d(ep_train_idx, _allowed)
+            if len(ep_train_idx) < 50: ep_train_idx = train_idx
         # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
         if _curriculum_mgr is not None:
             try:
@@ -2633,6 +2531,17 @@ def supervised_train(
                 })
             except Exception as _cm_exc:
                 _log_warn(f"[CurriculumManager] Epoch {ep+1} update failed: {_cm_exc}")
+        # Per-sample curriculum weights → global-index lookup for loss weighting
+        _cm_wl = None
+        if _curriculum_mgr is not None:
+            try:
+                _cm_wl = np.ones(n_samples, dtype=np.float64)
+                _cm_wl[train_idx] = np.asarray(
+                    _curriculum_mgr.get_sample_weights(), dtype=np.float64,
+                )
+            except Exception as _cm_wl_exc:
+                _log_warn(f"[CurriculumManager] Sample-weight lookup failed: {_cm_wl_exc}")
+                _cm_wl = None
         _direction_warmup_active = bool(
             use_direction_targets
             and multitask
@@ -2662,12 +2571,13 @@ def supervised_train(
         # ──────────────────────────────────────────────────────────────────
 
         if len(ep_train_idx) != len(train_idx) or _direction_warmup_active:
-            _diff_stage = _difficulty_stage_for_epoch(ep)
             if len(ep_train_idx) != len(train_idx) and not _direction_warmup_active:
-                _log_info(f"[DiffCurriculum] Epoch {ep+1}: stage={_diff_stage} "
+                _log_info(f"[Curriculum] Epoch {ep+1}: training on "
                           f"({len(ep_train_idx):,}/{len(train_idx):,} samples)")
             _ep_ds = ZarrStreamDataset(
-                cache_path, ep_train_idx, shuffle_chunks=True, multitask_targets=use_direction_targets,
+                cache_path, ep_train_idx, shuffle_chunks=True,
+                multitask_targets=use_direction_targets,
+                return_indices=True,
             )
             epoch_train_dl = DataLoader(
                 _ep_ds, batch_size=args.batch_size, shuffle=False,
@@ -2711,6 +2621,7 @@ def supervised_train(
                 adversarial_feature_names=_adv_feature_names or None,
                 ewc_module=_ewc,
                 ewc_lambda=float(getattr(args, "ewc_lambda", 100.0)),
+                sample_weight_lookup=_cm_wl,
             )
         except Exception as _epoch_exc:
             _log_error(f"[Train] Epoch {ep+1} failed for {model_name}", _epoch_exc)
@@ -2793,81 +2704,12 @@ def supervised_train(
         history["train_loss"].append(tl); history["val_loss"].append(vl)
         history["dir_acc"].append(da);    history["lr"].append(lr)
         history["val_sharpe"].append(v_sh)
-        history.setdefault("sharpe_ema", []).append(float(_sharpe_ema) if _sharpe_ema is not None else v_sh)
-        history.setdefault("seq_len", []).append(int(_active_seq_len))
-        history.setdefault("difficulty_stage", []).append(int(_active_diff_stage))
-        history.setdefault("curriculum_stalls", []).append(int(_curriculum_stalls))
         history.setdefault("val_pred_counts", []).append(
             [int(x) for x in _class_counts.get("pred", [0, 0, 0])]
         )
         history.setdefault("val_true_counts", []).append(
             [int(x) for x in _class_counts.get("true", [0, 0, 0])]
         )
-
-
-        # Adaptive Curriculum Update (P1: unified collapse detector)
-        _v_sh_history.append(v_sh)
-        if len(_v_sh_history) >= 2:
-            _prev_peak_sharpe = max(_v_sh_history[:-1])
-            _meaningful_peak  = _prev_peak_sharpe >= _adapt_collapse_min_peak
-
-            # Condition A ΓÇö sustained drop from peak (Optuna-tunable threshold)
-            _peak_drop_collapse = v_sh < (_prev_peak_sharpe - _adapt_collapse_drop)
-
-            # Condition B ΓÇö sharp single-epoch reversal from positive to deeply negative
-            # (was hardcoded to -0.1; now driven by collapse_reversal_threshold in YAML)
-            _sharp_reversal = (
-                len(_rolling_sharpes) >= 1
-                and v_sh < _adapt_reversal_threshold
-                and _rolling_sharpes[-1] > _adapt_min_stable_sharpe
-            )
-
-            _should_stall = _meaningful_peak and (_peak_drop_collapse or _sharp_reversal)
-            _collapse_reason = (
-                "peak_drop_and_reversal" if (_peak_drop_collapse and _sharp_reversal)
-                else "peak_drop" if _peak_drop_collapse
-                else "sharp_reversal" if _sharp_reversal
-                else None
-            )
-
-            if _should_stall:
-                _log_warn(
-                    f"[Curriculum] Sharpe collapsed to {v_sh:.3f} "
-                    f"(peak={_prev_peak_sharpe:.3f}, reason={_collapse_reason}). "
-                    "Stalling curriculum progression."
-                )
-                _curriculum_stalls += 1
-                _post_stall_stable_count = 0
-                _curriculum_events.append({
-                    "epoch": ep + 1,
-                    "type": "stall",
-                    "reason": _collapse_reason,
-                    "val_sharpe": float(v_sh),
-                    "previous_peak_sharpe": float(_prev_peak_sharpe),
-                    "collapse_min_peak": float(_adapt_collapse_min_peak),
-                    "collapse_drop": float(_adapt_collapse_drop),
-                    "reversal_threshold": float(_adapt_reversal_threshold),
-                    "seq_len": int(_active_seq_len),
-                    "difficulty_stage": int(_active_diff_stage),
-                    "lr_mult": float(_adapt_collapse_lr_mult),
-                })
-                _rolling_sharpes.clear()
-                _seq_frozen = True
-                for param_group in opt.param_groups:
-                    param_group['lr'] *= _adapt_collapse_lr_mult
-                if scheduler is not None:
-                    for attr in ["base_lrs", "initial_lrs", "max_lrs", "min_lrs"]:
-                        if hasattr(scheduler, attr):
-                            setattr(scheduler, attr, [v * _adapt_collapse_lr_mult
-                                                       for v in getattr(scheduler, attr)])
-
-            elif v_sh < (_prev_peak_sharpe - 0.05):
-                _log_info(
-                    f"[Curriculum] Minor Sharpe dip to {v_sh:.3f} "
-                    f"(peak={_prev_peak_sharpe:.3f}); no stall (below collapse thresholds)."
-                )
-
-
 
         # GPU temp for display
         try:
@@ -2928,9 +2770,6 @@ def supervised_train(
             _tb_writer.add_scalar("Loss/val",         vl,   ep)
             _tb_writer.add_scalar("Metrics/dir_acc",  da,   ep)
             _tb_writer.add_scalar("Metrics/sharpe",     v_sh, ep)
-            if _sharpe_ema is not None:
-                _tb_writer.add_scalar("Metrics/sharpe_ema", float(_sharpe_ema), ep)
-            _tb_writer.add_scalar("Curriculum/epochs_since_advance", int(_epochs_since_advance), ep)
             _tb_writer.add_scalar("ValPred/sell",     _class_counts.get("pred", [0, 0, 0])[0], ep)
 
             _tb_writer.add_scalar("ValPred/hold",     _class_counts.get("pred", [0, 0, 0])[1], ep)
@@ -2938,12 +2777,6 @@ def supervised_train(
             _tb_writer.add_scalar("ValPred/buy",      _class_counts.get("pred", [0, 0, 0])[2], ep)
 
             _tb_writer.add_scalar("Train/lr",         lr,   ep)
-            _tb_writer.add_scalar("Curriculum/seq_len", int(_active_seq_len), ep)
-
-            _tb_writer.add_scalar("Curriculum/difficulty_stage", int(_active_diff_stage), ep)
-
-            _tb_writer.add_scalar("Curriculum/stalls", int(_curriculum_stalls), ep)
-
             _tb_writer.add_scalar("GPU/mem_mb",       gm,   ep)
             if _gpu_temp > 0:
                 _tb_writer.add_scalar("GPU/temp_c",   _gpu_temp, ep)
@@ -2961,11 +2794,6 @@ def supervised_train(
                 "val_pred/buy": _pred_counts[2],
                 "val_true/sell": _true_counts[0], "val_true/hold": _true_counts[1],
                 "val_true/buy": _true_counts[2],
-                "curriculum/seq_len": int(_active_seq_len),
-                "curriculum/difficulty_stage": int(_active_diff_stage),
-                "curriculum/stalls": int(_curriculum_stalls),
-                "curriculum/sharpe_ema": float(_sharpe_ema) if _sharpe_ema is not None else v_sh,
-                "curriculum/epochs_since_advance": int(_epochs_since_advance),
                 **({"fold": fold_id} if fold_id is not None else {}),
             })
 
@@ -2993,129 +2821,6 @@ def supervised_train(
         else:
             print(f"{ep+1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} "
                   f"{lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
-
-        # -- Adaptive Curriculum Update --
-        # SYS-005: Use train loss plateau as the primary curriculum progression signal
-        # instead of val Sharpe. This prevents the validation set from influencing
-        # training decisions (curriculum stage selection).
-        # Val Sharpe is still used for collapse detection (safety mechanism) but NOT
-        # for advancement gating.
-        _curriculum_metric_source = str(getattr(args, "curriculum_gate_metric", "train_loss")).lower()
-        if _curriculum_metric_source == "train_loss":
-            # Gate on train loss EMA plateau: loss hasn't improved by >threshold for N epochs
-            if _sharpe_ema is None:
-                _sharpe_ema = -tl  # negate so "higher is better" logic still works
-            else:
-                _sharpe_ema = _adapt_ema_alpha * (-tl) + (1.0 - _adapt_ema_alpha) * _sharpe_ema
-        else:
-            # Legacy behavior: use val Sharpe (for backward compat if explicitly requested)
-            if _sharpe_ema is None:
-                _sharpe_ema = v_sh
-            else:
-                _sharpe_ema = _adapt_ema_alpha * v_sh + (1.0 - _adapt_ema_alpha) * _sharpe_ema
-
-        # Rolling window uses the EMA value for stability judgement; raw v_sh feeds collapse detector.
-        _rolling_sharpes.append(_sharpe_ema)
-        if len(_rolling_sharpes) > _adapt_stable_window:
-            _rolling_sharpes.pop(0)
-
-        # P1: track cooldown
-        _epochs_since_advance += 1
-
-        # P1: Recovery — after recovery_window consecutive stable epochs post-stall, unfreeze.
-        # SYS-005: when gating on train_loss, "stable" means loss has plateaued
-        # (range of recent values is small relative to mean).
-        if _curriculum_metric_source == "train_loss" and len(_rolling_sharpes) == _adapt_stable_window:
-            _window_range = max(_rolling_sharpes) - min(_rolling_sharpes)
-            _window_mean = abs(sum(_rolling_sharpes) / len(_rolling_sharpes))
-            _plateau_threshold = max(1e-4, _window_mean * 0.02)
-            _window_stable = _window_range < _plateau_threshold
-        else:
-            _window_stable = (
-                len(_rolling_sharpes) == _adapt_stable_window
-                and all(s > _adapt_min_stable_sharpe for s in _rolling_sharpes)
-            )
-        if _seq_frozen and _window_stable:
-            _post_stall_stable_count += 1
-            if _post_stall_stable_count >= _adapt_recovery_window:
-                _seq_frozen = False
-                _post_stall_stable_count = 0
-                _log_info(
-                    f"[Curriculum] Recovery: {_adapt_recovery_window} consecutive stable "
-                    f"epochs after stall ΓÇö curriculum unfrozen at ep {ep+1}."
-                )
-                _curriculum_events.append({
-                    "epoch": ep + 1, "type": "recovery",
-                    "recovery_window": int(_adapt_recovery_window),
-                    "rolling_sharpe": [float(s) for s in _rolling_sharpes],
-                    "seq_len": int(_active_seq_len),
-                    "difficulty_stage": int(_active_diff_stage),
-                })
-        elif not _seq_frozen and not _window_stable:
-            _post_stall_stable_count = 0  # reset when window breaks outside a freeze
-
-        # P1: Performance gating with cooldown guard
-        _cooldown_ok = _epochs_since_advance >= _adapt_min_epochs_per_stage
-        if _window_stable and _cooldown_ok and not _seq_frozen:
-
-            # Evaluate difficulty advance (only up to schedule's next floor ΓÇö never skip a stage)
-            next_diff = _active_diff_stage
-            for entry in _diff_schedule:
-                if int(entry["max_difficulty"]) > _active_diff_stage:
-                    next_diff = int(entry["max_difficulty"])
-                    break
-
-            # Evaluate seq_len advance (next target above current; schedule floors already applied)
-            next_seq = _active_seq_len
-            for entry in _seq_schedule:
-                if int(entry["seq_len"]) > _active_seq_len:
-                    next_seq = int(entry["seq_len"])
-                    break
-
-            if next_diff > _active_diff_stage:
-                _prev_diff_stage = _active_diff_stage
-                _stable_window_values = [float(s) for s in _rolling_sharpes]
-                _active_diff_stage = next_diff
-                _epochs_since_advance = 0
-                _rolling_sharpes.clear()
-                _log_info(f"[DiffCurriculum] Rolling Sharpe stable. Advancing difficulty to stage {next_diff}.")
-                _curriculum_events.append({
-                    "epoch": ep + 1,
-                    "type": "difficulty_increase",
-                    "from_stage": int(_prev_diff_stage),
-                    "to_stage": int(next_diff),
-                    "rolling_sharpe": _stable_window_values,
-                    "stable_window": int(_adapt_stable_window),
-                    "min_stable_sharpe": float(_adapt_min_stable_sharpe),
-                    "lr_mult": float(_adapt_advance_lr_mult),
-                })
-                for param_group in opt.param_groups:
-                    param_group['lr'] *= _adapt_advance_lr_mult
-                if scheduler is not None:
-                    for attr in ["base_lrs", "initial_lrs", "max_lrs", "min_lrs"]:
-                        if hasattr(scheduler, attr):
-                            setattr(scheduler, attr, [v * _adapt_advance_lr_mult
-                                                       for v in getattr(scheduler, attr)])
-                _log_info(f"[DiffCurriculum] Regime changed: LR multiplied by {_adapt_advance_lr_mult:.3f}.")
-
-            elif next_seq > _active_seq_len:
-                _prev_seq_len = _active_seq_len
-                _stable_window_values = [float(s) for s in _rolling_sharpes]
-                _active_seq_len = next_seq
-                _epochs_since_advance = 0
-                _rolling_sharpes.clear()
-                _log_info(f"[DiffCurriculum] Rolling Sharpe stable. Advancing seq_len to {next_seq}.")
-                _curriculum_events.append({
-                    "epoch": ep + 1,
-                    "type": "seq_len_increase",
-                    "from_seq_len": int(_prev_seq_len),
-                    "to_seq_len": int(next_seq),
-                    "rolling_sharpe": _stable_window_values,
-                    "stable_window": int(_adapt_stable_window),
-                    "min_stable_sharpe": float(_adapt_min_stable_sharpe),
-                })
-
-
 
         if improved:
             core = _core_model(model)
@@ -3175,18 +2880,6 @@ def supervised_train(
             "chunk_sharpe_history": _chunk_sharpe_history,
             "chunk_worse_streak":   _chunk_worse_streak,
             "feat_stability_state": _feat_stability.get_state(),
-            "curriculum_state": {
-                "seq_frozen": _seq_frozen,
-                "rolling_sharpes": [float(s) for s in _rolling_sharpes],
-                "epochs_since_advance": int(_epochs_since_advance),
-                "post_stall_stable_count": int(_post_stall_stable_count),
-                "sharpe_ema": float(_sharpe_ema) if _sharpe_ema is not None else None,
-                "active_seq_len": int(_active_seq_len),
-                "active_diff_stage": int(_active_diff_stage),
-                "curriculum_stalls": int(_curriculum_stalls),
-                "curriculum_events": _curriculum_events,
-                "v_sh_history": [float(s) for s in _v_sh_history],
-            },
         }, last_path, metadata={
             "model_name": model_name,
             "n_features": n_features,
@@ -3341,37 +3034,12 @@ def supervised_train(
 
             "seq_len": int(_hist_at("seq_len", _active_seq_len)),
 
-            "difficulty_stage": int(_hist_at("difficulty_stage", _active_diff_stage)),
-
-            "curriculum_stalls": int(_hist_at("curriculum_stalls", _curriculum_stalls)),
-
         },
 
         "final_train_val_gap": _final_train_val_gap,
         "early_stopped": _early_stopped,
         "overfitting_warnings": [],
         "final_seq_len": int(_active_seq_len),
-
-        "final_difficulty_stage": int(_active_diff_stage),
-
-        "adaptation_config": {
-
-            "stable_window": int(_adapt_stable_window),
-
-            "min_stable_sharpe": float(_adapt_min_stable_sharpe),
-
-            "collapse_min_peak": float(_adapt_collapse_min_peak),
-
-            "collapse_drop": float(_adapt_collapse_drop),
-
-            "advance_lr_mult": float(_adapt_advance_lr_mult),
-
-            "collapse_lr_mult": float(_adapt_collapse_lr_mult),
-
-        },
-
-        "curriculum_stalls": _curriculum_stalls,
-        "curriculum_events": _curriculum_events
     }
     if _final_train_val_gap > 0.05:
         _control_report["overfitting_warnings"].append(f"High train-val gap: {_final_train_val_gap:.4f}")

@@ -732,7 +732,7 @@ def _run_trial_process(args, params: dict[str, Any], *, trial_number: int, epoch
 
 def _evaluate_trial_artifacts(checkpoint_dir: Path, model_name: str, folds: int, metric: str) -> dict[str, Any]:
     ckpt_path = _trial_checkpoint_path(checkpoint_dir, model_name, folds)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     history = ckpt.get("history", {})
     summary = _read_json(_trial_summary_path(checkpoint_dir, model_name))
 

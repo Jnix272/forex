@@ -161,22 +161,38 @@ class TestModelRegistry:
 class TestPromotionGates:
     def test_passes_good_metrics(self):
         passed, reasons = check_promotion_gates({
-            "val_sharpe": 1.2,
+            "val_sharpe": 2.0,  # Higher to pass PSR
             "profit_factor": 1.5,
             "max_drawdown": 0.08,
             "val_loss": 0.5,
+            "n_trades": 1000,
+            "gross_pnl": 5000.0,
+            "transaction_costs": 800.0,
+            "n_backtest_trials": 1,
+            "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
+            "n_obs": 1000,
         })
+        print(f"passed={passed}, reasons={reasons}")
         assert passed
-        assert len(reasons) == 0
+        # reasons contains all gates with status, check that all passed
+        assert all("✓" in r for r in reasons)
 
     def test_fails_low_sharpe(self):
         passed, reasons = check_promotion_gates({
             "val_sharpe": 0.3,
             "profit_factor": 1.5,
             "max_drawdown": 0.08,
+            "n_trades": 1000,
+            "gross_pnl": 5000.0,
+            "transaction_costs": 800.0,
+            "n_backtest_trials": 1,
+            "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
+            "n_obs": 1000,
         })
+        print(f"passed={passed}, reasons={reasons}")
         assert not passed
-        assert any("Sharpe" in r for r in reasons)
+        # Check that at least one sharpe-related gate failed
+        assert any("sharpe" in r.lower() and "✗" in r for r in reasons)
 
     def test_fails_high_drawdown(self):
         passed, reasons = check_promotion_gates({

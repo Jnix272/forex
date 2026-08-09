@@ -317,11 +317,17 @@ class TestMultiTaskWrapper:
         assert p.max() <= 1.0 + 1e-6
 
     def test_wrapper_large_head_auto_projects(self, seq_batch):
-        """iTransformer head_in = d_model * n_features which is large; wrapper should project."""
+        """Oversized head_in estimate uses LazyLinear (iTransformer Identity mean-pools to d_model)."""
         B, T, F = seq_batch.shape
         base = iTransformerScalper(input_size=F, seq_len=T, d_model=32, nhead=4)
-        head_in = 32 * F   # F * d_model = 48 * 32 = 1536 > proj_threshold=1024
-        wrapped = MultiTaskWrapper(base, head_in=head_in, proj_threshold=1024, proj_to=128)
+        head_in = 32 * F   # stale F*d_model estimate; real Identity path is d_model
+        wrapped = MultiTaskWrapper(
+            base,
+            head_in=head_in,
+            proj_threshold=1024,
+            proj_to=128,
+            force_project=True,
+        )
         wrapped.eval()
         logits, ret_hat, conf = wrapped(seq_batch)
         assert logits.shape == (B, 3)
@@ -714,7 +720,7 @@ class TestMultiPairHelpers:
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
         scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.train_gpu._build_chunk",
+        with patch("training.dataset_builder._build_chunk",
                    side_effect=[self._fake_chunk(N, T, F), self._fake_chunk(N, T, F)]):
             X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,
@@ -734,7 +740,7 @@ class TestMultiPairHelpers:
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
         scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.train_gpu._build_chunk",
+        with patch("training.dataset_builder._build_chunk",
                    side_effect=[self._fake_chunk(N1, T, F), self._fake_chunk(N2, T, F)]):
             X, y, _, _, _, _, _, _, _ = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,
@@ -768,7 +774,7 @@ class TestMultiPairHelpers:
         eur = chunk([30, 10, 20, 21], [3, 1, 2, 2])
         gbp = chunk([200, 300, 100], [2, 3, 1])
 
-        with patch("training.train_gpu._build_chunk", side_effect=[eur, gbp]):
+        with patch("training.dataset_builder._build_chunk", side_effect=[eur, gbp]):
             X, y, _, _, _, close, _, _, n_feat = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,
                 seq_len=T, chunk_idx=0, label_method="rl_reward",
@@ -804,7 +810,7 @@ class TestMultiPairHelpers:
         pq   = np.ones(N, np.float32)
         y_c  = np.zeros(N, np.int8)
         time_idx = np.arange(N)
-        with patch("training.train_gpu._build_chunk",
+        with patch("training.dataset_builder._build_chunk",
                    side_effect=[(X_z, y_eur, diff, pq, y_c, diff, pq, pq, F, time_idx), (X_z, y_gbp, diff, pq, y_c, diff, pq, pq, F, time_idx)]):
             _, y_out, _, _, _, _, _, _, _ = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,
@@ -824,7 +830,7 @@ class TestMultiPairHelpers:
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
         scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.train_gpu._build_chunk",
+        with patch("training.dataset_builder._build_chunk",
                    return_value=(np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), 0, np.array([]))):
             X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,
@@ -844,7 +850,7 @@ class TestMultiPairHelpers:
         pair_ticks = dict.fromkeys(pairs, "stub")
         scalers    = {p: StandardScaler() for p in pairs}
 
-        with patch("training.train_gpu._build_chunk",
+        with patch("training.dataset_builder._build_chunk",
                    side_effect=[self._fake_chunk(N, T, F) for _ in pairs]):
             X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
                 pair_ticks, fe=None, scalers=scalers,

@@ -1,6 +1,6 @@
 """
 Tests for validation module (Improvement #11):
-WalkForwardCV, CombCV, OnlineCV, RegimeCV, NestedCV, PurgedKFold.
+WalkForwardCV, CombCV, OnlineCV, NestedCV, PurgedKFold.
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from validation.cv import (
     NestedCV,
     OnlineCV,
     PurgedKFold,
-    RegimeCV,
     WalkForwardCV,
     _embargo_indices,
     _purge_indices,
@@ -203,65 +202,6 @@ def test_purged_kfold_embargo():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# RegimeCV
-# ═════════════════════════════════════════════════════════════════════════════
-
-def test_regime_cv_basic():
-    """Test RegimeCV basic functionality."""
-    X = np.random.randn(1000, 10)
-    regime_labels = np.random.choice([0, 1, 2], 1000, p=[0.3, 0.5, 0.2])
-
-    cv = RegimeCV(n_splits=3, regime_labels=regime_labels, purge=5)
-    splits = list(cv.split(X))
-
-    assert len(splits) == 3
-    for train_idx, val_idx in splits:
-        assert len(train_idx) > 0
-        assert len(val_idx) > 0
-
-
-def test_regime_cv_stratification():
-    """Test regime stratification in folds."""
-    X = np.random.randn(1000, 10)
-    # 30% regime 0, 50% regime 1, 20% regime 2
-    regime_labels = np.hstack([
-        np.zeros(300),
-        np.ones(500),
-        2 * np.ones(200)
-    ]).astype(int)
-
-    cv = RegimeCV(n_splits=4, regime_labels=regime_labels, purge=0)
-    splits = list(cv.split(X))
-
-    assert len(splits) == 4
-
-    # Check each fold has representation from all regimes
-    for train_idx, val_idx in splits:
-        for regime in [0, 1, 2]:
-            assert np.any(regime_labels[val_idx] == regime)
-
-
-def test_regime_cv_purge():
-    """Test purge in RegimeCV."""
-    X = np.random.randn(1000, 10)
-    regime_labels = np.random.choice([0, 1, 2], 1000)
-
-    cv = RegimeCV(n_splits=3, regime_labels=np.random.choice([0, 1], 1000), purge=10)
-    splits = list(cv.split(X))
-
-    for train_idx, val_idx in splits:
-        if len(train_idx) > 0 and len(val_idx) > 0:
-            # Purge removes train samples adjacent to the val fold within each
-            # regime, so no train sample may fall in the purge zone of val.
-            below = train_idx[train_idx < val_idx[0]]
-            above = train_idx[train_idx > val_idx[-1]]
-            if len(below) > 0:
-                assert val_idx[0] - below[-1] >= 5
-            if len(above) > 0:
-                assert above[0] - val_idx[-1] >= 5
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # OnlineCV
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -447,10 +387,6 @@ def test_create_cv():
     cv = create_cv("purged_kfold", n_splits=5, purge=10)
     assert isinstance(cv, PurgedKFold)
 
-    # Regime
-    cv = create_cv("regime", n_splits=3, regime_labels=np.zeros(100))
-    assert isinstance(cv, RegimeCV)
-
     # Comb
     cv = create_cv("comb", n_groups=10, test_groups=2)
     assert isinstance(cv, CombCV)
@@ -498,16 +434,6 @@ def test_walk_forward_edge_cases():
     cv = WalkForwardCV(n_splits=5, initial_train_size=0.6)
     splits = list(cv.split(np.zeros(20)))
     # Should handle gracefully
-
-
-def test_regime_cv_edge_cases():
-    """Test RegimeCV edge cases."""
-    # Single regime
-    X = np.random.randn(100, 5)
-    regime_labels = np.zeros(100)
-    cv = RegimeCV(n_splits=3, regime_labels=regime_labels)
-    splits = list(cv.split(np.zeros(100)))
-    assert len(splits) == 3
 
 
 def test_cv_diagnostics_output():

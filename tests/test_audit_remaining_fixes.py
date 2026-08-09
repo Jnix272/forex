@@ -5,6 +5,7 @@ import pytest
 
 
 def test_embargo_purge_from_config_matches_yaml_floor():
+    from labeling.rl_reward_labeling import max_label_horizon_mult
     from training.cv_splits import embargo_purge_from_config
 
     emb, pur, meth = embargo_purge_from_config({
@@ -13,8 +14,9 @@ def test_embargo_purge_from_config_matches_yaml_floor():
         "execution": {"delay_bars": 1},
         "validation": {"embargo_bars": 60, "purge_bars": 120, "method": "purged_embargo"},
     })
-    # Dynamic floor = 80+30+1 = 111 > yaml 60
-    assert emb == 111
+    # Dynamic floor = 80 + int(30 * max_horizon_mult) + 1  (> yaml 60)
+    eff_lh = int(30 * max_label_horizon_mult())
+    assert emb == 80 + eff_lh + 1
     assert pur == 120
     assert meth == "purged_embargo"
 

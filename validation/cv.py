@@ -4,7 +4,6 @@ Validation Module (Improvement #11)
 Cross-validation strategies for time-series financial data:
   - CombCV: Combinatorial Purged Cross-Validation (López de Prado)
   - OnlineCV: Rolling/expanding window CV with purging
-  - RegimeCV: Regime-stratified cross-validation
   - WalkForwardCV: Expanding/rolling window with purging/embargo
   - NestedCV: Nested CV for hyperparameter optimization
 
@@ -361,122 +360,7 @@ class OnlineCV:
 # 5. Regime-Stratified CV
 # ════════════════════════════════════════════════════════════════════════════
 
-class RegimeCV:
-    """
-    Regime-stratified cross-validation.
-    
-    Ensures each fold has representative samples from each market regime.
-    Uses regime labels to stratify folds, preventing regime imbalance.
-    
-    Parameters:
-        n_splits: Number of CV folds
-        regime_labels: Array of regime labels per sample
-        purge: Purge distance
-        shuffle: Whether to shuffle within regimes
-    """
 
-    def __init__(
-        self,
-        n_splits: int = 5,
-        regime_labels: np.ndarray = None,
-        purge: int = 0,
-        shuffle: bool = True,
-    ):
-        self.n_splits = n_splits
-        self.regime_labels = regime_labels
-        self.purge = purge
-        self.shuffle = shuffle
-
-    def split(
-        self,
-        X: np.ndarray,
-        y: np.ndarray = None,
-        groups: np.ndarray = None,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        if self.regime_labels is None:
-            raise ValueError("regime_labels required for RegimeCV")
-
-        n = len(X)
-        if len(self.regime_labels) != n:
-            raise ValueError("regime_labels length must match X")
-
-        unique_regimes = np.unique(self.regime_labels)
-        n_regimes = len(unique_regimes)
-
-        # Build indices per regime
-        regime_indices = {}
-        for regime in unique_regimes:
-            regime_indices[regime] = np.where(self.regime_labels == regime)[0]
-
-        if self.shuffle:
-            rng = np.random.default_rng(42)
-            for regime in unique_regimes:
-                rng.shuffle(regime_indices[regime])
-
-        # Calculate samples per fold per regime
-        fold_sizes = {}
-        for regime in unique_regimes:
-            n_regime = len(regime_indices[regime])
-            fold_sizes[regime] = [n_regime // self.n_splits] * self.n_splits
-            remainder = n_regime % self.n_splits
-            for i in range(remainder):
-                fold_sizes[regime][i] += 1
-
-        # Build folds
-        for fold in range(self.n_splits):
-            train_idx_list = []
-            val_idx_list = []
-
-            for regime in unique_regimes:
-                indices = regime_indices[regime]
-                sizes = fold_sizes[regime]
-
-                # Validation indices for this fold
-                val_start = sum(sizes[:fold])
-                val_end = val_start + sizes[fold]
-                val_idx = indices[val_start:val_end]
-
-                # Training indices (all other folds)
-                train_before = indices[:val_start]
-                train_after = indices[val_end:]
-
-                # Intra-regime purge (fold adjacency within the regime's index list)
-                if self.purge > 0:
-                    train_before = _purge_indices(train_before, purge_after=self.purge)
-                    train_after = _purge_indices(train_after, purge_before=self.purge)
-
-                val_idx_list.append(val_idx)
-                train_idx_list.append(np.concatenate([train_before, train_after]))
-
-            train_idx = np.concatenate(train_idx_list)
-            val_idx = np.concatenate(val_idx_list)
-
-            # Global temporal purge: drop train samples within ``purge`` of any
-            # val index so cross-regime adjacency cannot leak across folds.
-            if self.purge > 0 and len(train_idx) > 0 and len(val_idx) > 0:
-                val_sorted = np.sort(val_idx)
-                keep = np.ones(len(train_idx), dtype=bool)
-                for i, t in enumerate(train_idx):
-                    j = int(np.searchsorted(val_sorted, t))
-                    dist = n
-                    if j < len(val_sorted):
-                        dist = min(dist, int(val_sorted[j] - t))
-                    if j > 0:
-                        dist = min(dist, int(t - val_sorted[j - 1]))
-                    if dist <= self.purge:
-                        keep[i] = False
-                train_idx = train_idx[keep]
-
-            if len(train_idx) > 0 and len(val_idx) > 0:
-                yield train_idx, val_idx
-
-    def get_n_splits(self, X=None, y=None, groups=None) -> int:
-        return self.n_splits
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 6. Nested CV for Hyperparameter Optimization
-# ════════════════════════════════════════════════════════════════════════════
 
 class NestedCV:
     """
@@ -733,8 +617,6 @@ def create_cv(
                       embargo=kwargs.get("embargo", 0))
     elif cv_type == "online":
         return OnlineCV(**kwargs)
-    elif cv_type == "regime":
-        return RegimeCV(n_splits=n_splits, **kwargs)
     elif cv_type == "purged_kfold":
         return PurgedKFold(n_splits=n_splits, **kwargs)
     elif cv_type == "nested":
@@ -759,9 +641,7 @@ __all__ = [
     "CombCV",
     "NestedCV",
     "OnlineCV",
-    "PurgedKFold",
-    "RegimeCV",
-    "WalkForwardCV",
+    "PurgedKFold","WalkForwardCV",
     "_embargo_indices",
     "_purge_indices",
     "create_cv",
@@ -786,11 +666,7 @@ if __name__ == "__main__":
     splits = list(cv.split(np.zeros(1000)))
     print(f"PurgedKFold: {len(splits)} splits")
 
-    # Regime CV
-    regimes = np.random.choice([0, 1, 2], 1000)
-    cv = RegimeCV(n_splits=3, regime_labels=regimes)
-    splits = list(cv.split(np.zeros(1000)))
-    print(f"RegimeCV: {len(splits)} splits")
+
 
     # Diagnostics
     diag = cv_diagnostics(cv)

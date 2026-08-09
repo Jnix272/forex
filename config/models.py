@@ -108,10 +108,12 @@ MODELS: dict[str, dict[str, Any]] = {
         "d_model": 128,
         "nhead": 8,
         "num_layers": 4,
-        # use_conv_ffn/no_pos_encoding: hardcoded design decisions in EXPERTEncoder
-        # (ConvFFN always used, positional encoding always omitted by design).
+        # use_conv_ffn/no_pos_encoding: design decisions in EXPERTEncoder.
+        # A4 fix (2026-08-07): positional encoding is now OPT-IN via
+        # `max_seq_len` constructor kwarg (default 240), so flip the
+        # config flag to False. ConvFFN remains always-on.
         "use_conv_ffn": True,
-        "no_pos_encoding": True,
+        "no_pos_encoding": False,
         "dropout": 0.1,
         "seq_len": 80,
         "learning_rate": 1e-4,

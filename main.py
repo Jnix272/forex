@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 _ROOT = Path(__file__).resolve().parent   # repo root — used in final summary
 
 
-from config.settings import FEATURES
+from config.settings import FEATURES, LABELING
 from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
 from data.economic_calendar import EcoCalendarFeatureBuilder
 from features.advanced_features import AdvancedFeatureBuilder
@@ -96,7 +96,12 @@ def main():
     fe     = FeatureEngineer(atr_window=FEATURES["atr_window"],
                               lag_windows=FEATURES["lag_windows"])
     feats  = fe.build(bars)
-    labels = compute_rl_reward_labels(bars, feats)
+    labels = compute_rl_reward_labels(
+        bars, feats,
+        lookahead_bars=int(LABELING["lookahead_bars"]),
+        profit_atr_mult=float(LABELING["profit_target_atr"]),
+        stop_atr_mult=float(LABELING["stop_loss_atr"]),
+    )
     X, y, _ = align_labels_with_features(labels, feats)
     print(f"  {len(ticks):,} ticks → {len(bars):,} bars → "
           f"{_width(X)} features → {len(X):,} samples")

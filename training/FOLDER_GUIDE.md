@@ -8,7 +8,7 @@ Main supervised/RL training pipeline and training support modules.
 | --- | --- | --- |
 | `__init__.py` | Package initializer | Training entrypoints package. |
 | `config_validate.py` | Python module | Preflight audit for train_gpu runs — no torch/dataset dependencies. Functions: resolve_models_to_train, estimate_run_minutes, collect_config_issues, validate_run_config |
-| `hard_example_miner.py` | Python module | training/hard_example_miner.py ================================ Identifies and persists "hard examples" from validation — samples where the model was confident but wrong, or missed large reward opportunities. Classes: HardExampleMiner |
+| `hard_example_miner.py` | Python module | Online in-batch hard-example mining — tracks per-sample loss over epochs and oversamples hard/forgotten samples for the next epoch. Classes: OnlineHardExampleMiner |
 | `optuna_config.py` | Python module | Resolve and apply Optuna best-run YAML overlays for train_gpu. Functions: find_best_optuna_config, resolve_optuna_config_path, should_apply_optuna_overlay, apply_optuna_overlay_if_needed, read_run_yaml_optuna_section |
 | `scale_model.py` | Python module | training/scale_model.py ======================= Knowledge Distillation script for scaling models. Functions: parse_args, distillation_loss_fn, run_distillation |
 | `smoke_test.py` | Test module | training/smoke_test.py ======================== Pre-flight smoke test — runs all 6 model architectures through a tiny synthetic training loop before committing to a full GPU training run. Classes: ModelResult Functions: main |

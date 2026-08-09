@@ -28,6 +28,7 @@ Requirements:
 """
 
 import argparse
+from typing import Any
 import sys
 import time
 from collections import deque
@@ -45,6 +46,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from trading.inference_engines import BaseInferenceEngine
 
 
+def torch_load_safe(path, map_location=None):
+    """Load a checkpoint with weights_only=True, falling back for legacy pickles."""
+    import pickle
+
+    import torch
+
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except (torch.SerializationWarning, pickle.UnpicklingError, AttributeError,
+            TypeError, KeyError, ValueError, ModuleNotFoundError):
+        return torch.load(path, map_location=map_location, weights_only=False)
+
+
 def _checkpoint_state_dict(checkpoint):
     """Return a state_dict from either rich or raw training checkpoints."""
     if isinstance(checkpoint, dict):
@@ -57,8 +71,11 @@ def _checkpoint_state_dict(checkpoint):
 
 def _read_training_config(ckpt_path: Path, model_name: str) -> dict:
     """Load the sidecar config emitted by training/train_gpu.py when present."""
+    # Handle fold suffix in checkpoint names (e.g., haelt_fold0_best.pt -> haelt_fold0_config.json)
+    stem = ckpt_path.stem  # e.g., "haelt_fold0_best" or "haelt_best"
     candidates = [
-        ckpt_path.with_name(ckpt_path.name.replace(".pt", "").replace("_best", "_config") + ".json"),
+        ckpt_path.with_name(stem.replace("_best", "") + "_config.json"),
+        ckpt_path.with_name(stem + "_config.json"),
         ckpt_path.parent / f"{model_name}_config.json",
     ]
     if "_fold" not in ckpt_path.stem:
@@ -95,9 +112,22 @@ def _make_training_args(
     has_multitask = any("mt_head" in k or ".mt_head." in k for k in state_keys)
 
     n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or 1)
-    if n_pairs == 1 and has_pair_embed and n_features % 224 == 0 and n_features > 224:
-        n_pairs = max(1, n_features // 224)
-    f_per_pair = int(cfg.get("_f_per_pair") or cfg.get("f_per_pair") or max(1, n_features // n_pairs))
+    explicit_fpp = cfg.get("_f_per_pair") or cfg.get("f_per_pair")
+    f_per_pair = (
+        int(explicit_fpp)
+        if explicit_fpp is not None
+        else max(1, n_features // max(1, n_pairs))
+    )
+    if (
+        n_pairs == 1
+        and has_pair_embed
+        and f_per_pair > 0
+        and n_features > f_per_pair
+        and n_features % f_per_pair == 0
+    ):
+        n_pairs = max(1, n_features // f_per_pair)
+        if explicit_fpp is None:
+            f_per_pair = max(1, n_features // n_pairs)
 
     return SimpleNamespace(
         model=model_name,
@@ -170,14 +200,13 @@ def _policy_to_direction_logits(policy_out):
 
     # ScalingAction mapping:
     # 0 HOLD, 1 OPEN_LONG, 2 OPEN_SHORT, 3/4/5 SCALE_IN, 6/7/8 SCALE_OUT, 9 CLOSE_ALL.
-    # Without live position state, SCALE_IN is directional only if there is an
-    # existing side. Treat it as a weak directional vote and all exits as hold.
+    # Without live position state, SCALE_IN cannot choose a side — treat as HOLD
+    # (matches trading.live_actions when position is flat). Do NOT boost both
+    # buy and sell (that made scale-in look bullish and bearish at once).
     hold = torch.maximum(q[:, 0], torch.maximum(q[:, 9], q[:, 6:9].amax(dim=1)))
+    hold = torch.maximum(hold, q[:, 3:6].amax(dim=1))
     sell = q[:, 2]
     buy = q[:, 1]
-    scale_in = q[:, 3:6].amax(dim=1)
-    sell = torch.maximum(sell, scale_in - 0.25)
-    buy = torch.maximum(buy, scale_in - 0.25)
     return torch.stack([sell, hold, buy], dim=-1)
 
 
@@ -200,7 +229,12 @@ def _wrap_ensemble_logits(model, threshold: float = 0.15):
 
 
 def _wrap_rl_policy_logits(encoder, policy, obs_size: int):
-    """Wrap frozen supervised encoder + RL policy as 3-class direction logits."""
+    """Wrap frozen supervised encoder + RL policy as 3-class direction logits.
+
+    Degraded path: portfolio state dims are unknown at export time, so they are
+    zeroed. Prefer ``export_rl_execution_to_onnx`` / ``_wrap_rl_execution_policy``
+    for live RL where position/uPnL/holding are available.
+    """
     import torch
 
     class _RLDirectionLogits(torch.nn.Module):
@@ -217,6 +251,7 @@ def _wrap_rl_policy_logits(encoder, policy, obs_size: int):
             h = h.reshape(h.shape[0], -1)
             n_state = max(0, self.policy_obs_size - h.shape[-1])
             if n_state:
+                # Flat/neutral agent state — direction-only export cannot see position.
                 state = torch.zeros(h.shape[0], n_state, dtype=h.dtype, device=h.device)
                 obs = torch.cat([h, state], dim=-1)
             else:
@@ -311,14 +346,56 @@ def core_onnx_export(
     opset: int = 17,
     batch_size: int = 1,
     output_name: str = "logits",
+    scaler: Any = None,
 ) -> str:
-    """Core logic to export a loaded PyTorch model to ONNX."""
+    """Core logic to export a loaded PyTorch model to ONNX.
+    
+    If scaler is provided (StandardScaler with mean_ and scale_ attributes),
+    the scaler is fused into the ONNX graph so the exported model accepts
+    raw features and internally applies normalization.
+    """
     import torch
     model.eval()
     try:
         export_device = next(model.parameters()).device
     except StopIteration:
         export_device = torch.device("cpu")
+
+    # Create a wrapper that includes the scaler if provided
+    if scaler is not None:
+        from inference._scaler_load import apply_inference_scaler
+        import numpy as np
+        
+        # Get scaler parameters
+        mean = getattr(scaler, "mean_", None)
+        scale = getattr(scaler, "scale_", None)
+        
+        if mean is not None and scale is not None:
+            # Create scaler parameters as tensors
+            mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
+            scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
+            
+            # Avoid division by zero
+            scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
+            
+            class ScaledModel(torch.nn.Module):
+                def __init__(self, model, mean, scale):
+                    super().__init__()
+                    self.model = model
+                    # Register as buffers so they're included in ONNX
+                    self.register_buffer("mean", mean)
+                    self.register_buffer("scale", scale)
+                
+                def forward(self, x):
+                    # x: (batch, seq_len, n_features)
+                    # NaN/Inf sanitization FIRST (same as training)
+                    x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
+                    # Apply z-score normalization: (x - mean) / scale
+                    x = (x - self.mean) / self.scale
+                    return self.model(x)
+            
+            model = ScaledModel(model, mean_tensor, scale_tensor)
+            print(f"[Export] Fused StandardScaler into ONNX graph (n_features={len(mean)})")
 
     # Dummy input
     dummy = torch.randn(batch_size, seq_len, n_features, device=export_device)
@@ -341,8 +418,14 @@ def core_rl_execution_onnx_export(
     opset: int = 17,
     batch_size: int = 1,
     agent_state_size: int = 5,
+    scaler: Any = None,
 ) -> str:
-    """Export a two-input execution policy: features + agent_state -> action logits."""
+    """Export a two-input execution policy: features + agent_state -> action logits.
+    
+    If scaler is provided (StandardScaler with mean_ and scale_ attributes),
+    the scaler is fused into the ONNX graph so the exported model accepts
+    raw features and internally applies normalization.
+    """
     import torch
 
     model.eval()
@@ -350,6 +433,42 @@ def core_rl_execution_onnx_export(
         export_device = next(model.parameters()).device
     except StopIteration:
         export_device = torch.device("cpu")
+
+    # Create a wrapper that includes the scaler if provided
+    if scaler is not None:
+        import numpy as np
+        
+        # Get scaler parameters
+        mean = getattr(scaler, "mean_", None)
+        scale = getattr(scaler, "scale_", None)
+        
+        if mean is not None and scale is not None:
+            # Create scaler parameters as tensors
+            mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
+            scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
+            
+            # Avoid division by zero
+            scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
+            
+            class ScaledRLModel(torch.nn.Module):
+                def __init__(self, model, mean, scale):
+                    super().__init__()
+                    self.model = model
+                    # Register as buffers so they're included in ONNX
+                    self.register_buffer("mean", mean)
+                    self.register_buffer("scale", scale)
+                
+                def forward(self, features, agent_state):
+                    # features: (batch, seq_len, n_features)
+                    # NaN/Inf sanitization FIRST (same as training)
+                    features = torch.nan_to_num(features, nan=0.0, posinf=1e6, neginf=-1e6)
+                    # Apply z-score normalization: (features - mean) / scale
+                    features = (features - self.mean) / self.scale
+                    return self.model(features, agent_state)
+            
+            model = ScaledRLModel(model, mean_tensor, scale_tensor)
+            print(f"[Export] Fused StandardScaler into RL execution ONNX graph (n_features={len(mean)})")
+
     dummy_features = torch.randn(batch_size, seq_len, n_features, device=export_device)
     dummy_state = torch.zeros(batch_size, int(agent_state_size), device=export_device)
     _export_onnx(
@@ -403,7 +522,7 @@ def export_to_onnx(
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     # Load checkpoint
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch_load_safe(ckpt_path, map_location="cpu")
 
     # Reconstruct model. Prefer the training sidecar config because best.pt is
     # often a raw state_dict from the exact training builder.
@@ -457,7 +576,7 @@ def export_to_onnx(
                 b_ckpt = next((p for p in [ckpt_path.parent.parent / b_name / f"{b_name}_best.pt", ckpt_path.parent.parent / f"{b_name}_best.pt"] if p.exists()), None)
                 if b_ckpt:
                     b_model = build_training_model(b_name, int(n_features), model_args)
-                    b_state = torch.load(b_ckpt, map_location="cpu", weights_only=False)
+                    b_state = torch_load_safe(b_ckpt, map_location="cpu")
                     if isinstance(b_state, dict) and "model_state_dict" in b_state:
                         b_state = b_state["model_state_dict"]
                     elif isinstance(b_state, dict) and "state_dict" in b_state:
@@ -490,6 +609,19 @@ def export_to_onnx(
         model = TemperatureScaler(model)
         model.temperature.data.fill_(float(ckpt["temperature"]))
 
+    # Load scaler for ONNX fusion
+    scaler = None
+    cache_path = ckpt_path.parent
+    try:
+        from inference._scaler_load import load_inference_scaler
+        scaler = load_inference_scaler(cache_path)
+        if scaler is not None:
+            print(f"[Export] Found scaler at {cache_path}/scaler.npz, fusing into ONNX")
+        else:
+            print(f"[Export] No scaler found at {cache_path}/scaler.npz, exporting without normalization")
+    except Exception as e:
+        print(f"[Export] Could not load scaler: {e}")
+
     if output_path is None:
         output_path = str(ckpt_path.with_suffix(".onnx"))
 
@@ -501,6 +633,7 @@ def export_to_onnx(
         opset=opset,
         batch_size=1,
         output_name="logits",
+        scaler=scaler,
     )
 
 
@@ -556,7 +689,7 @@ def export_ensemble_to_onnx(
         hidden=int(meta.get("hidden", 64)),
         base_names=base_names,
     ).to(dev)
-    state = torch.load(ckpt_path, map_location=dev, weights_only=False)
+    state = torch_load_safe(ckpt_path, map_location=dev)
     if isinstance(state, dict):
         for key in ("model_state", "model_state_dict", "state_dict"):
             if isinstance(state.get(key), dict):
@@ -565,6 +698,19 @@ def export_ensemble_to_onnx(
     model.load_state_dict(state, strict=False)
     wrapped = _wrap_ensemble_logits(model).to(dev)
     wrapped.eval()
+
+    # Load scaler for ONNX fusion
+    scaler = None
+    try:
+        from inference._scaler_load import load_inference_scaler
+        # Use checkpoint_dir as cache path
+        scaler = load_inference_scaler(Path(checkpoint_dir))
+        if scaler is not None:
+            print(f"[Export] Found scaler, fusing into ONNX")
+        else:
+            print(f"[Export] No scaler found, exporting without normalization")
+    except Exception as e:
+        print(f"[Export] Could not load scaler: {e}")
 
     if output_path is None:
         output_path = str(ckpt_path.with_suffix(".onnx"))
@@ -577,6 +723,7 @@ def export_ensemble_to_onnx(
         opset=opset,
         batch_size=1,
         output_name="logits",
+        scaler=scaler,
     )
 
 
@@ -591,7 +738,11 @@ def export_rl_to_onnx(
     algo: str = "dqn",
     device: str = "cpu",
 ) -> str:
-    """Export frozen supervised encoder + RL policy as a 3-logit ONNX graph."""
+    """Export frozen supervised encoder + RL policy as a 3-logit ONNX graph.
+
+    Direction-only / degraded: agent state is zeroed. For execution parity with
+    training and ``RLInferenceAgent``, use ``export_rl_execution_to_onnx``.
+    """
     import json
 
     import torch
@@ -606,7 +757,7 @@ def export_rl_to_onnx(
         raise FileNotFoundError(f"RL checkpoint not found: {rl_path}")
 
     dev = torch.device(device)
-    sup_model, n_features, seq_len, arch_name = load_pytorch_model(
+    sup_model, n_features, seq_len, arch_name, _scaler = load_pytorch_model(
         supervised_checkpoint,
         model_name,
         seq_len=int(seq_len),
@@ -635,7 +786,7 @@ def export_rl_to_onnx(
 
     algo_name = str(algo).lower()
     algo_kw = dict(RL.get(algo_name, {}))
-    state = torch.load(rl_path, map_location=dev, weights_only=False)
+    state = torch_load_safe(rl_path, map_location=dev)
     if algo_name == "dqn":
         n_actions = int(meta.get("n_actions", 0) or 0)
         if n_actions <= 0:
@@ -656,6 +807,14 @@ def export_rl_to_onnx(
 
     wrapped = _wrap_rl_policy_logits(encoder, policy, obs_size).to(dev)
     wrapped.eval()
+
+    # Use the scaler from load_pytorch_model for ONNX fusion
+    scaler = _scaler
+    if scaler is not None:
+        print(f"[Export] Found scaler, fusing into ONNX")
+    else:
+        print(f"[Export] No scaler found, exporting without normalization")
+
     if output_path is None:
         output_path = str(rl_path.with_suffix(".onnx"))
 
@@ -667,6 +826,7 @@ def export_rl_to_onnx(
         opset=opset,
         batch_size=1,
         output_name="logits",
+        scaler=scaler,
     )
 
 
@@ -696,7 +856,7 @@ def export_rl_execution_to_onnx(
         raise FileNotFoundError(f"RL checkpoint not found: {rl_path}")
 
     dev = torch.device(device)
-    sup_model, n_features, seq_len, arch_name = load_pytorch_model(
+    sup_model, n_features, seq_len, arch_name, _scaler = load_pytorch_model(
         supervised_checkpoint,
         model_name,
         seq_len=int(seq_len),
@@ -725,7 +885,7 @@ def export_rl_execution_to_onnx(
 
     algo_name = str(algo).lower()
     algo_kw = dict(RL.get(algo_name, {}))
-    state = torch.load(rl_path, map_location=dev, weights_only=False)
+    state = torch_load_safe(rl_path, map_location=dev)
     if algo_name == "dqn":
         n_actions = int(meta.get("n_actions", 0) or 0) or 10
         if int(meta.get("n_actions", 0) or 0) <= 0 and isinstance(state, dict):
@@ -762,6 +922,7 @@ def export_rl_execution_to_onnx(
         opset=opset,
         batch_size=1,
         agent_state_size=5,
+        scaler=_scaler,
     )
 
 

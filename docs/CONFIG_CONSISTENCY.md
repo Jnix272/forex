@@ -1,8 +1,8 @@
 # Config Consistency — Settings, YAML, Curriculum, Dataset Schema
 
-**Updated:** 2026-08-04  
+**Updated:** 2026-08-06  
 **Audience:** anyone changing `config/settings.py`, `config/run.yaml`, curriculum groups, or the dataset builder.  
-**Index:** [`README.md`](README.md) · tracker: [`CONTINUE.md`](CONTINUE.md)
+**Index:** [`README.md`](README.md) · status: [`IMPROVEMENTS.md`](IMPROVEMENTS.md) · next: [`CONTINUE.md`](CONTINUE.md)
 
 When YAML is loaded (`--config config/run.yaml`), it is authoritative. `settings.py` is the no-YAML fallback and documentation. Drift between them used to be silent; the gates below make it loud.
 
@@ -15,6 +15,7 @@ When YAML is loaded (`--config config/run.yaml`), it is authoritative. `settings
 | Preflight | `validate_run_config` / `--validate-config` | Curriculum drift, FEATURE_MASK orphans, section mismatches, args↔YAML |
 | Dataset build | `training/dataset_builder.py` | Multi-part feature-schema gate (first chunk + final write) |
 | Training start | `training/supervised_loop.py` | Curriculum / market / settings↔YAML warnings |
+| Config apply | `training/gpu_cli._sync_runtime_config` | `execution:` → `EXECUTION`; **`risk:` → `LIVE_RISK`** (session/regime deep-merge) |
 
 **CLI**
 
@@ -32,6 +33,23 @@ Artifacts after a build:
 
 - `{cache}_feature_schema.json` — ordered column names in `X`
 - `{cache}_feature_schema_audit.json` — multi-part report (`parts.*`)
+
+---
+
+## Nested YAML blocks attached to args
+
+| YAML section | Args / runtime | Notes |
+|--------------|----------------|-------|
+| `curriculum` | `args.curriculum` | Feature groups + schedules |
+| `execution` | `args.execution` → `settings.EXECUTION` | Whole-dict sync |
+| `risk` | `args.risk` → **`settings.LIVE_RISK`** | Deep-merge session_limits + regime_scale; aliases `volatile→crisis`, `ranging→mean_rev`, `unknown→normal` |
+| `sidecar` | `args.sidecar` | Monitoring Sidecar; default `enabled: false` |
+| `training.use_mixup` / `use_volatility_sampler` | `args.use_mixup` / `use_volatility_sampler` | Applied in supervised loop |
+| `direction_training.use_mixup` / `use_volatility_sampler` | same dests | Direction head twins |
+
+### Quick mode vs ensemble / RL
+
+`quick.enabled: true` still caps epochs and **forces** `train_ensemble=False` / `rl_train=False` (smoke intent). Default `run.yaml` keeps **`quick.enabled: false`** so `ensemble.enabled` / `rl.enabled` actually run. When quick overrides YAML that had them on, gpu_cli prints a WARN.
 
 ---
 
@@ -67,15 +85,39 @@ Compares shared keys between `settings.py` dicts and matching YAML sections:
 | `distillation` | `DISTILLATION` |
 | `monitoring` | `MONITORING` |
 
-**Critical keys (fail closed)** — must stay synced as fallbacks:
+**Critical keys (fail closed)** — must stay synced as fallbacks
+(`config_mismatch_audit.CRITICAL_SHARED_KEYS`):
 
 - `training.seq_len`
 - `training.loss`
 - `training.sharpe_annualization_factor`
+- `training.lr_warmup_epochs`
 - `backtest.atr_stop_mult`
 - `rl.reward.overtrade`
+- `validation.embargo_bars`
+- `validation.purge_bars`
+- `pretrain.epochs` (canonical `run.yaml` only; profile YAMLs treat this as scale)
+- `distillation.temperature`
 
-**Warnings** — other shared drift (`epochs`, `batch_size`, `grad_clip`, …) is expected when YAML overrides for a quick run; treat as documentation smell, not a load bug.
+Also fail-closed: **`strategy.*` ↔ `LABELING`** for `lookahead_bars`,
+`profit_target_atr`, `stop_loss_atr` (`audit_strategy_vs_labeling`).
+Canonical defaults: **LH=30 / TP=1.2 / SL=0.8** (scalping profile + `run.yaml`).
+
+**PRETRAIN naming:** YAML / settings use `pretrain.epochs` (and `min_epochs`).
+CLI / argparse still expose `--pretrain-epochs` → `pretrain_epochs`; settings
+keeps both keys mirrored. Prefer editing YAML `pretrain.epochs`.
+
+**`run_ubuntu.yaml`:** hardware / scale profile only (`PROFILE_SCALE_KEYS` —
+epochs, batch_size, patience, chunk_size, paths, hardware.profile). Strategy,
+labeling, and critical shared keys must match `run.yaml` — **Ubuntu is not a
+second strategy/labeling source of truth**.
+
+**LABEL_REGIME** (settings-only policy for RL barriers / session cost+horizon /
+spread_z horizon gate): edits bust the training cache via `lr{digest6}` in
+`cache_integrity` (with FEATURE_MASK `fm*`). Session overlap keys:
+`asia_london`, `london_ny`. Status: [`IMPROVEMENTS.md`](IMPROVEMENTS.md); detail: [`SESSION_AUDIT.md`](SESSION_AUDIT.md).
+
+**Warnings** — other shared drift (`grad_clip`, …) is expected when YAML overrides for a quick run; treat as documentation smell, not a load bug.
 
 Curriculum **schedules** (`epoch_unfreeze`, `seq_schedule`, `difficulty_schedule`, early-stop scalars) are also checked by `audit_settings_yaml_curriculum_drift()` (errors on mismatch). Feature *name lists* live only in YAML.
 
@@ -87,8 +129,9 @@ Code: `config/config_mismatch_audit.py` → `audit_settings_yaml_section_mismatc
 
 Compares resolved CLI/args (after `_apply_yaml_config`) to the YAML file. Catches silent load failures (bad indent, missing `strategy:` mapping).
 
-**Errors** if these diverge: `seq_len`, `loss`, `bar_freq`, `strategy_mode`, `profit_target_atr`, `stop_loss_atr`, `lookahead_bars`.  
-**Warnings** for softer training knobs (`batch_size`, `epochs`, …).
+**Warnings** when resolved args diverge from YAML (`seq_len`, `loss`, strategy ATR, `batch_size`, …).  
+CLI flags and strategy profiles intentionally override YAML — hard fail closed lives in settings↔YAML critical keys and the strategy-block presence check, not every args drift.  
+Skipped entirely when `--config` was not passed (no false “YAML may not have applied” on argparse defaults).
 
 Code: `config/config_mismatch_audit.py` → `audit_args_vs_yaml_mismatches()`.
 
@@ -109,7 +152,7 @@ Code: `config/config_mismatch_audit.py` → `audit_args_vs_yaml_mismatches()`.
 | market_regime | 16 | regime quality |
 | higher_timeframe | 20 | 5m / 15m / 1h context |
 
-`label_quality` is **commented out** in `run.yaml` (features not implemented). It may still appear in `run_ubuntu.yaml` — prefer `run.yaml` as the active source of truth.
+`label_quality` is **commented out** in `run.yaml` and `run_ubuntu.yaml` (features not implemented). Prefer keeping both files aligned; **Ubuntu = HW/scale only** (paths, hardware.profile, PROFILE_SCALE_KEYS) — not a second strategy/labeling source of truth.
 
 ---
 

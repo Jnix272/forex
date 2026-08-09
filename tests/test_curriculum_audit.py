@@ -253,3 +253,30 @@ def test_settings_aligned_on_critical_keys_with_run_yaml():
     assert report["errors"] == [], report["errors"]
     # Non-critical drift (epochs/batch_size/…) may still warn
     assert isinstance(report["warnings"], list)
+
+
+def test_strategy_vs_labeling_aligned_on_run_yaml():
+    from config.config_mismatch_audit import (
+        audit_strategy_vs_labeling,
+        load_yaml_config,
+    )
+
+    raw = load_yaml_config("config/run.yaml")
+    report = audit_strategy_vs_labeling(raw, yaml_path="config/run.yaml")
+    assert report["errors"] == [], report["errors"]
+
+
+def test_ubuntu_profile_pretrain_epochs_not_critical():
+    from config.config_mismatch_audit import (
+        audit_settings_yaml_section_mismatches,
+        load_yaml_config,
+    )
+
+    raw = load_yaml_config("config/run_ubuntu.yaml")
+    report = audit_settings_yaml_section_mismatches(
+        raw, yaml_path="config/run_ubuntu.yaml"
+    )
+    # Hardware-scaled pretrain.epochs must not fail closed vs settings stubs.
+    assert not any("pretrain.epochs" in e for e in report["errors"]), report["errors"]
+    # Strategy ↔ LABELING still fail-closed on profile YAMLs.
+    assert not any("strategy." in e for e in report["errors"]), report["errors"]

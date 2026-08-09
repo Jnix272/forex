@@ -369,11 +369,11 @@ def compute_triple_barrier_labels(
     """
     cfg = _default_labeling()
     if vertical_bars is None:
-        vertical_bars = int(cfg.get("lookahead_bars", 20))
+        vertical_bars = int(cfg.get("lookahead_bars", 30))
     if profit_atr_mult is None:
-        profit_atr_mult = float(cfg.get("profit_target_atr", 1.8))
+        profit_atr_mult = float(cfg.get("profit_target_atr", 1.2))
     if stop_atr_mult is None:
-        stop_atr_mult = float(cfg.get("stop_loss_atr", 0.9))
+        stop_atr_mult = float(cfg.get("stop_loss_atr", 0.8))
     if pip_size is None:
         pip_size = float(cfg.get("pip_size", 0.0001))
     if use_numba is None:

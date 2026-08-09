@@ -55,6 +55,12 @@ def test_base_pred_to_batch_vector():
     assert out4.shape == (B,)
     assert torch.allclose(out4, t1.squeeze(-1))
 
+    # CE-only (B, 3) logits → buy − sell signed score (not B*3 flatten)
+    logits = torch.tensor([[1.0, 0.0, 3.0], [2.0, 0.0, 0.5]])
+    out5 = _base_pred_to_batch_vector(logits)
+    assert out5.shape == (2,)
+    assert torch.allclose(out5, torch.tensor([2.0, -1.5]))
+
 def test_ensemble_meta_learner_initialization():
     models = [MockModelSingle(), MockModelSingle()]
     ensemble = EnsembleMetaLearner(base_models=models, context_dim=16, hidden=32)

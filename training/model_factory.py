@@ -1,7 +1,22 @@
-"""Model construction helpers for GPU training.\n\nSee docs/CONTINUE.md."""
+"""Model construction helpers for GPU training.
+
+See docs/CONTINUE.md."""
 from __future__ import annotations
 
 import torch.nn as nn
+
+from models.architectures import (
+    EXPERTEncoder,
+    GNNFromSequence,
+    HAELTHybrid,
+    MambaScalper,
+    MODEL_ROLES,
+    MultiPairWrapper,
+    MultiTaskWrapper,
+    TFTScalper,
+    iTransformerScalper,
+)
+from training.cache_integrity import _resolve_pair_feat_indices
 
 _HOST = None
 _BOUND = False
@@ -9,15 +24,6 @@ _HOST_DEPS = (
     '_log_error',
     '_log_warn',
     '_log_info',
-    'MultiTaskWrapper',
-    'MultiPairWrapper',
-    'HAELTHybrid',
-    'MambaScalper',
-    'TFTScalper',
-    'iTransformerScalper',
-    'GNNFromSequence',
-    'EXPERTEncoder',
-    'MODEL_ROLES',
     '_get_pairs',
 )
 

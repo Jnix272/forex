@@ -512,19 +512,27 @@ def main():
     if _do_feature_importance:
         print("\n[FeatureImportance] Extracting CatBoost feature importance...")
         try:
-            booster = model.model.get_booster()
-            importance_types = ["weight", "gain", "cover"]
+            # CatBoost uses its own native API, NOT XGBoost's get_booster().
+            # Using get_booster() would raise AttributeError and fail silently.
+            cb_model = model.model  # the underlying CatBoost model object
             fi_report: dict = {}
-            for imp_type in importance_types:
-                raw_scores = booster.get_score(importance_type=imp_type)
-                if not raw_scores:
-                    continue
-                sorted_feats = sorted(raw_scores.items(), key=lambda x: x[1], reverse=True)
-                fi_report[imp_type] = {
-                    "all": {k: float(v) for k, v in sorted_feats},
-                    "top_n": {k: float(v) for k, v in sorted_feats[:_fi_top_n]},
-                }
-                print(f"  [{imp_type}] Top-5: {', '.join(f'{k}={v:.4f}' for k, v in sorted_feats[:5])}")
+            for imp_type in ["PredictionValuesChange", "LossFunctionChange", "ShapValues"]:
+                try:
+                    if imp_type == "ShapValues":
+                        # ShapValues requires passing data; skip unless X_val is small
+                        continue
+                    raw_scores = cb_model.get_feature_importance(type=imp_type)
+                    feature_names = cb_model.feature_names_ if hasattr(cb_model, "feature_names_") else [
+                        f"f{i}" for i in range(len(raw_scores))
+                    ]
+                    pairs = sorted(zip(feature_names, raw_scores.tolist()), key=lambda x: x[1], reverse=True)
+                    fi_report[imp_type] = {
+                        "all": {k: float(v) for k, v in pairs},
+                        "top_n": {k: float(v) for k, v in pairs[:_fi_top_n]},
+                    }
+                    print(f"  [{imp_type}] Top-5: {', '.join(f'{k}={v:.4f}' for k, v in pairs[:5])}")
+                except Exception as _fi_err:
+                    print(f"  [FeatureImportance] {imp_type} failed: {_fi_err}")
 
             # Also extract sklearn-style feature_importances_ if available
             if hasattr(model.model, "feature_importances_"):

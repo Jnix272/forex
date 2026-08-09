@@ -121,12 +121,12 @@ def _path_pnl(side: str, entry: float, start: int, end: int, q: dict[str, np.nda
 
 
 def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_col: str = "atr_6",
-                             lookahead_bars: int = 10, pip_size: float = .0001,
+                             lookahead_bars: int = 30, pip_size: float = .0001,
                              execution_delay_bars: int = 1, pair: str = "EURUSD",
                              fill_model: EmpiricalFillModel | None = None,
                              edge_margin_pips: float = .25, rejection_penalty_pips: float = 1.0,
                              latency_col: str | None = None, no_trade_col: str | None = None,
-                             profit_target_atr: float = 1.5, stop_loss_atr: float = 1.0,
+                             profit_target_atr: float = 1.2, stop_loss_atr: float = 0.8,
                              no_trade_threshold: float = 0.67) -> pd.DataFrame:
     """Generate long/hold/short utilities using delayed executable prices."""
     b = bars.reindex(features.index).ffill()

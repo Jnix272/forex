@@ -27,6 +27,21 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+try:
+    from numba import njit
+    _NUMBA_OK = True
+except ImportError:  # pragma: no cover - optional / version-skew fallback
+    _NUMBA_OK = False
+
+    def njit(*args, **kwargs):  # type: ignore[misc]
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def _wrap(fn):
+            return fn
+
+        return _wrap
+
 if TYPE_CHECKING:
     import polars as pl
 
@@ -37,9 +52,82 @@ except Exception:  # pragma: no cover - optional dependency
     _HMMLEARN_OK = False
 
 
+def _rolling_mean_causal(src: np.ndarray, dst: np.ndarray, window: int) -> None:
+    """Causal rolling mean via cumulative sum — O(n) vs O(n×window) loop."""
+    n = len(src)
+    if window <= 0 or n <= window:
+        return
+    # cumsum[0] = 0, cumsum[k] = sum(src[:k]) for k >= 1
+    cumsum = np.concatenate([[0.0], np.cumsum(src)])
+    # dst[i] = (cumsum[i] - cumsum[i-window]) / window  for i >= window
+    dst[window:] = (cumsum[window:n] - cumsum[0:n - window]) / window
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Hurst exponents
 # ════════════════════════════════════════════════════════════════════════════
+
+@njit(cache=True)
+def _hurst_rs_numba(x: np.ndarray) -> float:
+    n = len(x)
+    if n < 20:
+        return 0.5
+
+    max_lag = max(4, n // 4)
+    max_lag = min(max_lag, n // 2 - 1)
+    raw_lags = np.logspace(np.log10(8.0), np.log10(max_lag), 40)
+    lags = np.unique(np.round(raw_lags).astype(np.int64))
+    filtered = np.empty(len(lags), dtype=np.int64)
+    fcount = 0
+    for lag in lags:
+        if 4 <= lag < n // 2:
+            filtered[fcount] = lag
+            fcount += 1
+    lags = filtered[:fcount]
+    if len(lags) < 4:
+        return 0.5
+
+    rs_vals = np.empty(len(lags), dtype=np.float64)
+    valid = 0
+    for li, lag in enumerate(lags):
+        n_chunks = n // lag
+        if n_chunks < 2:
+            continue
+        rs_sum = 0.0
+        rs_count = 0
+        for c in range(n_chunks):
+            chunk = x[c * lag:(c + 1) * lag]
+            m = chunk.mean()
+            std = chunk.std()
+            if std < 1e-12:
+                continue
+            dev = np.cumsum(chunk - m)
+            rs_sum += (dev.max() - dev.min()) / std
+            rs_count += 1
+        if rs_count > 0:
+            rs_vals[valid] = rs_sum / rs_count
+            valid += 1
+
+    if valid < 4:
+        return 0.5
+    log_lags = np.log(lags[:valid])
+    log_rs = np.log(rs_vals[:valid])
+    # Manual linear regression (np.polyfit not supported in Numba)
+    n_pts = len(log_lags)
+    x_mean = log_lags.mean()
+    y_mean = log_rs.mean()
+    num = ((log_lags - x_mean) * (log_rs - y_mean)).sum()
+    den = ((log_lags - x_mean) ** 2).sum()
+    if den < 1e-12:
+        return 0.5
+    slope = num / den
+    result = slope
+    if result < 0.05:
+        return 0.05
+    if result > 0.95:
+        return 0.95
+    return float(result)
+
 
 def hurst_rs(x: Sequence[float], max_lag: int | None = None) -> float:
     """
@@ -52,45 +140,9 @@ def hurst_rs(x: Sequence[float], max_lag: int | None = None) -> float:
     Returns H in [0, 1]:  H ~ 0.5 random walk, H > 0.55 trending
     (positive autocorrelation), H < 0.45 mean-reverting.
     """
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
-    n = len(x)
-    if n < 20:
-        return 0.5
-
-    # lags out to ~n/4 keep finite-sample bias small while preserving power.
-    max_lag = max_lag or max(4, n // 4)
-    max_lag = min(max_lag, n // 2 - 1)
-    lags = np.unique(np.logspace(np.log10(8), np.log10(max_lag), 40)
-                     .round().astype(int))
-    lags = [lag for lag in lags if 4 <= lag < n // 2]
-    if len(lags) < 4:
-        return 0.5
-
-    rs_vals = []
-    for lag in lags:
-        n_chunks = n // lag
-        if n_chunks < 2:
-            continue
-        rs = []
-        for c in range(n_chunks):
-            chunk = x[c * lag:(c + 1) * lag]
-            m = chunk.mean()
-            std = chunk.std()
-            if std < 1e-12:
-                continue
-            dev = np.cumsum(chunk - m)
-            rs.append((dev.max() - dev.min()) / std)
-        if rs:
-            rs_vals.append(np.mean(rs))
-
-    if len(rs_vals) < 4:
-        return 0.5
-    try:
-        H, _ = np.polyfit(np.log(lags[:len(rs_vals)]), np.log(rs_vals), 1)
-        return float(np.clip(H, 0.05, 0.95))
-    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
-        return 0.5
+    x_arr = np.asarray(x, dtype=float)
+    x_arr = x_arr[np.isfinite(x_arr)]
+    return _hurst_rs_numba(x_arr)
 
 
 def hurst_dfa(x: Sequence[float], min_box: int = 4) -> float:
@@ -102,41 +154,75 @@ def hurst_dfa(x: Sequence[float], min_box: int = 4) -> float:
     the pooled residuals against box size in log-log space.  DFA is more
     robust than R/S for non-stationary series (trends, intraday seasonality).
     """
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
+    x_arr = np.asarray(x, dtype=float)
+    x_arr = x_arr[np.isfinite(x_arr)]
+    return _hurst_dfa_numba(x_arr, min_box)
+
+
+@njit(cache=True)
+def _hurst_dfa_numba(x: np.ndarray, min_box: int) -> float:
     n = len(x)
     if n < 20:
         return 0.5
 
     y = np.cumsum(x - x.mean())
-    box_sizes = np.unique(np.logspace(
-        np.log10(min_box), np.log10(n // 4), 20).round().astype(int))
-    box_sizes = [b for b in box_sizes if b >= 2 and n // b >= 2]
+    raw_sizes = np.logspace(
+        np.log10(float(min_box)), np.log10(n // 4), 20)
+    box_sizes = np.unique(np.round(raw_sizes).astype(np.int64))
+    filtered = np.empty(len(box_sizes), dtype=np.int64)
+    fcount = 0
+    for bs in box_sizes:
+        if bs >= 2 and n // bs >= 2:
+            filtered[fcount] = bs
+            fcount += 1
+    box_sizes = filtered[:fcount]
+    if len(box_sizes) < 4:
+        return 0.5
 
-    fluct = []
-    for box in box_sizes:
+    fluct = np.empty(len(box_sizes), dtype=np.float64)
+    for bi, box in enumerate(box_sizes):
         n_box = n // box
         sq_err = 0.0
         n_pts = 0
         for i in range(n_box):
             seg = y[i * box:(i + 1) * box]
-            t = np.arange(box, dtype=float)
-            slope, intercept = np.polyfit(t, seg, 1)
+            t = np.arange(box, dtype=np.float64)
+            # Manual linear regression for speed
+            t_mean = t.mean()
+            seg_mean = seg.mean()
+            numerator = ((t - t_mean) * (seg - seg_mean)).sum()
+            denominator = ((t - t_mean) ** 2).sum()
+            if denominator < 1e-12:
+                slope = 0.0
+            else:
+                slope = numerator / denominator
+            intercept = seg_mean - slope * t_mean
             resid = seg - (slope * t + intercept)
             sq_err += np.sum(resid ** 2)
             n_pts += box
-        fluct.append(np.sqrt(sq_err / n_pts) if n_pts > 0 else np.nan)
+        fluct[bi] = np.sqrt(sq_err / n_pts) if n_pts > 0 else np.nan
 
-    fluct = np.asarray(fluct)
     mask = np.isfinite(fluct) & (fluct > 0)
     if mask.sum() < 4:
         return 0.5
-    try:
-        H, _ = np.polyfit(
-            np.log(np.asarray(box_sizes)[mask]), np.log(fluct[mask]), 1)
-        return float(np.clip(H, 0.05, 0.95))
-    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+    filtered_sizes = box_sizes[mask]
+    filtered_fluct = fluct[mask]
+    log_sizes = np.log(filtered_sizes)
+    log_fluct = np.log(filtered_fluct)
+    n_pts = len(log_sizes)
+    x_mean = log_sizes.mean()
+    y_mean = log_fluct.mean()
+    num = ((log_sizes - x_mean) * (log_fluct - y_mean)).sum()
+    den = ((log_sizes - x_mean) ** 2).sum()
+    if den < 1e-12:
         return 0.5
+    slope = num / den
+    result = slope
+    if result < 0.05:
+        return 0.05
+    if result > 0.95:
+        return 0.95
+    return float(result)
 
 
 def fractal_dimension(x: Sequence[float], k_max: int | None = None) -> float:
@@ -148,14 +234,22 @@ def fractal_dimension(x: Sequence[float], k_max: int | None = None) -> float:
     trending behaviour, D ~ 1.5 for self-similar (fractional Brownian) noise,
     D ~ 2 for uncorrelated white noise.
     """
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
+    x_arr = np.asarray(x, dtype=float)
+    x_arr = x_arr[np.isfinite(x_arr)]
+    n = len(x_arr)
+    k_max_resolved = k_max if k_max is not None else min(32, n // 2)
+    return _fractal_dimension_numba(x_arr, k_max_resolved)
+
+
+@njit(cache=True)
+def _fractal_dimension_numba(x: np.ndarray, k_max: int) -> float:
     n = len(x)
     if n < 16:
         return 1.5
 
-    k_max = k_max or min(32, n // 2)
-    lengths = []
+    if k_max is None:
+        k_max = min(32, n // 2)
+    lengths = np.empty(k_max, dtype=np.float64)
     for k in range(1, k_max + 1):
         Lk = 0.0
         for m in range(k):
@@ -166,18 +260,29 @@ def fractal_dimension(x: Sequence[float], k_max: int | None = None) -> float:
             for i in range(1, n_int):
                 Lmk += abs(x[m + i * k] - x[m + (i - 1) * k])
             Lk += Lmk * (n - 1) / (n_int * k)
-        lengths.append(Lk / k)
+        lengths[k - 1] = Lk / k
 
-    lengths = np.asarray(lengths)
     mask = np.isfinite(lengths) & (lengths > 0)
     if mask.sum() < 4:
         return 1.5
-    k_vals = np.arange(1, k_max + 1, dtype=float)[mask]
-    try:
-        slope, _ = np.polyfit(np.log(k_vals), np.log(lengths[mask]), 1)
-        return float(np.clip(1.0 - slope, 1.0, 2.0))
-    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+    filt_k = np.arange(1, k_max + 1, dtype=np.float64)[mask]
+    filt_l = lengths[mask]
+    log_k = np.log(filt_k)
+    log_l = np.log(filt_l)
+    n_pts2 = len(log_k)
+    x_mean = log_k.mean()
+    y_mean = log_l.mean()
+    num = ((log_k - x_mean) * (log_l - y_mean)).sum()
+    den = ((log_k - x_mean) ** 2).sum()
+    if den < 1e-12:
         return 1.5
+    slope = num / den
+    result = 1.0 - slope
+    if result < 1.0:
+        return 1.0
+    if result > 2.0:
+        return 2.0
+    return float(result)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -233,18 +338,35 @@ class RegimeHMM:
 
     @property
     def states(self) -> np.ndarray:
-        if self._model is None:
-            raise RuntimeError("RegimeHMM.fit() must be called first")
-        return self._model.predict(
-            (np.nan_to_num(np.asarray(self._features)) - self._mean) / self._std
-        )
+        probs = self.state_probs
+        return np.argmax(probs, axis=1)
 
     @property
     def state_probs(self) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("RegimeHMM.fit() must be called first")
         Z = (np.nan_to_num(np.asarray(self._features)) - self._mean) / self._std
-        return self._model.predict_proba(Z)
+
+        # BUG-004: hmmlearn's predict_proba uses Forward-Backward (smoothing)
+        # which leaks future data. We do a manual forward-only pass here for
+        # causal P(S_t | O_{1:t}) — the same approach as ``_causal_hmm_decode``.
+        m = self._model
+        framelogprob = m._compute_log_likelihood(Z)
+        n, k = framelogprob.shape
+        log_transmat = np.log(m.transmat_ + 1e-12)
+        log_startprob = np.log(m.startprob_ + 1e-12)
+        from scipy.special import logsumexp
+
+        logprob = np.empty((n, k))
+        logprob[0] = log_startprob + framelogprob[0]
+        for t in range(1, n):
+            logprob[t] = (
+                logsumexp(logprob[t - 1, :, np.newaxis] + log_transmat.T, axis=0)
+                + framelogprob[t]
+            )
+        causal_probs = np.exp(logprob - logsumexp(logprob, axis=1, keepdims=True))
+        return causal_probs
+
 
     @property
     def transition_(self) -> np.ndarray:
@@ -304,17 +426,54 @@ def _causal_hmm_decode(
         model = RegimeHMM(n_states=n_states, random_state=random_state)
         model.set_features(feat[:min_fit])
         model.fit(feat[:min_fit])
-        # Decode full series with warm-up mean/std + frozen transition/emission
-        model.set_features(feat)
-        raw_p = np.asarray(model.state_probs, dtype=np.float64)
-        raw_s = np.asarray(model.states, dtype=np.int32)
+        
+        # Extract frozen parameters from fitted model
+        transmat = model.transition_.copy()
+        startprob = model._model.startprob_.copy()
+        means = model._model.means_.copy()
+        covars = model._model.covars_.copy()
+        mean_scaler = model._mean
+        std_scaler = model._std
+        
+        # Manually decode full series with frozen parameters (no refit)
+        # Standardize full features with warm-up mean/std
+        Z_full = (np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0) - mean_scaler) / std_scaler
+        
+        # Compute log-likelihood for each state at each timestep
+        from scipy.stats import multivariate_normal
+        n = len(feat)
+        framelogprob = np.zeros((n, n_states))
+        for i in range(n_states):
+            framelogprob[:, i] = multivariate_normal.logpdf(Z_full, mean=means[i], cov=covars[i])
+        
+        # Forward algorithm with frozen parameters
+        from scipy.special import logsumexp
+        logprob = np.zeros((n, n_states))
+        logprob[0] = np.log(startprob) + framelogprob[0]
+        for t in range(1, n):
+            # log P(S_t | O_{1:t}) = logsumexp(log P(S_{t-1} | O_{1:t-1}) + log A_{S_{t-1}, S_t}) + log P(O_t | S_t)
+            logprob[t] = logsumexp(logprob[t-1, :, np.newaxis] + np.log(transmat.T + 1e-12), axis=0) + framelogprob[t]
+        
+        # Normalize to get causal probabilities
+        causal_probs = np.exp(logprob - logsumexp(logprob, axis=1, keepdims=True))
+        
+        # Get states (argmax)
+        raw_s = np.argmax(causal_probs, axis=1)
+        
         # 1-bar lag: feature at t uses posterior known at t-1
-        probs[1:] = raw_p[:-1]
+        probs[1:] = causal_probs[:-1]
         states[1:] = raw_s[:-1]
         probs[0] = 1.0 / n_states
         states[0] = 0
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "HMM regime fit/decode failed (%s); emitting explicit uniform "
+            "fallback probs (not a fitted regime).",
+            exc,
+        )
+        probs[:] = 1.0 / max(1, n_states)
+        states[:] = 0
     return probs, states
 
 
@@ -341,8 +500,7 @@ def vol_regime_probs_polars(
     abs_ret = np.abs(ret)
     # Causal rolling vol (no mode="same" convolution look-ahead)
     vol = np.zeros(n)
-    for i in range(window, n):
-        vol[i] = abs_ret[i - window:i].mean()
+    _rolling_mean_causal(abs_ret, vol, window)
 
     feat = np.column_stack([ret, vol])
     probs, _ = _causal_hmm_decode(feat, n_states=n_states, min_fit=max(window * 2, 120))
@@ -408,8 +566,7 @@ def detect_regimes_polars(
     ret[1:] = np.diff(np.log(np.maximum(close, 1e-12)))
     vol = np.zeros(n)
     abs_ret = np.abs(ret)
-    for i in range(window, n):
-        vol[i] = abs_ret[i - window:i].mean()
+    _rolling_mean_causal(abs_ret, vol, window)
     feat = np.column_stack([ret, vol])
 
     probs, states = _causal_hmm_decode(

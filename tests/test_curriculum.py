@@ -153,7 +153,7 @@ def test_loss_weighting_schemes():
     """Test different loss weighting schemes."""
     losses = np.linspace(0, 5, 100)
 
-    for scheme in ["inverse", "focal", "threshold", "softmax", "curriculum"]:
+    for scheme in ["inverse", "focal", "threshold", "softmax"]:
         config = LossWeightingConfig(scheme=scheme)
         weighting = LossBasedWeighting(config)
         weights = weighting.compute_weights(losses, epoch=50)

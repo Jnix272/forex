@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
+from infrastructure.numerics import sanitize_array
 from training.gpu_cache_io import (
     ZARR,
     _diff_path,

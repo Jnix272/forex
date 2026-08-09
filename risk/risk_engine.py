@@ -176,18 +176,28 @@ class RiskEngine:
             self._log(d, now)
             return d
 
+        current_lots = sum(abs(p.get("lots", 0.0)) for p in self.positions.values())
+        total_lots = current_lots + abs(lots)
+        
+        current_notional = sum(abs(p.get("lots", 0.0)) * p.get("entry_price", 1.0) * 100_000 for p in self.positions.values())
+        total_notional = current_notional + notional_usd
+        
+        total_position_pct = total_notional / max(self.equity, 1.0)
+
         checks = [
+            # Use caller's position_size_pct for max_position_pct (backward-compat)
+            # Use total_notional/equity for max_notional_usd
             self._check("max_position_pct", position_size_pct, self.cfg.max_position_pct,
                         allowed_fn=lambda v, lim: v <= lim,
-                        reason="position size exceeds max_position_pct"),
-            self._check("max_total_lots", lots, self.cfg.max_total_lots,
+                        reason="cumulative position size exceeds max_position_pct"),
+            self._check("max_total_lots", total_lots, self.cfg.max_total_lots,
                         allowed_fn=lambda v, lim: v <= lim,
-                        reason="lots exceed max_total_lots"),
-            self._check("max_notional_usd", notional_usd, self.cfg.max_notional_usd,
+                        reason="cumulative lots exceed max_total_lots"),
+            self._check("max_notional_usd", total_notional, self.cfg.max_notional_usd,
                         allowed_fn=lambda v, lim: v <= lim,
-                        reason="notional exceeds max_notional_usd"),
+                        reason="cumulative notional exceeds max_notional_usd"),
             self._check("daily_loss", abs(self.day_realized_pnl) if self.day_realized_pnl < 0 else 0.0,
-                        self.equity * self.cfg.max_daily_loss_pct,
+                        max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct,
                         allowed_fn=lambda v, lim: v <= lim,
                         reason="daily loss limit breached"),
             self._check("concentration", lots, self._max_lots_for_instrument(pair, self.cfg.max_instrument_concentration),
@@ -292,7 +302,7 @@ class RiskEngine:
         breach: list[str] = []
         if dd >= self.cfg.max_drawdown_halt:
             breach.append("max_drawdown_halt")
-        if self.day_realized_pnl < 0 and abs(self.day_realized_pnl) >= self.equity * self.cfg.max_daily_loss_pct:
+        if self.day_realized_pnl < 0 and abs(self.day_realized_pnl) >= max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct:
             breach.append("daily_loss_limit")
 
         var = self.portfolio_var()

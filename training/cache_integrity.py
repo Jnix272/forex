@@ -8,12 +8,15 @@ from pathlib import Path
 import numpy as np
 
 from config.settings import FEATURES, LABELING
+from training.config_validate import _effective_max_seq_len
+from training.cv_splits import _embargo_bars
 from training.gpu_cache_io import (
     ZARR,
     _atr_path,
     _close_path,
     _diff_path,
     _pq_path,
+    _scaler_npz_path,
     _spread_path,
     _x_path,
     _y_cls_path,
@@ -27,7 +30,6 @@ _HOST_DEPS = (
     '_log_error',
     '_log_warn',
     '_log_info',
-    '_effective_max_seq_len',
     'LABELING',
     'FEATURES',
     'PATHS',
@@ -155,7 +157,7 @@ def _get_cache_path(args) -> Path:
     exec_delay = int(getattr(args, "execution_delay_bars", 1))
     strategy = str(getattr(args, "strategy_mode", "scalping") or "scalping").lower()
     bar_freq = str(getattr(args, "bar_freq", "1min") or "1min").lower()
-    lookahead = int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 15)))
+    lookahead = int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30)))
     tp_atr = float(getattr(args, "profit_target_atr", LABELING.get("profit_target_atr", 1.5)))
     sl_atr = float(getattr(args, "stop_loss_atr", LABELING.get("stop_loss_atr", 0.8)))
     news_mode = str(getattr(args, "historical_news_mode", "calendar") or "calendar").lower()
@@ -166,10 +168,36 @@ def _get_cache_path(args) -> Path:
     # label_exit_mode / warmup_days bust caches after DS-001 / DS-002 fixes.
     exit_mode = str(getattr(args, "label_exit_mode", "bid_ask") or "bid_ask").lower()
     warmup_days = int(getattr(args, "feature_warmup_days", 14) or 14)
-    tag      = (
+    # FEATURE_MASK digest so mask toggles cannot silently reuse a stale Zarr.
+    # LABEL_REGIME policy digest: barrier/session/spread horizon+cost edits bust cache
+    # (lh{base} tag alone would not; force-rebuild also works).
+    try:
+        import hashlib
+        import json
+
+        from config.feature_mask import FEATURE_MASK as _FM
+        from config.settings import LABEL_REGIME as _LR
+        _mask_payload = {str(k): bool(v) for k, v in sorted(_FM.items())}
+        mask_digest = hashlib.md5(
+            json.dumps(_mask_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:8]
+        _lr_payload = {
+            "barrier_scale": _LR.get("barrier_scale"),
+            "session_cost_scale": _LR.get("session_cost_scale"),
+            "session_horizon_mult": _LR.get("session_horizon_mult"),
+            "spread_horizon": _LR.get("spread_horizon"),
+        }
+        lr_digest = hashlib.md5(
+            json.dumps(_lr_payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:6]
+    except Exception:
+        mask_digest = "nomask"
+        lr_digest = "nolr"
+    tag = (
         f"{strategy}_{bar_freq}_{pair_tag}_{args.n_ticks}_{args.data_source}_{args.seq_len}_"
         f"{args.label_method}_{target_col}_lh{lookahead}_tp{tp_atr:g}_sl{sl_atr:g}_"
-        f"exec{exec_delay}_lexit-{exit_mode}_wu{warmup_days}_{news_tag}_{ca_tag}"
+        f"exec{exec_delay}_lexit-{exit_mode}_wu{warmup_days}_fm{mask_digest}_"
+        f"lr{lr_digest}_{news_tag}_{ca_tag}"
     )
     if getattr(args, "data_start", None) and getattr(args, "data_end", None):
         tag += f"_{args.data_start}_{args.data_end}"
@@ -418,6 +446,26 @@ def _cache_length_snapshot(cache_path: str) -> dict:
                 out[key] = int(np.load(str(pp), mmap_mode="r").shape[0])
     return out
 
+import hashlib
+import json
+
+
+def _compute_content_hash(args) -> str:
+    """Compute a deterministic hash of the dataset generation parameters to prevent stale reuse."""
+    if args is None:
+        return "no_args"
+
+    # Collect core features and builder configurations
+    state = {
+        "features": getattr(args, "_feat_names", []),
+        "seq_len": getattr(args, "seq_len", 80),
+        "lookahead": getattr(args, "lookahead_bars", 30),
+        "target": getattr(args, "target_col", ""),
+    }
+
+    # Convert to a stable JSON string
+    state_str = json.dumps(state, sort_keys=True)
+    return hashlib.sha256(state_str.encode('utf-8')).hexdigest()
 
 def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
     _ensure_bound()
@@ -455,6 +503,11 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
                 problems.append(f"Manifest read error: {e}")
 
         if manifest:
+            if args:
+                current_hash = _compute_content_hash(args)
+                cached_hash = manifest.get("content_hash", "missing")
+                if current_hash != "no_args" and cached_hash != "missing" and current_hash != cached_hash:
+                    problems.append(f"feature content hash mismatch (cached: {cached_hash[:8]}, current: {current_hash[:8]})")
             try:
                 expected_pairs = _get_pairs(args)
                 manifest_pairs = manifest.get("pairs")
@@ -742,6 +795,209 @@ def _verify_dataset(
     return report
 
 
+def _validate_dataset_builder_reader_contract(
+    cache_path: str,
+    args,
+    *,
+    context: str = "Data",
+    sample_rows: int = 4096,
+) -> tuple[bool, list[str]]:
+    """Verify that what ``dataset_builder`` wrote matches what
+    ``ZarrStreamDataset`` and the supervised loop expect to read.
+
+    The existing :func:`_validate_cache_integrity` only checks *lengths* of
+    the zarr / NPY sidecars (X, y, y_cls, pq, diff, close/atr/spread all
+    equal). This function goes one step further and inspects *values* and
+    *runtime-contract hooks* that were previously implicit:
+
+      1. ``multitask`` mode requires a ``pq`` array that is satisfiable
+         (i.e. either present in the cache, or absent so the reader falls
+         back to ``pq=1.0``). If the array is present but its dtype is not
+         ``float32`` we warn — the BCE loss head silently promotes it.
+      2. ``pq`` value range is ``[0, 1]``. Outside that range the BCE head
+         is poorly defined; this is the previous silent-legacy behaviour
+         that the old ``min(1, |y|)`` reader-side fallback papered over.
+         Now the reader honours the real array, so a bad writer becomes
+         visible — fail-stop instead of training on garbage.
+      3. ``y_cls`` ∈ {-1, 0, +1}. The dataset builder writes
+         ``np.sign(y_seq)`` or, for ``rl_reward``, a consensus-d direction
+         label. A bug that writes raw reward floats into ``y_cls`` would
+         silently corrupt classification.
+      4. Zarr row chunk size matches reader expectation. ``ZarrStreamDataset``
+         reads ``chunks[0]`` from ``X/.zarray`` and uses it for streaming
+         block partitioning. A sub-optimal chunk size (e.g. ``1``) makes
+         each "block" a single row and reintroduces the per-row decompress
+         cost that ``ZarrStreamDataset`` was built to avoid.
+      5. ``scaler.scale_`` shape (if present) matches ``X.shape[-1]``.
+         The reader applies the scaler inside the worker process; a shape
+         mismatch makes the worker crash opaquely mid-epoch.
+      6. ``diff`` (curriculum) is ``uint8`` with values in {0, 1, 2}.
+
+    Returns ``(ok, problems)``: ``ok=True`` iff there are no problems.
+    ``problems`` is a list of human-readable strings, joined with ``" | "``
+    for display.
+    """
+    _ensure_bound()
+    p = Path(cache_path)
+    problems: list[str] = []
+
+    snap = _cache_length_snapshot(cache_path)
+    n_rows = snap.get("zarr_X", snap.get("npy_X"))
+    if n_rows is None or n_rows == 0:
+        # Length checks are the existing validator's job; bail here.
+        return True, problems
+
+    # Subset we will actually load. Cap to keep validation cheap.
+    k = max(1, min(int(sample_rows), int(n_rows)))
+
+    is_zarr = bool(ZARR and p.is_dir() and (p / ".zgroup").exists())
+
+    # ── Load the tiled arrays we need to inspect ────────────────────────
+    X_tile = y_cls_tile = pq_tile = diff_tile = None
+    if is_zarr:
+        try:
+            z = _zarr_open_group(cache_path, mode="r")
+            X_tile = np.asarray(z["X"][:k], dtype=np.float32)
+            if "y_cls" in z:
+                y_cls_tile = np.asarray(z["y_cls"][:k], dtype=np.float32)
+            if "pq" in z:
+                pq_tile = np.asarray(z["pq"][:k], dtype=np.float32)
+            if "diff" in z:
+                diff_tile = np.asarray(z["diff"][:k])
+        except Exception as exc:  # pragma: no cover - corrupt zarr
+            problems.append(f"reader_contract: zarr tile read failed: {exc}")
+            return False, problems
+    else:
+        # NPY fallback path (Windows) — read the relevant sidecars.
+        try:
+            X_tile = np.load(_x_path(cache_path), mmap_mode="r")[:k].astype(np.float32, copy=False)
+        except Exception as exc:  # pragma: no cover
+            problems.append(f"reader_contract: NPY X read failed: {exc}")
+            return False, problems
+        yc_path = Path(_y_cls_path(cache_path))
+        if yc_path.exists():
+            try:
+                y_cls_tile = np.load(str(yc_path), mmap_mode="r")[:k].astype(np.float32, copy=False)
+            except Exception:
+                pass
+        pq_path_ = Path(_pq_path(cache_path))
+        if pq_path_.exists():
+            try:
+                pq_tile = np.load(str(pq_path_), mmap_mode="r")[:k].astype(np.float32, copy=False)
+            except Exception:
+                pass
+        diff_p = Path(_diff_path(cache_path))
+        if diff_p.exists():
+            try:
+                diff_tile = np.load(str(diff_p), mmap_mode="r")[:k]
+            except Exception:
+                pass
+
+    # ── (4) Zarr row chunk size sanity ─────────────────────────────────
+    if is_zarr:
+        try:
+            import json as _json
+            meta_file = p / "X" / ".zarray"
+            if meta_file.exists():
+                cs = int(_json.loads(meta_file.read_text())["chunks"][0])
+                # Reading 1 row at a time = worst case for stream block
+                # partitioning. Anything >= 64 is sane; below warns.
+                if cs < 64:
+                    problems.append(
+                        f"reader_contract: zarr X row-chunk size {cs} < 64 — "
+                        "ZarrStreamDataset will decompress one chunk per row "
+                        "(reintroduces the per-row decompress cost it was "
+                        "designed to avoid). Rebuild with a larger chunk."
+                    )
+        except Exception as exc:  # pragma: no cover
+            problems.append(f"reader_contract: could not read zarr X chunk size: {exc}")
+
+    # ── (1)/(2) pq presence + value range ──────────────────────────────
+    multitask_on = bool(getattr(args, "multitask", False))
+    label_is_rl = str(getattr(args, "label_method", "")).lower() == "rl_reward"
+
+    if pq_tile is None:
+        if multitask_on and label_is_rl:
+            # Reader falls back to ``pq=1.0`` (uniform confidence target for
+            # the BCE head) — this is *safe* but not what an rl_reward
+            # cache intends. Surface a rebuild hint, not a failure.
+            problems.append(
+                "reader_contract: multitask + rl_reward enabled but cache "
+                "has no `pq` array — confidence head will train against "
+                "uniform-1.0 target (rebuild to get true path-quality labels)"
+            )
+    else:
+        finite = pq_tile[np.isfinite(pq_tile)]
+        if finite.size:
+            vmin = float(finite.min()); vmax = float(finite.max())
+            if vmin < 0.0 or vmax > 1.0:
+                problems.append(
+                    f"reader_contract: pq range [{vmin:.4f}, {vmax:.4f}] "
+                    "outside [0, 1] — BCE confidence head is ill-defined; "
+                    "rebuild with a clamped writer (np.clip(pq, 0, 1))"
+                )
+
+    # ── (3) y_cls ∈ {-1, 0, +1} ───────────────────────────────────────
+    if y_cls_tile is not None:
+        finite = y_cls_tile[np.isfinite(y_cls_tile)]
+        if finite.size:
+            unique = np.unique(np.round(finite))
+            bad = sorted(float(v) for v in unique if v not in (-1.0, 0.0, 1.0))
+            if bad:
+                problems.append(
+                    "reader_contract: y_cls contains values outside "
+                    f"{{-1, 0, +1}}: {bad[:5]} (count={len(bad)}) — "
+                    "classification head will see stray class ids"
+                )
+
+    # ── (6) diff is uint8 with values in {0, 1, 2} ────────────────────
+    if diff_tile is not None:
+        if diff_tile.dtype != np.uint8:
+            problems.append(
+                f"reader_contract: diff dtype {diff_tile.dtype} != uint8 "
+                "(curriculum scaler assumes uint8; values will be silently "
+                "reinterpreted)"
+            )
+        else:
+            finite = diff_tile[np.isfinite(diff_tile)]
+            if finite.size:
+                unique = np.unique(finite)
+                bad = sorted(int(v) for v in unique if v not in (0, 1, 2))
+                if bad:
+                    problems.append(
+                        "reader_contract: diff contains values outside "
+                        f"{{0, 1, 2}}: {bad[:5]} (count={len(bad)}) — "
+                        "curriculum stage selection will misclassify these"
+                    )
+
+    # ── (5) scaler.scale_ shape vs X feature dim ─────────────────────
+    if X_tile is not None and X_tile.ndim >= 2:
+        try:
+            from training.gpu_cache_io import _scaler_npz_path
+            scaler_path = _scaler_npz_path(Path(cache_path))
+            if scaler_path.exists():
+                scaler_npz = np.load(str(scaler_path))
+                # StandardScaler persists ``scale_`` (per-feature std) and
+                # ``mean_`` (per-feature mean). Both should match the X
+                # feature dim — the last axis of X.
+                feat_dim = int(X_tile.shape[-1])
+                for arr_name in ("scale_", "mean_"):
+                    if arr_name in scaler_npz:
+                        s = scaler_npz[arr_name]
+                        if int(s.shape[0]) != feat_dim:
+                            problems.append(
+                                f"reader_contract: scaler.{arr_name} "
+                                f"shape ({s.shape[0]}) != X feature dim "
+                                f"({feat_dim}) — `scaler.transform` will "
+                                "crash inside the DataLoader worker"
+                            )
+                            break
+        except Exception as exc:  # pragma: no cover
+            problems.append(f"reader_contract: scaler shape check failed: {exc}")
+
+    return (len(problems) == 0), problems
+
+
 def _postprocess_cache_integrity_check(cache_path: str, args, *, context: str = "Data") -> None:
     """Fail immediately if a freshly processed cache is incomplete or inconsistent."""
     _ensure_bound()
@@ -751,6 +1007,24 @@ def _postprocess_cache_integrity_check(cache_path: str, args, *, context: str = 
             f"[{context}] Post-processing cache integrity failed: {reason}. "
             "Delete/rebuild the processed cache before training."
         )
+    # Reader-contract checks: dump tile values + shape hooks across the
+    # builder→reader boundary. Fail-stop on hard errors; warn on soft ones.
+    ok_rc, problems = _validate_dataset_builder_reader_contract(
+        cache_path, args, context=context,
+    )
+    if not ok_rc:
+        raise RuntimeError(
+            f"[{context}] Dataset builder / reader contract violated: "
+            + " | ".join(problems)
+            + ". Delete/rebuild the cache before training."
+        )
+    if problems:
+        # Soft warnings (e.g. "pq not present — falling back to uniform 1.0")
+        for msg in problems:
+            try:
+                _log_warn(f"[{context}] {msg}")
+            except Exception:
+                print(f"[{context}] WARN: {msg}", flush=True)
     snap = _cache_length_snapshot(cache_path)
     n_rows = snap.get("zarr_X", snap.get("npy_X", 0))
     print(f"[{context}] Post-processing cache integrity PASS ({int(n_rows):,} rows)")

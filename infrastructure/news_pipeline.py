@@ -83,14 +83,14 @@ class StreamingNewsEnricher:
 
         # 1. FinBERT / Ollama Sentiment & Embedding
         sentiment_score = 0.0
-        embedding = []
+        embedding: list[float] = []
         try:
-            score = self.sentiment_pipeline.score_headlines([headline])
-            sentiment_score = float(score)
-            # Emulate an embedding output for now (dim=8)
-            embedding = [sentiment_score] * 8
+            scores = self.sentiment_pipeline.score_headlines_batch([headline])
+            sentiment_score = float(scores[0]) if scores else 0.0
+            embedding = self._headline_embedding(headline, sentiment_score)
         except Exception as e:
             logging.error(f"Sentiment error: {e}")
+            embedding = [0.0] * 8
 
         # 2. DistilBERT Event Classification
         high_impact = self.is_high_impact(headline)
@@ -109,6 +109,36 @@ class StreamingNewsEnricher:
             self.producer.send(self.enriched_topic, enriched_msg)
         else:
             logging.info(f"Mock Output: {enriched_msg}")
+
+    def _headline_embedding(self, headline: str, sentiment_score: float, dim: int = 8) -> list[float]:
+        """Prefer real FinBERT CLS embedding (PCA-reduced); fall back to score vector."""
+        try:
+            import numpy as np
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+
+            if not hasattr(self, "_emb_tok"):
+                self._emb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+                self._emb_model = AutoModel.from_pretrained("ProsusAI/finbert")
+                self._emb_model.eval()
+            inputs = self._emb_tok(
+                headline, padding=True, truncation=True, max_length=128, return_tensors="pt"
+            )
+            with torch.no_grad():
+                out = self._emb_model(**inputs)
+                vec = out.last_hidden_state[:, 0, :].cpu().numpy().reshape(-1)
+            # Deterministic truncate/pool to dim without fitting PCA online
+            if vec.size >= dim:
+                chunks = np.array_split(vec, dim)
+                return [float(c.mean()) for c in chunks]
+            padded = np.zeros(dim, dtype=np.float32)
+            padded[: vec.size] = vec
+            return padded.tolist()
+        except Exception as e:
+            logging.warning(
+                "FinBERT embedding unavailable (%s); using sentiment-score vector", e
+            )
+            return [float(sentiment_score)] * dim
 
     def run(self):
         logging.info(f"Starting News Enricher: {self.raw_topic} -> {self.enriched_topic}")

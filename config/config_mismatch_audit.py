@@ -14,7 +14,7 @@ from typing import Any
 SECTION_MAP: dict[str, str] = {
     "training": "TRAINING",
     "execution": "EXECUTION",
-    "risk": "RISK",
+    "risk": "LIVE_RISK",
     "backtest": "BACKTEST",
     "data": "DATA",
     "distillation": "DISTILLATION",
@@ -22,6 +22,7 @@ SECTION_MAP: dict[str, str] = {
     "monitoring": "MONITORING",
     "curriculum": "CURRICULUM",
     "validation": "VALIDATION",
+    "pretrain": "PRETRAIN",
 }
 
 # Shared keys that must stay synced (settings used as no-YAML fallback / docs).
@@ -32,14 +33,39 @@ CRITICAL_SHARED_KEYS: frozenset[str] = frozenset({
     "training.seq_len",
     "training.loss",
     "training.sharpe_annualization_factor",
+    "training.lr_warmup_epochs",
     "validation.embargo_bars",
     "validation.purge_bars",
+    "pretrain.epochs",
+    "distillation.temperature",
 })
+
+# Hardware / duration knobs: intentional drift on profile YAMLs (e.g. run_ubuntu.yaml).
+# Still fail-closed when auditing the canonical run.yaml against settings stubs.
+PROFILE_SCALE_KEYS: frozenset[str] = frozenset({
+    "pretrain.epochs",
+    "pretrain.min_epochs",
+    "pretrain.pretrain_epochs",
+    "training.epochs",
+    "training.batch_size",
+    "training.patience",
+    "data.chunk_size",
+})
+
+_CANONICAL_YAML_NAMES: frozenset[str] = frozenset({"run.yaml"})
+
+# YAML strategy.* ↔ settings.LABELING (label/target contract).
+_STRATEGY_LABELING_MAP: dict[str, str] = {
+    "lookahead_bars": "lookahead_bars",
+    "profit_target_atr": "profit_target_atr",
+    "stop_loss_atr": "stop_loss_atr",
+}
 
 # Path / machine-local / order-only keys — never fail, optionally skip entirely.
 IGNORE_KEYS: frozenset[str] = frozenset({
     "training.checkpoint_dir",
     "distillation.teacher_ckpt",
+    "pretrain.checkpoint",
     "data.pairs",  # order-only; same membership is fine
 })
 
@@ -83,6 +109,62 @@ def _should_skip(path: str) -> bool:
     if path in IGNORE_KEYS:
         return True
     return any(path.startswith(p) for p in _SKIP_PREFIXES)
+
+
+def _is_canonical_yaml(yaml_path: str) -> bool:
+    return Path(yaml_path).name in _CANONICAL_YAML_NAMES
+
+
+def _key_is_critical(key: str, yaml_path: str, critical: frozenset[str]) -> bool:
+    if key not in critical:
+        return False
+    # Profile YAMLs may scale epochs/batch/chunk without updating settings stubs.
+    if key in PROFILE_SCALE_KEYS and not _is_canonical_yaml(yaml_path):
+        return False
+    return True
+
+
+def audit_strategy_vs_labeling(
+    yaml_cfg: dict | None,
+    *,
+    yaml_path: str = "config/run.yaml",
+) -> dict[str, Any]:
+    """Fail closed when YAML strategy barriers diverge from settings.LABELING."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    mismatches: list[dict[str, Any]] = []
+    raw = yaml_cfg if isinstance(yaml_cfg, dict) else {}
+    strat = raw.get("strategy") if isinstance(raw.get("strategy"), dict) else {}
+    lbl = _load_settings_section("LABELING") or {}
+    if not strat:
+        warnings.append(f"{yaml_path}: strategy block missing — skip LABELING cross-check")
+        return {
+            "yaml_path": yaml_path,
+            "mismatches": mismatches,
+            "errors": errors,
+            "warnings": warnings,
+        }
+    for y_key, s_key in _STRATEGY_LABELING_MAP.items():
+        if y_key not in strat or s_key not in lbl:
+            continue
+        if not _values_equal(strat[y_key], lbl[s_key]):
+            msg = (
+                f"strategy.{y_key}={strat[y_key]!r} != LABELING.{s_key}={lbl[s_key]!r} "
+                f"({yaml_path})"
+            )
+            mismatches.append({
+                "key": f"strategy.{y_key}",
+                "settings": lbl[s_key],
+                "yaml": strat[y_key],
+                "critical": True,
+            })
+            errors.append(msg)
+    return {
+        "yaml_path": yaml_path,
+        "mismatches": mismatches,
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 def _load_settings_section(attr: str) -> dict | None:
@@ -150,23 +232,31 @@ def audit_settings_yaml_section_mismatches(
 
         for key in sorted(sk & yk):
             if not _values_equal(sf[key], yf[key]):
+                is_crit = _key_is_critical(key, yaml_path, critical)
                 entry = {
                     "key": key,
                     "settings": sf[key],
                     "yaml": yf[key],
-                    "critical": key in critical,
+                    "critical": is_crit,
                 }
                 part["mismatches"].append(entry)
                 mismatches.append(entry)
                 msg = (
                     f"{key}: settings={sf[key]!r} != {yaml_path}={yf[key]!r}"
                 )
-                if key in critical:
+                if is_crit:
                     errors.append(msg)
                 else:
                     warnings.append(msg)
 
         parts[yaml_key] = part
+
+    # Cross-check strategy barriers vs LABELING (label/target contract).
+    strat_rep = audit_strategy_vs_labeling(raw, yaml_path=yaml_path)
+    errors.extend(strat_rep.get("errors") or [])
+    warnings.extend(strat_rep.get("warnings") or [])
+    mismatches.extend(strat_rep.get("mismatches") or [])
+    parts["strategy_labeling"] = strat_rep
 
     return {
         "yaml_path": yaml_path,
@@ -228,21 +318,12 @@ def audit_args_vs_yaml_mismatches(
             mismatches.append(entry)
             msg = (
                 f"args.{dest}={arg_val!r} != {yaml_path}:{ypath}={y_val!r} "
-                "(YAML may not have applied)"
+                "(CLI/strategy override or YAML may not have applied)"
             )
-            # Strategy / seq_len / loss affect dataset + training identity.
-            if dest in {
-                "seq_len",
-                "loss",
-                "bar_freq",
-                "strategy_mode",
-                "profit_target_atr",
-                "stop_loss_atr",
-                "lookahead_bars",
-            }:
-                errors.append(msg)
-            else:
-                warnings.append(msg)
+            # Soft: CLI flags and strategy profiles intentionally override YAML.
+            # Hard errors for silent load failure belong in settings↔YAML critical
+            # keys and the strategy-block presence check — not every args drift.
+            warnings.append(msg)
 
     return {
         "yaml_path": yaml_path,

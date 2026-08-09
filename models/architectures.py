@@ -226,6 +226,13 @@ if TORCH:
             sharpe_ann:  float = 1.0,
             sharpe_eps:  float = 1e-8,
             label_smoothing: float = 0.05,
+            class_floor_frac: float = 0.35,
+            recall_margin: float = 0.35,
+            dist_penalty_w: float = 4.0,
+            balanced_ce_w: float = 0.15,
+            aux_bce_w: float = 0.15,
+            recon_w: float = 0.1,
+            vol_w: float = 0.05,
         ):
             super().__init__()
             self.ce    = nn.CrossEntropyLoss(
@@ -246,6 +253,13 @@ if TORCH:
             self.entropy_weight = float(entropy_weight)
             self.direction_weight_floor = float(direction_weight_floor)
             self.focal_gamma = float(focal_gamma)
+            self.class_floor_frac = float(class_floor_frac)
+            self.recall_margin = float(recall_margin)
+            self.dist_penalty_w = float(dist_penalty_w)
+            self.balanced_ce_w = float(balanced_ce_w)
+            self.aux_bce_w = float(aux_bce_w)
+            self.recon_w = float(recon_w)
+            self.vol_w = float(vol_w)
             prior = class_prior.float() if class_prior is not None else torch.ones(3) / 3.0
             prior = prior.reshape(-1).clamp_min(1e-6)
             prior = prior / prior.sum().clamp_min(1e-6)
@@ -309,9 +323,9 @@ if TORCH:
                 true_dist = self.class_prior.to(dtype=probs.dtype, device=probs.device)
                 dist_mse = F.mse_loss(pred_dist, true_dist)
                 dist_kl = F.kl_div(pred_dist.log(), true_dist, reduction="sum")
-                class_floor = true_dist * 0.35
+                class_floor = true_dist * self.class_floor_frac
                 missing_penalty = F.relu(class_floor - pred_dist).pow(2).sum()
-                recall_margin = logits.new_tensor(0.35)
+                recall_margin_t = logits.new_tensor(self.recall_margin)
                 recall_penalty = logits.new_tensor(0.0)
                 balanced_ce_parts = []
                 aux_bce_parts = []
@@ -338,7 +352,7 @@ if TORCH:
                     )
                     other_best = other_logits.max(dim=1).values
                     recall_penalty = recall_penalty + F.relu(
-                        recall_margin - (target_logit - other_best)
+                        recall_margin_t - (target_logit - other_best)
                     ).mean()
                 balanced_ce = (
                     torch.stack(balanced_ce_parts).mean()
@@ -349,10 +363,10 @@ if TORCH:
                     if aux_bce_parts else logits.new_tensor(0.0)
                 )
                 loss = loss + self.class_balance_weight * (
-                    4.0 * (dist_mse + dist_kl + missing_penalty)
+                    self.dist_penalty_w * (dist_mse + dist_kl + missing_penalty)
                     + recall_penalty
-                    + 0.15 * balanced_ce
-                    + 0.15 * aux_bce
+                    + self.balanced_ce_w * balanced_ce
+                    + self.aux_bce_w * aux_bce
                 )
             if self.entropy_weight:
                 probs = torch.softmax(logits, dim=-1).clamp_min(1e-6)
@@ -363,9 +377,9 @@ if TORCH:
                 and recon_tgt is not None
                 and recon_hat.shape[-1] == recon_tgt.shape[-1]
             ):
-                loss = loss + 0.1 * F.mse_loss(recon_hat, recon_tgt)
+                loss = loss + self.recon_w * F.mse_loss(recon_hat, recon_tgt)
             if vol_hat is not None and vol_tgt is not None:
-                loss = loss + 0.05 * F.mse_loss(vol_hat.reshape(-1), vol_tgt.reshape(-1))
+                loss = loss + self.vol_w * F.mse_loss(vol_hat.reshape(-1), vol_tgt.reshape(-1))
             return loss
 
 
@@ -695,7 +709,7 @@ if TORCH:
             self.softmax = nn.Softmax(dim=-1)
         def forward(self, x):
             weights = self.softmax(self.grn(x))
-            return (x * weights).sum(dim=-1, keepdim=True) * x, weights
+            return x * weights, weights
 
     class TFTScalper(nn.Module):
         """
@@ -703,21 +717,37 @@ if TORCH:
         Uses Variable Selection Networks to identify which features matter,
         LSTM for local sequential patterns, and Self-Attention for long-range.
         Pre-norm residual blocks (TM-012) for training stability.
+
+        A4 fix (2026-08-07): added a learnable positional embedding applied
+        after the LSTM. The LSTM is sequence-aware but the self-attention on
+        top is permutation-equivariant; without positions, attention cannot
+        distinguish timesteps. The original TFT paper uses relative position
+        encodings — we use a learnable absolute positional embedding, which
+        is the simplest equivalent that restores temporal ordering awareness
+        for the attention layer.
         """
         def __init__(self, input_size=64, hidden=128, heads=4,
                      lstm_layers=2, dropout=0.1, num_classes=1,
-                     use_gradient_checkpointing: bool = True):
+                     use_gradient_checkpointing: bool = True,
+                     max_seq_len: int = 240):
             super().__init__()
             self.num_classes = num_classes
             self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.vsn     = VariableSelectionNetwork(input_size, hidden, dropout)
             self.lstm    = nn.LSTM(input_size, hidden, lstm_layers,
                                    batch_first=True, dropout=dropout)
+            # A4: positional embedding for the post-LSTM self-attention block.
+            # max_seq_len=240 covers typical daily/hourly seq lengths; the
+            # forward gracefully slices or cycles if T differs.
+            self.pos_emb = nn.Embedding(max_seq_len, hidden)
+            nn.init.normal_(self.pos_emb.weight, std=0.02)
+            self.max_seq_len = int(max_seq_len)
             self.attn    = _FlashMHA(hidden, heads, dropout=dropout)
             self.norm1   = nn.LayerNorm(hidden)
             self.ffn     = nn.Sequential(nn.Linear(hidden,hidden*2),nn.GELU(),
                                          nn.Dropout(dropout),nn.Linear(hidden*2,hidden))
             self.norm2   = nn.LayerNorm(hidden)
+            self.norm_out= nn.LayerNorm(hidden)
             self.head    = nn.Linear(hidden, num_classes)
             _kaiming_init_module(self)
 
@@ -727,17 +757,32 @@ if TORCH:
         def _ffn_block(self, h):
             return h + self.ffn(self.norm2(h))
 
+        def _add_pos(self, lstm_out):
+            """Add positional embedding to (B, T, hidden) tensor.
+            Handles T == max_seq_len (exact), T < max_seq_len (forward slice),
+            and T > max_seq_len (cyclic reuse — fallback for longer inputs).
+            """
+            T = lstm_out.size(1)
+            if T <= self.max_seq_len:
+                pos = self.pos_emb.weight[:T]  # (T, hidden)
+            else:
+                idx = torch.arange(T, device=lstm_out.device) % self.max_seq_len
+                pos = self.pos_emb.weight[idx]
+            return lstm_out + pos.unsqueeze(0)
+
         def forward(self, x):
             # x: (B, T, F) — pre-norm: x + f(norm(x))
             x_sel, _ = self.vsn(x)
             lstm_out, _ = self.lstm(x_sel)
+            # A4: inject positional embedding before permutation-equivariant attention
+            lstm_out = self._add_pos(lstm_out)
             h = _maybe_checkpoint(
                 self._attn_block, lstm_out, enabled=self.use_gradient_checkpointing,
             )
             h = _maybe_checkpoint(
                 self._ffn_block, h, enabled=self.use_gradient_checkpointing,
             )
-            out = self.head(h[:, -1, :])
+            out = self.head(self.norm_out(h[:, -1, :]))
             if isinstance(self.head, nn.Identity):
                 return out
             return out.squeeze(-1) if self.num_classes == 1 else out
@@ -764,6 +809,9 @@ if TORCH:
                 d_model=d_model, nhead=nhead, dim_feedforward=dim_ff,
                 dropout=dropout, batch_first=True, norm_first=True)
             self.encoder  = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
+            self.norm_out = nn.LayerNorm(d_model * input_size)
+            # Separate norm for Identity head path (returns B, d_model)
+            self.norm_out_identity = nn.LayerNorm(d_model)
             self.head     = nn.Linear(d_model * input_size, num_classes)
             self.input_size = input_size
             _kaiming_init_module(self)
@@ -784,9 +832,9 @@ if TORCH:
             # When head is Identity (MultiTaskWrapper), mean-pool variates to
             # (B, d_model) instead of materializing (B, F*d_model).
             if isinstance(self.head, nn.Identity):
-                return out.mean(dim=1)
+                return self.norm_out_identity(out.mean(dim=1))  # normalize, matching all other archs
             out = out.reshape(B, -1)           # (B, F*d_model)
-            o = self.head(out)
+            o = self.head(self.norm_out(out))
             return o.squeeze(-1) if self.num_classes == 1 else o
     # ── 3. HAELT Hybrid (LSTM + Transformer in parallel) ──────────────────
 
@@ -796,6 +844,12 @@ if TORCH:
         LSTM branch captures local microstructure; Transformer captures
         long-range cross-asset correlations. Both run in parallel and are
         fused with a learned attention gate.
+
+        A4 fix (2026-08-07): the Transformer branch is permutation-equivariant
+        over time — without positional information it cannot distinguish
+        bar 0 from bar 59, undermining the "long-range cross-asset correlations"
+        docstring claim. We add a learnable ``nn.Embedding(seq_len, d_model)``
+        positional embedding injected after the input projection.
         """
         def __init__(self, input_size=64, seq_len=60, lstm_hidden=64,
                      d_model=64, nhead=4, n_layers=2, dropout=0.1, num_classes=1,
@@ -803,8 +857,16 @@ if TORCH:
             super().__init__()
             self.num_classes = num_classes
             self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
+            self.seq_len = int(seq_len)
             self.lstm = nn.LSTM(input_size, lstm_hidden, 2, batch_first=True, dropout=dropout)
             self.proj = nn.Linear(input_size, d_model)
+            # A4: learnable positional embedding for the Transformer branch.
+            # The LSTM is sequence-aware and does not need positions; the
+            # attention is permutation-equivariant and DOES.
+            self.pos_emb = nn.Embedding(self.seq_len, d_model)
+            # Init positional embedding with small values so the model starts
+            # near identity (no position signal) and learns to use it.
+            nn.init.normal_(self.pos_emb.weight, std=0.02)
             enc = nn.TransformerEncoderLayer(d_model, nhead, d_model*4,
                                               dropout=dropout, batch_first=True, norm_first=True)
             self.trf  = nn.TransformerEncoder(enc, n_layers, enable_nested_tensor=False)
@@ -812,6 +874,7 @@ if TORCH:
             self.attn_pool_trf = nn.Linear(d_model, 1)
             fused = lstm_hidden + d_model
             self.gate = nn.Sequential(nn.Linear(fused, fused), nn.Sigmoid())
+            self.norm_out = nn.LayerNorm(fused)
             self.head = nn.Sequential(nn.Linear(fused,64),nn.GELU(),
                                        nn.Dropout(dropout),nn.Linear(64, num_classes))
             self._init_weights()
@@ -824,17 +887,36 @@ if TORCH:
             # Preserves signal magnitude for high-impact news events while bounding values
             x = torch.nan_to_num(x.float(), nan=0.0, posinf=0.0, neginf=0.0)
             x = torch.where(x.abs() > 10.0, 10.0 * torch.tanh(x / 10.0), x)
+            # LSTM branch (sequence-aware — no position needed)
             lout, _ = self.lstm(x)
             attn_w_l = torch.softmax(self.attn_pool_lstm(lout), dim=1)
             lf = (lout * attn_w_l).sum(dim=1)
+            # Transformer branch with A4 positional encoding
+            h = self.proj(x)
+            # Inject positional embedding: shape (T, d_model) broadcast over (B, T, d_model)
+            T = h.size(1)
+            if T == self.seq_len:
+                pos = self.pos_emb.weight  # (seq_len, d_model)
+                h = h + pos.unsqueeze(0)
+            elif T <= self.seq_len:
+                # Forward slicing if input is shorter than the training seq_len
+                pos = self.pos_emb.weight[:T]
+                h = h + pos.unsqueeze(0)
+            else:
+                # Longer input than training seq_len — pad by reusing positions cyclically.
+                # This is a fallback; the canonical use-case has T == seq_len at training time.
+                idx = torch.arange(T, device=h.device) % self.seq_len
+                pos = self.pos_emb.weight[idx]  # (T, d_model)
+                h = h + pos.unsqueeze(0)
             tout = _maybe_checkpoint(
-                self.trf, self.proj(x), enabled=self.use_gradient_checkpointing,
+                self.trf, h, enabled=self.use_gradient_checkpointing,
             )
             attn_w_t = torch.softmax(self.attn_pool_trf(tout), dim=1)
             tf = (tout * attn_w_t).sum(dim=1)
             c  = torch.cat([lf, tf], dim=-1)
             c  = torch.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
-            o = self.head(c * self.gate(c))
+            g  = self.gate(c)
+            o = self.head(self.norm_out(c + g * c))   # residual through gate (TM-016)
             if isinstance(self.head, nn.Identity):
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o
@@ -843,27 +925,30 @@ if TORCH:
 
     class MambaBlock(nn.Module):
         """
-        Simplified Mamba block (State Space Model).
-        Full Mamba (Gu & Dao 2023) uses selective state spaces for O(L) scaling.
-        This implementation captures the SSM spirit using 1D conv + gating,
-        providing transformer-level accuracy at ~2ms latency (GRU-class speed).
+        Causal conv + SiLU + softplus-dt gated residual (Mamba-*inspired*).
+
+        This is **not** a selective SSM (no discretized A/B/C state, no scan).
+        ``dt_proj`` only scales the conv features. Prefer this for speed; do not
+        expect strict load of older checkpoints that had ``A_log``/``d_state``.
+        Architecture tag: ``mamba_gated_v2`` (see ``MambaScalper.arch_tag``).
         """
-        def __init__(self, d_model=128, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        def __init__(self, d_model=128, d_conv=4, expand=2, dropout=0.1):
             super().__init__()
             d_inner = d_model * expand
             self.in_proj  = nn.Linear(d_model, d_inner * 2, bias=False)
+            # A8/A9 fix (2026-08-07): use asymmetric LEFT-ONLY padding so the
+            # 1D conv is genuinely causal. The previous symmetric
+            # `padding=d_conv-1` + `[:, :, :T]` truncation leaked `d_conv-1`
+            # future bars into every output position (clearest in MambaScalper).
+            # Note: Conv1d only accepts symmetric padding; we manually pad in forward()
             self.conv1d   = nn.Conv1d(d_inner, d_inner, d_conv,
-                                       padding=d_conv-1, groups=d_inner, bias=True)
+                                       padding=0, groups=d_inner, bias=True)
+            self.conv1d_pad = d_conv - 1
             self.act      = nn.SiLU()
             self.out_proj = nn.Linear(d_inner, d_model, bias=False)
             self.norm     = nn.LayerNorm(d_model)
             self.drop     = nn.Dropout(dropout)
-            # SSM parameters
-            self.A_log    = nn.Parameter(torch.randn(d_inner, d_state))
-            self.D        = nn.Parameter(torch.ones(d_inner))
             self.dt_proj  = nn.Linear(d_inner, d_inner, bias=True)
-            self.B        = nn.Linear(d_inner, d_state, bias=False)
-            self.C        = nn.Linear(d_inner, d_state, bias=False)
 
         def forward(self, x):
             # x: (B, T, d_model) — pre-norm residual (TM-012)
@@ -872,10 +957,15 @@ if TORCH:
             x_n   = self.norm(x)
             xz    = self.in_proj(x_n)         # (B, T, d_inner*2)
             x2, z = xz.chunk(2, dim=-1)       # each (B, T, d_inner)
-            # 1D conv along time (causal)
-            x2c   = self.conv1d(x2.permute(0,2,1))[:, :, :T].permute(0,2,1)
+            # 1D conv along time (causal — asymmetric LEFT pad, no future leakage)
+            # A8/A9 fix: manually pad left with zeros, then conv with padding=0
+            # This avoids the 2-tuple padding issue in Conv1d
+            x2_perm = x2.permute(0,2,1).contiguous()  # (B, d_inner, T)
+            x2_pad = F.pad(x2_perm, (self.conv1d_pad, 0))  # (B, d_inner, T + pad)
+            x2c = self.conv1d(x2_pad)  # (B, d_inner, T)
+            x2c = x2c.permute(0,2,1).contiguous()
             x2c   = self.act(x2c)
-            # Simplified SSM (linear recurrence approximation); softplus dt (TM-009)
+            # Softplus-dt feature gate (not an SSM recurrence)
             y     = x2c * F.softplus(self.dt_proj(x2c))
             y     = y * torch.sigmoid(z)      # gating
             out   = self.out_proj(y)
@@ -884,16 +974,20 @@ if TORCH:
     class MambaScalper(nn.Module):
         """
         Stack of MambaBlocks for low-latency HFT inference.
-        Handles extremely long sequences of tick data better than Transformers
-        (O(L) vs O(L²) complexity) while maintaining high accuracy.
+        Handles long sequences with O(L) cost vs transformer O(L²).
+        Not a true Mamba SSM — see MambaBlock docstring.
         """
-        def __init__(self, input_size=64, d_model=128, d_state=16,
-                     d_conv=4, expand=2, num_layers=4, dropout=0.1, num_classes=1):
+        arch_tag = "mamba_gated_v2"
+
+        def __init__(self, input_size=64, d_model=128, d_conv=4,
+                     expand=2, num_layers=4, dropout=0.1, num_classes=1,
+                     use_gradient_checkpointing: bool = True):
             super().__init__()
             self.num_classes = num_classes
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.embed = nn.Linear(input_size, d_model)
             self.layers = nn.ModuleList([
-                MambaBlock(d_model, d_state, d_conv, expand, dropout)
+                MambaBlock(d_model, d_conv, expand, dropout)
                 for _ in range(num_layers)
             ])
             self.norm = nn.LayerNorm(d_model)
@@ -902,7 +996,8 @@ if TORCH:
 
         def forward(self, x):
             h = self.embed(x)
-            for layer in self.layers: h = layer(h)
+            for layer in self.layers:
+                h = _maybe_checkpoint(layer, h, enabled=self.use_gradient_checkpointing)
             o = self.head(self.norm(h[:, -1, :]))
             if isinstance(self.head, nn.Identity):
                 return o
@@ -926,12 +1021,19 @@ if TORCH:
             self.n_nodes  = n_nodes
             self.num_classes = num_classes
             self.node_embed = nn.Linear(node_features, hidden)
-            self.adj_logits = nn.Parameter(torch.zeros(n_nodes, n_nodes))
+            # Input-dependent adjacency: edge weights are a function of node
+            # features so the graph structure can adapt across market regimes.
+            self.adj_net = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.Tanh(),
+                nn.Linear(hidden, n_nodes),
+            )
             self.attn_layers = nn.ModuleList([
                 _FlashMHA(hidden, heads, dropout=dropout)
                 for _ in range(num_layers)
             ])
             self.norms = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(num_layers)])
+            self.norm_out = nn.LayerNorm(hidden * n_nodes)
             self.head  = nn.Linear(hidden * n_nodes, num_classes)
             self.drop  = nn.Dropout(dropout)
             _kaiming_init_module(self)
@@ -939,17 +1041,24 @@ if TORCH:
         def forward(self, x, adj=None):
             """
             x  : (B, n_nodes, node_features) — one feature vector per node per bar
-            adj: ignored (kept for API compatibility); edge weights are learned via adj_logits.
-            Pre-norm message passing (TM-012).
+            adj: optional precomputed (B, n_nodes, n_nodes) edge weights. When None,
+                 adjacency is computed from node embeddings via attention (adapts
+                 across regimes). Pre-norm message passing (TM-012).
             """
             h = self.node_embed(x)          # (B, N, hidden)
-            A = torch.sigmoid(self.adj_logits).unsqueeze(0).expand(h.shape[0], -1, -1)
+            if adj is not None:
+                A = adj
+            else:
+                # Attention-style dot-product adjacency: A_ij = softmax_j(q_i·k_j)
+                q = self.adj_net(h)         # (B, N, N)
+                k = self.adj_net(h)
+                A = torch.softmax(torch.bmm(q, k.transpose(1, 2)) / (self.n_nodes ** 0.5), dim=-1)
             for attn, norm in zip(self.attn_layers, self.norms):
                 h_n = norm(h)
                 h_mix = torch.einsum("bnm,bmh->bnh", A, h_n)
                 out = attn(h_mix)
                 h = h + self.drop(out)
-            o = self.head(h.reshape(h.shape[0], -1))
+            o = self.head(self.norm_out(h.reshape(h.shape[0], -1)))
             # MultiTaskWrapper sets head to Identity to expose (B, D). Never squeeze in that
             # case: num_classes==1 + squeeze(-1) would turn (B, 1) into (B,) and breaks BYOL.
             if isinstance(self.head, nn.Identity):
@@ -968,6 +1077,7 @@ if TORCH:
             self.n_nodes = n_nodes
             self.chunk = chunk
             self.proj = nn.Linear(input_size, n_nodes * chunk)
+            self.temporal_attn = nn.Linear(input_size, 1)
             self.gnn = GNNCrossAsset(
                 node_features=chunk, hidden=hidden, num_layers=num_layers,
                 heads=nhead, n_nodes=n_nodes, dropout=dropout, num_classes=num_classes,
@@ -984,10 +1094,11 @@ if TORCH:
             else:
                 super().__setattr__(name, value)
 
-        def forward(self, x):
-            z = x.mean(dim=1)
+        def forward(self, x, adj=None):
+            attn_w = torch.softmax(self.temporal_attn(x), dim=1)
+            z = (x * attn_w).sum(dim=1)
             h = self.proj(z).view(-1, self.n_nodes, self.chunk)
-            return self.gnn(h)
+            return self.gnn(h, adj=adj)
 
     # ── 6. EXPERT Encoder ─────────────────────────────────────────────────
 
@@ -995,9 +1106,15 @@ if TORCH:
         """1D conv feedforward — captures local temporal patterns better than MLP."""
         def __init__(self, d_model, d_ff, kernel=3, dropout=0.1):
             super().__init__()
-            pad = kernel // 2
-            self.conv1 = nn.Conv1d(d_model, d_ff,   kernel, padding=pad)
-            self.conv2 = nn.Conv1d(d_ff,    d_model, kernel, padding=pad)
+            # A8/A9 fix (2026-08-07): asymmetric LEFT-ONLY padding so both
+            # conv1 and conv2 are genuinely causal. The previous symmetric
+            # `padding=kernel-1` + `h[:, :, :T]` truncation leaked up to
+            # `2*(kernel-1)` future bars (since two stacked convs compound).
+            # Note: Conv1d only accepts symmetric padding; we manually pad in forward()
+            self.conv1 = nn.Conv1d(d_model, d_ff, kernel, padding=0)
+            self.conv2 = nn.Conv1d(d_ff, d_model, kernel, padding=0)
+            self.conv1_pad = kernel - 1
+            self.conv2_pad = kernel - 1
             self.norm  = nn.LayerNorm(d_model)
             self.drop  = nn.Dropout(dropout)
             self.act   = nn.GELU()
@@ -1005,28 +1122,44 @@ if TORCH:
         def forward(self, x):
             # x: (B, T, D) — pre-norm residual (TM-012)
             x_n = self.norm(x)
-            h = x_n.permute(0,2,1)
-            h = self.act(self.conv1(h))
-            h = self.drop(self.conv2(h))
-            return x + h.permute(0,2,1)
+            h = x_n.permute(0,2,1).contiguous()  # (B, D, T)
+            # Manual causal padding for conv1
+            h = F.pad(h, (self.conv1_pad, 0))
+            h = self.act(self.conv1(h))  # (B, d_ff, T)
+            # Manual causal padding for conv2
+            h = F.pad(h, (self.conv2_pad, 0))
+            h = self.drop(self.conv2(h))  # (B, d_model, T)
+            # A8/A9 fix: with manual asymmetric left padding + padding=0, output length
+            # equals input length T exactly; no post-hoc slice needed.
+            return x + h.permute(0,2,1).contiguous()
 
     class EXPERTEncoder(nn.Module):
         """
         EXPERT: EXchange-Rate Prediction using Encoder Representation from Transformers.
         Key differences from standard Transformer:
-          - NO positional encoding (order is inherent in time series)
+          - A4 fix (2026-08-07): positional encoding via learnable
+            ``nn.Embedding(max_seq_len, d_model)``. The previous "order is
+            inherent in time series" docstring was wrong — attention is
+            permutation-equivariant and cannot tell bar 0 from bar 79 without
+            position info. Especially with ConvFFN (causal-only) providing
+            local temporal structure, the attention layer still needs absolute
+            position info to distinguish distant timesteps.
           - 1D convolutional feedforward layers (local temporal patterns)
           - Encoder-only (no decoder needed for regression)
         Focused architecture makes it more data-efficient than general Transformers.
         """
         def __init__(self, input_size=64, d_model=128, nhead=8,
                      num_layers=4, dropout=0.1, num_classes=1,
-                     use_gradient_checkpointing: bool = True):
+                     use_gradient_checkpointing: bool = True,
+                     max_seq_len: int = 240):
             super().__init__()
             self.num_classes = num_classes
             self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
             self.proj   = nn.Linear(input_size, d_model)
-            # No positional encoding by design
+            # A4: learnable positional embedding (replaces old "no positional encoding")
+            self.pos_emb = nn.Embedding(max_seq_len, d_model)
+            nn.init.normal_(self.pos_emb.weight, std=0.02)
+            self.max_seq_len = int(max_seq_len)
             self.layers = nn.ModuleList([
                 nn.ModuleDict({
                     "attn": _FlashMHA(d_model, nhead, dropout=dropout),
@@ -1035,7 +1168,8 @@ if TORCH:
                 })
                 for _ in range(num_layers)
             ])
-            self.pool = nn.AdaptiveAvgPool1d(1)
+            self.pool = None  # replaced by last-timestep pooling for streaming
+            self.norm_out = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, num_classes)
             _kaiming_init_module(self)
 
@@ -1044,8 +1178,19 @@ if TORCH:
             h = h + layer["attn"](layer["norm1"](h))
             return layer["ffn"](h)
 
+        def _add_pos(self, h):
+            """Add positional embedding to (B, T, d_model)."""
+            T = h.size(1)
+            if T <= self.max_seq_len:
+                pos = self.pos_emb.weight[:T]
+            else:
+                idx = torch.arange(T, device=h.device) % self.max_seq_len
+                pos = self.pos_emb.weight[idx]
+            return h + pos.unsqueeze(0)
+
         def forward(self, x):
             h = self.proj(x)
+            h = self._add_pos(h)   # A4: inject positional information
             for layer in self.layers:
                 # Capture layer in default-arg closure for checkpoint safety.
                 def _run(t, _layer=layer):
@@ -1053,8 +1198,8 @@ if TORCH:
                 h = _maybe_checkpoint(
                     _run, h, enabled=self.use_gradient_checkpointing,
                 )
-            h = self.pool(h.permute(0,2,1)).squeeze(-1)
-            o = self.head(h)
+            h = h[:, -1, :]   # last-timestep for streaming/online inference
+            o = self.head(self.norm_out(h))
             if isinstance(self.head, nn.Identity):
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o

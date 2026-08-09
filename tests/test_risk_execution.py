@@ -44,10 +44,15 @@ class TestSessionLimitsEnforcer:
             assert result["session"] == "asia", f"Hour {hour} should be asia"
 
     def test_london_session_classification(self, enforcer):
-        # London: 7-11 (12-15 is overlap)
-        for hour in (7, 10, 11):
+        # Pure London after Asia close (09 UTC JST end) and before NY open
+        for hour in (10, 11):
             result = enforcer.check(hour, 0.0, 0)
             assert result["session"] == "london", f"Hour {hour} should be london"
+
+    def test_asia_london_overlap(self, enforcer):
+        # Summer: Asia still open + London BST open around 07–09 UTC
+        result = enforcer.check(7, 0.0, 0)
+        assert result["session"] == "asia_london"
 
     def test_ny_session_classification(self, enforcer):
         # NY: 12-20, but london is checked first so 12-15 are london
@@ -62,8 +67,35 @@ class TestSessionLimitsEnforcer:
             assert result["session"] == "off", f"Hour {hour} should be off"
 
     def test_london_ny_overlap(self, enforcer):
-        result = enforcer.check(13, 0.0, 0)
-        assert result["session"] == "overlap"
+        # Mid-summer DST: London/NY overlap ~13:30–15:30 UTC → policy key london_ny
+        result = enforcer.check(14, 0.0, 0)
+        assert result["session"] == "london_ny"
+
+    def test_overlap_alias_maps_to_london_ny(self, enforcer):
+        result = enforcer.check(14, 0.0, 0, session="overlap")
+        assert result["session"] == "london_ny"
+        assert result["max_lots"] == 3.0  # falls back to london limits in fixture
+
+    def test_london_ny_limits_when_configured(self):
+        limits = {
+            "asia": {"max_lots": 1.0, "max_open_trades": 3},
+            "london": {"max_lots": 3.0, "max_open_trades": 5},
+            "ny": {"max_lots": 3.0, "max_open_trades": 5},
+            "london_ny": {"max_lots": 2.5, "max_open_trades": 4},
+            "off": {"max_lots": 0.5, "max_open_trades": 1},
+        }
+        enf = SessionLimitsEnforcer(session_limits=limits)
+        result = enf.check(14, 0.0, 0)
+        assert result["session"] == "london_ny"
+        assert result["max_lots"] == 2.5
+        assert result["max_trades"] == 4
+
+    def test_off_session_no_999_bypass(self):
+        """Missing keys must not silently allow 999-lot trading."""
+        enf = SessionLimitsEnforcer(session_limits={"off": {"max_lots": 0.0, "max_open_trades": 0}})
+        result = enf.check(22, 0.0, 0)
+        assert result["allowed"] is False
+        assert result["max_lots"] == 0.0
 
     def test_allows_when_under_limits(self, enforcer):
         result = enforcer.check(10, 1.0, 2)

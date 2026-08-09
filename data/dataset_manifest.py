@@ -62,6 +62,7 @@ class DatasetManifest:
         purge_bars: int | None = None,
         lockbox_start: str | None = None,
         lockbox_end: str | None = None,
+        content_hash: str | None = None,
     ) -> dict:
         """Writes a strict manifest file next to the processed cache."""
         manifest = {
@@ -76,6 +77,7 @@ class DatasetManifest:
             "label_method": label_method,
             "sequence_length": seq_len,
             "schema_hash": schema_hash,
+            "content_hash": content_hash,
             "cache_creation_time": datetime.now(UTC).isoformat(),
             "git_commit": _git_commit(),
             "n_rows_per_pair": n_rows_per_pair or {},

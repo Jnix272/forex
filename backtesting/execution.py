@@ -19,8 +19,32 @@ from enum import IntEnum
 import numpy as np
 import pandas as pd
 
-from backtesting.backtest import Trade
 from backtesting.improvements import SlippageCalibrator
+
+try:
+    from backtesting.backtest import Trade
+except ImportError:  # e.g. Numba/NumPy mismatch — keep execution usable
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class Trade:
+        trade_id: int
+        entry_time: object
+        entry_price: float
+        entry_lots: float
+        direction: int
+        stop_loss: float
+        take_profit: float
+        exit_time: object | None = None
+        exit_price: float | None = None
+        exit_lots: float | None = None
+        pnl_pips: float = 0.0
+        gross_pnl_usd: float = 0.0
+        pnl_usd: float = 0.0
+        commission: float = 0.0
+        slippage_pips: float = 0.0
+        exit_reason: str = ""
+        scale_additions: list = field(default_factory=list)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Queue Position & Order Book Models
@@ -638,7 +662,6 @@ class SlippageDecomposition:
     implementation_shortfall: float = 0.0  # total cost vs arrival mid
 
     # Metadata
-    arrival_mid: float = 0.0
     decision_price: float = 0.0
     arrival_mid: float = 0.0
     execution_price: float = 0.0
@@ -662,6 +685,7 @@ class SlippageDecomposition:
 
     @classmethod
     def from_execution(cls,
+                       direction: float,
                        decision_price: float,
                        arrival_mid: float,
                        execution_price: float,
@@ -672,39 +696,50 @@ class SlippageDecomposition:
                        adverse_selection_model: AdverseSelectionModel | None = None,
                        queue_position: int = 0,
                        max_queue: int = 1) -> SlippageDecomposition:
-        """Compute full slippage decomposition."""
-
+        """Compute full slippage decomposition (Almgren-Chriss style)."""
         d = cls()
-        d.decision_price = decision_price
-        d.arrival_mid = arrival_mid
-        d.execution_price = execution_price
-        d.fill_rate = fill_rate
+        d.decision_price = float(decision_price)
+        d.arrival_mid = float(arrival_mid) if arrival_mid else float(decision_price)
+        d.execution_price = float(execution_price)
+        d.fill_rate = float(np.clip(fill_rate, 0.0, 1.0))
+        direction = float(np.sign(direction)) if direction != 0 else 1.0
 
-        # 1. Delay cost: decision -> arrival mid
-        d.delay_cost = (arrival_mid - decision_price) / arrival_mid
+        mid = d.arrival_mid if abs(d.arrival_mid) > 1e-12 else 1.0
 
-        # 2. Spread cost: half spread crossed
-        # (approximated as half spread for market orders)
-        d.spread_cost = 0.5  # normalized, would use actual spread
+        # 1. Delay cost: decision → arrival mid (signed relative)
+        d.delay_cost = direction * (d.arrival_mid - d.decision_price) / mid
 
-        # 3. Market impact (Almgren-Chriss square-root model)
-        # impact = sigma * sqrt(Q/V) * (a + b * participation)
-        # Simplified:
-        d.market_impact = 0.0  # would compute from participation rate
+        # 2. Spread cost: half-spread / mid (market order crosses spread)
+        half_spread = max(0.0, float(spread)) * 0.5
+        d.spread_cost = half_spread / mid
 
-        # 4. Timing cost: price movement during execution
-        d.timing_cost = 0.0  # would use arrival to execution price movement
+        # 3. Temporary market impact ~ σ √(participation)
+        part = max(0.0, float(participation_rate))
+        vol = max(0.0, float(volatility))
+        d.market_impact = vol * float(np.sqrt(part)) if part > 0 else 0.0
 
-        # 5. Adverse selection (from queue position, VPIN, etc.)
-        d.adverse_selection = 0.0  # would use AdverseSelectionModel
+        # 4. Timing cost: arrival → execution move
+        d.timing_cost = direction * (d.execution_price - d.arrival_mid) / mid
 
-        # 6. Opportunity cost: unfilled portion
-        d.opportunity_cost = 0.0 if fill_rate >= 1.0 else (1 - fill_rate) * 0.1
+        # 5. Adverse selection from queue / toxicity model
+        if adverse_selection_model is not None:
+            try:
+                d.adverse_selection = float(
+                    adverse_selection_model.compute_queue_risk(queue_position, max_queue)
+                )
+            except Exception:
+                d.adverse_selection = float(queue_position) / max(1, max_queue) * 0.01
+        else:
+            d.adverse_selection = float(queue_position) / max(1, max_queue) * 0.01
 
-        d.total_slippage = (d.delay_cost + d.spread_cost + d.market_impact +
-                           d.timing_cost + d.adverse_selection + d.opportunity_cost)
-        d.implementation_shortfall = d.total_slippage
+        # 6. Opportunity cost on unfilled remainder
+        d.opportunity_cost = 0.0 if d.fill_rate >= 1.0 - 1e-9 else (1.0 - d.fill_rate) * d.spread_cost
 
+        d.total_slippage = (
+            abs(d.delay_cost) + d.spread_cost + d.market_impact
+            + abs(d.timing_cost) + d.adverse_selection + d.opportunity_cost
+        )
+        d.implementation_shortfall = direction * (d.execution_price - d.decision_price) / mid
         return d
 
 
@@ -749,11 +784,6 @@ class AdvancedExecutionEngine:
         self.tick_size = tick_size
         self.lot_size = lot_size
         self.max_queue_depth = max_queue_depth
-
-        # Internal state
-        self.lob = LimitOrderBook(symbol="SYM", tick_size=tick_size, lot_size=lot_size)
-        self.adverse_selection = AdverseSelectionModel()
-        self.latency_model = LatencyModel()
 
         # Execution state
         self._order_id_counter = 0
@@ -842,13 +872,47 @@ class AdvancedExecutionEngine:
         return [f for f in self.fills if f.order_id == order_id]
 
     def compute_slippage(self, order: Order) -> SlippageDecomposition:
-        """Compute full slippage decomposition for completed order."""
+        """Compute full slippage decomposition for a completed order."""
         if order.status != OrderStatus.FILLED:
             raise ValueError("Order not fully filled")
 
-        # Would use arrival mid, decision price, etc.
-        # Simplified for now
-        return SlippageDecomposition()
+        mid = None
+        if self.lob.best_bid is not None and self.lob.best_ask is not None:
+            mid = 0.5 * (float(self.lob.best_bid) + float(self.lob.best_ask))
+        exec_px = float(order.avg_fill_price or 0.0)
+        if mid is None or mid <= 0:
+            mid = exec_px if exec_px > 0 else 1.0
+        spread = 0.0
+        if self.lob.best_bid is not None and self.lob.best_ask is not None:
+            spread = float(self.lob.best_ask) - float(self.lob.best_bid)
+        decision = float(order.price) if order.price else mid
+        fill_rate = float(order.fill_ratio()) if hasattr(order, "fill_ratio") else (
+            float(order.filled_qty) / float(order.quantity) if order.quantity else 1.0
+        )
+        # Participation proxy: order size vs book depth capacity
+        depth = max(1.0, float(self.max_queue_depth))
+        participation = min(1.0, float(order.quantity or 0.0) / depth)
+        # Vol proxy from adverse-selection rolling state if available
+        vol = 0.0
+        try:
+            vol = float(getattr(self.adverse_selection, "last_volatility", 0.0) or 0.0)
+        except Exception:
+            vol = 0.0
+        if vol <= 0:
+            vol = max(spread / mid, 1e-6)
+
+        return SlippageDecomposition.from_execution(
+            decision_price=decision,
+            arrival_mid=mid,
+            execution_price=exec_px if exec_px > 0 else mid,
+            fill_rate=fill_rate,
+            spread=spread,
+            volatility=vol,
+            participation_rate=participation,
+            adverse_selection_model=self.adverse_selection,
+            queue_position=int(order.queue_position or 0),
+            max_queue=int(self.max_queue_depth),
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -862,28 +926,215 @@ class AdvancedBacktestEngine:
 
     def __init__(
         self,
-        bars: pd.DataFrame,
-        signals: pd.DataFrame,
+        bars: pd.DataFrame | None = None,
+        signals: pd.DataFrame | None = None,
         config: dict | None = None,
     ):
         self.bars = bars
         self.signals = signals
         self.config = config or {}
 
+        symbol = str(self.config.get("symbol", "SYM"))
         # Execution engine
-        self.execution_engine = AdvancedExecutionEngine("SYM")
+        self.execution_engine = AdvancedExecutionEngine(symbol)
 
         # State
         self.position = 0.0
-        self.equity = 10000.0
+        self.avg_entry = 0.0
+        self.equity = float(self.config.get("initial_equity", 10_000.0))
         self.trades: list[Trade] = []
         self.orders: dict[int, Order] = {}
+        self._trade_id = 0
+        self._pip_size = float(self.config.get("pip_size", 0.0001))
+        self._lot_size = float(self.config.get("lot_size", 0.1))
+        self._spread_pips = float(self.config.get("spread_pips", 0.8))
 
-    def run(self, bars: pd.DataFrame, signals: pd.DataFrame) -> pd.DataFrame:
-        """Run backtest with advanced execution."""
-        # Implementation would integrate with existing backtest.py
-        pass
+    def _seed_book(self, mid: float, ts: datetime) -> None:
+        """Place synthetic resting liquidity around mid so market orders can fill."""
+        lob = self.execution_engine.lob
+        lob.bids.clear()
+        lob.asks.clear()
+        lob.active_orders.clear()
+        lob.order_to_level.clear()
+        half = self._spread_pips * self._pip_size * 0.5
+        depth = float(self.config.get("book_depth_lots", 5.0))
+        for i in range(1, int(self.config.get("book_levels", 3)) + 1):
+            bid_px = lob._tick_round(mid - half - (i - 1) * self._pip_size)
+            ask_px = lob._tick_round(mid + half + (i - 1) * self._pip_size)
+            bid = Order(
+                order_id=0, symbol=lob.symbol, side=OrderSide.BUY,
+                order_type=OrderType.LIMIT, quantity=depth, price=bid_px,
+            )
+            ask = Order(
+                order_id=0, symbol=lob.symbol, side=OrderSide.SELL,
+                order_type=OrderType.LIMIT, quantity=depth, price=ask_px,
+            )
+            lob.submit_order(bid, ts)
+            lob.submit_order(ask, ts)
 
+    def _signal_side(self, row: pd.Series) -> int:
+        """Return +1 buy, -1 sell, 0 flat from a signal row."""
+        for col in ("signal", "action", "side", "direction"):
+            if col in row.index and pd.notna(row[col]):
+                v = float(row[col])
+                if v > 0:
+                    return 1
+                if v < 0:
+                    return -1
+                return 0
+        return 0
+
+    def _close_position(self, ts: datetime, fill_price: float, reason: str) -> None:
+        if abs(self.position) < 1e-12:
+            return
+        direction = 1 if self.position > 0 else -1
+        lots = abs(self.position)
+        pnl_price = (fill_price - self.avg_entry) * direction
+        pnl_pips = pnl_price / self._pip_size
+        # ~$10 per pip per standard lot scaled by lot size
+        pnl_usd = pnl_pips * 10.0 * lots
+        self.equity += pnl_usd
+        self._trade_id += 1
+        self.trades.append(Trade(
+            trade_id=self._trade_id,
+            entry_time=pd.Timestamp(ts),
+            entry_price=self.avg_entry,
+            entry_lots=lots,
+            direction=direction,
+            stop_loss=0.0,
+            take_profit=0.0,
+            exit_time=pd.Timestamp(ts),
+            exit_price=fill_price,
+            exit_lots=lots,
+            pnl_pips=float(pnl_pips),
+            gross_pnl_usd=float(pnl_usd),
+            pnl_usd=float(pnl_usd),
+            exit_reason=reason,
+        ))
+        self.position = 0.0
+        self.avg_entry = 0.0
+
+    def run(
+        self,
+        bars: pd.DataFrame | None = None,
+        signals: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        """Run backtest with advanced execution against bar + signal frames."""
+        bars = bars if bars is not None else self.bars
+        signals = signals if signals is not None else self.signals
+        if bars is None or signals is None:
+            raise ValueError("AdvancedBacktestEngine.run requires bars and signals")
+
+        bars = bars.copy()
+        signals = signals.copy()
+        if "timestamp_utc" in bars.columns:
+            bars = bars.set_index("timestamp_utc")
+        if "timestamp_utc" in signals.columns:
+            signals = signals.set_index("timestamp_utc")
+        # Align on intersection of indices
+        idx = bars.index.intersection(signals.index)
+        if len(idx) == 0:
+            # Positional fallback when indices don't align
+            n = min(len(bars), len(signals))
+            bars = bars.iloc[:n].reset_index(drop=True)
+            signals = signals.iloc[:n].reset_index(drop=True)
+            iterator = range(n)
+            get_bar = lambda i: bars.iloc[i]
+            get_sig = lambda i: signals.iloc[i]
+            get_ts = lambda i: (
+                pd.Timestamp(bars.iloc[i]["timestamp_utc"])
+                if "timestamp_utc" in bars.columns
+                else pd.Timestamp(i, unit="m", tz="UTC")
+            )
+        else:
+            bars = bars.loc[idx]
+            signals = signals.loc[idx]
+            iterator = range(len(idx))
+            get_bar = lambda i: bars.iloc[i]
+            get_sig = lambda i: signals.iloc[i]
+            get_ts = lambda i: pd.Timestamp(idx[i])
+
+        equity_curve = []
+        for i in iterator:
+            bar = get_bar(i)
+            sig = get_sig(i)
+            ts = get_ts(i)
+            if isinstance(ts, pd.Timestamp):
+                ts_dt = ts.to_pydatetime()
+            else:
+                ts_dt = datetime.utcnow()
+            mid = float(bar.get("close", bar.get("mid_close", np.nan)))
+            if not np.isfinite(mid):
+                equity_curve.append({"timestamp": ts, "equity": self.equity, "position": self.position})
+                continue
+
+            self._seed_book(mid, ts_dt)
+            side = self._signal_side(sig)
+            desired = float(side) * self._lot_size
+
+            # Flatten or reverse when signal flips / goes flat
+            if abs(desired) < 1e-12 and abs(self.position) > 1e-12:
+                close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
+                order = Order(
+                    order_id=0, symbol=self.execution_engine.symbol,
+                    side=close_side, order_type=OrderType.MARKET,
+                    quantity=abs(self.position),
+                )
+                self.execution_engine.submit_order(order, ts_dt)
+                fill_px = order.avg_fill_price if order.filled_qty > 0 else mid
+                self._close_position(ts_dt, fill_px, "signal")
+            elif desired * self.position < 0:
+                # Reverse
+                close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
+                order = Order(
+                    order_id=0, symbol=self.execution_engine.symbol,
+                    side=close_side, order_type=OrderType.MARKET,
+                    quantity=abs(self.position),
+                )
+                self.execution_engine.submit_order(order, ts_dt)
+                fill_px = order.avg_fill_price if order.filled_qty > 0 else mid
+                self._close_position(ts_dt, fill_px, "reverse")
+                self._seed_book(mid, ts_dt)
+
+            if abs(desired) > 1e-12 and abs(self.position) < 1e-12:
+                open_side = OrderSide.BUY if desired > 0 else OrderSide.SELL
+                order = Order(
+                    order_id=0, symbol=self.execution_engine.symbol,
+                    side=open_side, order_type=OrderType.MARKET,
+                    quantity=abs(desired),
+                )
+                self.execution_engine.submit_order(order, ts_dt)
+                if order.filled_qty > 0:
+                    self.position = desired
+                    self.avg_entry = float(order.avg_fill_price)
+                    self.orders[order.order_id] = order
+
+            equity_curve.append({
+                "timestamp": ts,
+                "equity": self.equity,
+                "position": self.position,
+                "mid": mid,
+            })
+
+        # Force flat at end
+        if abs(self.position) > 1e-12 and equity_curve:
+            last_mid = float(equity_curve[-1].get("mid", self.avg_entry))
+            last_ts = equity_curve[-1]["timestamp"]
+            ts_dt = last_ts.to_pydatetime() if isinstance(last_ts, pd.Timestamp) else datetime.utcnow()
+            self._seed_book(last_mid, ts_dt)
+            close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
+            order = Order(
+                order_id=0, symbol=self.execution_engine.symbol,
+                side=close_side, order_type=OrderType.MARKET,
+                quantity=abs(self.position),
+            )
+            self.execution_engine.submit_order(order, ts_dt)
+            fill_px = order.avg_fill_price if order.filled_qty > 0 else last_mid
+            self._close_position(ts_dt, fill_px, "eod")
+            equity_curve[-1]["equity"] = self.equity
+            equity_curve[-1]["position"] = 0.0
+
+        return pd.DataFrame(equity_curve)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. Export

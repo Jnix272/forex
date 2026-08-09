@@ -10,6 +10,7 @@ def test_train_gpu_synthetic_smoke(tmp_path):
       - Checkpoint directory is created.
       - Manifest, train_summary, and deployment files are written.
     """
+    import os
     import sys
     checkpoint_dir = tmp_path / "checkpoints"
 
@@ -22,12 +23,18 @@ def test_train_gpu_synthetic_smoke(tmp_path):
         "--model", "haelt",
         "--checkpoint-dir", str(checkpoint_dir),
         "--amp",
-        "--quick",
-        "--n-ticks", "10000",
-        "--chunk-size", "5000",
+        "--quick-mode",
+        "--n-ticks", "50000",
+        "--chunk-size", "25000",
+        "--pretrain-ablation", "false",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Isolate from a busy host GPU (OOM from unrelated processes) so this
+    # smoke stays a correctness check, not a VRAM contention check.
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
     if result.returncode != 0:
         print("STDOUT:", result.stdout)
