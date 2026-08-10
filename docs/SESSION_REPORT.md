@@ -1,5 +1,16 @@
 ---
 
+## Commit `6810c2c` — 2026-08-10 20:42 UTC
+**Author:** jamie  
+**Message:** Session report: log adapter-factory wiring session
+
+**Files changed:**
+```
+docs/SESSION_REPORT.md
+```
+
+---
+
 ## Commit `0991c68` — 2026-08-10 20:42 UTC
 **Author:** jamie  
 **Message:** Update SESSION_REPORT (post-commit session log)
