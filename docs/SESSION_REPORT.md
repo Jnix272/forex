@@ -1,3 +1,67 @@
+---
+
+## Commit `519b1f5` — 2026-08-10 20:42 UTC
+**Author:** jamie  
+**Message:** Wire curriculum/pretrain/RL adapter factories, fix audit + deep-check bugs
+
+**Files changed:**
+```
+.gitignore
+CHANGELOG.md
+config/FOLDER_GUIDE.md
+config/feature_mask.py
+config/model_training_profile.py
+config/run.yaml
+config/run_ubuntu.yaml
+data/build_duckdb_pairwise.py
+data/compact_ticks.py
+data/feature_cache.py
+docs/CONTINUE.md
+docs/IMPROVEMENTS.md
+docs/SESSION_REPORT.md
+inference/onnx_inference.py
+labeling/rl_reward_labeling.py
+labeling/rl_reward_numba.py
+labeling/triple_barrier_labeling.py
+monitoring/__init__.py
+monitoring/alerts/engine.py
+monitoring/checks/__init__.py
+monitoring/checks/checkpoint_load.py
+monitoring/checks/data_drift.py
+monitoring/checks/gradient_norm.py
+monitoring/checks/loss_plateau.py
+monitoring/checks/nan_detection.py
+monitoring/checks/representation_collapse.py
+monitoring/checks/resource_monitor.py
+monitoring/dashboard/app.py
+monitoring/event_bus.py
+monitoring/events.py
+monitoring/unified_logger.py
+pretrain/hard_example_mining.py
+requirements-base.txt
+scripts/fuse_multitf.py
+scripts/migrate_to_duckdb.py
+scripts/run_feature_engineering.py
+scripts/run_pipeline.py
+tests/test_data_ingestion.py
+tests/test_labeling_pipeline.py
+tests/test_pretrain_adapter.py
+training/FOLDER_GUIDE.md
+training/adversarial_generator.py
+training/config_validate.py
+training/curriculum.py
+training/curriculum_callbacks.py
+training/data_coverage.py
+training/dataset_builder.py
+training/gpu_cli.py
+training/gpu_datasets.py
+training/model_factory.py
+training/pretrain_adapter.py
+training/pretrain_runner.py
+training/rl_runner.py
+training/supervised_loop.py
+```
+
 # Session Report
 
 ## 2026-08-10 16:10 — Full Codebase Bug Audit & Critical Fixes (12 Bugs Fixed)
