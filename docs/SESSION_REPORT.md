@@ -1,5 +1,16 @@
 ---
 
+## Commit `0991c68` — 2026-08-10 20:42 UTC
+**Author:** jamie  
+**Message:** Update SESSION_REPORT (post-commit session log)
+
+**Files changed:**
+```
+docs/SESSION_REPORT.md
+```
+
+---
+
 ## Commit `519b1f5` — 2026-08-10 20:42 UTC
 **Author:** jamie  
 **Message:** Wire curriculum/pretrain/RL adapter factories, fix audit + deep-check bugs
