@@ -16,6 +16,11 @@ from models.architectures import (
     TFTScalper,
     iTransformerScalper,
 )
+from config.model_training_profile import (
+    ModelTrainingProfile,
+    get_training_profile,
+    MODEL_PROFILES,
+)
 from training.cache_integrity import _resolve_pair_feat_indices
 
 _HOST = None
@@ -249,4 +254,20 @@ def _strict_load_report(target: nn.Module, state: dict, label: str,
         )
     return {"frac_loaded": frac, "missing": missing,
             "unexpected": unexpected, "shape_mismatch": mismatched}
+
+
+def get_model_training_profile(model_name: str) -> ModelTrainingProfile:
+    """Convenience function to get training profile from model factory."""
+    return get_training_profile(model_name)
+
+
+__all__ = [
+    "build_model",
+    "_strict_load_report",
+    "_multitask_head_in",
+    "_core_model",
+    "get_model_training_profile",
+    "ModelTrainingProfile",
+    "MODEL_PROFILES",
+]
 

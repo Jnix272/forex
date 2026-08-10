@@ -164,17 +164,31 @@ class TS2VecAdapter(BasePretrainAdapter):
     def __init__(self, config: PretrainConfig):
         super().__init__(config)
         self._ts2vec_model = None
+        self._ts2vec_available = False
+        self._check_ts2vec_availability()
+    
+    def _check_ts2vec_availability(self):
+        """Check if TS2Vec is available."""
+        try:
+            import ts2vec
+            self._ts2vec_available = True
+        except ImportError:
+            self._ts2vec_available = False
+            warnings.warn(
+                "TS2Vec not installed. Install with: "
+                "pip install git+https://github.com/zhihanyue/ts2vec.git. "
+                "TS2VecAdapter will not work."
+            )
     
     def _import_ts2vec(self):
         """Lazy import TS2Vec."""
-        try:
-            from ts2vec import TS2Vec
-            return TS2Vec
-        except ImportError:
+        if not self._ts2vec_available:
             raise ImportError(
                 "TS2Vec not installed. Install with: "
                 "pip install git+https://github.com/zhihanyue/ts2vec.git"
             )
+        from ts2vec import TS2Vec
+        return TS2Vec
     
     def fit(
         self,
@@ -183,6 +197,11 @@ class TS2VecAdapter(BasePretrainAdapter):
         **kwargs
     ) -> dict[str, Any]:
         """Train TS2Vec model."""
+        if not self._ts2vec_available:
+            raise RuntimeError(
+                "TS2VecAdapter.fit() called but TS2Vec is not installed. "
+                "Install with: pip install git+https://github.com/zhihanyue/ts2vec.git"
+            )
         TS2Vec = self._import_ts2vec()
         
         # Prepare data - TS2Vec expects (n_samples, seq_len, n_features)
@@ -649,21 +668,40 @@ class LightlySoloAdapter(BasePretrainAdapter):
         self.adapt_for_timeseries = adapt_for_timeseries
         self._model = None
         self._trainer = None
+        self._framework_available = False
+        self._check_framework_availability()
+    
+    def _check_framework_availability(self):
+        """Check if the selected framework is available."""
+        try:
+            if self.framework == "lightly":
+                import lightly
+                self._framework_available = True
+            elif self.framework == "solo":
+                import solo
+                self._framework_available = True
+        except ImportError:
+            self._framework_available = False
+            warnings.warn(
+                f"{self.framework} not installed. "
+                f"Install with: pip install {'lightly' if self.framework == 'lightly' else 'solo-learn'}. "
+                f"LightlySoloAdapter with framework='{self.framework}' will not work."
+            )
     
     def _import_framework(self):
         """Import the selected framework."""
+        if not self._framework_available:
+            raise ImportError(
+                f"{self.framework} not installed. "
+                f"Install with: pip install {'lightly' if self.framework == 'lightly' else 'solo-learn'}"
+            )
+        
         if self.framework == "lightly":
-            try:
-                import lightly
-                return lightly
-            except ImportError:
-                raise ImportError("lightly not installed. pip install lightly")
+            import lightly
+            return lightly
         elif self.framework == "solo":
-            try:
-                import solo
-                return solo
-            except ImportError:
-                raise ImportError("solo-learn not installed. pip install solo-learn")
+            import solo
+            return solo
     
     def _build_backbone(self):
         """Build backbone adapted for time series."""
@@ -684,9 +722,10 @@ class LightlySoloAdapter(BasePretrainAdapter):
     def _build_resnet1d(self):
         """Build 1D ResNet for time series."""
         # Simplified 1D ResNet
+        out_dim = getattr(self.config, "output_dims", 64)
         return nn.Sequential(
-            nn.Conv1d(self.config.input_dims, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(self.config.input_dims, out_dim, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
             # ... residual blocks would go here
@@ -701,6 +740,11 @@ class LightlySoloAdapter(BasePretrainAdapter):
         **kwargs
     ) -> dict[str, Any]:
         """Train using lightly-ssl or solo-learn."""
+        if not self._framework_available:
+            raise RuntimeError(
+                f"LightlySoloAdapter.fit() called but {self.framework} is not installed. "
+                f"Install with: pip install {'lightly' if self.framework == 'lightly' else 'solo-learn'}"
+            )
         framework = self._import_framework()
         
         if self.framework == "lightly":
@@ -718,12 +762,12 @@ class LightlySoloAdapter(BasePretrainAdapter):
         
         if self.method == "simclr":
             from lightly.models.modules import SimCLRProjectionHead
-            projection_head = SimCLRProjectionHead(512, 512, self.config.output_dims)
+            projection_head = SimCLRProjectionHead(self.config.output_dims, self.config.output_dims, self.config.output_dims)
             criterion = loss.NTXentLoss(temperature=0.5)
         elif self.method == "byol":
             from lightly.models.modules import BYOLProjectionHead, BYOLPredictionHead
-            projection_head = BYOLProjectionHead(512, 512, self.config.output_dims)
-            prediction_head = BYOLPredictionHead(self.config.output_dims, 512, self.config.output_dims)
+            projection_head = BYOLProjectionHead(self.config.output_dims, self.config.output_dims, self.config.output_dims)
+            prediction_head = BYOLPredictionHead(self.config.output_dims, self.config.output_dims, self.config.output_dims)
             criterion = loss.NegativeCosineSimilarity()
         else:
             raise NotImplementedError(f"Method {self.method} not implemented for lightly")

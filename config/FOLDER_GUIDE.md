@@ -9,6 +9,7 @@ Runtime settings, model profiles, feature masks, and run configuration.
 | `__init__.py` | Package initializer | Defines project Python logic; inspect top-level functions/classes for behavior. |
 | `feature_mask.py` | Python module | Domain‑knowledge‑driven feature mask. |
 | `models.py` | Python module | config/models.py — Supervised architecture hyperparameters =========================================================== Defaults aligned with `training/train_gpu.py` builders and `models/architectures.py`. Functions: architecture_config |
+| `model_training_profile.py` | Python module | **Per-model training profiles** — `ModelTrainingProfile` registry with 12 training dimensions per architecture (adversarial, curriculum, miner, pretrain, SWA, RL, framework). Auto-detection fallback inspects model architecture. |
 | `run.yaml` | YAML configuration | Configuration for training runs, model profiles, providers, or runtime behavior. |
 | `run_fast.yaml` | YAML configuration | Configuration for training runs, model profiles, providers, or runtime behavior. |
 | `run_normal.yaml` | YAML configuration | Configuration for training runs, model profiles, providers, or runtime behavior. |

@@ -55,7 +55,7 @@ def main() -> int:
     if command == "download":
         return _run_script("download_all.py", passthrough)
     if command == "features":
-        return _run_script("build_features.py", passthrough)
+        return _run_script("run_feature_engineering.py", passthrough)
     if command == "train":
         return _run_script("train.py", passthrough)
     if command == "backtest":

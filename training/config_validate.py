@@ -551,6 +551,28 @@ def validate_run_config(args: Any, *, verbose: bool = True) -> int:
         lines.append("  Errors:")
         lines.extend(f"    ✗ {msg}" for msg in errors)
 
+    # Data coverage check
+    try:
+        from training.data_coverage import validate_pair_coverage
+        _pairs = _get_pairs(args)
+        if len(_pairs) > 1:
+            _src = getattr(args, "data_source", "dukascopy")
+            _min_y = getattr(args, "min_pair_years", 2)
+            _exp_y = getattr(args, "expected_pair_years", 18)
+            _valid, _rep = validate_pair_coverage(_pairs, data_source=_src, min_years=_min_y, expected_years=_exp_y)
+            _skipped = [p for p in _pairs if p not in _valid]
+            if _skipped:
+                lines.append("  Data Coverage:")
+                lines.append(f"    ⚠ {len(_skipped)}/{len(_pairs)} pairs lack data (<{_min_y} years): {', '.join(_skipped)}")
+                lines.append(f"    → Download with: python scripts/download_data.py --pairs {' '.join(_skipped)}")
+                errors.append(f"Data coverage: {len(_skipped)} pair(s) lack sufficient data")
+            else:
+                _low = [r["pair"] for r in _rep if r["status"] == "LOW"]
+                if _low:
+                    lines.append(f"    ℹ Low coverage pairs ({len(_low)}): {', '.join(_low)}")
+    except Exception:
+        pass  # Non-blocking
+
     if not errors and not warnings:
         lines.append("  ✓ No blocking issues detected.")
     elif not errors:

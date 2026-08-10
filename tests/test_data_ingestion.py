@@ -83,12 +83,11 @@ def test_load_tick_data_keeps_existing_ts(tmp_path):
 
 def test_load_tick_data_time_range_filter(tmp_path):
     # Multi-day frame so the start/end filter is meaningful.
-    df = pl.concat([
-        generate_synthetic_tick_data(n_rows=100),
-        generate_synthetic_tick_data(n_rows=100).with_columns(
-            (pl.col("timestamp_utc") + timedelta(days=1)).alias("timestamp_utc")
-        ),
-    ])
+    df1 = generate_synthetic_tick_data(n_rows=100).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("us", "UTC")))
+    df2 = generate_synthetic_tick_data(n_rows=100).with_columns(
+        (pl.col("timestamp_utc") + timedelta(days=1)).cast(pl.Datetime("us", "UTC")).alias("timestamp_utc")
+    )
+    df = pl.concat([df1, df2])
     path = tmp_path / "multi_day.parquet"
     df.write_parquet(path)
     out = load_tick_data(str(path), start="2024-01-03", end="2024-01-03 12:00")

@@ -566,7 +566,11 @@ class CustomCurriculumAdapter:
         elif self.mode == "self_paced":
             return self._curriculum.v > 0
         elif self.mode == "combined":
-            return self._curriculum.get_inclusion_mask()
+            diff_mask = self._diff_curriculum.get_inclusion_mask()
+            sp_weights = self._curriculum.get_weights(
+                getattr(self._curriculum, "current_epoch", 0), None
+            )
+            return diff_mask & (sp_weights > 0)
         return np.ones(len(self.difficulty_scores), dtype=bool)
     
     def get_sample_weights(self) -> np.ndarray:
@@ -579,7 +583,14 @@ class CustomCurriculumAdapter:
         elif self.mode == "self_paced":
             return self._curriculum.v
         elif self.mode == "combined":
-            return self._curriculum.get_sample_weights()
+            diff_weights = self._diff_curriculum.get_difficulty_weights()
+            sp_weights = self._curriculum.get_weights(
+                getattr(self._curriculum, "current_epoch", 0), None
+            )
+            combined = diff_weights * sp_weights
+            # Mirror update() normalization: scale to (0, 1] max
+            combined = combined / (combined.max() + 1e-8)
+            return combined
         return np.ones(len(self.difficulty_scores), dtype=float)
     
     def state_dict(self) -> dict[str, Any]:

@@ -56,6 +56,7 @@ from training.gpu_datasets import (
     ZarrStreamDataset,
 )
 from training.gpu_device import build_adamw, maybe_torch_compile
+from training.model_factory import get_model_training_profile
 from training.gpu_losses import (
     DirectionalHuberLoss,
     SharpeProxyLoss,
@@ -837,6 +838,57 @@ def _maybe_warn_grad_norm(model, batch_idx: int) -> None:
     total_norm = total_norm ** 0.5
     if total_norm > 50.0:
         print(f"[Stability] WARNING: High grad norm ({total_norm:.2f}) at batch {batch_idx}")
+
+
+class _CurriculumProviderConfig:
+    """Minimal config facade for providers without a dataclass ``config``.
+
+    The consumer inspects ``provider.config.difficulty`` for the difficulty
+    level count; the CustomCurriculumAdapter exposes ``mode``/``kwargs``
+    instead, so this shim reports no difficulty sub-config (falls back to
+    a default level count).
+    """
+
+    def __init__(self, provider):
+        self._provider = provider
+
+    @property
+    def difficulty(self):
+        return None
+
+
+class _CurriculumProvider:
+    """Unified surface over CurriculumManager / CustomCurriculumAdapter.
+
+    Both providers expose update()/get_sample_weights()/get_inclusion_mask(),
+    but with different signatures. This shim lets the training loop call either
+    through one interface (used for the P3-2 factory wiring).
+    """
+
+    def __init__(self, provider):
+        self._provider = provider
+
+    @property
+    def config(self):
+        cfg = getattr(self._provider, "config", None)
+        if cfg is not None and hasattr(cfg, "difficulty"):
+            return cfg
+        return _CurriculumProviderConfig(self._provider)
+
+    def get_inclusion_mask(self, epoch=None):
+        return self._provider.get_inclusion_mask()
+
+    def get_sample_weights(self):
+        return self._provider.get_sample_weights()
+
+    def update(self, epoch, **kwargs):
+        try:
+            return self._provider.update(epoch, **kwargs)
+        except TypeError:
+            allowed = {}
+            if "losses" in kwargs:
+                allowed["losses"] = kwargs["losses"]
+            return self._provider.update(epoch, **allowed)
 
 
 def _apply_curriculum_weights(loss, pred, yb, crit, classification, batch_idx_t, sample_weight_lookup):
@@ -1957,7 +2009,12 @@ def supervised_train(
     # -- Online Hard-Example Miner ---------------------------------------------
     _online_miner = None
     _use_online_miner = bool(getattr(args, "online_hard_mining", True))
-    if _use_online_miner and (classification or multitask):
+    # Per-model miner gating: only enable for models that benefit from it
+    _miner_models = str(getattr(args, "curriculum_miner_models", "") or "").strip()
+    _miner_allowed = True
+    if _miner_models:
+        _miner_allowed = model_name.lower() in [m.strip().lower() for m in _miner_models.split(",")]
+    if _use_online_miner and (classification or multitask) and _miner_allowed:
         try:
             from training.hard_example_miner import OnlineHardExampleMiner
             _online_miner = OnlineHardExampleMiner(
@@ -2351,12 +2408,30 @@ def supervised_train(
 
     _adversarial = None
     _adv_feature_names = _feature_schema or list(getattr(args, "_feat_names", []) or [])
-    if getattr(args, "enable_adversarial", False):
+    # Check per-model adversarial gating
+    _adv_models = str(getattr(args, "adversarial_models", "") or "").strip()
+    _adv_allowed = True
+    if _adv_models:
+        _adv_allowed = model_name.lower() in [m.strip().lower() for m in _adv_models.split(",")]
+
+    if getattr(args, "enable_adversarial", False) and _adv_allowed:
         try:
             from training.adversarial_generator import create_adversarial_attack
+            from pretrain.hard_example_mining import PretrainHardExampleMiner
             _adv_method = str(getattr(args, "adversarial_method", "pgd") or "pgd").lower()
             if model_name == "gnn" and _adv_method == "pgd":
                 _adv_method = "graph_pgd"
+            
+            # Load feature vulnerability scores from pretraining (Task 2)
+            _feature_eps_multipliers = None
+            try:
+                _vuln = PretrainHardExampleMiner.load_vulnerability_scores()
+                if _vuln is not None and len(_vuln) > 0:
+                    _feature_eps_multipliers = _vuln
+                    print(f"[Adversarial] Loaded feature vulnerability scores ({len(_vuln)} dims)")
+            except Exception as _vuln_e:
+                print(f"[Adversarial] Could not load vulnerability scores: {_vuln_e}")
+            
             _adversarial = create_adversarial_attack(
                 method=_adv_method,
                 eps=float(getattr(args, "adversarial_eps", 0.3)),
@@ -2364,6 +2439,9 @@ def supervised_train(
                 steps=int(getattr(args, "adversarial_steps", 7)),
                 probability=float(getattr(args, "adversarial_prob", 0.01)),
                 feature_names=_adv_feature_names or None,
+                normalize_grad=bool(getattr(args, "adversarial_normalize_grad", False)),
+                warmup_steps=int(getattr(args, "adversarial_warmup_steps", 0)),
+                feature_eps_multipliers=_feature_eps_multipliers,
             )
             _adversarial.train()
             print(f"[Adversarial] Initialized method={_adv_method} "
@@ -2383,26 +2461,83 @@ def supervised_train(
     # -- Unified CurriculumManager (Improvement #4) ---------------------------
     # Opt-in extra curriculum layer. Mirrors n_samples on the *train* fold so
     # difficulty scores line up with the samples this fold actually trains on.
+    # P3-2: when --curriculum-callback is set, the provider is built through the
+    # create_curriculum_callback() factory (CustomCurriculumAdapter) instead of
+    # create_curriculum_manager(); both expose the same provider surface used below.
     _curriculum_mgr = None
+    _cm_mode = str(getattr(args, "curriculum_manager_mode", "combined") or "combined")
     if getattr(args, "curriculum_manager", False):
         try:
-            from training.curriculum import create_curriculum_manager
             _cm_n = len(train_idx)
             _cm_diff = None
             if _diff_arr is not None and len(_diff_arr) == n_samples:
                 _cm_diff = np.asarray(_diff_arr[train_idx], dtype=float)
-            _curriculum_mgr = create_curriculum_manager(
-                mode=str(getattr(args, "curriculum_manager_mode", "combined") or "combined"),
-                n_samples=_cm_n,
-                difficulty_scores=_cm_diff,
-                total_epochs=max(1, int(args.epochs)),
-                seed=int(getattr(args, "seed", 1337)),
-            )
-            print(f"[CurriculumManager] Enabled (mode={getattr(args, 'curriculum_manager_mode', 'combined')}) "
-                  f"over {_cm_n:,} train samples")
+            if bool(getattr(args, "curriculum_callback", False)):
+                from training.curriculum_callbacks import create_curriculum_callback
+                _cb_kw = dict(
+                    n_levels=int(getattr(args, "curriculum_n_levels", 10) or 10),
+                    start_level=int(getattr(args, "curriculum_start_level", 1) or 1),
+                    advance_rate=float(getattr(args, "curriculum_advance_rate", 0.1)),
+                    max_level=int(getattr(args, "curriculum_freeze_patience", 1) or 1) + int(getattr(args, "curriculum_n_levels", 9) or 9),
+                    total_epochs=max(1, int(args.epochs)),
+                    use_loss_weighting=bool(getattr(args, "use_loss_weighting", False)),
+                )
+                _curriculum_provider = create_curriculum_callback(
+                    "custom",
+                    difficulty_scores=_cm_diff,
+                    mode=_cm_mode,
+                    **_cb_kw,
+                )
+                _curriculum_mgr = _CurriculumProvider(_curriculum_provider)
+                print(f"[CurriculumCallback] Enabled (mode={_cm_mode}, factory=create_curriculum_callback)")
+            else:
+                from training.curriculum import create_curriculum_manager
+                _curriculum_mgr = create_curriculum_manager(
+                    mode=_cm_mode,
+                    n_samples=_cm_n,
+                    difficulty_scores=_cm_diff,
+                    total_epochs=max(1, int(args.epochs)),
+                    seed=int(getattr(args, "seed", 1337)),
+                    # Self-paced config
+                    sp_pace=str(getattr(args, "self_paced_pace", "linear")),
+                    sp_lambda=float(getattr(args, "self_paced_lambda", 1.0)),
+                    use_self_paced=bool(getattr(args, "use_self_paced", False)),
+                    # Loss weighting config
+                    lw_scheme=str(getattr(args, "loss_weighting_scheme", "focal")),
+                    focal_gamma=float(getattr(args, "loss_weighting_focal_gamma", 2.0)),
+                    use_loss_weighting=bool(getattr(args, "use_loss_weighting", False)),
+                    # Miner feedback config
+                    forgetting_threshold=float(getattr(args, "curriculum_forgetting_threshold", 0.15)),
+                    easy_threshold=float(getattr(args, "curriculum_easy_threshold", 0.60)),
+                    freeze_patience=int(getattr(args, "curriculum_freeze_patience", 1)),
+                )
+                _curriculum_mgr = _CurriculumProvider(_curriculum_mgr)
+                print(f"[CurriculumManager] Enabled (mode={_cm_mode}) "
+                      f"over {_cm_n:,} train samples")
         except Exception as _cm_exc:
             _curriculum_mgr = None
             print(f"[CurriculumManager] Disabled ({_cm_exc})")
+
+    # Miner feedback gating
+    _miner_models = str(getattr(args, "curriculum_miner_models", "") or "").strip()
+    _miner_allowed = True
+    if _miner_models:
+        _miner_allowed = model_name.lower() in [m.strip().lower() for m in _miner_models.split(",")]
+    _miner_feedback_enabled = (bool(getattr(args, "curriculum_miner_feedback", False))
+                               and _miner_allowed
+                               and _online_miner is not None
+                               and _curriculum_mgr is not None)
+
+    # Self-paced / loss weighting model gating
+    _sp_models = str(getattr(args, "self_paced_models", "") or "").strip()
+    _sp_allowed = True
+    if _sp_models:
+        _sp_allowed = model_name.lower() in [m.strip().lower() for m in _sp_models.split(",")]
+
+    _lw_models = str(getattr(args, "loss_weighting_models", "") or "").strip()
+    _lw_allowed = True
+    if _lw_models:
+        _lw_allowed = model_name.lower() in [m.strip().lower() for m in _lw_models.split(",")]
 
     for ep in epoch_bar:
         if _TRAIN_LOGGER is not None:
@@ -2512,7 +2647,23 @@ def supervised_train(
         # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
         if _curriculum_mgr is not None:
             try:
-                _cm_info = _curriculum_mgr.update(ep, losses=None)
+                # Get per-sample losses from online miner for self-paced/loss weighting
+                epoch_losses = None
+                if _miner_feedback_enabled and _online_miner is not None:
+                    epoch_losses = _online_miner._loss_buffer[-1].copy()
+                    # Also get forgetting/easy ratios for curriculum pace control
+                    _forgetting_rate = float(_online_miner.get_forgotten_mask().mean())
+                    _easy_ratio = float(_online_miner.get_easy_mask().mean())
+                else:
+                    _forgetting_rate = 0.0
+                    _easy_ratio = 0.0
+
+                _cm_info = _curriculum_mgr.update(
+                    ep,
+                    losses=epoch_losses,
+                    forgetting_rate=_forgetting_rate,
+                    easy_ratio=_easy_ratio,
+                )
                 _cm_mask = _curriculum_mgr.get_inclusion_mask()
                 if len(_cm_mask) == len(ep_train_idx) and float(_cm_mask.mean()) < 0.999:
                     _ep_cm_idx = ep_train_idx[_cm_mask]
@@ -2529,9 +2680,20 @@ def supervised_train(
                     "inclusion_rate": float(_cm_mask.mean()) if len(_cm_mask) else 1.0,
                     "weights_mean": float(np.asarray(_cm_info.get("weights", np.ones(1))).mean()),
                 })
+                # Adversarial + Curriculum Coordination: scale eps with difficulty level
+                if _adversarial is not None and bool(getattr(args, "adversarial_eps_curriculum_scale", False)):
+                    _diff_level = _cm_info.get("difficulty_level", 1)
+                    _n_levels = getattr(_curriculum_mgr.config.difficulty, "max_level", 10) if _curriculum_mgr.config.difficulty else 10
+                    _level_ratio = _diff_level / max(1, _n_levels)
+                    _base_eps = float(getattr(args, "adversarial_eps", 0.3))
+                    _scaled_eps = _base_eps * _level_ratio
+                    _adversarial.set_eps(_scaled_eps)
+                    if hasattr(_adversarial, "set_warmup_step"):
+                        _adversarial.set_warmup_step(ep)
+                    _log_info(f"[Adversarial+Curriculum] Epoch {ep+1}: eps scaled to {_scaled_eps:.4f} (level {_diff_level}/{_n_levels})")
+            
             except Exception as _cm_exc:
                 _log_warn(f"[CurriculumManager] Epoch {ep+1} update failed: {_cm_exc}")
-        # Per-sample curriculum weights → global-index lookup for loss weighting
         _cm_wl = None
         if _curriculum_mgr is not None:
             try:

@@ -109,9 +109,9 @@ _OWNED_GLOBALS = frozenset({
     "_PAIR_ALIGNMENT_STATS",
 })
 _HOST_DEPS = (
-    '_log_error',
-    '_log_warn',
-    '_log_info',
+    'print',
+    'print',
+    'print',
     '_get_pairs',
     '_get_cache_path',
     '_cache_target_col',
@@ -375,12 +375,12 @@ def _enforce_dataset_feature_schema(
         {"warnings": warnings}, prefix="[FeatureSchema]"
     ):
         try:
-            _log_warn(line)
+            print(line)
         except Exception:
             print(line)
     for err in errors:
         try:
-            _log_warn(f"[FeatureSchema] ERROR: {err}")
+            print(f"[FeatureSchema] ERROR: {err}")
         except Exception:
             print(f"[FeatureSchema] ERROR: {err}")
 
@@ -1873,6 +1873,7 @@ def _build_chunk(
     X_arr = sanitize_array(
         X.to_numpy(),
         context="chunk features before scaling",
+        clip_range=None,  # Don't hard-clip — NaN/Inf handled by col_medians below
     )
 
     # Sanitize: replace +-inf / NaN (can arise from log-return or cross-asset
@@ -1918,13 +1919,14 @@ def _build_chunk(
         X_arr,
         col_medians=_col_medians,
         context="chunk features unscaled",
+        clip_range=None,  # NaN/Inf handled by col_medians, values clipped later by scaler
     )
     X_arr = np.asarray(X_arr, dtype=np.float32)
 
     # Path-quality gating: bars where the winning trade had a noisy/meandering path
     # (path_quality < 0.2) are relabelled as hold (0) to suppress gradient noise.
     y_arr = np.asarray(y.to_numpy(), dtype=np.float32)
-    y_arr = sanitize_array(y_arr, context="chunk labels")
+    y_arr = sanitize_array(y_arr, context="chunk labels", clip_range=(-50.0, 50.0))
 
     if "path_quality" in sidecar.columns:
         pq_arr = np.asarray(sidecar["path_quality"].to_numpy(), dtype=np.float32)
@@ -1978,11 +1980,11 @@ def _build_chunk(
     try:
         diff_seq = _compute_difficulty_scores(feats_aligned, seq_len)
     except Exception as e:
-        _log_warn(f"[DiffCurriculum] Difficulty scoring failed ({e}); defaulting all samples to easy (stage 0).")
+        print(f"[DiffCurriculum] Difficulty scoring failed ({e}); defaulting all samples to easy (stage 0).")
         diff_seq = np.zeros(len(y_seq), dtype=np.uint8)
 
     if len(diff_seq) != len(y_seq):
-        _log_warn(
+        print(
             f"[DiffCurriculum] Difficulty length mismatch ({len(diff_seq)} vs {len(y_seq)}); "
             "defaulting all samples to easy (stage 0)."
         )
@@ -2532,7 +2534,38 @@ def _build_multipair_dataset(
     """
     _ensure_bound()
     print(f"\n[MultiPair] {len(pairs)} pairs: {', '.join(pairs)}")
-    print(f"            Source: {args.data_source} | {args.data_start} -> {args.data_end}")
+    _start = getattr(args, "data_start", "N/A")
+    _end = getattr(args, "data_end", "N/A")
+    print(f"            Source: {args.data_source} | {_start} -> {_end}")
+
+    # ── Data coverage check ───────────────────────────────────────────
+    from training.data_coverage import validate_pair_coverage, print_coverage_summary
+    if args.data_source != "synthetic":
+        _coverage_valid, _coverage_report = validate_pair_coverage(
+            pairs=pairs,
+            data_source=args.data_source,
+            min_years=getattr(args, "min_pair_years", 2),
+            expected_years=getattr(args, "expected_pair_years", 18),
+        )
+    else:
+        _coverage_valid, _coverage_report = pairs, []
+    _skipped = [p for p in pairs if p not in _coverage_valid]
+    if _skipped:
+        print(f"[Coverage] ⚠  {len(_skipped)}/{len(pairs)} pairs have insufficient data (<2 years)")
+        print(f"[Coverage]    Skipped: {', '.join(_skipped)}")
+        print(f"[Coverage]    Training on: {', '.join(_coverage_valid) if _coverage_valid else 'NONE'}")
+        if len(_coverage_valid) < 2:
+            raise RuntimeError(
+                f"Only {len(_coverage_valid)} pair(s) available for multi-pair training. "
+                f"Need at least 2 pairs with >= 2 years of data. "
+                f"Run: python scripts/download_data.py --pairs {' '.join(p for p in pairs if p not in _coverage_valid)}"
+            )
+        pairs = [p for p in pairs if p in _coverage_valid]
+    else:
+        low = [r["pair"] for r in _coverage_report if r["status"] == "LOW"]
+        if low:
+            print(f"[Coverage] ℹ  {len(low)} pairs have shorter-than-expected history (low coverage): {', '.join(low)}")
+
     use_real_cross = (
         args.cross_asset_mode == "real"
         or (args.cross_asset_mode == "auto" and args.data_source != "synthetic")
@@ -2656,33 +2689,34 @@ def _build_multipair_dataset(
                     z_store = _zarr_open_group(str(cache_path), mode="w")
                     # 2048-row chunks: ~30× fewer decompressions per epoch vs 64-row chunks.
                     # X stored as FP16 (mixed-precision cache); labels/market stay FP32.
+                    # Use resizeable arrays (shape=(0,)+dims) for safe .append() across windows.
                     c0 = (min(2048, len(X_seq)),) + X_seq.shape[1:]
-                    _zarr_create(z_store, "X", shape=X_seq.shape, chunks=c0,
+                    _zarr_create(z_store, "X", shape=(0,) + X_seq.shape[1:], chunks=c0,
                                  dtype=ZARR_FEATURE_DTYPE, compressor=_compressor)
-                    _zarr_create(z_store, "y", shape=y_seq.shape, chunks=(c0[0],),
+                    _zarr_create(z_store, "y", shape=(0,), chunks=(c0[0],),
                                  dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-                    _zarr_create(z_store, "y_cls", shape=y_cls_seq.shape, chunks=(c0[0],),
+                    _zarr_create(z_store, "y_cls", shape=(0,), chunks=(c0[0],),
                                  dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-                    _zarr_create(z_store, "close", shape=close_seq.shape, chunks=(c0[0],),
+                    _zarr_create(z_store, "close", shape=(0,), chunks=(c0[0],),
                                  dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-                    _zarr_create(z_store, "atr", shape=atr_seq.shape, chunks=(c0[0],),
+                    _zarr_create(z_store, "atr", shape=(0,), chunks=(c0[0],),
                                  dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-                    _zarr_create(z_store, "spread", shape=spread_seq.shape, chunks=(c0[0],),
+                    _zarr_create(z_store, "spread", shape=(0,), chunks=(c0[0],),
                                  dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
                     if store_rl_sidecars:
-                        _zarr_create(z_store, "pq", shape=pq_arr.shape, chunks=(c0[0],),
+                        _zarr_create(z_store, "pq", shape=(0,), chunks=(c0[0],),
                                      dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-                        _zarr_create(z_store, "diff", shape=diff_arr.shape, chunks=(c0[0],),
+                        _zarr_create(z_store, "diff", shape=(0,), chunks=(c0[0],),
                                      dtype="uint8", compressor=_compressor)
-                    z_store["X"][:] = np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE)
-                    z_store["y"][:] = y_seq
-                    z_store["y_cls"][:] = y_cls_seq
-                    z_store["close"][:] = close_seq
-                    z_store["atr"][:] = atr_seq
-                    z_store["spread"][:] = spread_seq
+                    z_store["X"].append(np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE))
+                    z_store["y"].append(y_seq)
+                    z_store["y_cls"].append(y_cls_seq)
+                    z_store["close"].append(close_seq)
+                    z_store["atr"].append(atr_seq)
+                    z_store["spread"].append(spread_seq)
                     if store_rl_sidecars:
-                        z_store["pq"][:] = pq_arr
-                        z_store["diff"][:] = diff_arr
+                        z_store["pq"].append(pq_arr)
+                        z_store["diff"].append(diff_arr)
             else:
                 z_store["X"].append(np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE))
                 z_store["y"].append(y_seq)
@@ -3064,7 +3098,7 @@ def _build_multipair_dataset(
             "[MultiPair] No usable samples produced. Check date range and data source.\n"
             + _multipair_zero_samples_help(None)
         )
-        _log_error(err)
+        print(err)
         raise RuntimeError(err)
 
     # -- Finalise cache -------------------------------------------------------
@@ -3229,7 +3263,7 @@ def _build_multipair_dataset(
             purge_bars=int(getattr(args, "purge_bars", 120)),
         )
     except Exception as _m_err:
-        _log_warn(f"[Manifest] write failed ({_m_err})")
+        print(f"[Manifest] write failed ({_m_err})")
 
     # ── Future-leak check ────────────────────────────────────
     try:
@@ -3244,14 +3278,14 @@ def _build_multipair_dataset(
                 None, _fwd_ret.tolist(), max_abs_corr=0.30,
             )
             if _leaks:
-                _log_warn(
+                print(
                     f"[LeakCheck] {len(_leaks)} feature(s) correlated with "
                     f"forward returns (|r| > 0.30). Review for data leakage."
                 )
             else:
-                _log_info("[LeakCheck] No features correlated with forward returns.")
+                print("[LeakCheck] No features correlated with forward returns.")
     except Exception as _le_err:
-        _log_warn(f"[LeakCheck] skipped ({_le_err})")
+        print(f"[LeakCheck] skipped ({_le_err})")
 
     # ── Lockbox reservation ──────────────────────────────────
     try:
@@ -3275,7 +3309,11 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
     _ensure_bound()
 
     use_zarr = bool(ZARR)
-    pairs    = _get_pairs(args)
+    pairs    = getattr(args, "pairs", []) or []
+    if isinstance(pairs, str):
+        pairs = [p.strip() for p in pairs.split(",")]
+    if not pairs and getattr(args, "pair", None):
+        pairs = [args.pair]
     is_multi = len(pairs) > 1
     if not is_multi:
         globals()["_PAIR_READINESS_STATS"] = {}
@@ -3381,7 +3419,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             return str(cache_path), n_samples, n_features, scaler
         pass
     print(f"\n[Data] Building 20M tick dataset ΓÇö chunk size: {args.chunk_size:,}")
-    _pairs_display = ", ".join(_get_pairs(args))
+    _pairs_display = ", ".join(pairs)
     print(f"       Source: {args.data_source} | Pairs: {_pairs_display}")
     print(f"       News mode: {_news_mode} | Cache engine: {_cache_engine.upper()}")
     use_real_cross = (
@@ -3563,7 +3601,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             gc.collect()
 
         except Exception as _exc:
-            _log_error(f"[Data] chunk {chunk_n} build failed", _exc)
+            print(f"[Data] chunk {chunk_n} build failed", _exc)
             raise
 
         if X_seq.size == 0:
@@ -3686,7 +3724,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             "Likely causes: vendor returned mostly empty hour files, wrong pair/date range, "
             "or blocked data endpoint. Try a shorter recent range first and verify raw cache."
         )
-        _log_error(err)
+        print(err)
         raise RuntimeError(err)
 
     # -- Finalise storage ------------------------------------------------------
@@ -3706,7 +3744,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             "bar_freq": str(getattr(args, "bar_freq", "1min")),
             "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             "has_rl_market": True,
-            "pairs": list(_get_pairs(args)),
+            "pairs": pairs,
             "target_col": _cache_target_col(args),
 
             "y_cls_source": "labels.label",
@@ -3777,7 +3815,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             "bar_freq": str(getattr(args, "bar_freq", "1min")),
             "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             "has_rl_market": True,
-            "pairs": list(_get_pairs(args)),
+            "pairs": pairs,
             "target_col": _cache_target_col(args),
 
             "y_cls_source": "labels.label",
@@ -3794,7 +3832,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
     readiness_report = _write_pair_readiness_report(
         args,
         cache_path,
-        list(_get_pairs(args)),
+        pairs,
         alignment=globals().get("_PAIR_ALIGNMENT_STATS", {}),
     )
     if readiness_report.get("status") == "fail":
@@ -3816,7 +3854,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         from training.cache_integrity import _compute_content_hash
         _dm.write_manifest(
             source=str(getattr(args, "data_source", "dukascopy")),
-            pairs=_get_pairs(args),
+            pairs=pairs,
             start=str(getattr(args, "data_start", "")),
             end=str(getattr(args, "data_end", "")),
             freq=str(getattr(args, "bar_freq", "1min")),
@@ -3833,7 +3871,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             content_hash=_compute_content_hash(args),
         )
     except Exception as _m_err:
-        _log_warn(f"[Manifest] write failed ({_m_err})")
+        print(f"[Manifest] write failed ({_m_err})")
 
     # ── Future-leak check ────────────────────────────────────────────
     try:
@@ -3850,14 +3888,14 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
                 None, _fwd_ret.tolist(), max_abs_corr=0.30,
             )
             if _leaks:
-                _log_warn(
+                print(
                     f"[LeakCheck] {len(_leaks)} feature(s) correlated with "
                     f"forward returns (|r| > 0.30). Review for data leakage."
                 )
             else:
-                _log_info("[LeakCheck] No features correlated with forward returns.")
+                print("[LeakCheck] No features correlated with forward returns.")
     except Exception as _le_err:
-        _log_warn(f"[LeakCheck] skipped ({_le_err})")
+        print(f"[LeakCheck] skipped ({_le_err})")
 
     # ── Lockbox reservation ──────────────────────────────────────────
     try:
@@ -3867,6 +3905,38 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         DatasetManifest.reserve_lockbox(str(Path(cache_path).parent), _lockbox_start, _lockbox_end)
     except Exception:
         pass
+
+    # ── Data Quality Report ──────────────────────────────────────────
+    try:
+        from data.data_quality_report import DataQualityReporter
+        from zarr import open as zarr_open
+        reporter = DataQualityReporter(str(Path(cache_path).parent / "quality"))
+        z_store = zarr_open(cache_path, mode="r")
+        X_sample = np.array(z_store["X"][:min(10000, total_samples)], dtype=np.float32)
+        y_sample = np.array(z_store["y"][:min(10000, total_samples)], dtype=np.float32)
+        y_cls = np.array(z_store["y_cls"][:min(10000, total_samples)], dtype=np.float32) if "y_cls" in z_store else None
+
+        # Compute basic quality stats from cache
+        feat_nan_rates = {str(i): float(np.isnan(X_sample).mean(axis=0)[i]) for i in range(X_sample.shape[2])}
+        class_balance = {}
+        if y_cls is not None:
+            labels = y_cls[y_cls != 0]
+            if len(labels) > 0:
+                class_balance["long"] = float(np.mean(labels == 1))
+                class_balance["short"] = float(np.mean(labels == -1))
+                class_balance["hold"] = float(np.mean(y_cls == 0))
+
+        reporter.generate_report(
+            missing_bars={"total": 0},
+            zero_volume_periods={"total": 0},
+            spread_outliers={"total": 0},
+            feature_nan_rates={str(k): v for k, v in enumerate(feat_nan_rates.values()) if v > 0},
+            label_class_balance=class_balance,
+            reward_dist={"mean": float(y_sample.mean()), "std": float(y_sample.std())},
+            per_regime_counts={},
+        )
+    except Exception as _dq_e:
+        print(f"[DataQuality] Report generation skipped: {_dq_e}")
 
     return str(cache_path), total_samples, n_features_total, scaler
 

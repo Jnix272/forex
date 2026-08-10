@@ -352,6 +352,10 @@ class CurriculumManagerConfig:
     difficulty_weight: float = 0.4
     self_paced_weight: float = 0.3
     loss_weight: float = 0.3
+    # Miner feedback thresholds
+    forgetting_threshold: float = 0.15
+    easy_threshold: float = 0.60
+    freeze_patience: int = 1
 
 
 class CurriculumManager:
@@ -395,19 +399,52 @@ class CurriculumManager:
         if config.mode in ("adaptive", "combined") and config.adaptive:
             self.adaptive_controller = CurriculumController(config=config.adaptive)
 
-    def update(self, epoch: int, val_metrics: dict[str, float] = None, losses: np.ndarray = None) -> dict[str, Any]:
+    def update(
+        self,
+        epoch: int,
+        val_metrics: dict[str, float] = None,
+        losses: np.ndarray = None,
+        forgetting_rate: float = 0.0,
+        easy_ratio: float = 0.0,
+    ) -> dict[str, Any]:
         """Update all curriculum components and return combined sample weights."""
         self.current_epoch = epoch
         weights = np.ones(self.n_samples, dtype=float)
         info = {"epoch": epoch}
 
+        # Store miner feedback for pace control
+        info["forgetting_rate"] = forgetting_rate
+        info["easy_ratio"] = easy_ratio
+
         # Update difficulty curriculum
         if self.difficulty_curriculum:
-            level = self.difficulty_curriculum.update(epoch, val_metrics.get("val_accuracy", 0.0) if val_metrics else 0.0)
+            # Get val_accuracy from val_metrics or default to 0
+            val_acc = val_metrics.get("val_accuracy", 0.0) if val_metrics else 0.0
+            level = self.difficulty_curriculum.update(epoch, val_acc)
             mask = self.difficulty_curriculum.get_inclusion_mask()
             diff_weights = self.difficulty_curriculum.get_difficulty_weights()
             info["difficulty_level"] = self.difficulty_curriculum.current_level
             info["inclusion_rate"] = mask.mean()
+
+            # Miner feedback: freeze or accelerate difficulty
+            if forgetting_rate > self.config.forgetting_threshold:
+                info["curriculum_frozen"] = True
+                self._freeze_counter = getattr(self, "_freeze_counter", 0) + 1
+                if self._freeze_counter >= self.config.freeze_patience:
+                    # Hold at current level (don't advance)
+                    if self.difficulty_curriculum:
+                        self.difficulty_curriculum.current_level = max(
+                            1, self.difficulty_curriculum.current_level - 1
+                        )
+            elif easy_ratio > self.config.easy_threshold:
+                info["curriculum_accelerated"] = True
+                if self.difficulty_curriculum:
+                    self.difficulty_curriculum.current_level = min(
+                        self.difficulty_curriculum.max_level,
+                        self.difficulty_curriculum.current_level + 2
+                    )
+            else:
+                self._freeze_counter = 0
 
         # Update self-paced learning
         if self.self_paced and losses is not None:
@@ -718,6 +755,10 @@ def create_curriculum_manager(
         difficulty_weight=kwargs.get("difficulty_weight", 0.4),
         self_paced_weight=kwargs.get("self_paced_weight", 0.3),
         loss_weight=kwargs.get("loss_weight", 0.3),
+        # Miner feedback thresholds
+        forgetting_threshold=kwargs.get("forgetting_threshold", 0.15),
+        easy_threshold=kwargs.get("easy_threshold", 0.60),
+        freeze_patience=kwargs.get("freeze_patience", 1),
     )
 
     return CurriculumManager(config, n_samples, difficulty_scores)

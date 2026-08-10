@@ -94,6 +94,7 @@ desktop.ini
 
 # Compact tick cache (large local data)
 data/compact/
+data/store/
 
 # Local tooling caches
 .agents/

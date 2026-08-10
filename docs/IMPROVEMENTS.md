@@ -44,6 +44,48 @@ Verified against living docs + spot-checks (`SessionLimitsEnforcer` wired in `li
 | **P3-4** | **Migrate RL to CleanRL / Stable-Baselines3** (`training/rl_adapter.py`): unified `BaseRLAdapter`; `CleanRLAdapter` (PPO/DQN); `SB3Adapter` (PPO/DQN/A2C with Gymnasium); `CustomRLAdapter` wraps existing `PPOAgent`/`DQNAgent`; `GymEnvWrapper` makes `ForexTradingEnv` SB3-compatible; factory `create_rl_adapter()`; tests in `tests/test_rl_adapter.py` |
 | **P3-5** | **Export scaler in ONNX graph (single artifact)** (`inference/onnx_inference.py`): `core_onnx_export` and `core_rl_execution_onnx_export` accept optional `scaler` (StandardScaler); `ScaledModel`/`ScaledRLModel` wrappers register mean/scale as ONNX buffers; exported models accept raw features and internally apply z-score normalization + NaN/Inf sanitization; all export paths updated (`export_to_onnx`, `export_ensemble_to_onnx`, `export_rl_to_onnx`, `export_rl_execution_to_onnx`) |
 
+### P3-6 — Per-Model Training Profiles (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-6** | **Auto-applied per-model training profiles** (`config/model_training_profile.py`): central `ModelTrainingProfile` registry defines 12 training dimensions per architecture (adversarial, curriculum, miner feedback, pretraining, SWA/EMA, RL, framework). Auto-detection fallback inspects architecture for unknown models. Applied in `_apply_model_profile()` via `training/model_factory.py::get_model_training_profile()`. Wired into `supervised_loop.py` for adversarial gating (`adversarial_models`), curriculum (self-paced/loss-weighting/miner feedback gating), miner init gating, and SWA. New CLI flags: `--adversarial-models`, `--curriculum-miner-feedback`, `--curriculum-miner-models`, `--curriculum-forgetting-threshold`, `--curriculum-easy-threshold`, `--use-self-paced`, `--use-loss-weighting`, `--self-paced-models`, `--loss-weighting-models`, `--training-framework`, `--pretrain-framework`, `--rl-framework`. Model-specific configs: haelt/tft/transformer get full adversarial+self-paced+miner; mamba gets adversarial+difficulty only; gnn gets graph_pgd+difficulty; expert gets no adversarial/swa/miner. All 6 models compile and validated. |
+
+### P3-7 — Adversarial + Curriculum Coordination (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-7** | **Adversarial epsilon scales with curriculum difficulty** (`training/supervised_loop.py`): after `CurriculumManager.update()`, `difficulty_level / max_level` ratio scales `PGDAttack.eps` via new `set_eps()` method. `--adversarial-eps-curriculum-scale` flag enables. GNN's `GraphAdversarialAttack` gets dual `set_eps()` / `set_edge_eps()` for node features vs edge dropout. |
+
+### P3-8 — Pretrain Hard Examples → Adversarial (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-8** | **Feature vulnerability from pretraining hard examples** (`pretrain/hard_example_mining.py`): `compute_feature_vulnerability()` computes per-dimension gradient-norm scores from hard indices, saves to `logs/hard_feature_dims.json`. `AdversarialAttack` base class gets `feature_eps_multipliers` (via `_get_effective_eps()`), `PGDAttack` and `GraphAdversarialAttack` apply per-dimension eps scaling. Supervised training loads vulnerability and passes to attack constructor. |
+
+### P3-9 — PGD Hardening (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-9** | **PGD improvements** (`training/adversarial_generator.py`): L2 gradient normalization (`normalize_grad=True`), gradual attack step warmup (`warmup_steps`), per-dimension epsilon multipliers (`feature_eps_multipliers`). Same hardening applied to `GraphAdversarialAttack`. Factory `create_adversarial_attack()` accepts new params. CLI: `--adversarial-normalize-grad`, `--adversarial-warmup-steps`. |
+
+### P3-10 — ONNX Scaler Verification (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-10** | **ONNX scaler fusion validation** (`inference/onnx_inference.py`): `verify_onnx_scaler()` exports model with fused scaler, runs identical random inputs through PyTorch `ScaledModel` and ONNX Runtime, asserts `allclose(rtol=1e-4)`. CLI subcommand: `python inference/onnx_inference.py verify --checkpoint ... --model ... --seq-len 60`. |
+
+### P3-11 — Unified Monitoring System (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-11** | **Unified monitoring system** (`monitoring/`): Complete observability stack replacing fragmented logging/checking. **Components:** `events.py` (unified event schema with 7 types), `event_bus.py` (async priority queue, deduplication, SQLite persistence, backpressure), `unified_logger.py` (single entry point replacing train_logger/sidecar/logging_utils, supports LOG/CHECK/ALERT/METRIC/CHECKPOINT/HEARTBEAT/PROGRESS), `checks/` (24 built-in: NaN/Inf, grad norm, loss plateau, embedding collapse, checkpoint validation, data drift PSI/KS, GPU/CPU/disk resources), `alerts/engine.py` (10 rules: NaN storm, OOM storm, grad explosion, loss divergence, val Sharpe collapse, LR too low, data drift, checkpoint load fail, circuit breaker, model demoted; rate limiting + multi-channel dispatch), `dashboard/app.py` (FastAPI + WebSocket live dashboard with Chart.js metrics, real-time event log, check results, system resources). **Integration:** `monitoring/__init__.py` single import; replaces `train_logger.py`, `sidecar.py`, `logging_utils.py`, `health_check.py`; 24 checks registered across 7 phases; alert rules with rate limiting + multi-channel (console, Discord, email, PagerDuty); web dashboard at `python -m monitoring.dashboard.app` with Chart.js metrics visualization, real-time event log, check results, system resources. All modules compile clean, integration tests pass. |
+
+### P3-12 — Data Pipeline Audit & Fixes (2026-08-09)
+
+| ID | Fix |
+|----|-----|
+| **P3-12** | **Data pipeline audit & fixes** (`training/dataset_builder.py`, `training/gpu_datasets.py`, `labeling/rl_reward_labeling.py`, `labeling/triple_barrier_labeling.py`, `config/feature_mask.py`): Deep audit of 14 files found 21 issues (2 Critical, 4 High, 10 Medium, 5 Low). 9 fixed: (C1) Multi-pair Zarr arrays created at full shape → changed to `shape=(0,)+dims` for safe `.append()`. (C2) `DataQualityReporter` class never instantiated → wired into `build_dataset_chunked()` to generate `data_quality_report.json`. (H2) Hardcoded 1.5 pip direction label threshold ignores per-bar session cost → now uses `tx_pips_arr` computed per-entry from session/slippage multipliers. (H3) `sanitize_array` hard-clips features to [-20,20] arbitrarily → disabled clip_range for features (NaN/Inf handled by col_medians), labels clip to [-50,50]. (H4) No scaler shape validation at DataLoader load time → added `n_features_in_` check before `.transform()` in `ZarrStreamDataset._decompress_block`. (M7) Feature mask allowlist missing `mid`, `spread`, `asia_london`, `london_ny`, `time_idx` → added 5 columns. (L1) Triple barrier sequential fallback passes `close` instead of `exit_long_path`/`exit_short_path` → fixed. (L4) Dead expression `tx_cost_pips * pip_size` → removed. H1 (scaler identity passthrough) confirmed intentional — per-fold scaling happens in `_fit_fold_scaler()`. |
+
 ### P1 — Unwired / mismatch remediations (2026-08-06)
 
 | ID | Fix |

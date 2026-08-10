@@ -138,21 +138,24 @@ def run_pipeline():
 
             # Run Feature Engineering
             print("Running Feature Engineering Pipeline...")
-            engineer = FeatureEngineer()
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                engineer = FeatureEngineer()
+                
+                engineer.build_chunked(
+                    bars=bars,
+                    cross_asset=cross_asset_dict,
+                    sentiment=sentiment_df,
+                    eco_act=eco_act,
+                    eco_fc=eco_fc,
+                    chunk_size=50_000,
+                    output_dir=tmpdir
+                )
 
-            processed = engineer.build_chunked(
-                bars=bars,
-                cross_asset=cross_asset_dict,
-                sentiment=sentiment_df,
-                eco_act=eco_act,
-                eco_fc=eco_fc,
-                chunk_size=50_000
-            )
-
-            # Save the result
-            out_file = out_dir / f"{pair}_features.parquet"
-            processed.write_parquet(out_file)
-            print(f"Successfully saved feature dataset to {out_file}")
+                # Save the result using lazy streaming to avoid OOM
+                out_file = out_dir / f"{pair}_features.parquet"
+                pl.scan_parquet(f"{tmpdir}/*.parquet").sink_parquet(out_file)
+                print(f"Successfully saved feature dataset to {out_file}")
 
         except Exception as e:
             print(f"Error processing {pair}: {e}")

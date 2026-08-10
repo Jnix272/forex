@@ -598,8 +598,104 @@ def _deploy_onnx_to_cpp_server(
     return result
 
 
+def _run_rl_via_adapter(cache_path, n_features, args, device, framework="cleanrl",
+                        n_samples=None, run=None):
+    """Opt-in RL fast path: route through ``create_rl_adapter``/``run_rl_with_adapter``.
+
+    Used only when ``--rl-framework`` is explicitly non-"custom" (cleanrl / sb3).
+    The adapter trains the external-framework policy and returns its metrics dict;
+    the in-house PPO/DQN path (currency + val + ONNX export) is untouched.
+    """
+    _ensure_bound()
+    print(f"\n[RL] framework={framework} | {args.rl_algo.upper()} | model={args.model}")
+    _require_rl_market_cache(cache_path)
+
+    total = int(n_samples or (_on_disk_sequence_count(cache_path) or 0))
+    train_start, train_n, _val_start, _val_n = _rl_train_val_slices(total, args)
+    if train_n < 256:
+        raise RuntimeError(
+            f"[RL] Insufficient trainable bars ({train_n}). Rebuild cache or reduce holdout."
+        )
+
+    train_env = _build_rl_env(cache_path, train_start, train_n, n_features, args, device)
+    print(
+        f"[RL] Train env | obs={train_env.obs_size} | market std={float(np.std(train_env.prices)):.6f}"
+    )
+
+    from training.rl_adapter import RLConfig, create_rl_adapter, run_rl_with_adapter
+
+    _algo = str(args.rl_algo).lower()
+    _algo_cfg = RL.get(_algo, {})
+    _n_episodes = int(args.rl_episodes)
+    _n_timesteps = int(getattr(args, "rl_total_timesteps", 0) or max(10_000, _n_episodes * 1000))
+
+    ckpt_dir = Path(args.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    cfg = RLConfig(
+        algorithm=_algo,
+        learning_rate=float(_algo_cfg.get("lr", 3e-4)),
+        gamma=float(_algo_cfg.get("gamma", 0.99)),
+        n_steps=int(_algo_cfg.get("n_steps", 2048)),
+        n_epochs=int(_algo_cfg.get("n_epochs", 10)),
+        gae_lambda=float(_algo_cfg.get("gae_lambda", 0.95)),
+        clip_range=float(_algo_cfg.get("clip_epsilon", 0.2)),
+        ent_coef=float(_algo_cfg.get("entropy_coeff", 0.01)),
+        vf_coef=float(_algo_cfg.get("value_coeff", 0.5)),
+        total_timesteps=_n_timesteps,
+        device=str(device),
+        seed=int(getattr(args, "seed", 1337)),
+        log_dir=str(ckpt_dir / "logs"),
+        save_path=str(ckpt_dir / f"rl_{_algo}_adapter.pt"),
+    )
+    adapter = create_rl_adapter(framework, _algo, cfg)
+
+    metrics = run_rl_with_adapter(
+        adapter, cache_path, np.arange(train_n),
+        prices=np.asarray(train_env.prices, dtype=np.float32),
+        atr=np.asarray(train_env.atr, dtype=np.float32),
+        spreads=np.asarray(train_env.spreads, dtype=np.float32),
+        features=np.asarray(train_env.features, dtype=np.float32),
+        total_timesteps=_n_timesteps,
+        n_episodes=_n_episodes,
+    )
+
+    _save_path = cfg.save_path
+    if getattr(adapter, "model", None) is not None and hasattr(adapter, "save"):
+        try:
+            adapter.save(_save_path)
+            print(f"[RL] Saved adapter policy -> {_save_path}")
+        except Exception as _save_exc:
+            print(f"[RL] Adapter checkpoint save skipped: {_save_exc}")
+
+    result = {
+        "framework": framework,
+        "algorithm": _algo,
+        "n_episodes": _n_episodes,
+        "total_timesteps": _n_timesteps,
+        "metrics": metrics,
+        "checkpoint": _save_path,
+        "status": "success",
+    }
+    try:
+        if not (isinstance(metrics, dict) and "returns" in metrics):
+            print(f"[RL] Adapter metrics keys: {sorted(metrics) if isinstance(metrics, dict) else type(metrics).__name__}")
+        if WANDB and run is not None:
+            _safe_wandb_log(run, {f"rl_adapter/{k}": v for k, v in metrics.items()
+                                  if isinstance(v, (int, float))})
+    except Exception as _rl_ae:
+        print(f"[RL] Adapter post-run logging skipped: {_rl_ae}")
+    print(f"[RL] Adapter run complete | framework={framework} algo={_algo}")
+    return result
+
+
 def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     _ensure_bound()
+    _rl_framework = str(getattr(args, "rl_framework", "custom") or "custom").lower()
+    if _rl_framework != "custom":
+        return _run_rl_via_adapter(
+            cache_path, n_features, args, device,
+            framework=_rl_framework, n_samples=n_samples, run=run,
+        )
     print(f"\n[RL] {args.rl_algo.upper()} | {args.rl_episodes} episodes | model={args.model}")
     _require_rl_market_cache(cache_path)
 

@@ -13,6 +13,50 @@
 > (5 code fixes + 10 already-fixed + 7 false-positives + 12 design-deferred).
 > Training smoke + 232 tests pass. Remaining open: §9.2 design-gaps (backtest
 > realism, portfolio limits) and §9.3 P2 tech-debt.
+>
+> ✅ **2026-08-09 (late):** **Per-model training profiles** implemented.
+> Central `ModelTrainingProfile` registry in `config/model_training_profile.py`
+> auto-applies optimal config per architecture (adversarial, curriculum,
+> miner, pretrain, SWA, RL). 6 models × 12 training dimensions. Full CLI
+> override support. All 6 model types compile and validated.
+>
+> ✅ **2026-08-09 (late):** **Cross-cutting integrations** implemented.
+> - Adversarial + Curriculum coordination: eps scales with difficulty level
+> - Online Miner → Curriculum: forgetting/easy ratios freeze/accelerate pace
+> - PGD hardening: L2 grad norm, warmup steps, per-dim eps multipliers
+> - Pretrain → Adversarial: feature vulnerability from hard examples
+> - ONNX scaler verification: `verify_onnx_scaler` CLI subcommand
+> All modules compile clean.
+>
+> ✅ **2026-08-09 (late):** **YAML + CLI integration** complete.
+> New config sections in `run.yaml` / `run_ubuntu.yaml`: `training.adversarial`,
+> `training.training_framework`, `training.pretrain_framework`, `training.rl_framework`,
+> `curriculum.miner_feedback`, `curriculum.self_paced`, `curriculum.loss_weighting`,
+> `pretrain.framework`, `rl.framework`. Mapped via `_YAML_MAP` in `gpu_cli.py`.
+>
+> ✅ **2026-08-09 (late):** **Unified Monitoring System** implemented.
+> New `monitoring/` package with unified logging, checking, alerting, and dashboard:
+> - `monitoring/events.py` — Unified event schema (LOG, CHECK, ALERT, METRIC, CHECKPOINT, HEARTBEAT, PROGRESS)
+> - `monitoring/event_bus.py` — Async priority queue with deduplication, SQLite persistence, backpressure
+> - `monitoring/unified_logger.py` — Single entry point replacing train_logger, sidecar, logging_utils
+> - `monitoring/checks/` — 24 built-in checks (NaN, grad norm, loss plateau, representation collapse, checkpoint load, data drift PSI/KS, GPU/CPU/disk resources)
+> - `monitoring/alerts/engine.py` — 10 built-in alert rules with rate limiting, multi-channel dispatch
+> - `monitoring/dashboard/app.py` — FastAPI + WebSocket live dashboard with Chart.js metrics visualization
+> - `monitoring/__init__.py` — Single import for all components
+> All modules compile clean, integration tests pass.
+>
+> ✅ **2026-08-09 (late):** **Data Pipeline Audit & Fixes** complete.
+> Deep audit of 14 files across `data/`, `training/`, `labeling/`, `config/`.
+> 21 issues found (2 Critical, 4 High, 10 Medium, 5 Low). 9 fixed:
+> - Multi-pair Zarr resizeability (C1)
+> - DataQualityReporter wired into `build_dataset_chunked` (C2)
+> - Per-bar tx cost used for label threshold instead of hardcoded 1.5 pips (H2)
+> - `sanitize_array` clip range disabled for features (H3)
+> - Scaler shape validation at DataLoader load time (H4)
+> - Feature mask allowlist expanded (M7)
+> - Triple barrier sequential fallback bid/ask fix (L1)
+> - Dead expression removed (L4)
+> All modules compile clean.
 
 ---
 

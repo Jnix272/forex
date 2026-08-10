@@ -27,6 +27,7 @@ from pretrain.extended_trainers import (
     ForecastPretextTrainer,
     VAESeqTrainer,
 )
+from pretrain.hard_example_mining import PretrainHardExampleMiner
 
 _HOST = None
 _BOUND = False
@@ -485,7 +486,108 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
     return model
 
 
+def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
+                              framework="lightly", run=None):
+    """Opt-in pretraining fast path: route through ``create_pretrain_adapter``.
+
+    Used only when ``--pretrain-framework`` is explicitly non-"custom". The
+    adapter trains its own encoder (e.g. TS2Vec/Lightly) over the trainable
+    window and returns a metrics dict; the supervised ``model`` is returned
+    unchanged (external frameworks do not consume the in-house encoder).
+    """
+    from training.pretrain_adapter import PretrainConfig, create_pretrain_adapter, run_pretrain_with_adapter
+    from training.cache_integrity import _zarr_open_group
+
+    _method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
+    print(f"\n[Pretrain] framework={framework} | method={_method} | model={getattr(args, 'model', None)}")
+
+    if not (ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir()):
+        raise RuntimeError(
+            "[Pretrain] adapter path requires a .zarr cache; either rebuild the cache "
+            "as zarr or run with --pretrain-framework custom."
+        )
+
+    _z = _zarr_open_group(cache_path, mode="r")
+    n_total = min(int(_z["X"].shape[0]), int(_z["y"].shape[0]))
+    _source_n_total = int(n_total)
+    _cap = int(_trainable_max_index(n_total, args))
+    if 0 < _cap < n_total:
+        n_total = _cap
+        print(f"[Pretrain] Holdout-safe index cap: {n_total:,} trainable windows")
+
+    _holdout_n = _promotion_holdout_n(_source_n_total, args)
+    if not bool(n_total <= max(0, _source_n_total - _holdout_n)):
+        raise RuntimeError(
+            f"Pretrain window overlaps promotion holdout "
+            f"(pretrain_end={n_total}, holdout_start={max(0, _source_n_total - _holdout_n)})"
+        )
+
+    train_indices = np.arange(n_total, dtype=np.int64)
+    seq_len = int(args.seq_len)
+    _ckpt_dir = Path(args.checkpoint_dir)
+    _ckpt_dir.mkdir(parents=True, exist_ok=True)
+    cfg = PretrainConfig(
+        input_dims=int(n_features),
+        output_dims=int(getattr(args, "pretrain_embed_dim", 320) or 320),
+        hidden_dims=int(getattr(args, "pretrain_hidden_dim", 64) or 64),
+        batch_size=int(getattr(args, "pretrain_batch", PRETRAIN.get("pretrain_batch", 256))),
+        max_epochs=max(1, int(getattr(args, "pretrain_epochs", 30) or 30)),
+        max_train_length=int(seq_len) if seq_len > 0 else None,
+        device=str(device),
+        save_path=str(_ckpt_dir / f"pretrain_{framework}_encoder.pt"),
+        verbose=True,
+    )
+    adapter = create_pretrain_adapter(framework, cfg)
+
+    try:
+        results = run_pretrain_with_adapter(
+            adapter, cache_path, train_indices,
+            method=_method,
+            seq_len=seq_len,
+            n_features=int(n_features),
+        )
+    except Exception as _ad_exc:
+        print(f"[Pretrain] Adapter run failed: {_ad_exc}")
+        raise
+
+    if getattr(adapter, "model", None) is not None and hasattr(adapter, "save"):
+        try:
+            adapter.save(cfg.save_path)
+            print(f"[Pretrain] Saved adapter encoder -> {cfg.save_path}")
+        except Exception as _save_exc:
+            print(f"[Pretrain] Adapter encoder save skipped: {_save_exc}")
+
+    try:
+        _update_pretrain_report(args, {
+            "model_name": getattr(args, "model", None),
+            "pretrain_enabled": True,
+            "status": "completed",
+            "method": _method,
+            "framework": framework,
+            "cache_path": str(cache_path),
+            "source_windows": int(_source_n_total),
+            "trainable_windows_used_by_pretrain": int(n_total),
+            "adapter_metrics": results,
+            "checkpoint_path": str(cfg.save_path),
+            "loads_into_supervised_model": False,
+        })
+    except Exception as _rp_err:
+        print(f"[Pretrain] WARN: failed to update pretrain report: {_rp_err}")
+    print(f"[Pretrain] Adapter run complete | framework={framework} method={_method} | windows={n_total:,}")
+    return model
+
+
 def run_pretrain(model, cache_path, n_features, args, device, run=None):
+    _ensure_bound()
+    _pf = str(getattr(args, "pretrain_framework", "custom") or "custom").lower()
+    if _pf != "custom":
+        try:
+            return _run_pretrain_via_adapter(
+                model, cache_path, n_features, args, device,
+                framework=_pf, run=run,
+            )
+        except Exception as _pf_exc:
+            print(f"[Pretrain] Adapter path unavailable ({_pf_exc}); falling back to built-in trainer.")
     _ensure_bound()
     _method = _normalize_pretrain_method(
         str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
@@ -1145,6 +1247,25 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         print(f"[Pretrain] Done (early handoff). avg_loss={avg_loss:.4f}")
     else:
         print(f"[Pretrain] Done. avg_loss={avg_loss:.4f}")
+
+    # Compute feature vulnerability from hard examples for adversarial training (Task 2)
+    try:
+        _he_path = Path("logs/hard_examples.json")
+        if _he_path.exists():
+            import json
+            _he_data = json.loads(_he_path.read_text(encoding="utf-8"))
+            _he_indices = _he_data.get("indices", [])
+            if _he_indices:
+                # Load full training data to compute vulnerability
+                # Use the same data reader as pretraining
+                _X_full = np.asarray(x_reader[:n_total])  # (n_total, seq_len, n_features)
+                _miner = PretrainHardExampleMiner()
+                _vuln = _miner.compute_feature_vulnerability(_X_full, _he_indices, method="gradient_norm")
+                _miner.save_vulnerability_scores(_vuln)
+                print(f"[Pretrain] Computed feature vulnerability for {len(_vuln)} features -> logs/hard_feature_dims.json")
+    except Exception as _vuln_e:
+        print(f"[Pretrain] Feature vulnerability computation failed: {_vuln_e}")
+
     _update_pretrain_report(args, {
         "status": "completed",
         "method": _method,

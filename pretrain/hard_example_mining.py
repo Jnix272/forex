@@ -5,8 +5,13 @@ Extends hard-example mining into the unsupervised phase by targeting
 confident-wrong windows, missed opportunities, and regime transitions.
 """
 
+import json
 import logging
 import random
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
 
 
 class PretrainHardExampleMiner:
@@ -47,3 +52,78 @@ class PretrainHardExampleMiner:
 
         random.shuffle(batch)
         return batch
+
+    def compute_feature_vulnerability(
+        self,
+        X: np.ndarray,
+        hard_indices: list,
+        method: str = "gradient_norm",
+    ) -> np.ndarray:
+        """
+        Compute per-dimension vulnerability scores from hard examples.
+        
+        Args:
+            X: Full training data array of shape (n_samples, seq_len, n_features)
+            hard_indices: Indices of hard examples
+            method: "gradient_norm" | "variance" | "range" - how to compute vulnerability
+            
+        Returns:
+            Per-feature vulnerability scores (n_features,) - higher = more vulnerable
+        """
+        if not hard_indices or len(hard_indices) == 0:
+            return np.ones(X.shape[-1], dtype=np.float32)
+        
+        # Extract hard example windows
+        hard_data = X[hard_indices]  # (n_hard, seq_len, n_features)
+        
+        if method == "gradient_norm":
+            # Compute gradient of loss w.r.t input (approximate via temporal gradient)
+            # For each feature, compute temporal gradient magnitude across hard examples
+            grad_magnitudes = []
+            for t in range(1, hard_data.shape[1]):
+                diff = hard_data[:, t, :] - hard_data[:, t-1, :]  # (n_hard, n_features)
+                grad_magnitudes.append(np.abs(diff).mean(axis=0))
+            vulnerability = np.mean(grad_magnitudes, axis=0) if grad_magnitudes else np.zeros(X.shape[-1])
+            
+        elif method == "variance":
+            # High variance in hard examples = model uncertain about this feature
+            vulnerability = hard_data.var(axis=(0, 1))  # (n_features,)
+            
+        elif method == "range":
+            # Large range in hard examples = feature varies widely on difficult samples
+            vulnerability = hard_data.max(axis=(0, 1)) - hard_data.min(axis=(0, 1))
+            
+        else:
+            raise ValueError(f"Unknown vulnerability method: {method}")
+        
+        # Normalize to [0.1, 2.0] range for epsilon multipliers
+        # 0.1 = less attack, 2.0 = double attack on this dimension
+        vuln_min, vuln_max = vulnerability.min(), vulnerability.max()
+        if vuln_max > vuln_min:
+            normalized = 0.1 + 1.9 * (vulnerability - vuln_min) / (vuln_max - vuln_min)
+        else:
+            normalized = np.ones_like(vulnerability)
+        
+        return normalized.astype(np.float32)
+
+    def save_vulnerability_scores(self, vulnerability: np.ndarray, path: str = "logs/hard_feature_dims.json"):
+        """Save per-feature vulnerability scores for adversarial training."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "vulnerability_scores": vulnerability.tolist(),
+            "n_features": len(vulnerability),
+            "method": "gradient_norm",
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+        self.logger.info(f"Saved feature vulnerability scores to {path}")
+
+    @staticmethod
+    def load_vulnerability_scores(path: str = "logs/hard_feature_dims.json") -> Optional[np.ndarray]:
+        """Load per-feature vulnerability scores for adversarial training."""
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            return np.array(data.get("vulnerability_scores", []), dtype=np.float32)
+        except Exception:
+            return None

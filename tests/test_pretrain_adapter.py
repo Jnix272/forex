@@ -9,6 +9,12 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
+try:
+    import lightly
+    LIGHTLY_AVAILABLE = True
+except ImportError:
+    LIGHTLY_AVAILABLE = False
+
 
 class TestPretrainConfig:
     """Test PretrainConfig dataclass."""
@@ -137,7 +143,7 @@ class TestLightlySoloAdapter:
         assert adapter.framework == "lightly"
         assert adapter.method == "simclr"
     
-    @pytest.mark.skipif(True, reason="lightly not installed in test environment")
+    @pytest.mark.skipif(not LIGHTLY_AVAILABLE, reason="lightly not installed in test environment")
     def test_lightly_fit_encode(self):
         from training.pretrain_adapter import LightlySoloAdapter, PretrainConfig
         
@@ -169,7 +175,7 @@ class TestLightlySoloAdapter:
         
         assert reprs.shape == (5, 16)
     
-    @pytest.mark.skipif(True, reason="lightly not installed in test environment")
+    @pytest.mark.skipif(not LIGHTLY_AVAILABLE, reason="lightly not installed in test environment")
     def test_lightly_invalid_method(self):
         from training.pretrain_adapter import LightlySoloAdapter, PretrainConfig
         

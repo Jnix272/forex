@@ -77,7 +77,7 @@ class TestScanOutcomesSequential:
         close = 1.1000 + np.arange(n) * 0.0005
         atr = np.full(n, 0.0005)
         lo, tl, so, ts = _scan_outcomes_sequential(
-            close, close, close, atr,
+            close, close, close, close, atr,
             profit_mult=1.5, stop_mult=1.0,
             vertical_bars=15, execution_delay_bars=0,
         )
@@ -91,7 +91,7 @@ class TestScanOutcomesSequential:
         close = 1.1000 - np.arange(n) * 0.0005
         atr = np.full(n, 0.0005)
         lo, tl, so, ts = _scan_outcomes_sequential(
-            close, close, close, atr,
+            close, close, close, close, atr,
             profit_mult=1.5, stop_mult=1.0,
             vertical_bars=15, execution_delay_bars=0,
         )
@@ -103,7 +103,7 @@ class TestScanOutcomesSequential:
         close = np.array([1.1, 1.2, 1.3])
         atr = np.array([0.0005, 0.0005, 0.0005])
         lo, tl, so, ts = _scan_outcomes_sequential(
-            close, close, close, atr,
+            close, close, close, close, atr,
             profit_mult=1.5, stop_mult=1.0,
             vertical_bars=10, execution_delay_bars=0,
         )
@@ -115,7 +115,7 @@ class TestScanOutcomesSequential:
         close = 1.1 + np.cumsum(np.random.default_rng(1).normal(0, 0.0002, n))
         atr = np.full(n, 0.0005)
         lo, tl, so, ts = _scan_outcomes_sequential(
-            close, close, close, atr,
+            close, close, close, close, atr,
             profit_mult=1.5, stop_mult=1.0,
             vertical_bars=10, execution_delay_bars=1,
         )
@@ -127,7 +127,7 @@ class TestScanOutcomesSequential:
         close = 1.1 + np.cumsum(np.random.default_rng(7).normal(0, 0.0003, n))
         atr = np.full(n, 0.0005)
         lo, tl, so, ts = _scan_outcomes_sequential(
-            close, close, close, atr,
+            close, close, close, close, atr,
             profit_mult=1.5, stop_mult=1.0,
             vertical_bars=10, execution_delay_bars=0,
         )
@@ -142,10 +142,10 @@ class TestScanOutcomesSequential:
         close = np.ones(n) * 1.1
         atr = np.full(n, 0.0005)
         lo0, *_ = _scan_outcomes_sequential(
-            close, close, close, atr, 1.5, 1.0, 10, 0,
+            close, close, close, close, atr, 1.5, 1.0, 10, 0,
         )
         lo3, *_ = _scan_outcomes_sequential(
-            close, close, close, atr, 1.5, 1.0, 10, 3,
+            close, close, close, close, atr, 1.5, 1.0, 10, 3,
         )
         assert len(lo3) == len(lo0) - 3
 

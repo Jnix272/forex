@@ -14,6 +14,10 @@ import numpy as np
 import torch
 
 from config import settings as _settings
+from config.model_training_profile import (
+    get_training_profile,
+    ModelTrainingProfile,
+)
 from config.settings import (
     CURRICULUM as SETTINGS_CURRICULUM,
     DISTILLATION,
@@ -185,7 +189,50 @@ _YAML_MAP = {
     "direction_training.use_volatility_sampler": "use_volatility_sampler",
     "direction_training.label_smoothing": "label_smoothing",
 
-    "pretrain.enabled":         "pretrain",
+    # Adversarial (new)
+    "training.adversarial.enabled": "enable_adversarial",
+    "training.adversarial.method": "adversarial_method",
+    "training.adversarial.eps": "adversarial_eps",
+    "training.adversarial.alpha": "adversarial_alpha",
+    "training.adversarial.steps": "adversarial_steps",
+    "training.adversarial.prob": "adversarial_prob",
+    "training.adversarial.normalize_grad": "adversarial_normalize_grad",
+    "training.adversarial.warmup_steps": "adversarial_warmup_steps",
+    "training.adversarial.eps_curriculum_scale": "adversarial_eps_curriculum_scale",
+    "training.adversarial.models": "adversarial_models",
+
+    # Framework selection (new)
+    "training.training_framework": "training_framework",
+    "training.pretrain_framework": "pretrain_framework",
+    "training.rl_framework": "rl_framework",
+
+    # Pretrain framework (new)
+    "pretrain.enabled": "pretrain",
+    "pretrain.framework": "pretrain_framework",
+
+    # RL framework (new)
+    "rl.framework": "rl_framework",
+
+    # Curriculum miner feedback (new)
+    "curriculum.miner_feedback.enabled": "curriculum_miner_feedback",
+    "curriculum.miner_feedback.models": "curriculum_miner_models",
+    "curriculum.miner_feedback.forgetting_threshold": "curriculum_forgetting_threshold",
+    "curriculum.miner_feedback.easy_threshold": "curriculum_easy_threshold",
+    "curriculum.miner_feedback.freeze_patience": "curriculum_freeze_patience",
+
+    # Self-paced learning (new)
+    "curriculum.self_paced.enabled": "use_self_paced",
+    "curriculum.self_paced.pace": "self_paced_pace",
+    "curriculum.self_paced.lambda_pace": "self_paced_lambda",
+    "curriculum.self_paced.models": "self_paced_models",
+
+    # Loss weighting (new)
+    "curriculum.loss_weighting.enabled": "use_loss_weighting",
+    "curriculum.loss_weighting.scheme": "loss_weighting_scheme",
+    "curriculum.loss_weighting.focal_gamma": "loss_weighting_focal_gamma",
+    "curriculum.loss_weighting.models": "loss_weighting_models",
+
+    # Backward-compat aliases for older run.yaml layouts
     "pretrain.ablation":        "pretrain_ablation",
     "pretrain.ablation_models": "pretrain_ablation_models",
 
@@ -375,6 +422,20 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
 
     if isinstance(cfg.get("curriculum"), dict):
         defaults["curriculum"] = cfg["curriculum"]
+    if isinstance(cfg.get("training"), dict):
+        adv = cfg["training"].get("adversarial")
+        if isinstance(adv, dict):
+            defaults["training_adversarial"] = adv
+    if isinstance(cfg.get("curriculum"), dict):
+        miner_fb = cfg["curriculum"].get("miner_feedback")
+        if isinstance(miner_fb, dict):
+            defaults["curriculum_miner_feedback"] = miner_fb
+        sp = cfg["curriculum"].get("self_paced")
+        if isinstance(sp, dict):
+            defaults["curriculum_self_paced"] = sp
+        lw = cfg["curriculum"].get("loss_weighting")
+        if isinstance(lw, dict):
+            defaults["curriculum_loss_weighting"] = lw
     if isinstance(cfg.get("feature_ablation"), dict):
 
         defaults["feature_ablation"] = cfg["feature_ablation"]
@@ -729,6 +790,45 @@ def parse_args():
         choices=["difficulty", "self_paced", "loss_weighting", "adaptive", "combined"],
         help="CurriculumManager combination mode used with --curriculum-manager.",
     )
+    p.add_argument(
+        "--curriculum-callback",
+        action="store_true",
+        default=False,
+        help="Build the per-epoch curriculum controller through the "
+             "create_curriculum_callback() factory (CustomCurriculumAdapter) "
+             "instead of create_curriculum_manager(). Requires --curriculum-manager.",
+    )
+    p.add_argument(
+        "--curriculum-miner-feedback",
+        action="store_true",
+        help="Enable Online Miner -> Curriculum feedback (forgetting/easy ratios inform curriculum pace).")
+    p.add_argument("--curriculum-miner-models", type=str, default="",
+                   help="Comma-separated list of models to enable miner feedback for (default: tft,transformer,haelt).")
+    p.add_argument("--curriculum-forgetting-threshold", type=float, default=0.15,
+                   help="Forgetting rate threshold to freeze curriculum advancement (default: 0.15).")
+    p.add_argument("--curriculum-easy-threshold", type=float, default=0.60,
+                   help="Easy sample ratio threshold to accelerate curriculum (default: 0.60).")
+    p.add_argument("--curriculum-freeze-patience", type=int, default=1,
+                   help="Epochs to hold curriculum after freeze trigger (default: 1).")
+    p.add_argument("--use-self-paced", action="store_true",
+                   help="Enable SelfPacedLearning curriculum (jointly optimizes model params and sample inclusion).")
+    p.add_argument("--use-loss-weighting", action="store_true",
+                   help="Enable LossBasedWeighting curriculum (inverse/focal/threshold/softmax weighting).")
+    p.add_argument("--self-paced-pace", type=str, default="linear",
+                   choices=["linear", "exponential", "cosine"],
+                   help="SelfPacedLearning pace schedule (default: linear).")
+    p.add_argument("--self-paced-lambda", type=float, default=1.0,
+                   help="SelfPacedLearning lambda parameter (default: 1.0).")
+    p.add_argument("--loss-weighting-scheme", type=str, default="focal",
+                   choices=["inverse", "focal", "threshold", "softmax"],
+                   help="LossBasedWeighting scheme (default: focal).")
+    p.add_argument("--loss-weighting-focal-gamma", type=float, default=2.0,
+                   help="Focal loss gamma for LossBasedWeighting (default: 2.0).")
+    p.add_argument("--self-paced-models", type=str, default="",
+                   help="Comma-separated list of models to enable self-paced for (default: tft,transformer,haelt).")
+    p.add_argument("--loss-weighting-models", type=str, default="",
+                   help="Comma-separated list of models to enable loss weighting for (default: tft,transformer,haelt).")
+
     p.add_argument("--amp",    action="store_true", default=False,
                    help="Enable AMP (automatic mixed precision) for faster training. Disabled by default to avoid NaNs.")
     p.add_argument("--no-amp", action="store_true", default=False,
@@ -800,6 +900,18 @@ def parse_args():
     p.add_argument("--swa-lr", type=float,
                    default=float(TRAINING.get("swa_lr", 1e-5)),
                    help="Constant learning rate used by the SWA scheduler.")
+    p.add_argument(
+        "--training-framework",
+        choices=["custom", "lightning", "composer"],
+        default="custom",
+        help="Training framework: custom (built-in loop), lightning (PyTorch Lightning), composer (Mosaic Composer).",
+    )
+    p.add_argument(
+        "--rl-framework",
+        choices=["custom", "cleanrl", "sb3"],
+        default="custom",
+        help="RL framework: custom (built-in), cleanrl, sb3 (Stable-Baselines3).",
+    )
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument(
         "--label-method",
@@ -914,6 +1026,12 @@ def parse_args():
         choices=["byol", "tscl", "masked", "vae", "autoencoder", "cluster", "forecast", "drift"],
         default=str(PRETRAIN.get("method", "byol")).lower(),
         help="Self-supervised pretrain: byol (default), tscl, masked, vae, cluster, forecast, drift",
+    )
+    p.add_argument(
+        "--pretrain-framework",
+        choices=["custom", "lightly", "solo"],
+        default="custom",
+        help="Pretraining framework: custom (built-in), lightly (lightly-ssl), solo (solo-learn).",
     )
     p.add_argument("--pretrain-epochs",  type=int,   default=30)
     p.add_argument("--pretrain-max-epochs", type=int, default=0,
@@ -1218,6 +1336,12 @@ def parse_args():
         action="store_false",
         help="Disable the dataset feature-schema gate (not recommended).",
     )
+    p.add_argument("--min-pair-years", type=int, default=2,
+                   help="Minimum years of data required per pair for multi-pair training (default: 2).")
+    p.add_argument("--expected-pair-years", type=int, default=18,
+                   help="Expected years of data per pair — warns if less (default: 18).")
+    p.add_argument("--coverage-report", action="store_true",
+                   help="Generate data coverage report (data_coverage_report.json).")
     p.add_argument("--auto-rebuild-on-mismatch", action="store_true",
                    help="If cache integrity fails, delete cache/sidecars and rebuild automatically.")
     p.add_argument("--pretrain-ablation", type=str, nargs="?", const="true", choices=["true", "false", "auto"], default="auto",
@@ -1307,6 +1431,14 @@ def parse_args():
                    help="Step size for PGD/FreeLB (default: 0.01).")
     p.add_argument("--adversarial-steps", type=int, default=7,
                    help="Number of attack steps for PGD/FreeLB (default: 7).")
+    p.add_argument("--adversarial-normalize-grad", action="store_true",
+                   help="L2 normalize gradients in PGD/Graph PGD (Madry best practice).")
+    p.add_argument("--adversarial-warmup-steps", type=int, default=0,
+                   help="Gradually increase attack steps over this many training steps (0=disabled).")
+    p.add_argument("--adversarial-eps-curriculum-scale", action="store_true",
+                   help="Scale adversarial epsilon with curriculum difficulty level (eps *= level/n_levels).")
+    p.add_argument("--adversarial-models", type=str, default="",
+                   help="Comma-separated list of models to enable adversarial for (default: all except expert).")
 
     # -- Risk engine (Improvement #1) — optional live/dry-run enforcement config --
     p.add_argument("--risk-config", type=str, default=None, metavar="PATH",
@@ -1750,11 +1882,65 @@ def _apply_model_profile(args, model_name: str, *, enabled: bool = True):
         else:
             log_parts.append(f"{dest}={value}")
 
+    # Apply training profile (adversarial, curriculum, miner, pretrain, SWA, etc.)
+    _apply_training_profile(args, model_name, cli_overrides, log_parts)
+
     args.model = model_name
     args._profile_applied = True
     if log_parts:
         print(f"[Profile] {model_name}: " + " ".join(log_parts))
     return args
+
+
+def _apply_training_profile(args, model_name: str, cli_overrides: set, log_parts: list):
+    """Apply per-model training dimensions from ModelTrainingProfile."""
+    try:
+        tprofile: ModelTrainingProfile = get_training_profile(model_name)
+    except Exception as exc:
+        print(f"[TrainingProfile] Skipped for {model_name}: {exc}")
+        return
+
+    # Map training profile fields to args (only if not CLI-overridden)
+    training_fields = {
+        # Adversarial
+        "enable_adversarial": tprofile.adversarial_enabled,
+        "adversarial_method": tprofile.adversarial_method,
+        "adversarial_eps": tprofile.adversarial_eps,
+        "adversarial_alpha": tprofile.adversarial_alpha,
+        "adversarial_steps": tprofile.adversarial_steps,
+        "adversarial_prob": tprofile.adversarial_prob,
+        # Curriculum
+        "curriculum_manager": getattr(args, "curriculum_manager", True),
+        "curriculum_manager_mode": tprofile.curriculum_mode,
+        # Self-paced / loss weighting flags
+        "use_self_paced": tprofile.use_self_paced,
+        "use_loss_weighting": tprofile.use_loss_weighting,
+        # Online Miner feedback
+        "curriculum_miner_feedback": tprofile.miner_feedback,
+        "curriculum_forgetting_threshold": tprofile.forgetting_threshold,
+        "curriculum_easy_threshold": tprofile.easy_threshold,
+        "curriculum_freeze_patience": tprofile.freeze_patience,
+        # Pretraining
+        "pretrain_method": tprofile.pretrain_method,
+        "pretrain_framework": tprofile.pretrain_framework,
+        # SWA
+        "swa_enabled": tprofile.swa_enabled,
+        "swa_start_frac": tprofile.swa_start_frac,
+        "swa_lr": tprofile.swa_lr,
+        # EMA
+        "pretrain_ema_decay": tprofile.ema_decay,
+        # Framework
+        "training_framework": tprofile.training_framework,
+        # RL
+        "rl_framework": tprofile.rl_framework,
+        "rl_use_lstm": tprofile.rl_use_lstm,
+    }
+
+    for dest, value in training_fields.items():
+        if dest in cli_overrides or not hasattr(args, dest):
+            continue
+        setattr(args, dest, value)
+        log_parts.append(f"{dest}={value}")
 
 
 def _member_training_args(base_args, model_name: str, member_idx: int, total_members: int):
@@ -1806,7 +1992,6 @@ def _member_training_args(base_args, model_name: str, member_idx: int, total_mem
             out.pretrain_method = "cluster"
         elif "expert" in model_name.lower():
             out.pretrain_method = "tscl"
-
 
     return out
 

@@ -45,6 +45,25 @@ curriculum:
     max_difficulty: 2
   difficulty_spread_threshold: 1.5
   difficulty_spread_threshold_hard: 2.0
+  # ── Online Miner → Curriculum feedback (new) ─
+  miner_feedback:
+    enabled: false
+    models: ""  # comma-separated, e.g. "haelt,tft,transformer"
+    forgetting_threshold: 0.15
+    easy_threshold: 0.60
+    freeze_patience: 1
+  # ── Self-Paced Learning (new) ─
+  self_paced:
+    enabled: false
+    pace: "linear"
+    lambda_pace: 1.0
+    models: ""  # comma-separated
+  # ── Loss-Based Weighting (new) ─
+  loss_weighting:
+    enabled: false
+    scheme: "focal"
+    focal_gamma: 2.0
+    models: ""  # comma-separated
   feature_groups:
     # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
     # values fit training.epochs=6 so staged groups actually unlock.
@@ -252,6 +271,12 @@ data:
   integrity_gate: true
   momentum_window: 20
   n_ticks: 20000000
+  min_pair_years: 2      # Minimum years of data per pair for multi-pair training
+  expected_pair_years: 18  # Warn if any pair has less than this
+  chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number
+  shuffle_buffer_size: 16384  # Cross-chunk shuffle reservoir size (0 to disable)
+  use_feature_cache: false    # Load pre-built feature cache instead of running FE per window
+  feature_cache_dir: "data/features"  # Directory for feature cache parquet files
   pair: EURUSD
   pair_align: inner
   pair_embed_dim: 16
@@ -478,6 +503,7 @@ pretrain:
   recon_hidden_dim: 512
   regime_aware: true
   sample_windows: 4096
+  framework: "custom"  # custom|lightly|solo
 # ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
 quick:
   enabled: false
@@ -556,9 +582,10 @@ rl:
     pnl: 1.0
     tx_cost: 0.3
   val_frac: 0.15
+  framework: "custom"  # custom|cleanrl|sb3
 # ── Trading strategy parameters ────────────────────────────────────────────
 strategy:
-  bar_freq: 1min
+  bar_freq: "1min"
   lookahead_bars: 30
   mode: scalping
   profit_target_atr: 1.2
@@ -617,6 +644,22 @@ training:
   use_volatility_sampler: true
   val_split: 0.2
   weight_decay: 0.001
+  # ── Adversarial training (new) ─
+  adversarial:
+    enabled: false
+    method: "pgd"
+    eps: 0.3
+    alpha: 0.01
+    steps: 7
+    prob: 0.01
+    normalize_grad: false
+    warmup_steps: 0
+    eps_curriculum_scale: false
+    models: ""  # comma-separated, e.g. "haelt,tft,transformer,mamba,gnn"
+  # ── Framework selection (new) ─
+  training_framework: "custom"  # custom|lightning|composer
+  pretrain_framework: "custom"  # custom|lightly|solo
+  rl_framework: "custom"  # custom|cleanrl|sb3
 # ── Validation strategy: purged-embargo walk-forward ────────────────────────
 validation:
   embargo_bars: 60

@@ -195,6 +195,8 @@ _MASK_ALLOWLIST: frozenset[str] = frozenset({
     "bid_close", "ask_close", "bid_open", "ask_open",
     "timestamp_utc", "pair", "session_label", "regime_class", "regime_label",
     "no_trade_score",
+    # Auxiliary joining / labeling columns (safe to retain but not curriculum-staged)
+    "mid", "spread", "asia_london", "london_ny", "time_idx",
 })
 
 

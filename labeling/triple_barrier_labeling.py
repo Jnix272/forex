@@ -36,7 +36,8 @@ def _default_labeling() -> dict[str, Any]:
 
 
 def _scan_outcomes_sequential(
-    close: np.ndarray,
+    exit_long_path: np.ndarray,
+    exit_short_path: np.ndarray,
     entry_long: np.ndarray,
     entry_short: np.ndarray,
     atr: np.ndarray,
@@ -44,24 +45,18 @@ def _scan_outcomes_sequential(
     stop_mult: float,
     vertical_bars: int,
     execution_delay_bars: int = 0,
-    bid: np.ndarray = None,
-    ask: np.ndarray = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Reference implementation (single-threaded). Used for tests and fallback.
 
     DS-001: When bid/ask arrays are provided, long exits are evaluated at bid
     and short exits at ask (realistic execution pricing).
     """
-    n = close.shape[0]
+    n = exit_long_path.shape[0]
     delay = max(0, int(execution_delay_bars))
     n_valid = n - vertical_bars - delay
     if n_valid <= 0:
         z = np.zeros(0, dtype=np.int8)
         return z, z.astype(np.int32), z, z.astype(np.int32)
-
-    # DS-001: use bid for long exits, ask for short exits
-    exit_long_path = bid if bid is not None else close
-    exit_short_path = ask if ask is not None else close
 
     lo_o = np.zeros(n_valid, dtype=np.int8)
     tl_o = np.zeros(n_valid, dtype=np.int32)
@@ -323,15 +318,14 @@ def _run_barrier_scan(
                     stop_mult,
                     vertical_bars,
                     delay,
-                    bid=bid,
-                    ask=ask,
                 ),
                 "sequential_fallback",
             )
 
     return (
         *_scan_outcomes_sequential(
-            close,
+            exit_long_path,
+            exit_short_path,
             entry_long,
             entry_short,
             atr,
@@ -339,8 +333,6 @@ def _run_barrier_scan(
             stop_mult,
             vertical_bars,
             delay,
-            bid=bid,
-            ask=ask,
         ),
         "sequential",
     )

@@ -413,6 +413,16 @@ class ZarrStreamDataset(IterableDataset):
             offset = None  # not contiguous; indices are not predictable
         np.nan_to_num(X_blk, copy=False, nan=0.0, posinf=1e6, neginf=-1e6)
         if self.scaler is not None:
+            # Validate scaler shape matches data at load time (not just build time)
+            _n_features = getattr(self.scaler, "n_features_in_", None)
+            if _n_features is not None:
+                _data_n = X_blk.shape[-1]
+                if _data_n != _n_features:
+                    raise ValueError(
+                        f"Scaler/data shape mismatch at load time: "
+                        f"scaler.n_features_in_={_n_features}, data has {_data_n} features. "
+                        f"Rebuild the Zarr cache or fix the scaler."
+                    )
             # StandardScaler expects 2D (samples, features), reshape 3D -> 2D -> 3D
             orig_shape = X_blk.shape
             if X_blk.ndim == 3:
