@@ -1,5 +1,22 @@
 ---
 
+## Commit `d2e2efa` — 2026-08-10 21:10 UTC
+**Author:** jamie  
+**Message:** Fix monitoring check bugs (grad_norm/data_drift/checkpoint_load) + track integration harness
+
+**Files changed:**
+```
+docs/CONTINUE.md
+docs/IMPROVEMENTS.md
+monitoring/checks/checkpoint_load.py
+monitoring/checks/data_drift.py
+monitoring/checks/gradient_norm.py
+tests/conftest.py
+tests/test_all_new_components.py
+```
+
+---
+
 ## Commit `6810c2c` — 2026-08-10 20:42 UTC
 **Author:** jamie  
 **Message:** Session report: log adapter-factory wiring session
