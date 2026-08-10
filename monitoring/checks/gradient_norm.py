@@ -48,7 +48,14 @@ def check_gradient_norm(context: CheckContext) -> CheckResult:
         )
     
     total_norm = total_norm ** 0.5
-    avg_norm = total_norm / param_count
+    
+    # Compute meaningful average: mean of individual parameter gradient norms
+    # (not total L2 norm / count, which is not a standard metric)
+    avg_norm = 0.0
+    for name, param in context.model.named_parameters():
+        if param.grad is not None:
+            avg_norm += param.grad.data.norm(2).item()
+    avg_norm = avg_norm / param_count if param_count > 0 else 0.0
     
     issues = []
     if total_norm > crit_threshold:
@@ -133,9 +140,9 @@ register_check(
     severity="warning",
     tags={"gradient", "norm", "explosion", "vanishing"},
     threshold={
-        "warn": 10.0,
-        "crit": 50.0,
-        "vanish": 1e-6,
+        "grad_norm_warn": 10.0,
+        "grad_norm_crit": 50.0,
+        "grad_norm_vanish": 1e-6,
     },
 )
 

@@ -155,18 +155,32 @@ def check_optimizer_state(context: CheckContext) -> CheckResult:
     
     issues = []
     
+    # Determine expected state keys based on optimizer type
+    optimizer_class = context.optimizer.__class__.__name__.lower()
+    if 'adam' in optimizer_class:
+        expected_keys = ['exp_avg', 'exp_avg_sq']
+    elif 'sgd' in optimizer_class:
+        expected_keys = ['momentum_buffer']
+    elif 'rmsprop' in optimizer_class:
+        expected_keys = ['square_avg', 'momentum_buffer']  # RMSprop can have both
+    else:
+        # Unknown optimizer - accept any state keys
+        expected_keys = []
+    
     # Check if optimizer has state
     if hasattr(context.optimizer, 'state'):
         state = context.optimizer.state
         if len(state) == 0:
             issues.append("Optimizer state is empty")
         else:
-            # Check a few parameters have momentum/velocity
+            # Check a few parameters have expected state keys
             sample_params = list(state.keys())[:5]
             for p in sample_params:
                 param_state = state[p]
-                if 'momentum_buffer' not in param_state and 'exp_avg' not in param_state:
-                    issues.append(f"Missing momentum/exp_avg for param {p}")
+                if expected_keys:
+                    # At least one expected key should be present
+                    if not any(key in param_state for key in expected_keys):
+                        issues.append(f"Missing expected optimizer state keys ({expected_keys}) for param {p}")
     
     # Check LR matches
     if context.config.get("expected_lr"):
@@ -183,7 +197,7 @@ def check_optimizer_state(context: CheckContext) -> CheckResult:
         status=CheckStatus.PASSED if passed else CheckStatus.FAILED,
         passed=passed,
         message="Optimizer state OK" if passed else "; ".join(issues),
-        details={"issues": issues},
+        details={"issues": issues, "optimizer_type": optimizer_class},
     )
 
 

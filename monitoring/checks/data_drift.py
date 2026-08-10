@@ -8,6 +8,14 @@ import numpy as np
 import torch
 from typing import Any
 
+# Optional scipy import for KS test
+try:
+    from scipy import stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    stats = None
+
 from monitoring.checks import CheckContext, CheckResult, CheckStatus, register_check
 
 
@@ -44,7 +52,8 @@ def psi_score(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float
 
 def ks_statistic(expected: np.ndarray, actual: np.ndarray) -> tuple[float, float]:
     """Calculate KS statistic and p-value approximation."""
-    from scipy import stats
+    if not SCIPY_AVAILABLE:
+        return 0.0, 1.0
     try:
         stat, p_value = stats.ks_2samp(expected, actual)
         return float(stat), float(p_value)

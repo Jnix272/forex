@@ -45,18 +45,11 @@
 > - `monitoring/__init__.py` — Single import for all components
 > All modules compile clean, integration tests pass.
 >
-> ✅ **2026-08-09 (late):** **Data Pipeline Audit & Fixes** complete.
-> Deep audit of 14 files across `data/`, `training/`, `labeling/`, `config/`.
-> 21 issues found (2 Critical, 4 High, 10 Medium, 5 Low). 9 fixed:
-> - Multi-pair Zarr resizeability (C1)
-> - DataQualityReporter wired into `build_dataset_chunked` (C2)
-> - Per-bar tx cost used for label threshold instead of hardcoded 1.5 pips (H2)
-> - `sanitize_array` clip range disabled for features (H3)
-> - Scaler shape validation at DataLoader load time (H4)
-> - Feature mask allowlist expanded (M7)
-> - Triple barrier sequential fallback bid/ask fix (L1)
-> - Dead expression removed (L4)
-> All modules compile clean.
+> ✅ **2026-08-10:** **Type/Shape/Logic Bug Fixes** (3 bugs from monitoring audit):
+> - `gradient_norm` avg_norm: mean of individual param gradient norms (was meaningless `total_norm/param_count`)
+> - `data_drift` scipy import: moved to module level with graceful `try/except` fallback
+> - `checkpoint_load` optimizer state: optimizer-type-aware validation (Adam/SGD/RMSprop) eliminating false positives
+> All 3 fixes verified with test script.
 
 ---
 
@@ -110,3 +103,5 @@ Full tables live in [`IMPROVEMENTS.md`](IMPROVEMENTS.md). Recent: P0–P2 audit 
 **Phase 3 Architectural Replacements (2026-08-08):** AdversarialGenerator → PGD/FGSM/FreeLB, Curriculum → Composer/Lightning callbacks, Pretraining → lightly-ssl/Solo-learn adapters, RL → CleanRL/SB3 adapters, ONNX scaler fusion. New files: `training/adversarial_generator.py`, `training/curriculum_callbacks.py`, `training/pretrain_adapter.py`, `training/rl_adapter.py` + 4 test files. Modified: `training/supervised_loop.py`, `training/gpu_cli.py`, `inference/onnx_inference.py`. See `SESSION_REPORT.md` for details.
 
 **2026-08-09 curriculum/adversarial consolidation (Improvements #1–4):** ✅ **complete.** `CurriculumManager` + `OnlineHardExampleMiner` adopted in-loop; `GraphAdversarialAttack` added and **wired** (auto-select for `gnn`); per-model `pretrain_method` done; legacy adaptive-curriculum loop body **removed**; `OneCycleLR` `total_steps` mode; per-sample curriculum weights **applied to the loss** via `_apply_curriculum_weights`. See [`FIXES.md`](FIXES.md) for the full audit + verdicts.
+
+**2026-08-10 Type/Shape/Logic Bug Fixes:** `gradient_norm` avg_norm fixed, `data_drift` scipy import at module level, `checkpoint_load` optimizer state type-aware validation. All 3 verified.
