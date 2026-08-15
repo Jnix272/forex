@@ -22,10 +22,13 @@ from features.feature_engineering import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
 from scripts.backtest_model import (
     PIP_SIZES,
+    _bars_per_year_from_freq,
     _batched_logits,
     _checkpoint_state_dict,
     _load_checkpoint_config,
     _normalize_backtest_metrics,
+    _to_pandas_bars,
+    _write_df,
 )
 from training.train_gpu import build_model
 
@@ -104,23 +107,24 @@ def run_true_walkforward():
     afb = AdvancedFeatureBuilder()
 
     ticks = load_or_generate(source=args.source, pair=args.pair, start=args.start, end=args.end, n_rows=1000000)
-    base_bars = pipeline.run(ticks)
+    base_bars = _to_pandas_bars(pipeline.run(ticks))
     if base_bars is None or len(base_bars) == 0:
         log("Fatal: Failed to load dataset or no bars generated.")
         return
 
-    f_base = fe.build(base_bars)
-    f_adv = afb.build(base_bars, base_features=f_base)
-    features_df = pd.concat([f_base, f_adv], axis=1).reindex(base_bars.index).ffill().fillna(0.0)
-
+    # NOTE: feature engineering is deferred to inside the fold loop to prevent
+    # data leakage (W1). Rolling indicators would otherwise see future bars.
     n_samples = len(base_bars)
-    edges = np.linspace(0, n_samples, args.n_folds + 2, dtype=np.int64)
+    # FIX W2: n_folds+1 edges produce exactly n_folds fold boundaries
+    # (original n_folds+2 produced an out-of-bounds final-fold index)
+    edges = np.linspace(0, n_samples, args.n_folds + 1, dtype=np.int64)
 
     all_signals = []
 
     for k in range(args.n_folds):
-        val_start_idx = int(edges[k + 1])
-        val_end_idx = int(edges[k + 2])
+        val_start_idx = int(edges[k])
+        # FIX W2+W3: edges has n_folds+1 entries; last fold end is clamped to n_samples
+        val_end_idx = min(int(edges[k + 1]), n_samples)
 
         inf_start_idx = max(0, val_start_idx - args.seq_len)
 
@@ -143,6 +147,18 @@ def run_true_walkforward():
         if n_features <= 0:
             log(f"WARNING: {ckpt_path.name} missing n_features; skipping fold.")
             continue
+
+        # FIX W1: build features only up to val_end_idx to prevent data leakage.
+        # Rolling indicators (ATR, lags, regime) must not see bars beyond this fold.
+        fold_bars = base_bars.iloc[:val_end_idx]
+        f_base_fold = fe.build(fold_bars)
+        f_adv_fold = afb.build(fold_bars, base_features=f_base_fold)
+        features_df = (
+            pd.concat([f_base_fold, f_adv_fold], axis=1)
+            .reindex(fold_bars.index)
+            .ffill()
+            .fillna(0.0)
+        )
 
         model_kwargs = {
             "d_model": cfg.get("d_model", 256),
@@ -214,10 +230,13 @@ def run_true_walkforward():
 
         for off, c in enumerate(cls):
             i = inf_start_idx + args.seq_len + off
+            # FIX W6: guard against out-of-bounds access on the last fold
+            if i >= n_samples:
+                break
 
             adj_min_conf = args.min_confidence
             if regime_vals is not None:
-                rl = float(regime_vals[args.seq_len + off])
+                rl = float(np.asarray(regime_vals[args.seq_len + off]).item())
                 if rl > 0.5:
                     adj_min_conf = max(0.5, args.min_confidence - 0.05)
                 elif rl < -0.5:
@@ -228,7 +247,10 @@ def run_true_walkforward():
             if i - last_signal_i < max(1, args.min_gap_bars):
                 continue
 
-            price = float(close_vals[i])
+            price = float(np.asarray(close_vals[i]).item())
+            # NOTE W7: class mapping is correct (not inverted):
+            #   c==0 = SELL signal → act=2 (OPEN_SHORT): stop above, TP below
+            #   c==2 = BUY  signal → act=1 (OPEN_LONG):  stop below, TP above
             if c == 0:
                 act = 2
                 stop_loss = price + args.stop_pips * pip_size
@@ -275,16 +297,21 @@ def run_true_walkforward():
     sig_df = pd.DataFrame(all_signals).set_index("timestamp")
     sig_df = sig_df[~sig_df.index.duplicated(keep='first')].sort_index()
 
+    # FIX W5: clamp bars lower bound so the backtest never gets an empty frame
+    # when sig_df.index[0] precedes the first bar (e.g. due to execution delay)
+    bars_start = max(base_bars.index[0], sig_df.index[0])
     bt = ForexScalingBacktest(
-        bars=base_bars.loc[sig_df.index[0]:],
+        bars=base_bars.loc[bars_start:],
         signals=sig_df,
         initial_equity=args.equity,
         commission_per_lot=args.commission_per_lot,
         slippage_pips=args.slippage_pips,
         pip_size=PIP_SIZES.get(args.pair.upper(), 0.0001),
         execution_delay_bars=max(1, int(args.execution_delay_bars)),
+        bars_per_year=_bars_per_year_from_freq(args.bar_freq),
     )
-    bt.run()
+    # FIX W8: assign run() result (was discarded, which is misleading)
+    results = bt.run()
     metrics = bt.performance_metrics()
     norm_metrics = _normalize_backtest_metrics(metrics)
 
@@ -292,8 +319,9 @@ def run_true_walkforward():
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    bt.get_trade_log().to_csv(out_dir / f"{args.model}_OOS_{stamp}_trades.csv")
-    bt.results_df.to_csv(out_dir / f"{args.model}_OOS_{stamp}_equity.csv")
+    # FIX W4: use _write_df() — bt output is now pl.DataFrame after Polars migration
+    _write_df(bt.get_trade_log(), out_dir / f"{args.model}_OOS_{stamp}_trades.csv")
+    _write_df(bt.results_df, out_dir / f"{args.model}_OOS_{stamp}_equity.csv")
     (out_dir / f"{args.model}_OOS_{stamp}_summary.json").write_text(
         json.dumps({
             "model": args.model,

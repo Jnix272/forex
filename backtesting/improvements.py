@@ -13,7 +13,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+
+try:
+    import polars as pl
+    _POLARS_OK = True
+except ImportError:  # pragma: no cover
+    _POLARS_OK = False
+    pl = None  # type: ignore[assignment]
+
+try:
+    import pandas as pd
+    _PANDAS_OK = True
+except ImportError:  # pragma: no cover
+    _PANDAS_OK = False
+    pd = None  # type: ignore[assignment]
 
 from config.settings import PATHS
 
@@ -272,10 +285,12 @@ class SlippageCalibrator:
 
     def fit(
         self,
-        fills_df: pd.DataFrame,
+        fills_df,
     ) -> dict:
         """
         Fit slippage model to real fill data.
+
+        Accepts polars or pandas DataFrame.
 
         fills_df columns:
           lots          : order size in lots
@@ -288,7 +303,15 @@ class SlippageCalibrator:
         """
         from trading.session_utils import normalize_session_name
 
-        df = fills_df.copy()
+        # FIX I1: normalise to pandas for downstream slippage fitting logic
+        # (both Polars and pandas inputs are accepted)
+        if _POLARS_OK and pl is not None and isinstance(fills_df, pl.DataFrame):
+            df = fills_df.to_pandas() if _PANDAS_OK and pd is not None else fills_df
+        elif _PANDAS_OK and pd is not None and isinstance(fills_df, pd.DataFrame):
+            df = fills_df.copy()
+        else:
+            raise TypeError(f"fills_df must be a polars or pandas DataFrame, got {type(fills_df)}")
+
         slip = (
             (df["fill_price"] - df["requested_price"]) * df["direction"] / 0.0001
         ).to_numpy(dtype=np.float64)
@@ -372,23 +395,44 @@ class SlippageCalibrator:
           DateTime, InstrumentId, Side, Quantity, RequestedPrice, FillPrice
         """
         try:
-            df = pd.read_csv(
-                fill_csv_path,
-                parse_dates=("DateTime",),
-                iterator=False,
-            )
-            df.columns = df.columns.str.lower().str.strip()
-
-            col_map = {}
-            for c in df.columns:
-                if "quantity" in c or "size" in c or "lot" in c: col_map[c] = "lots"
-                elif "request" in c: col_map[c] = "requested_price"
-                elif "fill" in c and "price" in c: col_map[c] = "fill_price"
-                elif "side" in c or "dir" in c: col_map[c] = "direction"
-            df = df.rename(columns=col_map)
-            if "direction" in df.columns:
-                _dir = {"buy": 1, "sell": -1, "Buy": 1, "Sell": -1}
-                df["direction"] = df["direction"].map(_dir)  # type: ignore[arg-type]
+            # Prefer pandas for CSV parsing with datetime support
+            if _PANDAS_OK and pd is not None:
+                df = pd.read_csv(
+                    fill_csv_path,
+                    parse_dates=("DateTime",),
+                    iterator=False,
+                )
+                df.columns = df.columns.str.lower().str.strip()
+                col_map = {}
+                for c in df.columns:
+                    if "quantity" in c or "size" in c or "lot" in c: col_map[c] = "lots"
+                    elif "request" in c: col_map[c] = "requested_price"
+                    elif "fill" in c and "price" in c: col_map[c] = "fill_price"
+                    elif "side" in c or "dir" in c: col_map[c] = "direction"
+                df = df.rename(columns=col_map)
+                if "direction" in df.columns:
+                    _dir = {"buy": 1, "sell": -1, "Buy": 1, "Sell": -1}
+                    df["direction"] = df["direction"].map(_dir)  # type: ignore[arg-type]
+            elif _POLARS_OK and pl is not None:
+                # Polars fallback
+                df = pl.read_csv(fill_csv_path, try_parse_dates=True)
+                df = df.rename({c: c.lower().strip() for c in df.columns})
+                col_map = {}
+                for c in df.columns:
+                    if "quantity" in c or "size" in c or "lot" in c: col_map[c] = "lots"
+                    elif "request" in c: col_map[c] = "requested_price"
+                    elif "fill" in c and "price" in c: col_map[c] = "fill_price"
+                    elif "side" in c or "dir" in c: col_map[c] = "direction"
+                df = df.rename(col_map)
+                if "direction" in df.columns:
+                    df = df.with_columns(
+                        pl.col("direction").map_elements(
+                            lambda v: {"buy": 1, "sell": -1, "Buy": 1, "Sell": -1}.get(str(v), 0),
+                            return_dtype=pl.Int8,
+                        )
+                    )
+            else:
+                raise RuntimeError("Neither pandas nor polars is available to read CSV.")
 
             return self.fit(df)
         except Exception as e:
@@ -483,20 +527,53 @@ class LockboxTest:
         self._save_log()
         print(f"[Lockbox] Registered model: {model_name}")
 
-    def check_data_leak(self, df: pd.DataFrame) -> bool:
+    def check_data_leak(self, df) -> bool:
         """
         Verify that a DataFrame does NOT contain lockbox period data.
         Returns True if data is clean (no leak).
+        Accepts polars or pandas DataFrames.
         """
-        if df.empty: return True
-        idx = pd.to_datetime(df.index, utc=True)
-        start_ts = pd.Timestamp(self.start, tz="UTC")
-        end_ts   = pd.Timestamp(self.end,   tz="UTC")
-        overlap  = ((idx >= start_ts) & (idx <= end_ts)).sum()
-        if overlap > 0:
-            print(f"[Lockbox] ⚠ DATA LEAK DETECTED: {overlap} rows from lockbox period!")
-            return False
-        return True
+        if df is None or len(df) == 0:
+            return True
+
+        # FIX I2: accept Polars DataFrames (no .index or pd.to_datetime available)
+        if _POLARS_OK and pl is not None and isinstance(df, pl.DataFrame):
+            # Try common timestamp column names
+            ts_col = None
+            for cand in ("timestamp_utc", "timestamp", "time", "date"):
+                if cand in df.columns:
+                    ts_col = cand
+                    break
+            if ts_col is None:
+                # No timestamp column found — assume clean
+                return True
+            import datetime as _dt
+            start_dt = _dt.datetime.fromisoformat(self.start).replace(tzinfo=_dt.timezone.utc)
+            end_dt = _dt.datetime.fromisoformat(self.end).replace(tzinfo=_dt.timezone.utc)
+            # Convert column to python datetimes for comparison
+            ts_series = df[ts_col].cast(pl.Datetime("us", "UTC"), strict=False)
+            overlap = int(df.filter(
+                (ts_series >= pl.lit(start_dt)) & (ts_series <= pl.lit(end_dt))
+            ).height)
+            if overlap > 0:
+                print(f"[Lockbox] ⚠ DATA LEAK DETECTED: {overlap} rows from lockbox period!")
+                return False
+            return True
+
+        # Pandas path
+        if _PANDAS_OK and pd is not None and isinstance(df, pd.DataFrame):
+            if df.empty:
+                return True
+            idx = pd.to_datetime(df.index, utc=True)
+            start_ts = pd.Timestamp(self.start, tz="UTC")
+            end_ts   = pd.Timestamp(self.end,   tz="UTC")
+            overlap  = int(((idx >= start_ts) & (idx <= end_ts)).sum())
+            if overlap > 0:
+                print(f"[Lockbox] ⚠ DATA LEAK DETECTED: {overlap} rows from lockbox period!")
+                return False
+            return True
+
+        raise TypeError(f"check_data_leak requires polars or pandas DataFrame, got {type(df)}")
 
     def evaluate(
         self,

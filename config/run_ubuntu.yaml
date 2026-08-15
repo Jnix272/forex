@@ -607,7 +607,7 @@ tracking:
 # ── Supervised training hyper-parameters ───────────────────────────────────
 training:
   amp: true
-  batch_size: 212
+  batch_size: 256
   enable_ewc: false
   ewc_lambda: 1000.0
   enable_si: false
@@ -618,7 +618,7 @@ training:
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
   epochs: 1
-  grad_accum_steps: 4  # production: larger effective batch; run.yaml uses 2 for faster dev
+  grad_accum_steps: 2
   grad_clip: 0.75
   label_method: rl_reward
   label_smoothing: 0.05
@@ -634,8 +634,14 @@ training:
   save_every: 5
   seed: 1337
   seq_len: "6h40m"
-  sharpe_annualization_factor: 325.0
-  sharpe_weight: 1.0
+  # Annualisation: sqrt(trading_days * bars_per_day)
+  # bar_freq=5m → 78 bars/day (390 min/day ÷ 5) → sqrt(252 × 78) = 140.2
+  # Was 325.0 (daily-bar factor) — wrong for 5m bars, inflated Sharpe ~2.3×
+  sharpe_annualization_factor: 140.0
+  # Weight vs Huber: designed default in gpu_losses.py is 0.2.
+  # Was 1.0 (5× too high) — Sharpe gradient dominated loss, causing early_peak
+  # pattern and best_sharpe=0.0 across 27 runs. Back to 0.25 (near default).
+  sharpe_weight: 0.25
   # ── Adversarial training (new) ─
   adversarial:
     enabled: false

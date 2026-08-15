@@ -64,6 +64,12 @@ class ModelTrainingProfile:
     ewc_lambda: float = 1000.0
     enable_si: bool = False
     si_lambda: float = 1.0
+    # Dynamic SI lambda — uses DynamicSILambdaConfig sigmoid schedule:
+    # λ rises when loss is low (protect learned weights), falls when loss is
+    # high (allow adaptation during regime shocks). See synaptic_intelligence.py.
+    si_dynamic: bool = False
+    si_lambda_min: float = 0.0
+    si_lambda_max: float = 1.0
     freeze_patience: int = 1
 
     # Pretraining
@@ -100,6 +106,14 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
+        forgetting_threshold=0.08,   # tighter: LSTM+attention catches drift early
+        # SI: online path-integral tracking fits HAELT's walk-forward use;
+        # dynamic lambda relaxes protection during regime shocks.
+        enable_si=True,
+        si_lambda=1.0,
+        si_dynamic=True,
+        si_lambda_min=0.1,
+        si_lambda_max=2.0,
         pretrain_method="masked",
         pretrain_framework="custom",
         rl_use_lstm=True,
@@ -118,6 +132,13 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
+        forgetting_threshold=0.10,   # high-cap attention: tighter than default
+        # SI: no LSTM so continuity relies entirely on SI regularisation.
+        enable_si=True,
+        si_lambda=0.8,
+        si_dynamic=True,
+        si_lambda_min=0.05,
+        si_lambda_max=1.5,
         pretrain_method="masked",
         pretrain_framework="custom",
     ),
@@ -135,6 +156,14 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
+        forgetting_threshold=0.10,   # iTransformer: no positional encoding, needs anchor
+        # SI: variate-token attention is prone to representation collapse;
+        # SI anchors key token interactions across folds.
+        enable_si=True,
+        si_lambda=0.8,
+        si_dynamic=True,
+        si_lambda_min=0.05,
+        si_lambda_max=1.5,
         pretrain_method="byol_or_tscl",
         pretrain_framework="lightly",
     ),
@@ -152,6 +181,15 @@ MODEL_PROFILES = {
         curriculum_mode="difficulty",
         use_self_paced=False,
         miner_feedback=False,
+        forgetting_threshold=0.12,   # medium-cap: slightly looser than high-cap
+        # SI only (no EWC): SSM/conv layers don't suit Fisher diagonal anchoring;
+        # light SI stabilises the selective-state transitions across data windows.
+        # Static lambda (no dynamic): Mamba is already fast; avoid extra overhead.
+        enable_si=True,
+        si_lambda=0.5,
+        si_dynamic=False,
+        si_lambda_min=0.0,
+        si_lambda_max=0.5,
         pretrain_method="forecast",
         pretrain_framework="custom",
         swa_enabled=True,
@@ -170,6 +208,11 @@ MODEL_PROFILES = {
         curriculum_mode="difficulty",
         use_self_paced=False,
         miner_feedback=False,
+        forgetting_threshold=0.12,   # relational: graph topology shifts between regimes
+        # EWC (not SI): graph message-passing weights have a clear Fisher structure;
+        # EWC anchors the inter-asset relationship weights learned on prior regimes.
+        enable_ewc=True,
+        ewc_lambda=800.0,            # slightly below default 1000 to allow topology adaptation
         pretrain_method="cluster",
         pretrain_framework="custom",
         rl_finetune=False,
@@ -190,6 +233,14 @@ MODEL_PROFILES = {
         use_self_paced=False,
         use_loss_weighting=False,
         miner_feedback=False,
+        forgetting_threshold=0.15,   # low-cap: keep default, less sensitive needed
+        # Light SI: low-capacity model, just stabilise conv filters between folds;
+        # very small lambda to avoid over-constraining a small parameter space.
+        enable_si=True,
+        si_lambda=0.3,
+        si_dynamic=False,
+        si_lambda_min=0.0,
+        si_lambda_max=0.3,
         pretrain_method="tscl",
         pretrain_framework="custom",
         swa_enabled=False,
@@ -208,6 +259,12 @@ MODEL_PROFILES = {
         use_self_paced=False,
         use_loss_weighting=False,
         miner_feedback=False,
+        forgetting_threshold=0.15,   # linear baseline: default threshold
+        # No EWC or SI: GLM is a linear baseline; regularisation is handled
+        # entirely by weight decay. Adding SI/EWC would over-constrain a
+        # model that has no meaningful parameter topology to protect.
+        enable_si=False,
+        enable_ewc=False,
         pretrain_method="byol",
         swa_enabled=False,
         rl_finetune=False,

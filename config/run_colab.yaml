@@ -1,0 +1,149 @@
+# =============================================================================
+# Forex Scaling Model — Google Colab Training Config
+# =============================================================================
+# Purpose: Fast probe on Colab — validates data + model train cleanly.
+#          NOT a production run. Use run_ubuntu.yaml for full training.
+#
+# Colab GPU estimates (3 pairs, 2018-2026, 10 epochs):
+#   Free T4  → ~8 min total
+#   Pro A100 → ~2 min total
+#
+# Usage:
+#   !python training/train_gpu.py \
+#       --config config/run_colab.yaml \
+#       --resume
+#
+# On reconnect: just re-run the cell above — resumes from last epoch.
+#
+# Keep-alive (paste in separate cell):
+#   %%javascript
+#   setInterval(() => document.querySelector("colab-toolbar-button#connect").click(), 60000)
+# =============================================================================
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  source: dukascopy
+  pair: EURUSD
+  pairs:
+    - EURUSD
+    - USDJPY
+    - GBPUSD
+  pair_embed_dim: 4
+  pair_align: inner
+  corr_window: 10
+  corr_window_long: 30
+  momentum_window: 10
+  start: "2018-01-01"
+  end: "2026-12-31"
+  full_day_data: false
+  n_ticks: 20_000_000
+  chunk_size: 100_000
+  use_cache: true
+  integrity_gate: true
+  auto_rebuild_on_mismatch: true
+
+# ── Strategy ─────────────────────────────────────────────────────────────────
+strategy:
+  bar_freq: "5m"
+  lookahead_bars: 30
+  mode: scalping
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  name: haelt
+  all_models: false
+  hidden_size: 64
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dropout: 0.15
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  epochs: 10
+  batch_size: 256
+  amp: true
+  grad_accum_steps: 1
+  grad_clip: 1.0
+  weight_decay: 0.0001
+
+  lr: 0.0001
+  lr_warmup_epochs: 2
+  seq_len: "2h30m"
+  val_split: 0.2
+  patience: 5
+  early_stop_metric: sharpe
+  early_stop_min_delta: 0.01
+
+  # Simple loss — no Sharpe-proxy complexity for a probe
+  loss: cross_entropy
+  label_method: rl_reward
+
+  # Sharpe display-only (early-stop uses it but not the loss)
+  # bar_freq=5m → sqrt(252 × 78) = 140.2
+  sharpe_annualization_factor: 140.0
+  sharpe_weight: 0.25
+
+  # Resume — critical for Colab reconnects
+  resume: true
+  save_every: 1
+
+  # No SI/EWC — adds overhead, not needed for a probe
+  enable_si: false
+  enable_ewc: false
+  ewc_lambda: 1000.0
+  si_lambda: 1.0
+
+  cross_asset_mode: auto
+  seed: 1337
+
+# ── Hardware ─────────────────────────────────────────────────────────────────
+hardware:
+  num_workers: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  torch_compile: false      # must be false on Colab
+  val_num_workers: 2
+  val_prefetch_factor: 2
+
+# ── Disabled production features ─────────────────────────────────────────────
+walk_forward:
+  enabled: false
+  folds: 1
+
+multitask:
+  enabled: true
+  w_ret: 0.08
+  w_conf: 0.05
+
+pretrain:
+  enabled: false
+  epochs: 0
+
+ensemble:
+  enabled: false
+  deploy: false
+  epochs: 0
+
+rl:
+  enabled: false
+  deploy: false
+  algo: dqn
+  episodes: 0
+
+# ── Tracking ─────────────────────────────────────────────────────────────────
+tracking:
+  no_wandb: true
+  run_name: colab_haelt_probe
+  auto_tune: false
+  dry_tune: false
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+# Mount Drive first:
+#   from google.colab import drive; drive.mount('/content/drive')
+paths:
+  checkpoint_dir: /content/drive/MyDrive/forex-checkpoints
+  data_cache: /content/drive/MyDrive/forex-data/processed

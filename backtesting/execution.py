@@ -11,13 +11,27 @@ Realistic execution simulation with:
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
 
 import numpy as np
-import pandas as pd
+
+try:
+    import polars as pl
+    _POLARS_OK = True
+except ImportError:  # pragma: no cover
+    _POLARS_OK = False
+    pl = None  # type: ignore[assignment]
+
+try:
+    import pandas as pd
+    _PANDAS_OK = True
+except ImportError:  # pragma: no cover
+    _PANDAS_OK = False
+    pd = None  # type: ignore[assignment]
 
 from backtesting.improvements import SlippageCalibrator
 
@@ -291,7 +305,7 @@ class LimitOrderBook:
 
     def _execute_market_sell(self, order: Order, current_time: datetime) -> int:
         """Execute market sell against bid side."""
-        filled = 0.0
+        filled = 0.0  # FIX E1: track filled qty explicitly
         remaining = order.quantity
 
         for price in sorted(self.bids.keys(), reverse=True):
@@ -318,6 +332,7 @@ class LimitOrderBook:
                     / order.filled_qty
                 )
                 remaining -= fill_qty
+                filled += fill_qty  # FIX E1: was missing — kept filled=0 so every sell was REJECTED
 
                 if resting_order.remaining_qty() <= 1e-9:
                     self._remove_order_from_level(resting_order, True)
@@ -926,8 +941,8 @@ class AdvancedBacktestEngine:
 
     def __init__(
         self,
-        bars: pd.DataFrame | None = None,
-        signals: pd.DataFrame | None = None,
+        bars=None,
+        signals=None,
         config: dict | None = None,
     ):
         self.bars = bars
@@ -938,16 +953,24 @@ class AdvancedBacktestEngine:
         # Execution engine
         self.execution_engine = AdvancedExecutionEngine(symbol)
 
-        # State
-        self.position = 0.0
-        self.avg_entry = 0.0
-        self.equity = float(self.config.get("initial_equity", 10_000.0))
-        self.trades: list[Trade] = []
-        self.orders: dict[int, Order] = {}
-        self._trade_id = 0
+        self._initial_equity = float(self.config.get("initial_equity", 10_000.0))
         self._pip_size = float(self.config.get("pip_size", 0.0001))
         self._lot_size = float(self.config.get("lot_size", 0.1))
         self._spread_pips = float(self.config.get("spread_pips", 0.8))
+        # FIX E5: configurable pip_value_per_lot (was hard-coded as 10.0 USD/pip/lot)
+        self._pip_value_per_lot = float(self.config.get("pip_value_per_lot", 10.0))
+
+        # FIX E6: initialise mutable state via reset() so run() is idempotent
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset mutable simulation state so run() is idempotent."""
+        self.position = 0.0
+        self.avg_entry = 0.0
+        self.equity = self._initial_equity
+        self.trades: list[Trade] = []
+        self.orders: dict[int, Order] = {}
+        self._trade_id = 0
 
     def _seed_book(self, mid: float, ts: datetime) -> None:
         """Place synthetic resting liquidity around mid so market orders can fill."""
@@ -972,16 +995,24 @@ class AdvancedBacktestEngine:
             lob.submit_order(bid, ts)
             lob.submit_order(ask, ts)
 
-    def _signal_side(self, row: pd.Series) -> int:
-        """Return +1 buy, -1 sell, 0 flat from a signal row."""
+    def _signal_side(self, row: dict) -> int:
+        """Return +1 buy, -1 sell, 0 flat from a signal row (dict or mapping)."""
         for col in ("signal", "action", "side", "direction"):
-            if col in row.index and pd.notna(row[col]):
-                v = float(row[col])
-                if v > 0:
-                    return 1
-                if v < 0:
-                    return -1
-                return 0
+            val = row.get(col) if hasattr(row, "get") else None
+            if val is None:
+                continue
+            # FIX E2: framework-agnostic notna check (replaces pd.notna)
+            if isinstance(val, float) and math.isnan(val):
+                continue
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                return 1
+            if v < 0:
+                return -1
+            return 0
         return 0
 
     def _close_position(self, ts: datetime, fill_price: float, reason: str) -> None:
@@ -991,8 +1022,8 @@ class AdvancedBacktestEngine:
         lots = abs(self.position)
         pnl_price = (fill_price - self.avg_entry) * direction
         pnl_pips = pnl_price / self._pip_size
-        # ~$10 per pip per standard lot scaled by lot size
-        pnl_usd = pnl_pips * 10.0 * lots
+        # FIX E5: use configurable pip_value_per_lot (was hard-coded 10.0)
+        pnl_usd = pnl_pips * self._pip_value_per_lot * lots
         self.equity += pnl_usd
         self._trade_id += 1
         self.trades.append(Trade(
@@ -1016,54 +1047,70 @@ class AdvancedBacktestEngine:
 
     def run(
         self,
-        bars: pd.DataFrame | None = None,
-        signals: pd.DataFrame | None = None,
-    ) -> pd.DataFrame:
-        """Run backtest with advanced execution against bar + signal frames."""
+        bars=None,
+        signals=None,
+    ):
+        """
+        Run backtest with advanced execution against bar + signal frames.
+
+        Accepts polars or pandas DataFrames for bars and signals.
+        Returns a polars DataFrame (or pandas fallback).
+        """
+        # FIX E6: reset state so run() is idempotent
+        self.reset()
+
         bars = bars if bars is not None else self.bars
         signals = signals if signals is not None else self.signals
         if bars is None or signals is None:
             raise ValueError("AdvancedBacktestEngine.run requires bars and signals")
 
-        bars = bars.copy()
-        signals = signals.copy()
-        if "timestamp_utc" in bars.columns:
-            bars = bars.set_index("timestamp_utc")
-        if "timestamp_utc" in signals.columns:
-            signals = signals.set_index("timestamp_utc")
-        # Align on intersection of indices
-        idx = bars.index.intersection(signals.index)
-        if len(idx) == 0:
-            # Positional fallback when indices don't align
-            n = min(len(bars), len(signals))
-            bars = bars.iloc[:n].reset_index(drop=True)
-            signals = signals.iloc[:n].reset_index(drop=True)
-            iterator = range(n)
-            get_bar = lambda i: bars.iloc[i]
-            get_sig = lambda i: signals.iloc[i]
-            get_ts = lambda i: (
-                pd.Timestamp(bars.iloc[i]["timestamp_utc"])
-                if "timestamp_utc" in bars.columns
-                else pd.Timestamp(i, unit="m", tz="UTC")
-            )
-        else:
-            bars = bars.loc[idx]
-            signals = signals.loc[idx]
-            iterator = range(len(idx))
-            get_bar = lambda i: bars.iloc[i]
-            get_sig = lambda i: signals.iloc[i]
-            get_ts = lambda i: pd.Timestamp(idx[i])
+        # ── Normalise to row-iterable dicts (works for Polars and pandas) ──
+        def _to_row_dicts(df):
+            """Convert DataFrame to list of dicts, framework-agnostic."""
+            if _POLARS_OK and pl is not None and isinstance(df, pl.DataFrame):
+                return df.to_dicts()
+            if _PANDAS_OK and pd is not None and isinstance(df, pd.DataFrame):
+                # reset index so timestamp becomes a column
+                return df.reset_index().to_dict(orient="records")
+            raise TypeError(f"Unsupported DataFrame type: {type(df)}")
+
+        bar_rows = _to_row_dicts(bars)
+        sig_rows = _to_row_dicts(signals)
+        n = min(len(bar_rows), len(sig_rows))
+        iterator = range(n)
+
+        def get_bar(i):
+            return bar_rows[i]
+
+        def get_sig(i):
+            return sig_rows[i]
+
+        def get_ts(i):
+            row = bar_rows[i]
+            for k in ("timestamp_utc", "timestamp", "time", "date", "index"):
+                if k in row and row[k] is not None:
+                    v = row[k]
+                    if _PANDAS_OK and pd is not None and hasattr(v, "to_pydatetime"):
+                        return v
+                    try:
+                        return datetime.fromisoformat(str(v))
+                    except Exception:
+                        pass
+            return datetime.utcfromtimestamp(i * 60)
 
         equity_curve = []
         for i in iterator:
             bar = get_bar(i)
             sig = get_sig(i)
             ts = get_ts(i)
-            if isinstance(ts, pd.Timestamp):
+            if hasattr(ts, "to_pydatetime"):
                 ts_dt = ts.to_pydatetime()
+            elif isinstance(ts, datetime):
+                ts_dt = ts
             else:
                 ts_dt = datetime.utcnow()
-            mid = float(bar.get("close", bar.get("mid_close", np.nan)))
+            # FIX E4: bar is now a plain dict — use .get() safely
+            mid = float(bar.get("close") or bar.get("mid_close") or float("nan"))
             if not np.isfinite(mid):
                 equity_curve.append({"timestamp": ts, "equity": self.equity, "position": self.position})
                 continue
@@ -1120,7 +1167,12 @@ class AdvancedBacktestEngine:
         if abs(self.position) > 1e-12 and equity_curve:
             last_mid = float(equity_curve[-1].get("mid", self.avg_entry))
             last_ts = equity_curve[-1]["timestamp"]
-            ts_dt = last_ts.to_pydatetime() if isinstance(last_ts, pd.Timestamp) else datetime.utcnow()
+            if hasattr(last_ts, "to_pydatetime"):
+                ts_dt = last_ts.to_pydatetime()
+            elif isinstance(last_ts, datetime):
+                ts_dt = last_ts
+            else:
+                ts_dt = datetime.utcnow()
             self._seed_book(last_mid, ts_dt)
             close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
             order = Order(
@@ -1134,7 +1186,12 @@ class AdvancedBacktestEngine:
             equity_curve[-1]["equity"] = self.equity
             equity_curve[-1]["position"] = 0.0
 
-        return pd.DataFrame(equity_curve)
+        # FIX E7: return Polars DataFrame (pandas fallback)
+        if _POLARS_OK and pl is not None:
+            return pl.DataFrame(equity_curve)
+        if _PANDAS_OK and pd is not None:
+            return pd.DataFrame(equity_curve)
+        return equity_curve
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. Export

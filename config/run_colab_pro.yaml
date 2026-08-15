@@ -1,0 +1,191 @@
+# =============================================================================
+# Forex Scaling Model — Google Colab Pro Training Config (A100 40GB)
+# =============================================================================
+# Purpose: Serious training run on Colab Pro/Pro+.
+#          Larger model, more data, pretrain + walk-forward enabled.
+#          NOT the same as run_ubuntu.yaml (10 pairs, 18yr, full WF).
+#          Think of this as "near-production" — a meaningful result.
+#
+# Colab Pro A100 estimates (5 pairs, 2015-2026, pretrain + 3-fold WF):
+#   Dataset build : ~35 min (first run only, cached after)
+#   Pretrain      : ~1.5 h  (8 epochs)
+#   Supervised    : ~5 h    (3 folds × 20 epochs × haelt)
+#   Total         : ~7 h    → fits in a single Pro session
+#
+# Usage:
+#   !python training/train_gpu.py \
+#       --config config/run_colab_pro.yaml \
+#       --resume
+#
+# On reconnect: re-run above — resumes from last checkpoint/fold.
+# =============================================================================
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  source: dukascopy
+  pair: EURUSD
+  pairs:
+    - EURUSD
+    - USDJPY
+    - GBPUSD
+    - AUDUSD
+    - USDCAD
+  pair_embed_dim: 16          # full embed dim
+  pair_align: inner
+  corr_window: 20
+  corr_window_long: 60
+  momentum_window: 20
+  start: "2015-01-01"         # 11 years — meaningful but not overwhelming
+  end: "2026-12-31"
+  full_day_data: false
+  n_ticks: 20_000_000
+  chunk_size: 200_000
+  use_cache: true
+  integrity_gate: true
+  auto_rebuild_on_mismatch: true
+
+# ── Strategy ─────────────────────────────────────────────────────────────────
+strategy:
+  bar_freq: "5m"
+  lookahead_bars: 30
+  mode: scalping
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+# Full production size — A100 40GB handles this comfortably
+model:
+  name: haelt
+  all_models: false
+  hidden_size: 256
+  d_model: 256
+  nhead: 8
+  num_layers: 3
+  dropout: 0.237
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  epochs: 20                  # reduced from 40 — 3 folds × 20 still meaningful
+  batch_size: 1024            # A100 40GB — push it safely
+  amp: true
+  grad_accum_steps: 1         # No need to accumulate, we have the VRAM
+  grad_clip: 0.75
+  weight_decay: 0.001
+
+  lr: 3.0e-05
+  lr_schedule: warmup_cosine
+  lr_warmup_epochs: 2
+  lr_min_ratio: 0.08
+
+  seq_len: "6h40m"            # 80 bars at 5m — full production seq_len
+  val_split: 0.2
+  patience: 6
+  early_stop_metric: sharpe
+  early_stop_min_delta: 0.01
+
+  loss: sharpe_huber          # production loss
+  label_method: rl_reward
+  direction_weight: 0.75
+
+  # Corrected Sharpe math: bar_freq=5m → sqrt(252 × 78) = 140.2
+  sharpe_annualization_factor: 140.0
+  sharpe_weight: 0.25
+
+  # Resume — critical for Pro session reconnects
+  resume: true
+  save_every: 1
+
+  # SI anti-forgetting — worth it for 3-fold walk-forward
+  enable_si: true
+  si_lambda: 1.0
+  enable_ewc: false           # EWC too heavy even on A100 (Fisher matrix)
+  ewc_lambda: 1000.0
+
+  swa_enabled: true           # Stochastic Weight Averaging — on for Pro
+  swa_lr: 1.0e-05
+  swa_start_frac: 0.75
+
+  use_mixup: true
+  label_smoothing: 0.05
+  cross_asset_mode: auto
+  seed: 1337
+
+# ── Hardware ─────────────────────────────────────────────────────────────────
+hardware:
+  num_workers: 4              # A100 machines have proper CPUs
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+  torch_compile: false        # still must be false on Colab
+  val_num_workers: 4
+  val_prefetch_factor: 2
+
+# ── Walk-forward (3 folds — meaningful, not full 7) ──────────────────────────
+walk_forward:
+  enabled: true
+  folds: 3
+
+# ── Multitask ────────────────────────────────────────────────────────────────
+multitask:
+  enabled: true
+  w_ret: 0.08
+  w_conf: 0.05
+
+# ── Pretrain (enabled on Pro — A100 handles it in ~1.5h) ─────────────────────
+pretrain:
+  enabled: true
+  epochs: 8                   # reduced from 18 — still meaningful
+  method: byol
+  batch: 1024
+  lr: 0.0001
+  mask_prob: 0.2
+  regime_aware: true
+  ema_decay: 0.996
+  projection_dim: 256
+  pred_dim: 128
+  sample_windows: 2048
+  read_windows: 32
+  min_epochs: 1
+  handoff_loss: 0.18
+  handoff_patience: 2
+
+# ── Ensemble (disabled — too much VRAM even on A100 with 5 pairs) ────────────
+ensemble:
+  enabled: false
+  deploy: false
+  epochs: 0
+
+# ── RL (disabled — 500 episodes × 5 pairs still too slow) ───────────────────
+rl:
+  enabled: false
+  deploy: false
+  algo: dqn
+  episodes: 0
+
+# ── Curriculum (simplified — full curriculum needs more data) ────────────────
+curriculum:
+  miner_feedback:
+    enabled: true
+    forgetting_threshold: 0.08    # haelt profile value
+    easy_threshold: 0.60
+    freeze_patience: 1
+  self_paced:
+    enabled: true
+    pace: linear
+    lambda_pace: 1.0
+  loss_weighting:
+    enabled: true
+    scheme: focal
+    focal_gamma: 2.0
+
+# ── Tracking ─────────────────────────────────────────────────────────────────
+tracking:
+  no_wandb: true              # set false + !wandb login to enable
+  run_name: colab_pro_haelt
+  auto_tune: false
+  dry_tune: false
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  checkpoint_dir: /content/drive/MyDrive/forex-checkpoints-pro
+  data_cache: /content/drive/MyDrive/forex-data/processed

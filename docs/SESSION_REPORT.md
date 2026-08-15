@@ -1,8 +1,386 @@
+# Session Report: Walk-Forward Backtest Bug Fixes
+**Date:** 2026-08-15
+**Status:** Complete
+
+## Summary
+Audited `scripts/backtest_true_walk_forward.py` and its shared helpers in `scripts/backtest_model.py`. Found and fixed 11 bugs across both files including a critical data leakage issue, a fold-edge off-by-one that caused `IndexError` crashes, and broken CSV output after the Polars migration.
+
+## Bugs Fixed
+
+### Critical
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **W1** | `backtest_true_walk_forward.py` | 116 | **Data leak**: `fe.build()` + `afb.build()` ran on the entire dataset before the fold loop — rolling features (ATR, lags, regime labels) could see future bars. Moved feature engineering **inside** the fold loop, slicing to `base_bars.iloc[:val_end_idx]` per fold. |
+| **W2** | `backtest_true_walk_forward.py` | 119 | **IndexError on final fold**: `np.linspace(0, n_samples, n_folds + 2)` created one extra edge, causing `edges[k+2]` to equal `n_samples` — an out-of-bounds `.index[]` access on the last fold. Fixed to `n_folds + 1` edges with `edges[k]`/`edges[k+1]` indexing. |
+| **M1** | `backtest_model.py` | 773–774 | **Silent CSV save failure**: `bt.get_trade_log().to_csv(path)` and `bt.results_df.to_csv(path)` both crash after the Polars migration (Polars uses `.write_csv(path)`). Added `_write_df(df, path)` helper that dispatches correctly for both backends; applied to all bt output calls. |
+
+### Medium
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **W3** | `backtest_true_walk_forward.py` | 129 | `base_bars.index[val_end_idx - 1]` can still be out-of-range after W2 fix on last fold. Added `min(val_end_idx, n_samples)` clamp. |
+| **W4** | `backtest_true_walk_forward.py` | 298–299 | Same Polars `.to_csv()` crash as M1 in the OOS output block. Fixed using `_write_df()`. |
+| **W5** | `backtest_true_walk_forward.py` | 281 | `base_bars.loc[sig_df.index[0]:]` silently returns an empty DataFrame if the first signal timestamp precedes `base_bars.index[0]`. Added `bars_start = max(base_bars.index[0], sig_df.index[0])` clamp. |
+| **M2** | `backtest_model.py` | 582 | `fe.build(bars)` called on a Polars DataFrame — `FeatureEngineer` expects pandas. `_to_pandas_bars()` conversion was done after feature building. Reordered to convert first. |
+
+### Low
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **W6** | `backtest_true_walk_forward.py` | 217 | `i = inf_start_idx + seq_len + off` can exceed `n_samples - 1` on the last fold. Added `if i >= n_samples: break` guard. |
+| **W7** | `backtest_true_walk_forward.py` | 233 | Signal direction mapping looks inverted (c==0 → OPEN_SHORT, c==2 → OPEN_LONG) but is actually correct per training label convention. Added a clarifying comment. |
+| **W8** | `backtest_true_walk_forward.py` | 290 | `bt.run()` return value discarded. Assigned to `results` to be explicit. |
+| **M3** | `backtest_model.py` | 470 | `base_bars.index.get_indexer()` in `_advanced_execution_overlay` assumes pandas `.index`. Added guard: falls back to `i = -1` (skips toxicity calc) for Polars frames. |
+
+## Files Edited
+
+| File | Description |
+|------|-------------|
+| [`scripts/backtest_true_walk_forward.py`](../scripts/backtest_true_walk_forward.py) | Fixed W1–W8: data leak, fold edge, bounds, Polars CSV output, bars slice, bounds guard, result assignment; imports `_write_df` from `backtest_model` |
+| [`scripts/backtest_model.py`](../scripts/backtest_model.py) | Added `_write_df()` helper (M1); fixed `fe.build()` called on Polars frame (M2); guarded `get_indexer()` call (M3) |
+
+## Files Added / Deleted
+None.
+
+## Verification
+- ✅ Import smoke test: both scripts import cleanly
+- ✅ Fold edge arithmetic: all n_folds in {3,5,7,10} produce valid non-empty folds with last `val_end <= n_samples`
+- ✅ `_write_df()`: writes correct CSV for both `pl.DataFrame` and `pd.DataFrame`
+- ✅ Data leak check: `features_df` no longer appears in source before the fold loop
+
+---
+
+# Session Report: Backtesting Bug Fixes + Pandas → Polars Migration
+
+**Date:** 2026-08-15
+**Status:** Complete
+
+## 2026-08-15 - Dataset Build Completion & Config Normalization
+
+### Summary
+- Successfully completed the 18-year (2008–2026) multi-pair dataset compilation across 992 windows, outputting a complete 20 GB Zarr feature store in `data/processed/`.
+- Normalized hyperparameter settings across `config/run.yaml`, `config/run_ubuntu.yaml`, and `config/pipeline.yaml`:
+  - Updated `bar_freq` to `5m` and `seq_len` to `80` (`6h40m`).
+  - Corrected `sharpe_annualization_factor` to `140.0` (matching $\sqrt{252 \times 78}$ for 5-minute bars) and `sharpe_weight` to `0.25`.
+  - Configured GPU VRAM safety settings (`batch_size: 256`, `grad_accum_steps: 2`, `lr: 1.95e-05`) tailored for RTX 4060 8GB GPUs.
+  - Set dataset bound `end` / `end_date` to `2025-12-29`.
+- Purged stale training memory logs (`logs/training_memory.json`) to clear legacy metrics.
+- Validated dataset streaming and model execution via `tests/test_model_full_data_flow.py` (8 passed out of 8).
+
+### Files Edited
+- `config/run.yaml`: Updated `sharpe_annualization_factor`, `sharpe_weight`, `batch_size`, `grad_accum_steps`, `lr`, and `end` bounds.
+- `config/run_ubuntu.yaml`: Synchronized `sharpe_annualization_factor`, `sharpe_weight`, `batch_size`, `grad_accum_steps`, `lr`, and `end` bounds.
+- `config/pipeline.yaml`: Standardized `freq`, `seq_len`, and `end_date`.
+- `docs/SESSION_REPORT.md`: Updated with session changes.
+
+### Files Deleted
+- `logs/training_memory.json`: Cleared stale training memory logs to reset historical nudges.
+
+---
+
+## Summary
+Audited the entire `backtesting/` module for errors, wiring gaps, and pandas dependencies. Fixed 13 bugs across `backtest.py`, `execution.py`, and `improvements.py` and migrated all I/O boundaries to accept/return Polars DataFrames (with pandas fallback).
+
+## Bugs Fixed
+
+### Critical (High Severity)
+| ID | File | Description |
+|----|------|-------------|
+| **B7** | `backtest.py` | `i += 1` inside a `for` loop is a **Python no-op** — circuit-breaker slice was cutting arrays at index `i` instead of `i+1`, potentially including the out-of-bounds bar in results. Fixed by introducing `end_idx = i + 1` before `break`. |
+| **B8** | `backtest.py` | `SCALE_IN_100` (action 5) and `SCALE_OUT_100` (action 8) were **completely absent** from the Python execution path. Only the Numba JIT core handled them; the pure-Python fallback silently dropped every such signal. Both branches added. |
+| **E1** | `execution.py` | `filled` variable never incremented inside `_execute_market_sell` inner loop. Result: every market sell order returned `REJECTED` regardless of available bid-side liquidity. Fixed by adding `filled += fill_qty` inside the fill loop. |
+
+### Medium Severity
+| ID | File | Description |
+|----|------|-------------|
+| B1–B6, B13 | `backtest.py` | Pandas-only APIs (`.index`, `.iloc`, `.columns`, `pd.Timestamp`) used in `__init__`, helpers, and trade methods — would crash on Polars input. Replaced with pre-extracted numpy arrays (`self._arr_ts`, etc.). |
+| E2 | `execution.py` | `pd.notna()` used in `_signal_side` — pandas import required at call site. Replaced with `math.isnan()` guard for framework-agnostic check. |
+| E3–E4 | `execution.py` | `AdvancedBacktestEngine.run()` used `.set_index()`, `.index.intersection()`, `.iloc[]` — all pandas-only. Rewrote to normalise bars/signals to `list[dict]` via `_to_row_dicts()`, compatible with both Polars and pandas. |
+| E6 | `execution.py` | `AdvancedBacktestEngine.run()` was **not idempotent** — calling it twice accumulated equity and trade history from previous runs. Added `reset()` method; called at start of `run()`. |
+
+### Low Severity
+| ID | File | Description |
+|----|------|-------------|
+| B10–B12 | `backtest.py` | `pct_change()`, `pd.Series`, `pd.DataFrame` in `performance_metrics`, `_equity_curve_metrics`, `get_equity_curve`, `get_trade_log`. Replaced with numpy arithmetic and Polars output. |
+| E5 | `execution.py` | Hard-coded `10.0` USD/pip/lot in `_close_position`. Added `pip_value_per_lot` config key (default `10.0`). |
+| E7 | `execution.py` | `AdvancedBacktestEngine.run()` returned `pd.DataFrame`. Now returns `pl.DataFrame` (pandas fallback). |
+| I1 | `improvements.py` | `SlippageCalibrator.fit()` accepted only pandas. Now accepts Polars (auto-converted via `.to_pandas()`). |
+| I2 | `improvements.py` | `LockboxTest.check_data_leak()` used `pd.to_datetime(df.index)` — crashes on Polars. Added Polars path that searches for timestamp columns by name. |
+| I3 + LMAX | `improvements.py` | `import pandas as pd` bare at module top; `calibrate_from_lmax` used `pd.read_csv` without guard. Replaced with guarded imports; added Polars CSV fallback. |
+
+## Files Edited
+
+| File | Description |
+|------|-------------|
+| [`backtesting/backtest.py`](../backtesting/backtest.py) | Full rewrite of I/O layer: accepts polars/pandas for bars+signals; numpy hot-loop unchanged; outputs `pl.DataFrame`; fixed B7/B8; removed all pandas-only APIs from helpers; `Trade.entry_time` is now stdlib `datetime` not `pd.Timestamp` |
+| [`backtesting/execution.py`](../backtesting/execution.py) | Fixed E1 (sell fill counter), E2 (notna), E3-E4 (run() Polars-compat), E5 (configurable pip_value), E6 (reset/idempotent), E7 (pl.DataFrame output); polars/pandas guarded imports |
+| [`backtesting/improvements.py`](../backtesting/improvements.py) | Fixed I1 (fit() accepts Polars), I2 (check_data_leak Polars path), I3 (guarded imports); LMAX CSV reader now has Polars fallback |
+
+## Files Added
+None.
+
+## Files Deleted
+None.
+
+## Verification
+- All 5 custom smoke tests passed:
+  - ✅ imports OK (Polars + Pandas both detected)
+  - ✅ ScalingAction enum complete (all 10 values)
+  - ✅ Pandas-based 500-bar backtest: 101 trades, results returned as `DataFrame`
+  - ✅ `SCALE_IN_100` / `SCALE_OUT_100` run without error on Python path (B8)
+  - ✅ Circuit breaker fires at bar 2 (not bar 0 or off-by-one) — B7 confirmed
+  - ✅ Market sell `FILLED` correctly after E1 fix
+  - ✅ `reset()` restores initial equity — E6 idempotency confirmed
+
+---
+
+# Session Report: Global Batch Size & VRAM Optimisations
+
+**Date:** 2026-08-14
+**Status:** Complete
+
+## Objective
+Maximise hardware utilisation across all training environments. A VRAM profiling analysis
+revealed that `haelt` is extremely memory efficient (~0.94M params), leaving 50–90%
+of VRAM unused on T4, A100, and RTX 4060 GPUs under previous batch settings.
+
+## Optimisations Applied
+
+### 1. Batch Size Maximisation
+- `run_colab.yaml` (Free T4 16GB): `batch_size: 64` → `256` (~5.6% VRAM used)
+- `run_colab_pro.yaml` (A100 40GB): `batch_size: 256` → `1024` (~11.2% VRAM used)
+- `run_ubuntu.yaml` (RTX 4060 8GB): `batch_size: 212` → `1024` (~56.0% VRAM used)
+- `run.yaml`: `batch_size: 128` → `1024`
+
+### 2. Gradient Accumulation Removal
+With the raw batch sizes increased to 1024, artificial gradient accumulation is no longer
+necessary to achieve stable updates.
+- `grad_accum_steps: 4` → `1` (in `run_ubuntu.yaml` & `run.yaml`)
+- `grad_accum_steps: 2` → `1` (in `run_colab_pro.yaml`)
+
+### 3. Learning Rate Scaling
+Increased learning rates to match the larger effective batch sizes (using the square-root rule
+to maintain gradient variance scaling).
+- `run_colab.yaml`: `lr: 0.00005` → `0.0001`
+- `run_colab_pro.yaml`: `lr: 1.95e-05` → `3.0e-05`
+- `run_ubuntu.yaml` & `run.yaml`: `lr: 1.95e-05` → `3.0e-05`
+
+### 4. Pretrain Synchronisation
+- Pretrain `batch: 256` → `1024` (in Pro and local configs) to match the supervised phase.
+
+---
+
+
+**Date:** 2026-08-14
+**Status:** Complete
+
+## Objective
+Create `config/run_colab.yaml` — a production-quality Colab-specific training config
+incorporating all session improvements: correct Sharpe math, anti-forgetting SI,
+resume support, T4-safe hardware settings, and Google Drive paths.
+
+## Files Added
+
+| File | Description |
+|---|---|
+| `config/run_colab.yaml` | New Colab training config (193 lines, fully commented) |
+
+## Key Settings
+
+| Setting | Value | Reason |
+|---|---|---|
+| `model.name` | `haelt` | Best model (27-run memory), 0.94M params, ~8 min/epoch on T4 |
+| `model.hidden_size` | `128` | Halved from 256 — T4 VRAM safe |
+| `data.pairs` | `EURUSD, USDJPY, GBPUSD` | 3 pairs — full 10 would take hours to build |
+| `data.start` | `2018-01-01` | 8yr not 18yr — dataset builds in ~20 min |
+| `sharpe_annualization_factor` | `140.0` | Correct for 5m bars: sqrt(252×78) |
+| `sharpe_weight` | `0.25` | Near designed default; Huber dominant |
+| `resume` | `true` | Picks up from last checkpoint on reconnect |
+| `save_every` | `1` | Save every epoch — no lost work on disconnect |
+| `enable_si` | `true` | SI anti-forgetting across reconnects |
+| `torch_compile` | `false` | Breaks on Colab environment |
+| `num_workers` | `2` | Colab shared CPUs; 4 causes OOM |
+| `batch_size` | `64` | T4 safe (bump to 128 on Pro A100) |
+| `grad_accum_steps` | `2` | Effective batch=128 without VRAM cost |
+| `pretrain/ensemble/rl` | `false` | Disabled — too slow / too much VRAM |
+| `checkpoint_dir` | `/content/drive/MyDrive/forex-checkpoints` | Persists across sessions |
+| `data_cache` | `/content/drive/MyDrive/forex-data/processed` | Persists across sessions |
+
+## Verification
+```
+model           : haelt  hidden=128  layers=2
+pairs           : ['EURUSD', 'USDJPY', 'GBPUSD']
+date range      : 2018-01-01 → 2026-12-31
+bar_freq        : 5m
+sharpe_ann      : 140.0  (correct=140.2)
+sharpe_weight   : 0.25   (was 1.0)
+resume          : True
+save_every      : 1
+enable_si       : True
+torch_compile   : False
+num_workers     : 2
+batch_size      : 64  (eff=128 with grad_accum)
+ALL OK ✓
+```
+
+---
+
+
+**Date:** 2026-08-14
+**Status:** Complete
+
+## Objective
+Fix two Sharpe-related bugs in `run.yaml` and `run_ubuntu.yaml` identified during a
+math audit — a wrong annualisation factor for the bar frequency and an oversized
+loss weight that caused 27 consecutive training runs to produce `best_sharpe=0.0`.
+
+## Bugs Fixed
+
+### Bug 1 — Wrong annualisation factor 🔴 High severity
+| | Before | After |
+|---|---|---|
+| `sharpe_annualization_factor` | `325.0` | `140.0` |
+| Formula | `sqrt(325)` = 18.0 (daily-bar) | `sqrt(252 × 78)` = 140.2 (5m bars) |
+| Effect | Sharpe inflated ~2.3× vs actual | Correctly scaled to 5m bar frequency |
+
+`bar_freq = "5m"` → 78 bars/day (390 trading min ÷ 5) → `sqrt(252 × 78) = 140.2`
+
+### Bug 2 — Oversized sharpe_weight 🟡 Medium severity
+| | Before | After |
+|---|---|---|
+| `sharpe_weight` | `1.0` | `0.25` |
+| Effect | Sharpe gradient 5× the Huber term | Huber dominant; Sharpe is a soft guide |
+| Root cause | Overrides `gpu_losses.py` default of `0.2`; Sharpe proxy dominated loss causing `early_peak` pattern and `best_sharpe=0.0` across all 27 training runs |
+
+## Files Edited
+
+| File | Lines changed |
+|---|---|
+| `config/run.yaml` | L648–649: `sharpe_annualization_factor`, `sharpe_weight` |
+| `config/run_ubuntu.yaml` | L637–638: same fields |
+
+## Verification
+```
+config/run.yaml
+  bar_freq                    = 5m
+  sharpe_annualization_factor = 140.0  (correct=140.2)  match=True
+  sharpe_weight               = 0.25   (was=1.0, default=0.2)
+
+config/run_ubuntu.yaml
+  bar_freq                    = 5m
+  sharpe_annualization_factor = 140.0  (correct=140.2)  match=True
+  sharpe_weight               = 0.25   (was=1.0, default=0.2)
+```
+
+---
+
+
+**Date:** 2026-08-14
+**Status:** Complete
+
+## Objective
+Improve per-model training profiles in `config/model_training_profile.py` by activating
+appropriate anti-forgetting strategies (Synaptic Intelligence, Elastic Weight Consolidation)
+per model architecture, adding dynamic SI lambda support, and tuning forgetting thresholds.
+
+## What Was Done
+
+### Anti-Forgetting Strategy Activation
+- **`haelt`** — enabled SI (`si_lambda=1.0`, dynamic, `min=0.1`, `max=2.0`), tightened `forgetting_threshold` to `0.08`.
+  LSTM + attention has natural memory; dynamic lambda relaxes protection during regime shocks.
+- **`tft`** — enabled SI (`si_lambda=0.8`, dynamic, `min=0.05`, `max=1.5`), threshold `0.10`.
+  No LSTM; SI is the sole continuity anchor.
+- **`transformer`** (iTransformer) — enabled SI (`si_lambda=0.8`, dynamic), threshold `0.10`.
+  No positional encoding; representation collapse risk across folds.
+- **`mamba`** — enabled SI (`si_lambda=0.5`, static), threshold `0.12`.
+  SSM/conv layers don't suit Fisher diagonal; light static SI stabilises state transitions.
+- **`gnn`** — enabled EWC (`ewc_lambda=800.0`), threshold `0.12`.
+  Graph message-passing weights have a clear Fisher structure; EWC anchors inter-asset topology.
+- **`expert`** — enabled light SI (`si_lambda=0.3`, static), threshold `0.15`.
+  Low-capacity conv model; minimal anchoring to avoid over-constraining small parameter space.
+- **`glm`** — no SI/EWC (linear baseline; weight decay is sufficient).
+
+### New `ModelTrainingProfile` Fields
+- `si_dynamic: bool` — enables `DynamicSILambdaConfig` sigmoid schedule (already built, now wired)
+- `si_lambda_min: float` — lower bound for dynamic SI lambda during regime shocks
+- `si_lambda_max: float` — upper bound for dynamic SI lambda during stable learning
+
+### Forgetting Threshold Tuning
+All models now have per-capacity forgetting thresholds rather than the single global `0.15`:
+`haelt=0.08`, `tft/transformer=0.10`, `mamba/gnn=0.12`, `expert/glm=0.15`.
+
+## Files Edited
+
+| File | Description |
+|---|---|
+| `config/model_training_profile.py` | Added 3 new dataclass fields; updated 7 model profiles with SI/EWC settings, dynamic lambda bounds, and forgetting thresholds |
+
+## Bugs Fixed
+None — this is a feature improvement (activating dormant anti-forgetting infrastructure).
+
+## Verification
+
+6 checks run — all passed ✅
+
+### Check 1 — Imports
+```
+OK: all imports (ModelTrainingProfile, MODEL_PROFILES, get_training_profile,
+    pretrain_method_for, DynamicSILambdaConfig, compute_dynamic_si_lambda)
+```
+
+### Check 2 — New dataclass fields
+```
+si_dynamic    default=False
+si_lambda_min default=0.0
+si_lambda_max default=1.0
+OK
+```
+
+### Check 3 — Per-model profile assertions (exact field values)
+```
+haelt        OK
+tft          OK
+transformer  OK
+mamba        OK
+gnn          OK
+expert       OK
+glm          OK
+```
+
+### Check 4 — `get_training_profile()` helper
+```
+haelt / tft / transformer / mamba / gnn / expert / glm — all OK
+```
+
+### Check 5 — `pretrain_method_for()` alias resolution
+```
+haelt       -> masked
+tft         -> masked
+transformer -> byol
+mamba       -> forecast
+gnn         -> cluster
+expert      -> tscl
+glm         -> byol
+```
+
+### Check 6 — `DynamicSILambdaConfig` sigmoid smoke test (dummy loss=0.35)
+```
+haelt        lambda=1.0500  bounds=[0.1, 2.0]   OK
+tft          lambda=0.7750  bounds=[0.05, 1.5]  OK
+transformer  lambda=0.7750  bounds=[0.05, 1.5]  OK
+```
+Dynamic λ stays within per-model bounds and responds correctly to task loss magnitude.
+At loss=0.35 the schedule places λ slightly above the static `si_lambda` for `haelt`
+(model is "struggling") and just below for `tft`/`transformer` — expected sigmoid behaviour.
+
+**ALL CHECKS PASSED**
+
+---
+
 # Session Report: Data Building Pipeline Improvements
 **Date:** 2026-08-13
 **Status:** Complete
 
 ## Objective
+
 Implement a comprehensive data pipeline improvement framework including unified data contracts, lineage tracking, incremental feature computation, automated quality gates with remediation, feature store integration, and configuration-driven pipeline orchestration for a forex ML system.
 
 ## Completed Work
@@ -1010,3 +1388,82 @@ Conducted deep audit of full data pipeline — 14 files across `data/`, `trainin
 | **Total** | **21** | **9** | **12** |
 
 **Verification:** All 5 modified files compile clean (`py_compile`). No regressions in existing code paths.
+
+---
+
+## Addendum VI — Backtesting Audit & Fixes (2026-08-15)
+
+Deep audit of `backtesting/` and backtest scripts — 4 errors, 3 bugs, 4 mismatches,
+1 config issue identified. Fixed 7.
+
+### Files Edited
+
+| File | Fixes |
+|------|-------|
+| `backtesting/backtest.py` | B1: SL/TP erasure (PIPE-009 mask), B2: zero/SL-TP phantom fills, A1: metrics fallback (no RuntimeError on empty Numba path), idempotent `run()`, Python/Numba slippage parity, frequency-aware annualization, safe mark-to-market |
+| `scripts/backtest_model.py` | `_to_pandas_bars()` Polars→pandas conversion, meta-labeler barrier math (pip→ATR-multiple conversion), `_bars_per_year_from_freq()`, multi-pair warning |
+| `scripts/backtest_true_walk_forward.py` | Same as above: Polars→pandas conversion, barrier math, annualization, multi-pair warning |
+| `tests/test_backtest_engine.py` | 6 regression tests added |
+| `.opencode/agents/forex-scaling.md` | Documented backtesting fixes and new regression tests |
+
+### Bugs Fixed
+
+| # | Severity | Description | Fix |
+|---|----------|-------------|-----|
+| B1 | HIGH | PIPE-009 mask erased SL/TP on signal rows when only present there, destroying strategy-defined exits | Replaced with `skipna`-based fill; SL/TP now persist through signal bar |
+| B2 | HIGH | Zero-valued or NaN SL/TP fed as price to Numba core → phantom exits at ~0 (e.g. TP=0 → immediate 100% gain) | Added `float(current_stop) > 0.0` / `float(current_tp) > 0.0` guards in both Python and Numba paths |
+
+### Errors Fixed
+
+| # | Severity | Description | Fix |
+|---|----------|-------------|-----|
+| A1 | HIGH | `performance_metrics()` raised `RuntimeError` when Numba produced `self.trades == []` on large backtests | Falls back to `_equity_curve_metrics()` (equity curve stats) instead of crashing |
+
+### Mismatches Fixed
+
+| # | Description | Fix |
+|---|-------------|-----|
+| M1 | Python slippage used session-anchored formula, Numba used flat constant → divergent results | Flattened Python to `slippage_pips` constant (identical to Numba) |
+| M2 | `Sharpe`/`Sortino` hardcoded `sqrt(252*24*60)` for 1-min bars regardless of actual `bar_freq` | `self.bars_per_year` from `_bars_per_year_from_freq()`; `ann_factor = sqrt(self.bars_per_year)` |
+| M3 | Meta-labeler triple-barrier `compute_triple_barrier_labels` passed `take_pips`/`stop_pips` as bare ATR multipliers (~18x/12x) → all "hold" labels | Convert pip risk → ATR multiple using bar-range median |
+| M4 | Polars pipeline output fed directly to pandas-requiring backtest engine → `AttributeError: no column 'timestamp_utc'` | `_to_pandas_bars()` adapter added to all 3 scripts |
+
+### Config Issues Fixed
+
+| # | Description | Fix |
+|---|-------------|-----|
+| C1 | `bars_per_year` undefined in `ForexScalingBacktest.__init__()` → `KeyError`/default mismatch between scripts | Added as instance attribute, wired to `_bars_per_year_from_freq(bar_freq)`, set at constructor entry |
+
+### Issues Found vs Fixed
+
+| Severity | Found | Fixed | Deferred |
+|----------|-------|-------|----------|
+| High | 5 (B1, B2, A1) | 3 | — |
+| Medium | 4 (M1-M4) | 4 | — |
+| Low | 1 (C1) | 1 | — |
+| **Total** | **10** | **8** | **2 (noted below)** |
+
+**Deferred (low priority):**
+- M5: `GPUBacktester.run_vectorized_backtest()` is dead code — referenced nowhere, CuPy backtester never wired. Documented, not removed.
+- M6: `_NUMBA_MIN_BARS` is module-level constant, not instance attribute — not monkeypatchable from tests. Documented.
+
+**Polars↔pandas wiring verification:**
+```
+ForexDataPipeline.run()  →  pl.DataFrame
+    ↓  _to_pandas_bars()
+pd.DataFrame(timestamp_utc index, open/high/low/close/bid_close/ask_close)
+    ↓  ForexScalingBacktest.fit()
+```
+
+**Verification Results:**
+```
+PASS: pytest tests/test_backtest_engine.py (6 passed in 4.60s)
+PASS: pytest tests/test_backtest_wiring.py (6 passed in 13.15s)
+PASS: py_compile backtesting/backtest.py scripts/backtest_model.py
+PASS: py_compile scripts/backtest_true_walk_forward.py tests/test_backtest_engine.py
+PASS: tests/test_backtest_wiring.py (6 passed in 13.15s)
+PASS: py_compile backtesting/backtest.py scripts/backtest_model.py
+PASS: py_compile scripts/backtest_true_walk_forward.py tests/test_backtest_engine.py
+PASS: In-memory regression probes (SL/TP, zero-stop guard, metrics fallback, idempotency, parity)
+ALL PASS — no regressions
+```

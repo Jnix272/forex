@@ -62,6 +62,23 @@ def _append_jsonl(path: Path, rec: dict) -> None:
         f.write(json.dumps(rec, default=str) + "\n")
 
 
+def _write_df(df, path) -> None:
+    """FIX M1: Write DataFrame to CSV regardless of Polars or pandas backend."""
+    if df is None or len(df) == 0:
+        return
+    try:
+        import polars as pl
+        if isinstance(df, pl.DataFrame):
+            df.write_csv(str(path))
+            return
+    except ImportError:
+        pass
+    try:
+        df.to_csv(path)
+    except Exception as e:
+        log(f"[_write_df] Failed to save {path}: {e}")
+
+
 def _fmt_metric(value, fmt: str = ".4f", prefix: str = "", suffix: str = "") -> str:
     if value is None:
         return "n/a"
@@ -117,6 +134,44 @@ def _normalize_backtest_metrics(metrics: dict) -> dict:
         "total_return_pct": float(metrics.get("total_return_pct", 0.0) or 0.0),
         "error": "",
     }
+
+
+def _to_pandas_bars(bars):
+    """Normalize pipeline output (Polars) to the pandas OHLCV+book schema the
+    backtest engine expects (timestamp-indexed). No-op when already pandas."""
+    if bars is None:
+        return None
+    if hasattr(bars, "to_pandas"):
+        df = bars.to_pandas()
+        if "timestamp_utc" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+            df = df.set_index("timestamp_utc")
+        return df
+    return bars
+
+
+def _bars_per_year_from_freq(bar_freq: str) -> float:
+    """Approximate bars-per-year for frequency strings like ``1min``/``5min``/``1h``
+    so Sharpe / Sortino / risk-free annualization matches the actual bar cadence."""
+    import re
+
+    if not bar_freq:
+        return 252.0 * 24.0 * 60.0
+    m = re.match(r"\s*(\d*\.?\d+)\s*([a-z]*)", str(bar_freq).strip().lower())
+    if not m:
+        return 252.0 * 24.0 * 60.0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit in ("h", "hr", "hour", "hours"):
+        minutes = n * 60.0
+    elif unit in ("s", "sec", "second", "seconds"):
+        minutes = n / 60.0
+    elif unit in ("", "m", "t", "min", "mins", "minute", "minutes"):
+        minutes = n
+    else:
+        minutes = n  # unknown unit — assume minutes
+    if not minutes or not np.isfinite(minutes) or minutes <= 0:
+        return 252.0 * 24.0 * 60.0
+    return 252.0 * 24.0 * (60.0 / minutes)
 
 
 def _build_windows(start: str, end: str, window_days: int, step_days: int) -> list[tuple[str, str]]:
@@ -262,13 +317,31 @@ def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls
         dirn[cls == 2] = 1.0
         dirn[cls == 0] = -1.0
 
+        # Convert pip-based risk (BACKTEST.stop_pips / take_pips) into ATR
+        # multiples so the triple-barrier labeler — which multiplies ATR —
+        # matches the backtest's actual stop/take semantics instead of treating
+        # pips as ATR multipliers (which produced ~18x/12x unreachable barriers).
+        pip_size_lbl = float(PIP_SIZES.get(str(args.pair).upper(), 0.0001))
+        stop_pips_lbl = float(getattr(args, "stop_pips", 12.0) or 12.0)
+        take_pips_lbl = float(getattr(args, "take_pips", 18.0) or 18.0)
+        try:
+            _rng = (base_bars["high"].to_numpy() - base_bars["low"].to_numpy())
+            _rng = _rng[np.isfinite(_rng)]
+            atr = float(np.median(_rng)) if len(_rng) else 0.0
+        except Exception:
+            atr = 0.0
+        if not (atr > 0.0):
+            atr = take_pips_lbl * pip_size_lbl
+        profit_atr_mult = max(1.0, take_pips_lbl * pip_size_lbl / max(atr, 1e-12))
+        stop_atr_mult = max(0.5, stop_pips_lbl * pip_size_lbl / max(atr, 1e-12))
+
         labels_df = compute_triple_barrier_labels(
             bars=base_bars,
             features=X,
             vertical_bars=int(getattr(args, "seq_len", 60) or 20),
-            profit_atr_mult=float(getattr(args, "take_pips", 18.0) or 1.8),
-            stop_atr_mult=float(getattr(args, "stop_pips", 12.0) or 0.9),
-            pip_size=PIP_SIZES.get(str(args.pair).upper(), 0.0001),
+            profit_atr_mult=profit_atr_mult,
+            stop_atr_mult=stop_atr_mult,
+            pip_size=pip_size_lbl,
             execution_delay_bars=max(1, int(getattr(args, "execution_delay_bars", 1))),
         )
         if labels_df is None or labels_df.empty:
@@ -408,10 +481,24 @@ def _advanced_execution_overlay(args, base_bars, signals):
         lat = LatencyModel()
         base = float(args.slippage_pips)
         costs = []
-        closes = np.asarray(base_bars["close"].values, dtype=float)
+        # FIX M2/M3: base_bars is always pandas here (cached via _to_pandas_bars)
+        # but guard defensively for Polars in case of future refactor
+        if hasattr(base_bars, "to_numpy"):
+            closes = np.asarray(base_bars["close"].to_numpy(), dtype=float)
+        else:
+            closes = np.asarray(base_bars["close"].values, dtype=float)
         n = len(closes)
         for s in signals:
-            i = base_bars.index.get_indexer([s["timestamp"]])[0]
+            # FIX M3: guard index lookup — works for pandas; Polars has no .index.get_indexer
+            if hasattr(base_bars, "index") and hasattr(base_bars.index, "get_indexer"):
+                i = base_bars.index.get_indexer([s["timestamp"]])[0]
+            else:
+                # Polars fallback: search by value
+                ts_arr = closes  # can't do timestamp search without index; skip toxicity
+                i = -1
+            if i < 0 or i >= n:
+                costs.append(base)
+                continue
             lo = max(0, i - 20)
             window = closes[lo:i + 1]
             if len(window) >= 3 and np.ptp(window) > 0:
@@ -512,18 +599,24 @@ def run_backtest():
     cached_bars = {}
     cached_features = {}
     pair_list = DEFAULT_PAIRS[:n_pairs] if n_pairs > 1 else [args.pair]
+    if len(pair_list) > 1:
+        log("WARNING: multi-pair backtests execute signals on the FIRST pair's "
+            "prices and apply --pair's pip size to every pair — results for "
+            "other pairs are not price-accurate. Prefer per-pair runs.")
     
     for p in pair_list:
         try:
             ticks = load_or_generate(source=args.source, pair=p, start=args.start, end=args.end, n_rows=2000000)
-            bars = pipeline.run(ticks)
-            if bars is not None and len(bars) > seq_len:
-                cached_bars[p] = bars
-                f_base = fe.build(bars)
-                f_adv = afb.build(bars, base_features=f_base)
+            bars_raw = pipeline.run(ticks)
+            if bars_raw is not None and len(bars_raw) > seq_len:
+                # FIX M2: convert to pandas BEFORE feature building — FeatureEngineer expects pandas
+                bars_pd = _to_pandas_bars(bars_raw)
+                cached_bars[p] = bars_pd
+                f_base = fe.build(bars_pd)
+                f_adv = afb.build(bars_pd, base_features=f_base)
                 f = pd.concat([f_base, f_adv], axis=1)
                 f = _fit_feature_width(f, f_per_pair)
-                f = f.reindex(bars.index).ffill().fillna(0.0)
+                f = f.reindex(bars_pd.index).ffill().fillna(0.0)
                 cached_features[p] = f
         except Exception as e:
             log(f"Failed to load/cache data for {p}: {e}")
@@ -600,7 +693,7 @@ def run_backtest():
                 continue
             if meta_ok is not None and not bool(meta_ok[off]):
                 continue
-            price = float(close_vals[i])
+            price = float(np.asarray(close_vals[i]).item())
             if c == 0:
                 act = 2
                 stop_loss = price + stop_pips * pip_size
@@ -673,6 +766,7 @@ def run_backtest():
             slippage_pips=eff_slippage,
             pip_size=pip_size,
             execution_delay_bars=max(1, int(args.execution_delay_bars)),
+            bars_per_year=_bars_per_year_from_freq(args.bar_freq),
         )
         bt.run()
         metrics = bt.performance_metrics()
@@ -709,8 +803,9 @@ def run_backtest():
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir.mkdir(parents=True, exist_ok=True)
-        bt.get_trade_log().to_csv(out_dir / f"{args.model}_{stamp}_trades.csv")
-        bt.results_df.to_csv(out_dir / f"{args.model}_{stamp}_equity.csv")
+        # FIX M1: use _write_df() — bt output is now pl.DataFrame (Polars migration)
+        _write_df(bt.get_trade_log(), out_dir / f"{args.model}_{stamp}_trades.csv")
+        _write_df(bt.results_df, out_dir / f"{args.model}_{stamp}_equity.csv")
         (out_dir / f"{args.model}_{stamp}_summary.json").write_text(json.dumps({"model": args.model, "checkpoint": str(ckpt), "start": ws, "end": we, "metrics": metrics, "monte_carlo": mc, "execution": exec_meta}, indent=2, default=str), encoding="utf-8")
 
     if wf_rows:
@@ -789,7 +884,7 @@ def run_execution_backtest(
         except Exception as exc:
             log(f"[Gate] {p}: data load failed ({exc}); skipping pair")
             continue
-        bars = pipeline.run(ticks)
+        bars = _to_pandas_bars(pipeline.run(ticks))
         if bars is None or len(bars) <= seq_len:
             log(f"[Gate] {p}: no usable bars after cleaning; skipping pair")
             continue
@@ -851,7 +946,7 @@ def run_execution_backtest(
             continue
         if i - last_signal_i < max(1, int(min_gap_bars)):
             continue
-        price = float(close_vals[i])
+        price = float(np.asarray(close_vals[i]).item())
         if c == 0:
             act = 2
             stop_loss = price + stop_pips * pip_size
@@ -900,6 +995,7 @@ def run_execution_backtest(
         slippage_pips=slippage_pips,
         pip_size=pip_size,
         execution_delay_bars=max(1, int(execution_delay_bars)),
+        bars_per_year=_bars_per_year_from_freq(bar_freq),
     )
     bt.run()
     metrics = _normalize_backtest_metrics(bt.performance_metrics())

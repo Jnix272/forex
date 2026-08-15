@@ -1565,8 +1565,10 @@ def parse_args():
                 _GPU_CFG["torch_compile"] = False
         except Exception:
             pass
-        # Keep curriculum within the quick-run seq_len so cache integrity
-        # does not demand SETTINGS schedules up to 120 bars.
+        # Time-anchored seq_len resolution (resolve string like "6h40m" -> integer bars before quick-mode caps)
+        _bf = getattr(args, "bar_freq", "5m")
+        args.seq_len = _resolve_seq_len(args.seq_len, _bf)
+
         # Synthetic short windows (~80–200 bars from 10k–50k ticks) cannot
         # form sequences when seq_len + lookahead_bars exceeds bar count
         # (e.g. seq=64 + LH=30 on ~84 bars → zero samples).
