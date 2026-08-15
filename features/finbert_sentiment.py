@@ -251,6 +251,7 @@ def _get_finbert():
             truncation=True,
             max_length=512,
             device=device,
+            torch_dtype=torch.float16
         )
     return _finbert_pipeline
 
@@ -447,7 +448,7 @@ class SentimentPipeline:
         weights = np.abs(scores) + 0.01   # stronger signals count more
         return float(np.clip(np.average(scores, weights=weights), -1.0, 1.0))
 
-    def prefetch_headlines(self, headlines: list[str], batch_size: int = 256) -> int:
+    def prefetch_headlines(self, headlines: list[str], batch_size: int = 512) -> int:
         """Pre-score all *headlines* so subsequent per-window calls are cache hits.
 
         Returns the number of cache misses that were scored (0 if all cached).
@@ -463,15 +464,42 @@ class SentimentPipeline:
             flush=True,
         )
         scored = 0
-        for i in range(0, len(misses), batch_size):
-            batch = misses[i : i + batch_size]
-            self.score_headlines_batch(batch)
-            scored += len(batch)
-            if scored % (batch_size * 4) == 0 or scored == len(misses):
-                print(
-                    f"  [Sentiment] prefetch {scored:,}/{len(misses):,}",
-                    flush=True,
-                )
+        backend = self._detect_backend()
+        
+        if backend == "finbert":
+            pipe = _get_finbert()
+            
+            def data_gen():
+                for t in misses:
+                    yield t[:512]
+                    
+            print("[Sentiment] Accelerated GPU FinBERT Inference started...", flush=True)
+            results = pipe(data_gen(), batch_size=batch_size, truncation=True)
+            
+            for (text, res) in zip(misses, results):
+                label = res["label"].lower()
+                score = res["score"]
+                final_score = LABEL_MAP.get(label, 0.0) * score
+                
+                with self._cache_lock:
+                    key = _cache_key(text)
+                    self._cache[key] = final_score
+                    self._new_entries += 1
+                
+                scored += 1
+                if scored % (batch_size * 10) == 0:
+                    print(f"  [Sentiment] prefetch {scored:,}/{len(misses):,}", flush=True)
+                    self.flush_cache()
+        else:
+            for i in range(0, len(misses), batch_size):
+                batch = misses[i : i + batch_size]
+                self.score_headlines_batch(batch)
+                scored += len(batch)
+                if scored % (batch_size * 4) == 0 or scored == len(misses):
+                    print(
+                        f"  [Sentiment] prefetch {scored:,}/{len(misses):,}",
+                        flush=True,
+                    )
         self.flush_cache()
         return scored
 

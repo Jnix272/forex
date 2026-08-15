@@ -127,6 +127,7 @@ def test_finalize_empty_window():
     assert feats.sma_20 is None
 
 
+@pytest.mark.skipif(not BYTEWAX_AVAILABLE, reason="bytewax not installed")
 def test_streaming_pipeline_init(stream_config):
     pipeline = StreamingFeaturePipeline(stream_config)
     assert pipeline.config is stream_config

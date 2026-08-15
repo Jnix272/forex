@@ -43,6 +43,13 @@ except ImportError:
     torch = None
     torch_data = None
 
+try:
+    import pytorch_lightning as pl
+    LIGHTNING_AVAILABLE = True
+except ImportError:
+    LIGHTNING_AVAILABLE = False
+    pl = None
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Core Curriculum Logic (framework-agnostic)
@@ -186,7 +193,7 @@ class BaseCurriculum:
 # PyTorch Lightning Callback
 # ════════════════════════════════════════════════════════════════════════════
 
-class PLCurriculumCallback:
+class PLCurriculumCallback(pl.Callback):
     """
     PyTorch Lightning callback for curriculum learning.
     
@@ -232,6 +239,7 @@ class PLCurriculumCallback:
         exp_rate: float = 5.0,
         verbose: bool = True,
     ):
+        super().__init__()
         config = CurriculumConfig(
             pace_function=pace_function,
             total_epochs=total_epochs,

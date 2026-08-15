@@ -47,23 +47,23 @@ curriculum:
   difficulty_spread_threshold_hard: 2.0
   # ── Online Miner → Curriculum feedback (new) ─
   miner_feedback:
-    enabled: false
-    models: ""  # comma-separated, e.g. "haelt,tft,transformer"
+    enabled: true
+    models: "haelt,tft,transformer"  # comma-separated, e.g. "haelt,tft,transformer"
     forgetting_threshold: 0.15
     easy_threshold: 0.60
     freeze_patience: 1
   # ── Self-Paced Learning (new) ─
   self_paced:
-    enabled: false
+    enabled: true
     pace: "linear"
     lambda_pace: 1.0
-    models: ""  # comma-separated
+    models: "haelt,tft,transformer"  # comma-separated
   # ── Loss-Based Weighting (new) ─
   loss_weighting:
-    enabled: false
+    enabled: true
     scheme: "focal"
     focal_gamma: 2.0
-    models: ""  # comma-separated
+    models: "haelt,tft,transformer"  # comma-separated
   feature_groups:
     # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
     # values fit training.epochs=6 so staged groups actually unlock.
@@ -262,11 +262,11 @@ curriculum:
 # ── Data source, tick ingestion, and feature-pipeline config ────────────────
 data:
   auto_rebuild_on_mismatch: true
-  chunk_size: 500000
+  chunk_size: 250000
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
-  end: '2024-01-31'
+  end: '2026-12-31'
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
@@ -284,10 +284,17 @@ data:
   - EURUSD
   - USDJPY
   - GBPUSD
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - EURGBP
+  - NZDUSD
+  - EURJPY
+  - GBPJPY
   parallel_window_workers: 1
   real_data_window_days: 7
   source: dukascopy
-  start: '2024-01-01'
+  start: '2008-01-01'
   use_cache: true
   window_batch_days: 1
   # auto → Linux lz4@1 / else zstd@3 (see training.gpu_cache_io.default_zarr_compression)
@@ -436,7 +443,7 @@ maturity:
 model:
   all_models: false
   d_model: 256
-  dropout: 0.35
+  dropout: 0.237
   hidden_size: 256
   name: haelt
   nhead: 8
@@ -489,7 +496,7 @@ pretrain:
   blocks_per_epoch: auto
   ema_decay: 0.996
   enabled: true
-  epochs: 3
+  epochs: 18
   handoff_loss: 0.18
   handoff_min_delta: 0.002
   handoff_patience: 2
@@ -585,7 +592,7 @@ rl:
   framework: "custom"  # custom|cleanrl|sb3
 # ── Trading strategy parameters ────────────────────────────────────────────
 strategy:
-  bar_freq: "1min"
+  bar_freq: "5m"
   lookahead_bars: 30
   mode: scalping
   profit_target_atr: 1.2
@@ -610,18 +617,22 @@ tracking:
 training:
   amp: true
   batch_size: 128
+  enable_ewc: false
+  ewc_lambda: 1000.0
+  enable_si: false
+  si_lambda: 1.0
   cross_asset_mode: auto
   cross_asset_provider: auto
   direction_weight: 0.75
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
-  epochs: 6
-  grad_accum_steps: 2  # dev: faster iteration; production (run_ubuntu) keeps 4
+  epochs: 1
+  grad_accum_steps: 4
   grad_clip: 0.75
   label_method: rl_reward
   label_smoothing: 0.05
   loss: sharpe_huber
-  lr: 4.68e-06
+  lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
   lr_warmup_epochs: 2
@@ -633,7 +644,7 @@ training:
   resume: false
   save_every: 5
   seed: 1337
-  seq_len: 80
+  seq_len: "6h40m"
   sharpe_annualization_factor: 325.0
   sharpe_weight: 1.0
   swa_enabled: true
@@ -670,7 +681,7 @@ validation:
 # ── Walk-forward cross-validation ──────────────────────────────────────────
 walk_forward:
   enabled: true
-  folds: 2
+  folds: 7
 # ── XGBoost baseline model config ──────────────────────────────────────────
 xgboost:
   colsample_bytree: 0.8

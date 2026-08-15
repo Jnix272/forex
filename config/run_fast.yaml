@@ -14,7 +14,7 @@ data:
   corr_window_long: 30
   momentum_window: 10
   start: "2018-01-01"
-  end: "2025-12-31"
+  end: "2026-12-31"
   full_day_data: false
   n_ticks: 20_000_000
   chunk_size: 150_000
@@ -34,10 +34,14 @@ model:
 training:
   epochs: 10
   batch_size: 128
+  enable_ewc: false
+  ewc_lambda: 1000.0
+  enable_si: false
+  si_lambda: 1.0
   lr: 0.00005
   lr_warmup_epochs: 2
   resume: false
-  seq_len: 30
+  seq_len: "2h30m"
   patience: 5
   val_split: 0.2
   loss: cross_entropy

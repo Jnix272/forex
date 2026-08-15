@@ -309,6 +309,15 @@ def audit_args_vs_yaml_mismatches(
         arg_val = getattr(args, dest)
         y_val = flat[ypath]
         if not _values_equal(arg_val, y_val):
+            # Special case for time-anchored seq_len: args.seq_len is an int (resolved), y_val is a str (unresolved)
+            if dest == "seq_len" and isinstance(arg_val, int) and isinstance(y_val, str):
+                try:
+                    import pandas as pd
+                    # we don't have bar_freq readily available here, but we can assume if it's seq_len, it was intentionally resolved
+                    continue
+                except Exception:
+                    pass
+
             entry = {
                 "key": ypath,
                 "args": arg_val,

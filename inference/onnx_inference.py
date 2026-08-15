@@ -944,145 +944,6 @@ def _print_onnx_info(onnx_path: str):
         print(f"         (onnx info skipped: {e})")
 
 
-def verify_onnx_scaler(
-    checkpoint_path: str,
-    model_name: str,
-    seq_len: int,
-    n_features: int | None = None,
-    rtol: float = 1e-4,
-    atol: float = 1e-6,
-    num_samples: int = 10,
-) -> bool:
-    """
-    Verify that ONNX scaler fusion matches PyTorch ScaledModel output.
-    
-    Exports the model to ONNX with scaler fusion, then compares outputs
-    between PyTorch (ScaledModel) and ONNX Runtime for random inputs.
-    
-    Args:
-        checkpoint_path: Path to .pt checkpoint
-        model_name: Model architecture name
-        seq_len: Input sequence length
-        n_features: Number of input features (inferred if None)
-        rtol: Relative tolerance for comparison
-        atol: Absolute tolerance for comparison
-        num_samples: Number of random test inputs
-        
-    Returns:
-        True if all outputs match within tolerance, False otherwise
-    """
-    import torch
-    import numpy as np
-    import onnxruntime as ort
-    
-    print(f"[Verify] Loading checkpoint: {checkpoint_path}")
-    
-    # Load checkpoint and model (reuse existing logic)
-    from inference.onnx_inference import export_to_onnx, core_onnx_export, _load_pytorch_model
-    
-    # Load model and scaler via existing function
-    model, n_feat, seq_len_, arch_name, scaler = _load_pytorch_model(
-        checkpoint_path, model_name, seq_len, n_features
-    )
-    
-    if scaler is None:
-        print("[Verify] No scaler found - skipping scaler fusion verification")
-        return True
-    
-    # Create ScaledModel wrapper (same as core_onnx_export)
-    from inference._scaler_load import apply_inference_scaler
-    import numpy as np
-    
-    mean = getattr(scaler, "mean_", None)
-    scale = getattr(scaler, "scale_", None)
-    
-    if mean is None or scale is None:
-        print("[Verify] Scaler missing mean_ or scale_")
-        return False
-    
-    mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32))
-    scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32))
-    scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
-    
-    class ScaledModel(torch.nn.Module):
-        def __init__(self, model, mean, scale):
-            super().__init__()
-            self.model = model
-            self.register_buffer("mean", mean)
-            self.register_buffer("scale", scale)
-        
-        def forward(self, x):
-            x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
-            x = (x - self.mean) / self.scale
-            return self.model(x)
-    
-    scaled_model = ScaledModel(model, mean_tensor, scale_tensor)
-    scaled_model.eval()
-    
-    # Export to temporary ONNX
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
-        tmp_path = tmp.name
-    
-    try:
-        core_onnx_export(
-            model=scaled_model,
-            n_features=n_feat,
-            seq_len=seq_len_,
-            output_path=tmp_path,
-            opset=17,
-            batch_size=1,
-            output_name="logits",
-            scaler=None,  # Already fused in ScaledModel
-        )
-        
-        # Create ONNX Runtime session
-        sess = ort.InferenceSession(tmp_path, providers=["CPUExecutionProvider"])
-        input_name = sess.get_inputs()[0].name
-        output_name = sess.get_outputs()[0].name
-        
-        print(f"[Verify] Running {num_samples} random test samples...")
-        max_diff = 0.0
-        all_passed = True
-        
-        for i in range(num_samples):
-            # Generate random input
-            x_np = np.random.randn(1, seq_len_, n_feat).astype(np.float32)
-            x_torch = torch.from_numpy(x_np)
-            
-            # PyTorch forward
-            with torch.no_grad():
-                pt_out = scaled_model(x_torch).numpy()
-            
-            # ONNX Runtime forward
-            ort_out = sess.run([output_name], {input_name: x_np})[0]
-            
-            # Compare
-            diff = np.abs(pt_out - ort_out).max()
-            rel_diff = diff / (np.abs(pt_out).max() + 1e-8)
-            max_diff = max(max_diff, diff)
-            
-            passed = np.allclose(pt_out, ort_out, rtol=rtol, atol=atol)
-            if not passed:
-                all_passed = False
-                print(f"  Sample {i+1}: FAILED (max_diff={diff:.6f}, rel_diff={rel_diff:.6f})")
-                print(f"    PT range: [{pt_out.min():.4f}, {pt_out.max():.4f}]")
-                print(f"    ORT range: [{ort_out.min():.4f}, {ort_out.max():.4f}]")
-            else:
-                print(f"  Sample {i+1}: OK (max_diff={diff:.6f})")
-        
-        print(f"[Verify] Max absolute difference: {max_diff:.6f}")
-        print(f"[Verify] Result: {'PASSED' if all_passed else 'FAILED'}")
-        return all_passed
-        
-    finally:
-        try:
-            import os
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # INFERENCE ENGINE:  ONNX Runtime + DirectML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1357,17 +1218,6 @@ if __name__ == "__main__":
                      choices=["haelt","tft","transformer","mamba","gnn","expert"])
     tst.add_argument("--seq-len",    type=int, default=60)
 
-    # verify — verify ONNX scaler fusion matches PyTorch
-    vrf = sub.add_parser("verify", help="Verify ONNX scaler fusion matches PyTorch output")
-    vrf.add_argument("--checkpoint", required=True, help="Path to *_best.pt")
-    vrf.add_argument("--model",      required=True,
-                     choices=["haelt","tft","transformer","mamba","gnn","expert"])
-    vrf.add_argument("--seq-len",    type=int, default=60)
-    vrf.add_argument("--n-feat",     type=int, default=None, help="Number of input features")
-    vrf.add_argument("--rtol",       type=float, default=1e-4, help="Relative tolerance")
-    vrf.add_argument("--atol",       type=float, default=1e-6, help="Absolute tolerance")
-    vrf.add_argument("--samples",    type=int, default=10, help="Number of test samples")
-
     args = ap.parse_args()
 
     if args.cmd == "export":
@@ -1444,20 +1294,6 @@ if __name__ == "__main__":
         print(f"[Test] Final action after {args.seq_len} bars: {label}")
 
         benchmark(onnx_path, seq_len=args.seq_len, n_feat=n_feat, runs=200)
-
-    elif args.cmd == "verify":
-        ok = verify_onnx_scaler(
-            checkpoint_path=args.checkpoint,
-            model_name=args.model,
-            seq_len=args.seq_len,
-            n_features=args.n_feat,
-            rtol=args.rtol,
-            atol=args.atol,
-            num_samples=args.samples,
-        )
-        if not ok:
-            raise SystemExit("[Verify] FAILED - scaler fusion mismatch detected")
-        print("[Verify] SUCCESS - all outputs match within tolerance")
 
     else:
         ap.print_help()

@@ -250,6 +250,7 @@ def compute_rl_reward_labels(
     exit_long_path = np.nan_to_num(exit_long_path, nan=0.0, posinf=0.0, neginf=0.0)
     exit_short_path = np.nan_to_num(exit_short_path, nan=0.0, posinf=0.0, neginf=0.0)
     atr = np.nan_to_num(atr, nan=0.0005, posinf=0.0005, neginf=0.0005)
+    tx_cost_pips * pip_size
     n = len(close)
 
     reward_long  = np.zeros(n, dtype=np.float32)
@@ -311,13 +312,15 @@ def compute_rl_reward_labels(
         "optimal_side": optimal,
     })
     valid_s = pl.Series("valid_market", valid_market)
-    # Tail cut: the base (non-regime) labeller stops producing labels at
-    # index n - lookahead_bars - delay (see loop bound above), so its tail
-    # length is exactly lookahead_bars + delay. The regime-scaled horizon
-    # max_label_horizon_mult() does NOT apply here — that belongs to the
-    # regime labeller (compute_rl_reward_labels_regime), which has a
-    # barrier_scale context. Referencing barrier_scale here was a bug.
-    tail_cut = lookahead_bars + max(0, int(execution_delay_bars))
+    # Use max horizon for tail cut (consistent with regime function)
+    try:
+        from config.settings import LABELING as L
+    except Exception:
+        L = {}
+    tail_cut = max(lookahead_bars, int(lookahead_bars * max_label_horizon_mult({
+        "barrier_scale": L.get("barrier_scale", {}),
+        "session_horizon_mult": L.get("session_horizon_mult", {})
+    }))) + max(0, int(execution_delay_bars))
     result_pl = result_pl.with_columns(valid_s)
     result_pl = result_pl.with_columns([
         pl.when(pl.col("valid_market")).then(pl.col("reward_long")).otherwise(0.0).alias("reward_long"),
@@ -571,7 +574,6 @@ def compute_rl_reward_labels_regime(
     reward_short      = np.zeros(n, dtype=np.float32)
     path_quality      = np.zeros(n, dtype=np.float32)  # B: path quality
     confidence_target = np.zeros(n, dtype=np.float32)  # B: drawdown risk proxy
-    tx_pips_arr       = np.zeros(n, dtype=np.float32)  # per-bar tx cost for label threshold
 
     # Max regime-scaled horizon for loop bounds (session/spread only shorten or
     # stretch within max_label_horizon_mult).
@@ -626,7 +628,6 @@ def compute_rl_reward_labels_regime(
         # E: inflate tx cost by slippage multiplier (vol + liquidity premium)
         tx_cost  = 1.5 * pip_size * sess_mult[entry_i] * float(slippage_mult[entry_i])
         tx_pips  = tx_cost / pip_size
-        tx_pips_arr[entry_i] = tx_pips  # save per-bar cost for label threshold
 
         el = entry_long[entry_i];  es = entry_short[entry_i]
         tp_l = el + tp_mult * atr[entry_i];  sl_l = el - sl_mult * atr[entry_i]
@@ -717,12 +718,10 @@ def compute_rl_reward_labels_regime(
 
     # ── Combined label ─────────────────────────────────────────────────────
     reward = np.maximum(reward_long, reward_short)
-    # Use the per-bar transaction cost already computed per entry as the direction threshold,
-    # rather than a hardcoded 1.5 pips. This accounts for session spread multipliers,
-    # slippage premiums, and regime-specific cost inflation.
+    tx_pip = 1.5   # approx threshold in pips
     label  = np.select(
-        [(reward_long > tx_pips_arr) & (reward_long >= reward_short),
-         (reward_short > tx_pips_arr) & (reward_short > reward_long)],
+        [(reward_long > tx_pip) & (reward_long >= reward_short),
+         (reward_short > tx_pip) & (reward_short > reward_long)],
         [1, -1], default=0
     )
 

@@ -105,7 +105,7 @@ class DatasetManifest:
 
     # ── Manifest validation ───────────────────────────────────────────
 
-    def validate_cache(self, expected_seq_len: int, expected_schema_hash: str) -> bool:
+    def validate_cache(self, expected_seq_len: int, expected_schema_hash: str, expected_freq: str) -> bool:
         """Fails fast if the cache manifest doesn't match training expectations."""
         manifest_path = self.cache_dir / "dataset_manifest.json"
         if not manifest_path.exists():
@@ -118,6 +118,12 @@ class DatasetManifest:
             raise ValueError(
                 f"Cache sequence length ({manifest['sequence_length']}) "
                 f"does not match expected ({expected_seq_len})."
+            )
+
+        if manifest.get("frequency") != expected_freq:
+            raise ValueError(
+                f"Cache bar_freq ({manifest.get('frequency')}) "
+                f"does not match expected ({expected_freq})."
             )
 
         if expected_schema_hash and manifest["schema_hash"] != expected_schema_hash:

@@ -8,10 +8,12 @@ Runs in order:
   2. GDELT historical news               (scripts/download_historical_news.py)
   3. CFTC COT positioning                (scripts/download_cot.py)
   4. ForexFactory economic calendar      (scripts/scrape_forexfactory.py)
+  5. DuckDB migration                    (scripts/migrate_to_duckdb.py, auto)
 
 Usage (PowerShell):
   .\\.venv-gpu\\Scripts\\python.exe scripts\\download_all.py --start 2008-01-01 --end 2025-12-31
   .\\.venv-gpu\\Scripts\\python.exe scripts\\download_all.py --dry-run
+  .\\.venv-gpu\\Scripts\\python.exe scripts\\download_all.py --skip-migrate
 """
 
 from __future__ import annotations
@@ -113,7 +115,7 @@ def _load_yaml_defaults() -> dict[str, Any]:
     if yaml is None:
         return defaults
 
-    for rel in ("config/run.yaml", "config/run_ubuntu.yaml"):
+    for rel in ("config/run_ubuntu.yaml", "config/run.yaml"):
         path = _ROOT / rel
         if not path.is_file():
             continue
@@ -282,6 +284,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-news", action="store_true", help="Skip free historical news download")
     p.add_argument("--skip-cot", action="store_true", help="Skip CFTC COT download")
     p.add_argument("--skip-eco", action="store_true", help="Skip ForexFactory calendar scrape")
+    p.add_argument("--skip-migrate", action="store_true",
+                   help="Skip the automatic consolidated-DuckDB migration step")
     p.add_argument("--continue-on-error", action="store_true", help="Run remaining steps even if one step fails")
     p.add_argument("--dry-run", action="store_true", help="Print planned commands without launching child scripts")
 
@@ -303,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--verify-min-ticks", type=int, default=int(defaults["verify_min_ticks"]),
                    help="Flag price files with fewer than N ticks as suspicious")
 
-    p.add_argument("--score-sentiment", action="store_true",
+    p.add_argument("--score-sentiment", action=argparse.BooleanOptionalAction, default=True,
                    help="After news download, pre-warm sentiment cache")
     p.add_argument("--gdelt-min-interval", type=float, default=5.0,
                    help="Minimum seconds between GDELT API requests")
@@ -411,6 +415,16 @@ def main() -> int:
         steps.append((label, eco_cmd))
         step_data_keys[label] = "calendar"
 
+    # ── Consolidated DuckDB migration (incremental, safe to re-run) ─────────
+    if not args.skip_migrate and not args.skip_prices:
+        migrate_label = "DuckDB migration"
+        migrate_cmd = [
+            py, str(_ROOT / "scripts" / "migrate_to_duckdb.py"),
+            "--pairs", *pairs,
+        ]
+        steps.append((migrate_label, migrate_cmd))
+        step_data_keys[migrate_label] = "prices"
+
     if not steps:
         print("[download_all] Nothing to do - all steps skipped.", flush=True)
         return 0
@@ -426,6 +440,7 @@ def main() -> int:
     print(f"  steps : {len(steps)}")
     print(f"  price : yearly={args.yearly} verify={args.verify} fix={args.verify_fix} missing_months={args.check_missing_months}")
     print(f"  news  : gdelt_workers={args.gdelt_workers} min_interval={args.gdelt_min_interval}s step_days={args.gdelt_step_days} official_feeds={args.official_feeds}")
+    print(f"  duckdb: {'auto-migrate ON' if not args.skip_migrate and not args.skip_prices else 'skipped'}")
     print(f"  wandb : {'ON -> ' + wb_run.url if wb_run else 'OFF'}")
     if args.dry_run:
         print("  mode  : DRY-RUN")

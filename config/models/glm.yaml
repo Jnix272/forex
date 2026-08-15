@@ -1,0 +1,10 @@
+model:
+  name: glm
+  input_dim: 120
+  dropout: 0.0
+
+training:
+  lr: 0.001
+  seq_len: 60
+  batch_size: 256
+  epochs: 100

@@ -21,7 +21,7 @@ Operational scripts for data, training, export, audit, and maintenance tasks.
 | `data_quality_check.py` | Python module | Functions: check_array, generate_plots, main |
 | `discord_ollama_bot.py` | Python module | Discord <-> Ollama training Q&A bot. Functions: redact, latest_file, tail_text, parse_latest_jsonl, summarize_metrics, list_checkpoints, config_excerpt, build_context, ask_ollama, discord_post... |
 | `download_2008_news.py` | Data operation script | Functions: generate_synthetic_2008 |
-| `download_all.py` | Data operation script | scripts/download_all.py ======================= One-command download for all offline training data. Functions: parse_args, main |
+| `download_all.py` | Data operation script | scripts/download_all.py ======================= One-command download for all offline training data (prices -> GDELT news -> COT -> ForexFactory). Automatically runs the consolidated DuckDB migration as a final step (`--skip-migrate` to disable). Functions: parse_args, main |
 | `download_cot.py` | Data operation script | Functions: download_cot_data, parse_args |
 | `download_data.py` | Data operation script | scripts/download_data.py ======================== Standalone bulk downloader / ingester for: 1) Dukascopy tick data (data/raw/dukascopy/<PAIR>/...) 2) Cross-asset panel (data/processed/cross_asset/...) 3) Myfxbook daily... Functions: download_ticks, download_ticks_yearly, download_cross_asset, download_eodhd_forex, download_eodhd_cross_asset, ingest_myfxbook, auto_redownload_missing_data, main |
 | `download_databento.py` | Data operation script | Functions: main |
@@ -40,13 +40,13 @@ Operational scripts for data, training, export, audit, and maintenance tasks.
 | `merge_datasets.py` | Data operation script | Functions: main |
 | `merge_datasets_duckdb.py` | Data operation script | Functions: main |
 | `merge_massive_datasets.py` | Data operation script | Functions: merge_massive_datasets, parse_args |
+| `migrate_to_duckdb.py` | Data operation script | Incremental, auto-refreshing migration of compacted tick parquet into a consolidated data/store/forex_ticks.duckdb. Idempotent; adds new pairs, refreshes re-downloaded pairs, skips up-to-date ones (state in data/store/.migrate_manifest.json). Flags: --force, --dry-run, --pairs. Runs automatically after download_all and as a pre-flight check before train/backtest/features. Functions: migrate_to_duckdb |
 | `normalize_historical_news.py` | Python module | Normalize historical_news_combined.parquet for the training news loader. Functions: normalize_news, main |
 | `optuna_tune.py` | Python module | Functions: parse_args, objective, main |
 | `parse_test.py` | Test module | Functions: parse |
 | `promote_best_fold.py` | Python module | scripts/promote_best_fold.py =========================== Standalone utility to scan cross-validation folds and promote the best one to the primary checkpoint filename, applying a stability penalty for overfitting. Functions: promote_best_fold, main |
 | `report_databento_usage.py` | Python module | Functions: get_file_size, human_readable_size, main |
-| `run_feature_engineering.py` | Python module | Functions: load_config, run_pipeline |
-| `run_pipeline.py` | Python module | scripts/run_pipeline.py ======================= Top-level pipeline: download data, train, or both. Functions: main |
+| `run_pipeline.py` | Python module | scripts/run_pipeline.py ======================= Top-level pipeline orchestrator. Commands: download | migrate | validate | data | train | backtest | all. `download` now auto-runs the DuckDB migration; `data` chains download -> migrate -> validate; `train`/`backtest` auto-run the migration if the consolidated DB is stale (`--no-auto-migrate` to disable). Functions: main |
 | `sanitize_cached_labels.py` | Python module | Functions: sanitize_cache, main |
 | `score_historical_news_sentiment.py` | Python module | Score historical news headlines and write sentiment_score into the CSV. Functions: print_stats, score_historical_news, parse_args, main |
 | `scrape_forexfactory.py` | Data operation script | Scrape the ForexFactory economic calendar into data/raw/eco_calendar/events.csv. Functions: parse_week_html, fetch_forexfactory_week, parse_args, main |

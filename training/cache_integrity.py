@@ -152,6 +152,9 @@ def _get_cache_path(args) -> Path:
     _ensure_bound()
     pairs    = _get_pairs(args)
     pair_tag = "-".join(sorted(pairs))
+    if len(pair_tag) > 30:
+        import hashlib
+        pair_tag = hashlib.md5(pair_tag.encode("utf-8")).hexdigest()[:10] + f"_{len(pairs)}pairs"
     target_col = _cache_target_col(args)
 
     exec_delay = int(getattr(args, "execution_delay_bars", 1))
@@ -461,6 +464,7 @@ def _compute_content_hash(args) -> str:
         "seq_len": getattr(args, "seq_len", 80),
         "lookahead": getattr(args, "lookahead_bars", 30),
         "target": getattr(args, "target_col", ""),
+        "bar_freq": getattr(args, "bar_freq", "5m"),
     }
 
     # Convert to a stable JSON string

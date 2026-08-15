@@ -108,9 +108,9 @@ CLI / argparse still expose `--pretrain-epochs` → `pretrain_epochs`; settings
 keeps both keys mirrored. Prefer editing YAML `pretrain.epochs`.
 
 **`run_ubuntu.yaml`:** hardware / scale profile only (`PROFILE_SCALE_KEYS` —
-epochs, batch_size, patience, chunk_size, paths, hardware.profile). Strategy,
-labeling, and critical shared keys must match `run.yaml` — **Ubuntu is not a
-second strategy/labeling source of truth**.
+batch_size, patience, chunk_size, paths, hardware.profile). Strategy,
+labeling, budgets, and critical shared keys are now fully synchronized and must match `run.yaml` — **Ubuntu is not a
+second strategy/labeling source of truth**. `run.yaml` is the canonical source for production scale.
 
 **LABEL_REGIME** (settings-only policy for RL barriers / session cost+horizon /
 spread_z horizon gate): edits bust the training cache via `lr{digest6}` in

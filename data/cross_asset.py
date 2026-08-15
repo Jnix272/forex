@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from infrastructure.logging_utils import log_data_load
 
@@ -206,27 +208,63 @@ def _read_fred_daily(series_id: str, start: str, end: str) -> pd.Series | None:
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
-def _cache_read(cache_path: Path) -> pd.Series | None:
+def _cache_read(cache_path: Path, start: pd.Timestamp = None, end: pd.Timestamp = None) -> pd.Series | None:
     if not cache_path.exists():
         return None
     try:
-        cached = pd.read_csv(cache_path)
-        idx  = pd.to_datetime(cached["timestamp"], utc=True, errors="coerce")
-        vals = pd.to_numeric(cached["value"], errors="coerce")
-        ser  = pd.Series(vals.values, index=idx).dropna()
-        return ser if not ser.empty else None
+        df = pd.read_parquet(cache_path)
+        idx = pd.to_datetime(df["timestamp"], utc=True)
+        ser = pd.Series(df["value"].values, index=idx).dropna()
+        if ser.empty:
+            return None
+            
+        # Range check: if the cache doesn't cover the requested range, force redownload
+        if start is not None and ser.index.min() > start:
+            return None
+        if end is not None and ser.index.max() < end:
+            return None
+            
+        return ser.sort_index()
     except Exception:
         return None
 
 
-def _cache_write(cache_path: Path, ser: pd.Series) -> None:
+def _cache_write(cache_path: Path, ser: pd.Series, metadata: dict = None) -> None:
     try:
-        pd.DataFrame({
-            "timestamp": ser.index.astype(str),
-            "value":     ser.values,
-        }).to_csv(cache_path, index=False)
-    except Exception:
-        pass
+        if ser.empty:
+            return
+            
+        # 1. Deduplicate by index (keep last observation)
+        ser = ser[~ser.index.duplicated(keep="last")]
+        
+        # 2. Sort index
+        ser = ser.sort_index()
+        
+        # 3. Resample to Calendar Daily and Forward Fill to enforce gap policy
+        ser = ser.asfreq("D").ffill()
+        
+        # Convert to DataFrame
+        df = pd.DataFrame({
+            "timestamp": ser.index,
+            "value": ser.values,
+        })
+        
+        # Save as Parquet with metadata
+        table = pa.Table.from_pandas(df)
+        
+        # Add metadata
+        if metadata is None: 
+            metadata = {}
+        metadata["schema_version"] = "1.0"
+        metadata["processed_at"] = pd.Timestamp.utcnow().isoformat()
+        
+        custom_meta = {k.encode(): str(v).encode() for k, v in metadata.items()}
+        existing_meta = table.schema.metadata or {}
+        table = table.replace_schema_metadata({**existing_meta, **custom_meta})
+        
+        pq.write_table(table, cache_path)
+    except Exception as e:
+        print(f"Cache write failed for {cache_path}: {e}")
 
 
 # ── EODHD helper ──────────────────────────────────────────────────────────────
@@ -252,8 +290,10 @@ def _read_eodhd_daily(
 
     # Check local EODHD-specific cache first
     safe_asset = asset.replace("/", "_")
-    cache_path = cache_dir / f"{safe_asset}_eodhd.csv"
-    cached     = _cache_read(cache_path)
+    cache_path = cache_dir / f"{safe_asset}_eodhd.parquet"
+    start_ts = pd.Timestamp(start, tz="UTC")
+    end_ts = pd.Timestamp(end, tz="UTC")
+    cached = _cache_read(cache_path, start_ts, end_ts)
     if cached is not None and not cached.empty:
         return cached
 
@@ -262,7 +302,7 @@ def _read_eodhd_daily(
         panel   = loader.load_cross_asset(start=start, end=end, assets=[asset], use_cache=False)
         ser     = panel.get(asset)
         if ser is not None and not ser.empty:
-            _cache_write(cache_path, ser)
+            _cache_write(cache_path, ser, metadata={"source": "eodhd", "asset": asset})
         return ser
     except Exception:
         return None
@@ -290,7 +330,7 @@ def load_cross_asset_panel(
     start_ts = pd.Timestamp(start, tz="UTC")
     end_ts   = pd.Timestamp(end,   tz="UTC")
 
-    cdir = Path(cache_dir)
+    cdir = Path(cache_dir) / "cross_asset"
     cdir.mkdir(parents=True, exist_ok=True)
 
     out: dict[str, pd.Series] = {}
@@ -312,12 +352,12 @@ def load_cross_asset_panel(
             if provider == "stooq":
                 for sym in candidates:
                     safe_sym   = sym.replace("^", "idx")
-                    cache_path = cdir / f"{asset}_stooq_{safe_sym}.csv"
-                    ser = _cache_read(cache_path)
+                    cache_path = cdir / f"{asset}_stooq_{safe_sym}.parquet"
+                    ser = _cache_read(cache_path, start_ts, end_ts)
                     if ser is None or ser.empty:
                         ser = _read_stooq_daily(sym)
                         if ser is not None and not ser.empty:
-                            _cache_write(cache_path, ser)
+                            _cache_write(cache_path, ser, metadata={"source": "stooq", "symbol": sym, "asset": asset})
                     if ser is not None and not ser.empty:
                         log_data_load("cross_asset_provider", f"{asset}/stooq/{sym}", 
                                      n_rows=len(ser), status="success", t0=_t0_asset)
@@ -330,12 +370,12 @@ def load_cross_asset_panel(
                 if not ysym:
                     continue
                 safe_sym   = ysym.replace("^", "idx").replace("=", "_")
-                cache_path = cdir / f"{asset}_yahoo_{safe_sym}.csv"
-                ser = _cache_read(cache_path)
+                cache_path = cdir / f"{asset}_yahoo_{safe_sym}.parquet"
+                ser = _cache_read(cache_path, start_ts, end_ts)
                 if ser is None or ser.empty:
                     ser = _read_yahoo_daily(ysym, start, end)
                     if ser is not None and not ser.empty:
-                        _cache_write(cache_path, ser)
+                        _cache_write(cache_path, ser, metadata={"source": "yahoo", "symbol": ysym, "asset": asset})
                 if ser is not None and not ser.empty:
                     log_data_load("cross_asset_provider", f"{asset}/yahoo/{ysym}", 
                                  n_rows=len(ser), status="success", t0=_t0_asset)
@@ -344,12 +384,12 @@ def load_cross_asset_panel(
                 fsym = FRED_YIELD_SYMBOLS.get(asset)
                 if not fsym:
                     continue
-                cache_path = cdir / f"{asset}_fred_{fsym}.csv"
-                ser = _cache_read(cache_path)
+                cache_path = cdir / f"{asset}_fred_{fsym}.parquet"
+                ser = _cache_read(cache_path, start_ts, end_ts)
                 if ser is None or ser.empty:
                     ser = _read_fred_daily(fsym, start, end)
                     if ser is not None and not ser.empty:
-                        _cache_write(cache_path, ser)
+                        _cache_write(cache_path, ser, metadata={"source": "fred", "symbol": fsym, "asset": asset})
                 if ser is not None and not ser.empty:
                     log_data_load("cross_asset_provider", f"{asset}/fred/{fsym}", 
                                  n_rows=len(ser), status="success", t0=_t0_asset)
@@ -372,6 +412,16 @@ def load_cross_asset_panel(
         clip = ser[(ser.index >= start_ts) & (ser.index <= end_ts)]
         out[asset] = clip if not clip.empty else ser
         
+        # Freshness warning
+        if not out[asset].empty:
+            max_dt = out[asset].index.max()
+            if max_dt < end_ts - pd.Timedelta(days=14):
+                import logging
+                logging.warning(
+                    f"Cross-asset {asset} is STALE! Max date {max_dt.date()} is >14 days "
+                    f"behind requested end date {end_ts.date()}. Fills will be hallucinated."
+                )
+
         log_data_load("cross_asset", asset, n_rows=len(out[asset]), status="success",
                       t0=_t0_asset, note=f"provider={used_provider or provider}")
 

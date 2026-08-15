@@ -8,7 +8,7 @@ parameters for normal/swing).
 
 STRATEGY_PROFILES = {
     "scalping": {
-        "bar_freq": "1min",
+        "bar_freq": "5min",
         "seq_len": 80,  # match config/run.yaml training.seq_len
         "lookahead_bars": 30,  # match strategy / LABELING defaults
         "profit_target_atr": 1.2,  # match strategy / LABELING defaults

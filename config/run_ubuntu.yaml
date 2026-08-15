@@ -37,6 +37,8 @@ backtest:
   stop_pips: 12.0
   take_profit_pips: 18.0
 # ── Post-training temperature scaling calibration to sharpen prob estimates ─
+  max_spread_clamp: 0.005
+  min_spread_clamp: 5.0e-05
 calibration:
   calibrate: true
   overconf_penalty: true
@@ -71,23 +73,23 @@ curriculum:
   difficulty_spread_threshold_hard: 2.0
   # ── Online Miner → Curriculum feedback (new) ─
   miner_feedback:
-    enabled: false
-    models: ""  # comma-separated, e.g. "haelt,tft,transformer"
+    enabled: true
+    models: "haelt,tft,transformer"  # comma-separated, e.g. "haelt,tft,transformer"
     forgetting_threshold: 0.15
     easy_threshold: 0.60
     freeze_patience: 1
   # ── Self-Paced Learning (new) ─
   self_paced:
-    enabled: false
+    enabled: true
     pace: "linear"
     lambda_pace: 1.0
-    models: ""  # comma-separated
+    models: "haelt,tft,transformer"  # comma-separated
   # ── Loss-Based Weighting (new) ─
   loss_weighting:
-    enabled: false
+    enabled: true
     scheme: "focal"
     focal_gamma: 2.0
-    models: ""  # comma-separated
+    models: "haelt,tft,transformer"  # comma-separated
   feature_groups:
     # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
     # values fit training.epochs=6 so staged groups actually unlock.
@@ -281,7 +283,7 @@ data:
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
-  end: '2025-12-31'
+  end: '2026-12-31'
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
@@ -295,6 +297,13 @@ data:
   - EURUSD
   - USDJPY
   - GBPUSD
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - EURGBP
+  - NZDUSD
+  - EURJPY
+  - GBPJPY
   parallel_window_workers: 1
   real_data_window_days: 7
   source: dukascopy
@@ -306,6 +315,10 @@ data:
   zarr_cname: lz4
   zarr_clevel: 1
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+  chunk_rows: auto
+  feature_cache_dir: data/features
+  shuffle_buffer_size: 16384
+  use_feature_cache: false
 direction_training:
   label_smoothing: 0.05
   max_pred_class_share: 0.8
@@ -429,7 +442,7 @@ maturity:
 model:
   all_models: false
   d_model: 256
-  dropout: 0.35
+  dropout: 0.237
   hidden_size: 256
   name: haelt
   nhead: 8
@@ -463,7 +476,7 @@ optuna:
   metric: val_loss
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/forex_3pair_2008_2025_haelt
+  checkpoint_dir: checkpoints/forex_10pair_2008_2025
   data_cache: data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:
@@ -545,6 +558,9 @@ risk:
       max_lots: 0.0
       max_open_trades: 0
 # ── Reinforcement learning (DQN / PPO) on top of supervised encoder ─────────
+  pip_value: 10.0
+  var_confidence: 0.99
+  var_max_pct: 0.02
 rl:
   algo: dqn
   all_models: false
@@ -575,7 +591,7 @@ rl:
   framework: "custom"  # custom|cleanrl|sb3
 # ── Trading strategy parameters ────────────────────────────────────────────
 strategy:
-  bar_freq: "1min"
+  bar_freq: "5m"
   lookahead_bars: 30
   mode: scalping
   profit_target_atr: 1.2
@@ -592,18 +608,22 @@ tracking:
 training:
   amp: true
   batch_size: 212
+  enable_ewc: false
+  ewc_lambda: 1000.0
+  enable_si: false
+  si_lambda: 1.0
   cross_asset_mode: auto
   cross_asset_provider: auto
   direction_weight: 0.75
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
-  epochs: 40
+  epochs: 1
   grad_accum_steps: 4  # production: larger effective batch; run.yaml uses 2 for faster dev
   grad_clip: 0.75
   label_method: rl_reward
   label_smoothing: 0.05
   loss: sharpe_huber
-  lr: 4.68e-06
+  lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
   lr_warmup_epochs: 2
@@ -613,7 +633,7 @@ training:
   resume: false
   save_every: 5
   seed: 1337
-  seq_len: 80
+  seq_len: "6h40m"
   sharpe_annualization_factor: 325.0
   sharpe_weight: 1.0
   # ── Adversarial training (new) ─
@@ -641,6 +661,8 @@ training:
   val_split: 0.2
   weight_decay: 0.001
 # ── Validation strategy: purged-embargo walk-forward ────────────────────────
+  max_bad_frac: 0.05
+  max_zero_frac: 0.8
 validation:
   embargo_bars: 60
   method: purged_embargo
@@ -692,3 +714,33 @@ catboost:
   tune: false
   tune_trials: 20
   max_samples: 500000
+
+features:
+  atr_windows: [6, 20, 60]
+  chop_window: 14
+  corr_window: 60
+  momentum_windows: [5, 20, 60]
+  ofi_windows: [5, 20, 60]
+  regime_window: 240
+  vol_windows: [6, 20, 60]
+  volatility_window: 120
+  vwap_window: 60
+# ── Per-asset pip resolution (overrides settings.PIP_SIZES) ─────────────────
+
+pip_sizes:
+  BTC: 1.0
+  ETH: 0.01
+  JPY: 0.01
+  XAG: 0.001
+  XAU: 0.1
+  default: 0.0001
+# ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+
+sidecar:
+  enabled: false
+  mode: process
+  max_queue_size: 10000
+  flush_interval_s: 2.0
+  retention_days: 30
+  enable_discord: false
+# ── Experiment tracking: W&B, run name, auto-tune ──────────────────

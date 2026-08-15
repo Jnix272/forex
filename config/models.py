@@ -9,7 +9,7 @@ from typing import Any
 
 # Keys accepted by train_gpu --model and build_model()
 SUPPORTED_SUPERVISED: frozenset[str] = frozenset(
-    {"tft", "transformer", "haelt", "mamba", "gnn", "expert"}
+    {"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm"}
 )
 
 BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
@@ -35,6 +35,14 @@ BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
 }
 
 MODELS: dict[str, dict[str, Any]] = {
+    "glm": {
+        "decision_role": "linear_baseline",
+        "use_when": "When you need an ultra-fast convex linear baseline.",
+        "default_use": "Baseline comparator.",
+        "seq_len": 60,
+        "dropout": 0.0,
+        "learning_rate": 1e-3,
+    },
     "tft": {
         "decision_role": "interpretability_exogenous",
         "use_when": "Need feature importance, interpretability, and many exogenous inputs.",

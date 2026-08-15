@@ -686,7 +686,6 @@ from training.direction_control import (
     labels_to_class_index,
     _reward_to_class_index,
 )
-from training.ewc import ElasticWeightConsolidation, apply_ewc_loss
 from training.feature_ablation import (
     _atomic_copy,
     _build_feature_ablation_mask,
@@ -1020,6 +1019,11 @@ def main():
 
     with _timer.stage("dataset_build"):
         cache_path, n_samples, n_features, scaler = build_dataset_chunked(args)
+    
+    if getattr(args, "build_only", False):
+        print(f"\n[Pipeline] Dataset built successfully at {cache_path}. Exiting due to --build-only.")
+        sys.exit(0)
+        
     n_samples = _clamp_n_samples_to_disk(cache_path, n_samples)
     _warn_multitask_cache_sidecars(cache_path, args)
     if scaler is not None and hasattr(scaler, "feature_names_in_"):

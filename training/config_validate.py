@@ -264,6 +264,36 @@ def collect_config_issues(
             f"Unknown model '{model_name}'. Valid: {sorted(SUPPORTED_SUPERVISED)}"
         )
 
+    # Framework Availability Check
+    import importlib.util
+    import os
+
+    def _is_installed(pkg_name: str) -> bool:
+        try:
+            return importlib.util.find_spec(pkg_name) is not None
+        except Exception:
+            return False
+
+    tf = str(getattr(args, "training_framework", "custom")).lower()
+    if tf == "lightning" and not (_is_installed("pytorch_lightning") or _is_installed("lightning")):
+        errors.append(f"Framework: training_framework='{tf}' requires 'pytorch-lightning', which is not installed.")
+    elif tf == "composer" and not _is_installed("composer"):
+        errors.append(f"Framework: training_framework='{tf}' requires 'mosaicml' (composer), which is not installed.")
+
+    pf = str(getattr(args, "pretrain_framework", "custom")).lower()
+    if pf == "lightly" and not _is_installed("lightly"):
+        errors.append(f"Framework: pretrain_framework='{pf}' requires 'lightly', which is not installed.")
+    elif pf == "solo" and not _is_installed("solo"):
+        errors.append(f"Framework: pretrain_framework='{pf}' requires 'solo-learn', which is not installed.")
+
+    rf = str(getattr(args, "rl_framework", "custom")).lower()
+    if rf == "sb3" and not _is_installed("stable_baselines3"):
+        errors.append(f"Framework: rl_framework='{rf}' requires 'stable-baselines3', which is not installed.")
+    elif rf == "cleanrl":
+        _local_cleanrl = os.path.exists(os.path.join(os.path.dirname(__file__), "..", "cleanrl"))
+        if not (_is_installed("cleanrl") or _local_cleanrl):
+            errors.append(f"Framework: rl_framework='{rf}' requires 'cleanrl' package or local cleanrl/ dir.")
+
     # Loss function validation
     loss_fn = str(getattr(args, "loss", "sharpe_huber")).lower().strip()
     if loss_fn not in SUPPORTED_LOSSES:
@@ -540,6 +570,27 @@ def validate_run_config(args: Any, *, verbose: bool = True) -> int:
         f"    TOTAL        : {_fmt_hours(est['total_min'])}",
         "-" * 62,
     ]
+    
+    try:
+        from training.gpu_cli import _apply_model_profile
+        import copy
+        has_printed_header = False
+        for m in models:
+            m_args = copy.copy(args)
+            m_args = _apply_model_profile(m_args, m, enabled=True)
+            if hasattr(m_args, "_training_features_report"):
+                if not has_printed_header:
+                    lines.append("  Training-Features Report (Precedence):")
+                    has_printed_header = True
+                report = m_args._training_features_report
+                lines.append(f"    [{m.upper()}]")
+                for k, v in report.items():
+                    lines.append(f"      {k:20s}: {str(v['mode']):<6s} (source: {v['source']})")
+        if has_printed_header:
+            lines.append("-" * 62)
+    except Exception as e:
+        lines.append(f"  [Warning] Failed to generate features report: {e}")
+        lines.append("-" * 62)
 
     if info:
         lines.append("  Info:")

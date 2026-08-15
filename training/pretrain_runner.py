@@ -110,6 +110,9 @@ def _normalize_pretrain_method(method: str) -> str:
         "regime_cluster": "cluster",
         "cluster_tscl": "cluster",
         "drift_pretrain": "drift",
+        "masked_or_byol": "masked",
+        "forecast_or_drift": "forecast",
+        "byol_or_tscl": "byol",
     }
     return aliases.get(str(method or "byol").lower(), str(method or "byol").lower())
 
@@ -320,21 +323,7 @@ def _update_pretrain_report(args, updates: dict) -> None:
         path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
 
-def _recommended_pretrain_method(model_name: str) -> str:
-    name = str(model_name or "").lower()
-    if "haelt" in name:
-        return "masked_or_byol"
-    if "mamba" in name:
-        return "forecast_or_drift"
-    if "tft" in name:
-        return "masked"
-    if "gnn" in name:
-        return "cluster"
-    if "expert" in name:
-        return "tscl"
-    if "transformer" in name:
-        return "byol_or_tscl"
-    return "masked"
+from config.model_training_profile import pretrain_method_for
 
 
 def _fold_history_summary(folds: list | None, metric_name: str = "sharpe") -> dict:
@@ -562,7 +551,8 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
             "model_name": getattr(args, "model", None),
             "pretrain_enabled": True,
             "status": "completed",
-            "method": _method,
+            "method_requested": getattr(args, "_raw_pretrain_method", _method),
+            "method_actual": _method,
             "framework": framework,
             "cache_path": str(cache_path),
             "source_windows": int(_source_n_total),
@@ -579,7 +569,18 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
 
 def run_pretrain(model, cache_path, n_features, args, device, run=None):
     _ensure_bound()
+    
     _pf = str(getattr(args, "pretrain_framework", "custom") or "custom").lower()
+    _raw_method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
+    _method = _normalize_pretrain_method(_raw_method)
+    
+    if _method not in _VALID_PRETRAIN_METHODS:
+        print(f"\n[Pretrain] [!!!] WARNING: Requested method={_raw_method!r} collapsed to unknown method={_method!r}; falling back to 'byol'")
+        _method = "byol"
+        
+    args.pretrain_method = _method
+    args._raw_pretrain_method = _raw_method
+
     if _pf != "custom":
         try:
             return _run_pretrain_via_adapter(
@@ -589,12 +590,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         except Exception as _pf_exc:
             print(f"[Pretrain] Adapter path unavailable ({_pf_exc}); falling back to built-in trainer.")
     _ensure_bound()
-    _method = _normalize_pretrain_method(
-        str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
-    )
-    if _method not in _VALID_PRETRAIN_METHODS:
-        print(f"[Pretrain] WARN: unknown method={_method!r}; falling back to byol")
-        _method = "byol"
+
     use_regime = getattr(args, "pretrain_regime", False) and _method == "tscl"
     _mode_labels = {
         "byol": "BYOL",
@@ -735,8 +731,9 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         "model_name": getattr(args, "model", None),
         "pretrain_enabled": True,
         "status": "started",
-        "method": _method,
-        "recommended_method_for_model": _recommended_pretrain_method(getattr(args, "model", "")),
+        "method_requested": getattr(args, "_raw_pretrain_method", _method),
+        "method_actual": _method,
+        "recommended_method_for_model": pretrain_method_for(getattr(args, "model", "")),
         "regime_aware": bool(use_regime),
         "cache_path": str(cache_path),
         "source_windows": int(_source_n_total),

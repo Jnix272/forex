@@ -15,6 +15,7 @@ from models.architectures import (
     MultiTaskWrapper,
     TFTScalper,
     iTransformerScalper,
+    GLMBaseline,
 )
 from config.model_training_profile import (
     ModelTrainingProfile,
@@ -81,6 +82,8 @@ def _multitask_head_in(model_name: str, args, n_features: int) -> int:
         return args.hidden_size * 6
     if m == "expert":
         return args.d_model
+    if m == "glm":
+        return getattr(args, "seq_len", 16) * n_features
     return args.hidden_size
 
 def _format_param_count(model: nn.Module) -> str:
@@ -161,6 +164,9 @@ def build_model(name: str, n_features: int, args) -> nn.Module:
                            nhead=args.nhead,
                            num_layers=args.num_layers, dropout=args.dropout,
                            num_classes=nc),
+        "glm":         lambda: GLMBaseline(
+                           input_size=backbone_input, num_classes=nc,
+                           seq_len=getattr(args, "seq_len", 16)),
     }
 
     if core_name not in builders:

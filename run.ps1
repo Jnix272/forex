@@ -2,13 +2,17 @@
 #
 # Usage:
 #   .\run.ps1 download --start 2017-02-18
+#   .\run.ps1 migrate
+#   .\run.ps1 validate
+#   .\run.ps1 data --start 2017-02-18
 #   .\run.ps1 train
 #   .\run.ps1 train --quick
+#   .\run.ps1 backtest
 #   .\run.ps1 all --start 2017-02-18
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("download", "train", "all")]
+    [ValidateSet("download", "migrate", "validate", "data", "train", "backtest", "all")]
     [string]$Command,
 
     [Parameter(ValueFromRemainingArguments = $true)]

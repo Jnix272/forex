@@ -346,25 +346,25 @@ class RegimeHMM:
         if self._model is None:
             raise RuntimeError("RegimeHMM.fit() must be called first")
         Z = (np.nan_to_num(np.asarray(self._features)) - self._mean) / self._std
-
-        # BUG-004: hmmlearn's predict_proba uses Forward-Backward (smoothing)
-        # which leaks future data. We do a manual forward-only pass here for
-        # causal P(S_t | O_{1:t}) — the same approach as ``_causal_hmm_decode``.
-        m = self._model
-        framelogprob = m._compute_log_likelihood(Z)
-        n, k = framelogprob.shape
-        log_transmat = np.log(m.transmat_ + 1e-12)
-        log_startprob = np.log(m.startprob_ + 1e-12)
+        
+        # BUG-004: predict_proba uses Forward-Backward (smoothing) which leaks future data.
+        # We must use only the forward pass for causal probabilities.
+        if hasattr(self._model, "_compute_log_likelihood"):
+            framelogprob = self._model._compute_log_likelihood(Z)
+        else:
+            framelogprob = self._model._compute_log_likelihood(Z) # Fallback?
+            
         from scipy.special import logsumexp
+        
+        if hasattr(self._model, "_do_forward_pass"):
+            logprob, fwdlattice = self._model._do_forward_pass(framelogprob)
+        else:
+            from hmmlearn._hmmc import forward_log
+            logprob, fwdlattice = forward_log(
+                self._model.startprob_, self._model.transmat_, framelogprob)
 
-        logprob = np.empty((n, k))
-        logprob[0] = log_startprob + framelogprob[0]
-        for t in range(1, n):
-            logprob[t] = (
-                logsumexp(logprob[t - 1, :, np.newaxis] + log_transmat.T, axis=0)
-                + framelogprob[t]
-            )
-        causal_probs = np.exp(logprob - logsumexp(logprob, axis=1, keepdims=True))
+        # fwdlattice is log P(O_{1:t}, S_t). We want P(S_t | O_{1:t})
+        causal_probs = np.exp(fwdlattice - logsumexp(fwdlattice, axis=1, keepdims=True))
         return causal_probs
 
 

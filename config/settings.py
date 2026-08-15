@@ -172,7 +172,7 @@ DATA = {
     "price_type":      "bid_ask",
     "pairs":           ["EURUSD", "GBPUSD", "USDJPY"],
     "primary_pair":    "EURUSD",
-    "bar_freq":        "1min",
+    "bar_freq":        "5min",
     "timescale": {
         "host":        "localhost",
         "port":        5432,
@@ -252,7 +252,7 @@ SENTIMENT = {
 TRAINING = {
     # Defaults mirrored from config/run.yaml (YAML wins when --config is used).
     "batch_size":       512,
-    "epochs":           6,
+    "epochs":           40,
     "patience":         3,   # must be < post-warmup epochs so early-stop can fire
     "loss":             "sharpe_huber",  # matches config/run.yaml
     "huber_delta":      1.0,
@@ -261,11 +261,11 @@ TRAINING = {
     "weight_decay":     0.001,
     "amp":              True,
     "val_split":        0.2,
-    "seq_len":          80,              # matches config/run.yaml + curriculum
+    "seq_len":          "6h40m",              # matches config/run.yaml + curriculum
     "lr_warmup_epochs": 2,               # matches config/run.yaml training.lr_warmup_epochs
     "lr_schedule":      "warmup_cosine",
     "checkpoint_dir":   PATHS["checkpoints"],
-    "walk_forward_folds": 6,
+    "walk_forward_folds": 7,
     "early_stop_metric": "sharpe",
     "sharpe_annualization_factor": 325.0,  # matches config/run.yaml (FX minute bars)
     "onecycle_pct_start": 0.1,
@@ -380,9 +380,9 @@ PRETRAIN = {
     },
     "pretrain_loss":    "huber",
     # YAML uses pretrain.epochs / min_epochs; keep pretrain_epochs as the CLI alias.
-    "epochs":           3,                # matches config/run.yaml pretrain.epochs
-    "min_epochs":       1,                # matches config/run.yaml pretrain.min_epochs
-    "pretrain_epochs":  3,
+    "epochs":           18,                # matches config/run.yaml pretrain.epochs
+    "min_epochs":       3,                 # matches config/run.yaml pretrain.min_epochs
+    "pretrain_epochs":  18,
     "pretrain_lr":      1e-4,
     "pretrain_batch":   256,
     "checkpoint":       PATHS["file_contrastive_encoder"],

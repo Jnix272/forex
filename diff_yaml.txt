@@ -1,0 +1,1474 @@
+--- config/run_ubuntu.yaml	2026-08-13 15:58:07.414546425 -0400
++++ config/run.yaml	2026-08-12 16:41:05.987271583 -0400
+@@ -1,746 +1,725 @@
+-# =============================================================================
+-# Forex Scaling Model — WSL2 / Ubuntu GPU Training Config  (v6.7)
+-# =============================================================================
+-# HW / scale profile of config/run.yaml — NOT a second source of strategy truth.
+-# Intentional differences vs run.yaml are hardware and duration only:
+-#   • paths.data_cache → Linux-native relative path (run.yaml may use D:/...)
+-#   • hardware.profile → ubuntu_* GPU profile (batch, Zarr codec, VRAM knobs)
+-#   • pretrain.epochs / training.epochs / batch_size / patience (PROFILE_SCALE_KEYS)
+-# Labeling, strategy ATR/LH, curriculum feature lists, and CRITICAL_SHARED_KEYS
+-# must stay aligned with run.yaml (audited by config_mismatch_audit).
+-#
+-# Usage
+-# ─────
+-#   source ~/forex_venv/bin/activate
+-#   python training/train_gpu.py --config config/run_ubuntu.yaml
+-#
+-# GPU profiles (hardware.profile):
+-#   ubuntu_rtx_laptop        RTX 30/40 laptop, 8–16 GB VRAM  ← this machine
+-#   ubuntu_rtx4070_laptop    RTX 4070 Laptop 12 GB (Ada, BF16)
+-#   ubuntu_rtx4090_desktop   RTX 4090 24 GB desktop
+-#   rtx_4000_ada_cloud       RTX 4000 Ada 20 GB cloud pod
+-#   a5000_24gb               NVIDIA A5000 24 GB
+-#   a40_48gb                 NVIDIA A40 48 GB cloud
+-# =============================================================================
+-
+-
+-# ── Backtest simulation defaults (non-DRL walk-forward and Monte Carlo) ─────
+-backtest:
+-  atr_stop_mult: 1.2
+-  atr_take_profit_mult: 1.8
+-  commission_per_lot: 3.5
+-  execution_delay_bars: 1
+-  lots: 0.1
+-  mc_sims: 500
+-  min_confidence: 0.45
+-  slippage_pips: 0.7
+-  stop_pips: 12.0
+-  take_profit_pips: 18.0
+-# ── Post-training temperature scaling calibration to sharpen prob estimates ─
+-  max_spread_clamp: 0.005
+-  min_spread_clamp: 5.0e-05
+-calibration:
+-  calibrate: true
+-  overconf_penalty: true
+-  overconf_threshold: 0.58
+-  overconf_weight: 0.2
+-# ── Adaptive training curriculum: seq_len, difficulty, feature-group unfreeze ─
+-curriculum:
+-  # ── Curriculum performance gate: advances seq_len/stage when Sharpe is stable,
+-  #    stalls curriculum when Sharpe collapses ──────────────────────────────
+-  adaptation:
+-    advance_lr_mult: 1.0
+-    collapse_drop: 0.15
+-    collapse_lr_mult: 0.9
+-    collapse_min_peak: 0.25
+-    collapse_reversal_threshold: -0.1
+-    min_epochs_per_stage: 1
+-    min_stable_sharpe: 0.05
+-    recovery_window: 2
+-    sharpe_ema_alpha: 0.3
+-    stable_window: 2
+-  # ── Curriculum subset calibration: reject subsets that distort S/H/B prior ─
+-  calibration:
+-    max_class_prior_delta: 0.05
+-    min_class_share: 0.05
+-  chunk_early_stop_min_batches: 50
+-  chunk_early_stop_patience: 3
+-  # ── Difficulty stages: 0=easiest → filters training samples by difficulty ─
+-  difficulty_schedule:
+-  - epoch_start: 0
+-    max_difficulty: 2
+-  difficulty_spread_threshold: 1.5
+-  difficulty_spread_threshold_hard: 2.0
+-  # ── Online Miner → Curriculum feedback (new) ─
+-  miner_feedback:
+-    enabled: true
+-    models: "haelt,tft,transformer"  # comma-separated, e.g. "haelt,tft,transformer"
+-    forgetting_threshold: 0.15
+-    easy_threshold: 0.60
+-    freeze_patience: 1
+-  # ── Self-Paced Learning (new) ─
+-  self_paced:
+-    enabled: true
+-    pace: "linear"
+-    lambda_pace: 1.0
+-    models: "haelt,tft,transformer"  # comma-separated
+-  # ── Loss-Based Weighting (new) ─
+-  loss_weighting:
+-    enabled: true
+-    scheme: "focal"
+-    focal_gamma: 2.0
+-    models: "haelt,tft,transformer"  # comma-separated
+-  feature_groups:
+-    # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
+-    # values fit training.epochs=6 so staged groups actually unlock.
+-    core:
+-      always_on: true
+-      epoch_unfreeze: 0
+-      features:
+-      - adx_14
+-      - atr_6
+-      - atr_20
+-      - atr_60
+-      - atr_ratio_6_20
+-      - atr_ratio_20_60
+-      - bb_upper
+-      - bb_lower
+-      - bb_width
+-      - bb_pct
+-      - breakout_pressure
+-      - chop_index
+-      - liquidity_vacuum
+-      - obi_proxy
+-      - price_ofi_div
+-      - tar
+-      - range_regime
+-      - trend_regime
+-      - vol_6
+-      - vol_20
+-      - vol_60
+-      - vol_ratio_6_20
+-      - vol_ratio_20_60
+-      - expected_latency_ms
+-      - eco_surprise_missing
+-      - eco_surprise_staleness
+-      - sentiment_decayed_missing
+-      - sentiment_decayed_staleness
+-      - yield_vol_20d
+-    cross_asset:
+-      always_on: false
+-      epoch_unfreeze: 3
+-      features:
+-      - spread_us_de
+-      - spread_us_jp
+-      - spread_us_gb
+-      - spread_us_au
+-      - spread_us_ca
+-      - spread_us_nz
+-      - spread_de_gb
+-      - spread_de_jp
+-      - spread_us_ch
+-      - carry_eur
+-      - carry_jpy
+-      - carry_gbp
+-      - carry_aud
+-      - carry_cad
+-      - carry_nzd
+-      - carry_eurgbp
+-      - carry_eurjpy
+-      - carry_chf
+-      - yield_curve_slope
+-    execution_cost:
+-      always_on: false
+-      epoch_unfreeze: 1
+-      features:
+-      - spread_pips
+-      - spread_zscore
+-      - spread_percentile
+-      - spread_widening_5m
+-      - spread_widening_20m
+-      - cost_to_atr
+-    higher_timeframe:
+-      always_on: false
+-      epoch_unfreeze: 5
+-      features:
+-      - ret_5m
+-      - rsi_5m
+-      - atr_5m
+-      - trend_slope_5m
+-      - distance_to_vwap_5m
+-      - volatility_regime_5m
+-      - ret_15m
+-      - rsi_15m
+-      - atr_15m
+-      - trend_slope_15m
+-      - distance_to_vwap_15m
+-      - volatility_regime_15m
+-      - ret_1h
+-      - rsi_1h
+-      - atr_1h
+-      - trend_slope_1h
+-      - distance_to_vwap_1h
+-      - volatility_regime_1h
+-    # label_quality: DISABLED — features not yet implemented (see CODEBASE_HEALTH_AUDIT.md WIRE-001)
+-    macro:
+-      always_on: false
+-      epoch_unfreeze: 4
+-      features:
+-      - cot_net_hf
+-      - cot_net_comm
+-      - cot_extreme
+-      - cot_hf_mom_4w
+-      - yield_momentum_5d
+-      - yield_momentum_20d
+-      - sentiment_raw
+-      - sentiment_decayed
+-      - fb_0
+-      - fb_1
+-      - fb_2
+-      - fb_3
+-      - fb_4
+-      - fb_5
+-      - fb_6
+-      - fb_7
+-    news:
+-      always_on: false
+-      epoch_unfreeze: 3
+-      features:
+-      - eco_surprise
+-      - eco_revision
+-      - news_ok
+-      - cat_central_bank
+-      - cat_inflation
+-      - cat_labor
+-      - cat_growth
+-      - cat_geopolitical
+-      - cat_commentary
+-    market_regime:
+-      always_on: false
+-      epoch_unfreeze: 4
+-      features:
+-      - realized_vol_regime
+-      - trend_quality
+-    microstructure:
+-      always_on: true
+-      epoch_unfreeze: 0
+-      features:
+-      - ofi
+-      - ofi_z
+-      - ofi_l2
+-      - kyles_lambda
+-      - amihud_illiq
+-      - realized_spread
+-      - vpin
+-    momentum:
+-      always_on: true
+-      epoch_unfreeze: 0
+-      features:
+-      - rsi_14
+-      - macd
+-      - macd_sig
+-      - macd_hist
+-      - ret_5
+-      - ret_20
+-      - ret_60
+-    session:
+-      always_on: true
+-      epoch_unfreeze: 0
+-      features:
+-      - time_sin
+-      - time_cos
+-      - day_sin
+-      - day_cos
+-      - london_ny
+-    volatility:
+-      always_on: false
+-      epoch_unfreeze: 2
+-      features:
+-      - vol_of_vol
+-      - volatility_regime
+-      - hurst_exponent
+-      - noise_to_signal_60
+-      - trailing_volatility_60
+-      - vp_poc_pos
+-      - vp_poc_dist
+-      - vp_poc_share
+-      - vp_vw_pos
+-      - vp_skew
+-      - vp_in_va
+-      - vol_clock_pos
+-      - vol_clock_ratio
+-      - vol_clock_z
+-      - vol_clock_pace
+-      - vol_clock_hot
+-  # ── Sequence-length schedule (bars per sample) ──────────────────────────
+-  seq_schedule:
+-  - epoch_start: 0
+-    seq_len: 80
+-# ── Data source, tick ingestion, and feature-pipeline config ────────────────
+-data:
+-  auto_rebuild_on_mismatch: true
+-  chunk_size: 250000
+-  corr_window: 20
+-  corr_window_long: 60
+-  dataset_build_workers: 2
+-  end: '2026-12-31'
+-  full_day_data: false
+-  integrity_gate: true
+-  momentum_window: 20
+-  n_ticks: 20000000
+-  min_pair_years: 2        # Minimum years of data per pair for multi-pair training
+-  expected_pair_years: 18   # Warn if any pair has less than this
+-  pair: EURUSD
+-  pair_align: inner
+-  pair_embed_dim: 16
+-  pairs:
+-  - EURUSD
+-  - USDJPY
+-  - GBPUSD
+-  - AUDUSD
+-  - USDCAD
+-  - USDCHF
+-  - EURGBP
+-  - NZDUSD
+-  - EURJPY
+-  - GBPJPY
+-  parallel_window_workers: 1
+-  real_data_window_days: 7
+-  source: dukascopy
+-  start: '2008-01-01'
+-  use_cache: true
+-  window_batch_days: 1
+-  # Linux local FS: lz4@1 maximizes decompress throughput for training reads.
+-  # Use zstd@3 (or --zarr-cname zstd) if the cache lives on slow/network storage.
+-  zarr_cname: lz4
+-  zarr_clevel: 1
+-# ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+-  chunk_rows: auto
+-  feature_cache_dir: data/features
+-  shuffle_buffer_size: 16384
+-  use_feature_cache: false
+-direction_training:
+-  label_smoothing: 0.05
+-  max_pred_class_share: 0.8
+-  min_pred_class_share: 0.05
+-  min_recall: 0.001
+-  min_true_class_share: 0.15
+-  probe: true
+-  probe_epochs: 2
+-  probe_samples: 4096
+-  use_mixup: true
+-  use_volatility_sampler: true
+-  warmup_epochs: 2
+-# ── Knowledge distillation from a larger teacher model (disabled by default) ─
+-distillation:
+-  alpha: 0.5
+-  enabled: false
+-  student_model: haelt
+-  teacher_ckpt: ''
+-  teacher_model: mamba
+-  temperature: 2.0
+-# ── Diversity fine-tuning loss for ensemble members ────────────────────────
+-diversity_loss:
+-  same_role_mult: 2.0
+-  weight: 0.1
+-# ── Dukascopy / EODHD tick and cross-asset data download settings ───────────
+-download:
+-  check_missing_months: true
+-  check_missing_scope: both
+-  cross_asset: true
+-  eodhd: false
+-  eodhd_cross_asset: true
+-  keep_going: true
+-  ticks: true
+-  verify: true
+-  verify_fix: true
+-  yearly: true
+-# ── Distribution-drift detection (KS/PSI) for automated retraining triggers ─
+-drift_detection:
+-  auto_schedule: true
+-  baseline_window_days: 90
+-  enabled: true
+-  ks_pvalue_threshold: 0.05
+-  ks_stat_threshold: 0.05
+-  live_window_days: 7
+-  monitored_features:
+-  - close
+-  - ret_5
+-  - ret_20
+-  - atr_6
+-  - atr_20
+-  - vol_20
+-  - ofi
+-  psi_bins: 10
+-  psi_threshold: 0.2
+-  schedule_hours: 24
+-# ── Ensemble: multi-member diversity fine-tuning + deployment ───────────────
+-ensemble:
+-  deploy: true
+-  div_weight: 0.1
+-  enabled: true
+-  epochs: 10
+-  explicit_diversity: true
+-  member_dropout_jitter: 0.15
+-  member_lr_jitter: 0.2
+-  member_seed_offset: 997
+-# ── Execution-model params: slippage estimation, latency budget ─────────────
+-execution:
+-  latency_baseline_ms: 50
+-  slippage_liq_alpha: 0.3
+-  slippage_spread_window: 120
+-  slippage_vol_alpha: 0.5
+-  slippage_vol_window: 120
+-# ── Feature-ablation experiment config (specify groups or features to drop) ─
+-feature_ablation:
+-  drop_features: []
+-  drop_groups: []
+-  enabled: false
+-  keep_groups: []
+-  name: full_features
+-# ── Feature cache: slow-changing columns (sentiment, COT, macro) ────────────
+-feature_cache:
+-  enabled: true
+-  ofi_z_threshold: 2.0
+-  regime_window: 60
+-  slow_cols:
+-  - sentiment_decayed
+-  - eco_surprise
+-  - hurst
+-  - cot_net_hf
+-# ── Feature store: on-disk registry with incremental materialization ────────
+-feature_store:
+-  auto_materialize: true
+-  compression: zstd
+-  data_root: features
+-  default_strategy: eager_batch
+-  enabled: true
+-  incremental_lookback_bars: 100
+-  job_queue:
+-    enabled: false
+-    max_workers: 2
+-    poll_interval_sec: 60
+-  registry_db: registry.db
+-  root: data/feature_store
+-# ── DataLoader worker and memory config ─────────────────────────────────────
+-hardware:
+-  num_workers: 4
+-  persistent_workers: true
+-  pin_memory: true
+-  prefetch_factor: 4
+-  force_thread_prefetch: false
+-  profile: ubuntu_rtx_laptop
+-  thread_prefetch_batches: 8
+-  torch_compile: true
+-  torch_compile_mode: reduce-overhead
+-  val_num_workers: 4
+-  val_prefetch_factor: 2
+-# ── Model maturity stage (dev → paper → production) – gates promotion ──────
+-maturity:
+-  stage: paper
+-# ── Primary model architecture (overridden by --model CLI flag) ──────────────
+-model:
+-  all_models: false
+-  d_model: 256
+-  dropout: 0.35
+-  hidden_size: 256
+-  name: haelt
+-  nhead: 8
+-  num_layers: 3
+-# ── Live monitoring: drift gate, fail-open behaviour ────────────────────────
+-monitoring:
+-  drift_baseline_samples: 20000
+-  drift_fail_open: false
+-  drift_gate: false
+-  drift_ks_pvalue_threshold: 0.05
+-  drift_live_samples: 5000
+-  drift_psi_threshold: 0.2
+-# ── Multi-task loss: direction (CE) + return (Huber) + confidence (BCE) + Sharpe ─
+-multitask:
+-  class_balance_weight: 1.0
+-  direction_weight_floor: 0.5
+-  enabled: true
+-  entropy_weight: 0.01
+-  focal_gamma: 2.0
+-  w_conf: 0.05
+-  w_ret: 0.08
+-# ── News/sentiment data sources (economic calendar, historical headlines) ───
+-news:
+-  economic_calendar_file: data/raw/eco_calendar/events.csv
+-  historical_mode: full
+-  historical_news_file: data/raw/news/historical_news_combined.parquet
+-# ── Optuna hyper-parameter tuning: auto-load best config per model ──────────
+-optuna:
+-  auto_launch: false
+-  auto_load: false
+-  metric: val_loss
+-# ── Filesystem paths for checkpoints and processed data ─────────────────────
+-paths:
+-  checkpoint_dir: checkpoints/forex_10pair_2008_2025
+-  data_cache: data/processed
+-# ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
+-pretrain:
+-  ablation: auto
+-  ablation_models: tft,transformer,haelt
+-  augmentations:
+-    crop_ratio:
+-    - 0.75
+-    - 1.0
+-    feature_drop_p: 0.2
+-    jitter_std: 0.02
+-    scaling_range:
+-    - 0.85
+-    - 1.15
+-  batch: 256
+-  blocks_per_epoch: auto
+-  ema_decay: 0.996
+-  enabled: true
+-  epochs: 18
+-  handoff_loss: 0.18
+-  handoff_min_delta: 0.002
+-  handoff_patience: 2
+-  lr: 0.0001
+-  mask_prob: 0.2
+-  method: byol
+-  min_epochs: 3
+-  pred_dim: 128
+-  projection_dim: 256
+-  read_windows: 64
+-  recon_hidden_dim: 512
+-  regime_aware: true
+-  sample_windows: 4096
+-  framework: "custom"  # custom|lightly|solo
+-# ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
+-quick:
+-  enabled: false
+-# ── Scheduled retraining: periodic re-train + auto-promote on drift ─────────
+-retraining:
+-  drift_feature_frac: 0.3
+-  dry_run: false
+-  enabled: true
+-  extras:
+-  - --epochs
+-  - '40'
+-  - --batch-size
+-  - '128'
+-  min_interval_days: 1
+-  model_family: haelt
+-  promote_on_complete: true
+-  schedule_interval_days: 7
+-# ── Risk management: Kelly sizing, drawdown halt, per-session position limits ─
+-risk:
+-  daily_loss_limit: 0.03
+-  kelly_fraction: 0.25
+-  max_drawdown_halt: 0.1
+-  max_position_pct: 0.05
+-  regime_scale:
+-    ranging: 0.7
+-    trending: 1.0
+-    unknown: 0.3
+-    volatile: 0.5
+-  session_limits:
+-    london:
+-      max_lots: 2.0
+-      max_open_trades: 6
+-    ny:
+-      max_lots: 2.0
+-      max_open_trades: 6
+-    asia:
+-      max_lots: 1.0
+-      max_open_trades: 3
+-    asia_london:
+-      max_lots: 1.5
+-      max_open_trades: 4
+-    london_ny:
+-      max_lots: 2.0
+-      max_open_trades: 6
+-    "off":
+-      max_lots: 0.0
+-      max_open_trades: 0
+-# ── Reinforcement learning (DQN / PPO) on top of supervised encoder ─────────
+-  pip_value: 10.0
+-  var_confidence: 0.99
+-  var_max_pct: 0.02
+-rl:
+-  algo: dqn
+-  all_models: false
+-  deploy: true
+-  dqn:
+-    batch: 64
+-    eps_decay: 0.995
+-    eps_end: 0.01
+-    eps_start: 1.0
+-    gamma: 0.99
+-    lr: 0.0001
+-    target_update: 100
+-  enabled: true
+-  encoder_obs: true
+-  episode_len: 2048
+-  episodes: 500
+-  min_val_sharpe: -999.0
+-  ppo:
+-    gamma: 0.99
+-    lr: 0.0003
+-    n_steps: 2048
+-  reward:
+-    drawdown: 1.5
+-    overtrade: 0.25
+-    pnl: 1.0
+-    tx_cost: 0.3
+-  val_frac: 0.15
+-  framework: "custom"  # custom|cleanrl|sb3
+-# ── Trading strategy parameters ────────────────────────────────────────────
+-strategy:
+-  bar_freq: "5m"
+-  lookahead_bars: 30
+-  mode: scalping
+-  profit_target_atr: 1.2
+-  stop_loss_atr: 0.8
+-# ── Experiment tracking: W&B, run name, auto-tune ──────────────────────────
+-tracking:
+-  auto_tune: true
+-  dry_tune: true
+-  no_wandb: false
+-  ollama_auto_tune: false
+-  run_name: high-impact
+-  wandb_project: forex-scaling-model
+-# ── Supervised training hyper-parameters ───────────────────────────────────
+-training:
+-  amp: true
+-  batch_size: 212
+-  enable_ewc: false
+-  ewc_lambda: 1000.0
+-  enable_si: false
+-  si_lambda: 1.0
+-  cross_asset_mode: auto
+-  cross_asset_provider: auto
+-  direction_weight: 0.75
+-  early_stop_metric: sharpe
+-  early_stop_min_delta: 0.01
+-  epochs: 40
+-  grad_accum_steps: 4  # production: larger effective batch; run.yaml uses 2 for faster dev
+-  grad_clip: 0.75
+-  label_method: rl_reward
+-  label_smoothing: 0.05
+-  loss: sharpe_huber
+-  lr: 4.68e-06
+-  lr_min_ratio: 0.08
+-  lr_schedule: warmup_cosine
+-  lr_warmup_epochs: 2
+-  onecycle_max_lr_mult: 10.0
+-  onecycle_pct_start: 0.1
+-  patience: 6
+-  resume: false
+-  save_every: 5
+-  seed: 1337
+-  seq_len: "6h40m"
+-  sharpe_annualization_factor: 325.0
+-  sharpe_weight: 1.0
+-  # ── Adversarial training (new) ─
+-  adversarial:
+-    enabled: false
+-    method: "pgd"
+-    eps: 0.3
+-    alpha: 0.01
+-    steps: 7
+-    prob: 0.01
+-    normalize_grad: false
+-    warmup_steps: 0
+-    eps_curriculum_scale: false
+-    models: ""  # comma-separated, e.g. "haelt,tft,transformer,mamba,gnn"
+-  # ── Framework selection (new) ─
+-  training_framework: "custom"  # custom|lightning|composer
+-  pretrain_framework: "custom"  # custom|lightly|solo
+-  rl_framework: "custom"        # custom|cleanrl|sb3
+-  swa_enabled: true
+-  swa_lr: 1.0e-05
+-  swa_start_frac: 0.75
+-  training_memory: true
+-  use_mixup: true
+-  use_volatility_sampler: true
+-  val_split: 0.2
+-  weight_decay: 0.001
+-# ── Validation strategy: purged-embargo walk-forward ────────────────────────
+-  max_bad_frac: 0.05
+-  max_zero_frac: 0.8
+-validation:
+-  embargo_bars: 60
+-  method: purged_embargo
+-  min_train_size: 50000
+-  n_splits: 7
+-  purge_bars: 120
+-# ── Walk-forward cross-validation ──────────────────────────────────────────
+-walk_forward:
+-  enabled: true
+-  folds: 7
+-# ── XGBoost baseline model config ──────────────────────────────────────────
+-xgboost:
+-  colsample_bytree: 0.8
+-  early_stopping_rounds: 15
+-  enabled: true
+-  eval_metric: ''
+-  feature_importance: true
+-  feature_importance_top_n: 50
+-  folds: 5
+-  gamma: 0.1
+-  learning_rate: 0.05
+-  max_depth: 6
+-  max_samples: 500000
+-  min_child_weight: 3
+-  n_estimators: 300
+-  objective: ''
+-  reg_alpha: 0.05
+-  reg_lambda: 1.0
+-  sequence_mode: temporal
+-  subsample: 0.8
+-  task: classification
+-  tune: false
+-  tune_trials: 20
+-
+-
+-# ── CatBoost baseline model config ─────────────────────────────────────────
+-catboost:
+-  enabled: true
+-  task: classification
+-  sequence_mode: temporal
+-  iterations: 300
+-  depth: 6
+-  learning_rate: 0.05
+-  subsample: 0.8
+-  colsample_bylevel: 0.8
+-  l2_leaf_reg: 1.0
+-  early_stopping_rounds: 15
+-  folds: 5
+-  tune: false
+-  tune_trials: 20
+-  max_samples: 500000
+-
+-features:
+-  atr_windows: [6, 20, 60]
+-  chop_window: 14
+-  corr_window: 60
+-  momentum_windows: [5, 20, 60]
+-  ofi_windows: [5, 20, 60]
+-  regime_window: 240
+-  vol_windows: [6, 20, 60]
+-  volatility_window: 120
+-  vwap_window: 60
+-# ── Per-asset pip resolution (overrides settings.PIP_SIZES) ─────────────────
+-
+-pip_sizes:
+-  BTC: 1.0
+-  ETH: 0.01
+-  JPY: 0.01
+-  XAG: 0.001
+-  XAU: 0.1
+-  default: 0.0001
+-# ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+-
+-sidecar:
+-  enabled: false
+-  mode: process
+-  max_queue_size: 10000
+-  flush_interval_s: 2.0
+-  retention_days: 30
+-  enable_discord: false
+-# ── Experiment tracking: W&B, run name, auto-tune ──────────────────
++# ── Backtest simulation defaults (non-DRL walk-forward and Monte Carlo) ─────
++backtest:
++  atr_stop_mult: 1.2
++  atr_take_profit_mult: 1.8
++  commission_per_lot: 3.5
++  execution_delay_bars: 1
++  lots: 0.1
++  max_spread_clamp: 0.0050
++  mc_sims: 500
++  min_confidence: 0.45
++  min_spread_clamp: 0.00005
++  slippage_pips: 0.7
++  stop_pips: 12.0
++  take_profit_pips: 18.0
++# ── Post-training temperature scaling calibration to sharpen prob estimates ─
++calibration:
++  calibrate: true
++  overconf_penalty: true
++  overconf_threshold: 0.58
++  overconf_weight: 0.2
++# ── Adaptive training curriculum: seq_len, difficulty, feature-group unfreeze ─
++curriculum:
++  # ── Curriculum performance gate: advances seq_len/stage when Sharpe is stable,
++  #    stalls curriculum when Sharpe collapses ──────────────────────────────
++  adaptation:
++    advance_lr_mult: 1.0
++    collapse_drop: 0.15
++    collapse_lr_mult: 0.9
++    collapse_min_peak: 0.25
++    collapse_reversal_threshold: -0.1
++    min_epochs_per_stage: 1
++    min_stable_sharpe: 0.05
++    recovery_window: 2
++    sharpe_ema_alpha: 0.3
++    stable_window: 2
++  # ── Curriculum subset calibration: reject subsets that distort S/H/B prior ─
++  calibration:
++    max_class_prior_delta: 0.05
++    min_class_share: 0.05
++  chunk_early_stop_min_batches: 50
++  chunk_early_stop_patience: 3
++  # ── Difficulty stages: 0=easiest → filters training samples by difficulty ─
++  difficulty_schedule:
++  - epoch_start: 0
++    max_difficulty: 2
++  difficulty_spread_threshold: 1.5
++  difficulty_spread_threshold_hard: 2.0
++  # ── Online Miner → Curriculum feedback (new) ─
++  miner_feedback:
++    enabled: true
++    models: "haelt,tft,transformer"  # comma-separated, e.g. "haelt,tft,transformer"
++    forgetting_threshold: 0.15
++    easy_threshold: 0.60
++    freeze_patience: 1
++  # ── Self-Paced Learning (new) ─
++  self_paced:
++    enabled: true
++    pace: "linear"
++    lambda_pace: 1.0
++    models: "haelt,tft,transformer"  # comma-separated
++  # ── Loss-Based Weighting (new) ─
++  loss_weighting:
++    enabled: true
++    scheme: "focal"
++    focal_gamma: 2.0
++    models: "haelt,tft,transformer"  # comma-separated
++  feature_groups:
++    # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
++    # values fit training.epochs=6 so staged groups actually unlock.
++    core:
++      always_on: true
++      epoch_unfreeze: 0
++      features:
++      - adx_14
++      - atr_6
++      - atr_20
++      - atr_60
++      - atr_ratio_6_20
++      - atr_ratio_20_60
++      - bb_upper
++      - bb_lower
++      - bb_width
++      - bb_pct
++      - breakout_pressure
++      - chop_index
++      - liquidity_vacuum
++      - obi_proxy
++      - price_ofi_div
++      - tar
++      - range_regime
++      - trend_regime
++      - vol_6
++      - vol_20
++      - vol_60
++      - vol_ratio_6_20
++      - vol_ratio_20_60
++      - expected_latency_ms
++      - eco_surprise_missing
++      - eco_surprise_staleness
++      - sentiment_decayed_missing
++      - sentiment_decayed_staleness
++      - yield_vol_20d
++    cross_asset:
++      always_on: false
++      epoch_unfreeze: 3
++      features:
++      - spread_us_de
++      - spread_us_jp
++      - spread_us_gb
++      - spread_us_au
++      - spread_us_ca
++      - spread_us_nz
++      - spread_de_gb
++      - spread_de_jp
++      - spread_us_ch
++      - carry_eur
++      - carry_jpy
++      - carry_gbp
++      - carry_aud
++      - carry_cad
++      - carry_nzd
++      - carry_eurgbp
++      - carry_eurjpy
++      - carry_chf
++      - yield_curve_slope
++    execution_cost:
++      always_on: false
++      epoch_unfreeze: 1
++      features:
++      - spread_pips
++      - spread_zscore
++      - spread_percentile
++      - spread_widening_5m
++      - spread_widening_20m
++      - cost_to_atr
++    higher_timeframe:
++      always_on: false
++      epoch_unfreeze: 5
++      features:
++      - ret_5m
++      - rsi_5m
++      - atr_5m
++      - trend_slope_5m
++      - distance_to_vwap_5m
++      - volatility_regime_5m
++      - ret_15m
++      - rsi_15m
++      - atr_15m
++      - trend_slope_15m
++      - distance_to_vwap_15m
++      - volatility_regime_15m
++      - ret_1h
++      - rsi_1h
++      - atr_1h
++      - trend_slope_1h
++      - distance_to_vwap_1h
++      - volatility_regime_1h
++    # label_quality: DISABLED — features not yet implemented (see CODEBASE_HEALTH_AUDIT.md WIRE-001)
++    # label_quality:
++    #   always_on: false
++    #   epoch_unfreeze: 6
++    #   features:
++    #   - rolling_hit_rate_240
++    #   - rolling_label_sharpe_240
++    #   - recent_loss_cluster_30
++    #   - label_confidence_prior_240
++    #   - rolling_false_breakout_rate_240
++    macro:
++      always_on: false
++      epoch_unfreeze: 4
++      features:
++      - cot_net_hf
++      - cot_net_comm
++      - cot_extreme
++      - cot_hf_mom_4w
++      - yield_momentum_5d
++      - yield_momentum_20d
++      - sentiment_raw
++      - sentiment_decayed
++      - fb_0
++      - fb_1
++      - fb_2
++      - fb_3
++      - fb_4
++      - fb_5
++      - fb_6
++      - fb_7
++    news:
++      always_on: false
++      epoch_unfreeze: 3
++      features:
++      - eco_surprise
++      - eco_revision
++      - news_ok
++      - cat_central_bank
++      - cat_inflation
++      - cat_labor
++      - cat_growth
++      - cat_geopolitical
++      - cat_commentary
++    market_regime:
++      always_on: false
++      epoch_unfreeze: 4
++      features:
++      - realized_vol_regime
++      - trend_quality
++    microstructure:
++      always_on: true
++      epoch_unfreeze: 0
++      features:
++      - ofi
++      - ofi_z
++      - ofi_l2
++      - kyles_lambda
++      - amihud_illiq
++      - realized_spread
++      - vpin
++    momentum:
++      always_on: true
++      epoch_unfreeze: 0
++      features:
++      - rsi_14
++      - macd
++      - macd_sig
++      - macd_hist
++      - ret_5
++      - ret_20
++      - ret_60
++    session:
++      always_on: true
++      epoch_unfreeze: 0
++      features:
++      - time_sin
++      - time_cos
++      - day_sin
++      - day_cos
++      - london_ny
++    volatility:
++      always_on: false
++      epoch_unfreeze: 2
++      features:
++      - vol_of_vol
++      - volatility_regime
++      - hurst_exponent
++      - noise_to_signal_60
++      - trailing_volatility_60
++      - vp_poc_pos
++      - vp_poc_dist
++      - vp_poc_share
++      - vp_vw_pos
++      - vp_skew
++      - vp_in_va
++      - vol_clock_pos
++      - vol_clock_ratio
++      - vol_clock_z
++      - vol_clock_pace
++      - vol_clock_hot
++  # ── Sequence-length schedule (bars per sample) ──────────────────────────
++  seq_schedule:
++  - epoch_start: 0
++    seq_len: 80
++# ── Data source, tick ingestion, and feature-pipeline config ────────────────
++data:
++  auto_rebuild_on_mismatch: true
++  chunk_size: 250000
++  corr_window: 20
++  corr_window_long: 60
++  dataset_build_workers: 2
++  end: '2026-12-31'
++  full_day_data: false
++  integrity_gate: true
++  momentum_window: 20
++  n_ticks: 20000000
++  min_pair_years: 2      # Minimum years of data per pair for multi-pair training
++  expected_pair_years: 18  # Warn if any pair has less than this
++  chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number
++  shuffle_buffer_size: 16384  # Cross-chunk shuffle reservoir size (0 to disable)
++  use_feature_cache: false    # Load pre-built feature cache instead of running FE per window
++  feature_cache_dir: "data/features"  # Directory for feature cache parquet files
++  pair: EURUSD
++  pair_align: inner
++  pair_embed_dim: 16
++  pairs:
++  - EURUSD
++  - USDJPY
++  - GBPUSD
++  - AUDUSD
++  - USDCAD
++  - USDCHF
++  - EURGBP
++  - NZDUSD
++  - EURJPY
++  - GBPJPY
++  parallel_window_workers: 1
++  real_data_window_days: 7
++  source: dukascopy
++  start: '2008-01-01'
++  use_cache: true
++  window_batch_days: 1
++  # auto → Linux lz4@1 / else zstd@3 (see training.gpu_cache_io.default_zarr_compression)
++  zarr_cname: auto
++  zarr_clevel: null
++# ── Feature indicator windows (overrides settings.FEATURE_SCALES) ───────────
++features:
++  atr_windows: [6, 20, 60]
++  chop_window: 14
++  corr_window: 60
++  momentum_windows: [5, 20, 60]
++  ofi_windows: [5, 20, 60]
++  regime_window: 240
++  vol_windows: [6, 20, 60]
++  volatility_window: 120
++  vwap_window: 60
++# ── Per-asset pip resolution (overrides settings.PIP_SIZES) ─────────────────
++pip_sizes:
++  BTC: 1.0
++  ETH: 0.01
++  JPY: 0.01
++  XAG: 0.001
++  XAU: 0.1
++  default: 0.0001
++# ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
++direction_training:
++  label_smoothing: 0.05
++  max_pred_class_share: 0.8
++  min_pred_class_share: 0.05
++  min_recall: 0.001
++  min_true_class_share: 0.15
++  probe: true
++  probe_epochs: 2
++  probe_samples: 4096
++  use_mixup: true
++  use_volatility_sampler: true
++  warmup_epochs: 2
++# ── Knowledge distillation from a larger teacher model (disabled by default) ─
++distillation:
++  alpha: 0.5
++  enabled: false
++  student_model: haelt
++  teacher_ckpt: ''
++  teacher_model: mamba
++  temperature: 2.0
++# ── Diversity fine-tuning loss for ensemble members ────────────────────────
++diversity_loss:
++  same_role_mult: 2.0
++  weight: 0.1
++# ── Dukascopy / EODHD tick and cross-asset data download settings ───────────
++download:
++  check_missing_months: true
++  check_missing_scope: both
++  cross_asset: true
++  eodhd: false
++  eodhd_cross_asset: true
++  keep_going: true
++  ticks: true
++  verify: true
++  verify_fix: true
++  yearly: true
++# ── Distribution-drift detection (KS/PSI) for automated retraining triggers ─
++drift_detection:
++  auto_schedule: true
++  baseline_window_days: 90
++  enabled: true
++  ks_pvalue_threshold: 0.05
++  ks_stat_threshold: 0.05
++  live_window_days: 7
++  monitored_features:
++  - close
++  - ret_5
++  - ret_20
++  - atr_6
++  - atr_20
++  - vol_20
++  - ofi
++  psi_bins: 10
++  psi_threshold: 0.2
++  schedule_hours: 24
++# ── Ensemble: multi-member diversity fine-tuning + deployment ───────────────
++ensemble:
++  deploy: true
++  div_weight: 0.1
++  enabled: true
++  epochs: 10
++  explicit_diversity: true
++  member_dropout_jitter: 0.15
++  member_lr_jitter: 0.2
++  member_seed_offset: 997
++# ── Execution-model params: slippage estimation, latency budget ─────────────
++execution:
++  latency_baseline_ms: 50
++  slippage_liq_alpha: 0.3
++  slippage_spread_window: 120
++  slippage_vol_alpha: 0.5
++  slippage_vol_window: 120
++# ── Feature-ablation experiment config (specify groups or features to drop) ─
++feature_ablation:
++  drop_features: []
++  drop_groups: []
++  enabled: false
++  keep_groups: []
++  name: full_features
++# ── Feature cache: slow-changing columns (sentiment, COT, macro) ────────────
++feature_cache:
++  enabled: true
++  ofi_z_threshold: 2.0
++  regime_window: 60
++  slow_cols:
++  - sentiment_decayed
++  - eco_surprise
++  - hurst
++  - cot_net_hf
++# ── Feature store: on-disk registry with incremental materialization ────────
++feature_store:
++  auto_materialize: true
++  compression: zstd
++  data_root: features
++  default_strategy: eager_batch
++  enabled: true
++  incremental_lookback_bars: 100
++  job_queue:
++    enabled: false
++    max_workers: 2
++    poll_interval_sec: 60
++  registry_db: registry.db
++  root: data/feature_store
++# ── DataLoader worker and memory config ─────────────────────────────────────
++hardware:
++  num_workers: 4
++  persistent_workers: true
++  pin_memory: true
++  prefetch_factor: 4
++  force_thread_prefetch: false
++  profile: ''
++  thread_prefetch_batches: 8
++  torch_compile: true
++  torch_compile_mode: reduce-overhead
++  val_num_workers: 4
++  val_prefetch_factor: 2
++# ── Model maturity stage (dev → paper → production) – gates promotion ──────
++maturity:
++  stage: paper
++# ── Primary model architecture (overridden by --model CLI flag) ──────────────
++model:
++  all_models: false
++  d_model: 256
++  dropout: 0.35
++  hidden_size: 256
++  name: haelt
++  nhead: 8
++  num_layers: 3
++# ── Live monitoring: drift gate, fail-open behaviour ────────────────────────
++monitoring:
++  drift_baseline_samples: 20000
++  drift_fail_open: false
++  drift_gate: false
++  drift_ks_pvalue_threshold: 0.05
++  drift_live_samples: 5000
++  drift_psi_threshold: 0.2
++# ── Multi-task loss: direction (CE) + return (Huber) + confidence (BCE) + Sharpe ─
++multitask:
++  class_balance_weight: 1.0
++  direction_weight_floor: 0.5
++  enabled: true
++  entropy_weight: 0.01
++  focal_gamma: 2.0
++  w_conf: 0.05
++  w_ret: 0.08
++# ── News/sentiment data sources (economic calendar, historical headlines) ───
++news:
++  economic_calendar_file: data/raw/eco_calendar/events.csv
++  historical_mode: full
++  historical_news_file: data/raw/news/historical_news_combined.parquet
++# ── Optuna hyper-parameter tuning: auto-load best config per model ──────────
++optuna:
++  auto_launch: false
++  auto_load: false
++  metric: val_loss
++# ── Filesystem paths for checkpoints and processed data ─────────────────────
++paths:
++  checkpoint_dir: checkpoints/forex_3pair_2008_2025_haelt
++  data_cache: ./data/processed
++# ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
++pretrain:
++  ablation: auto
++  ablation_models: tft,transformer,haelt
++  augmentations:
++    crop_ratio:
++    - 0.75
++    - 1.0
++    feature_drop_p: 0.2
++    jitter_std: 0.02
++    scaling_range:
++    - 0.85
++    - 1.15
++  batch: 256
++  blocks_per_epoch: auto
++  ema_decay: 0.996
++  enabled: true
++  epochs: 18
++  handoff_loss: 0.18
++  handoff_min_delta: 0.002
++  handoff_patience: 2
++  lr: 0.0001
++  mask_prob: 0.2
++  method: byol
++  min_epochs: 1
++  pred_dim: 128
++  projection_dim: 256
++  read_windows: 64
++  recon_hidden_dim: 512
++  regime_aware: true
++  sample_windows: 4096
++  framework: "custom"  # custom|lightly|solo
++# ── Quick/dev mode (tiny synthetic data, fewer epochs) ──────────────────────
++quick:
++  enabled: false
++# ── Scheduled retraining: periodic re-train + auto-promote on drift ─────────
++retraining:
++  drift_feature_frac: 0.3
++  dry_run: false
++  enabled: true
++  extras:
++  - --epochs
++  - '40'
++  - --batch-size
++  - '128'
++  min_interval_days: 1
++  model_family: haelt
++  promote_on_complete: true
++  schedule_interval_days: 7
++# ── Risk management: Kelly sizing, drawdown halt, per-session position limits ─
++risk:
++  daily_loss_limit: 0.03
++  kelly_fraction: 0.25
++  max_drawdown_halt: 0.1
++  max_position_pct: 0.05
++  pip_value: 10.0
++  regime_scale:
++    ranging: 0.7
++    trending: 1.0
++    unknown: 0.3
++    volatile: 0.5
++  session_limits:
++    london:
++      max_lots: 2.0
++      max_open_trades: 6
++    ny:
++      max_lots: 2.0
++      max_open_trades: 6
++    asia:
++      max_lots: 1.0
++      max_open_trades: 3
++    asia_london:
++      max_lots: 1.5
++      max_open_trades: 4
++    london_ny:
++      max_lots: 2.0
++      max_open_trades: 6
++    "off":
++      max_lots: 0.0
++      max_open_trades: 0
++  var_confidence: 0.99
++  var_max_pct: 0.02
++# ── Reinforcement learning (DQN / PPO) on top of supervised encoder ─────────
++rl:
++  algo: dqn
++  all_models: false
++  deploy: true
++  dqn:
++    batch: 64
++    eps_decay: 0.995
++    eps_end: 0.01
++    eps_start: 1.0
++    gamma: 0.99
++    lr: 0.0001
++    target_update: 100
++  enabled: true
++  encoder_obs: true
++  episode_len: 2048
++  episodes: 500
++  min_val_sharpe: -999.0
++  ppo:
++    gamma: 0.99
++    lr: 0.0003
++    n_steps: 2048
++  reward:
++    drawdown: 1.5
++    overtrade: 0.25
++    pnl: 1.0
++    tx_cost: 0.3
++  val_frac: 0.15
++  framework: "custom"  # custom|cleanrl|sb3
++# ── Trading strategy parameters ────────────────────────────────────────────
++strategy:
++  bar_freq: "5m"
++  lookahead_bars: 30
++  mode: scalping
++  profit_target_atr: 1.2
++  stop_loss_atr: 0.8
++# ── Sidecar: async log shipping and monitoring process ────────────────
++sidecar:
++  enabled: false
++  mode: process
++  max_queue_size: 10000
++  flush_interval_s: 2.0
++  retention_days: 30
++  enable_discord: false
++# ── Experiment tracking: W&B, run name, auto-tune ──────────────────
++tracking:
++  auto_tune: true
++  dry_tune: true
++  no_wandb: true
++  ollama_auto_tune: false
++  run_name: high-impact
++  wandb_project: forex-scaling-model
++# ── Supervised training hyper-parameters ───────────────────────────────────
++training:
++  amp: true
++  batch_size: 128
++  enable_ewc: false
++  ewc_lambda: 1000.0
++  enable_si: false
++  si_lambda: 1.0
++  cross_asset_mode: auto
++  cross_asset_provider: auto
++  direction_weight: 0.75
++  early_stop_metric: sharpe
++  early_stop_min_delta: 0.01
++  epochs: 40
++  grad_accum_steps: 4
++  grad_clip: 0.75
++  label_method: rl_reward
++  label_smoothing: 0.05
++  loss: sharpe_huber
++  lr: 4.68e-06
++  lr_min_ratio: 0.08
++  lr_schedule: warmup_cosine
++  lr_warmup_epochs: 2
++  max_bad_frac: 0.05
++  max_zero_frac: 0.80
++  onecycle_max_lr_mult: 10.0
++  onecycle_pct_start: 0.1
++  patience: 6
++  resume: false
++  save_every: 5
++  seed: 1337
++  seq_len: "6h40m"
++  sharpe_annualization_factor: 325.0
++  sharpe_weight: 1.0
++  swa_enabled: true
++  swa_lr: 1.0e-05
++  swa_start_frac: 0.75
++  training_memory: true
++  use_mixup: true
++  use_volatility_sampler: true
++  val_split: 0.2
++  weight_decay: 0.001
++  # ── Adversarial training (new) ─
++  adversarial:
++    enabled: false
++    method: "pgd"
++    eps: 0.3
++    alpha: 0.01
++    steps: 7
++    prob: 0.01
++    normalize_grad: false
++    warmup_steps: 0
++    eps_curriculum_scale: false
++    models: ""  # comma-separated, e.g. "haelt,tft,transformer,mamba,gnn"
++  # ── Framework selection (new) ─
++  training_framework: "custom"  # custom|lightning|composer
++  pretrain_framework: "custom"  # custom|lightly|solo
++  rl_framework: "custom"  # custom|cleanrl|sb3
++# ── Validation strategy: purged-embargo walk-forward ────────────────────────
++validation:
++  embargo_bars: 60
++  method: purged_embargo
++  min_train_size: 50000
++  n_splits: 7
++  purge_bars: 120
++# ── Walk-forward cross-validation ──────────────────────────────────────────
++walk_forward:
++  enabled: true
++  folds: 7
++# ── XGBoost baseline model config ──────────────────────────────────────────
++xgboost:
++  colsample_bytree: 0.8
++  early_stopping_rounds: 15
++  enabled: true
++  eval_metric: ''
++  feature_importance: true
++  feature_importance_top_n: 50
++  folds: 5
++  gamma: 0.1
++  learning_rate: 0.05
++  max_depth: 6
++  max_samples: 500000
++  min_child_weight: 3
++  n_estimators: 300
++  objective: ''
++  reg_alpha: 0.05
++  reg_lambda: 1.0
++  sequence_mode: temporal
++  subsample: 0.8
++  task: classification
++  tune: false
++  tune_trials: 20
++
++
++# ── CatBoost baseline model config ─────────────────────────────────────────
++catboost:
++  enabled: true
++  task: classification
++  sequence_mode: temporal
++  iterations: 300
++  depth: 6
++  learning_rate: 0.05
++  subsample: 0.8
++  colsample_bylevel: 0.8
++  l2_leaf_reg: 1.0
++  early_stopping_rounds: 15
++  folds: 5
++  tune: false
++  tune_trials: 20
++  max_samples: 500000

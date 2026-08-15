@@ -186,7 +186,7 @@ class TestLabelingSmoke:
         profit_mult, stop_mult = 1.5, 1.0
 
         lo_seq, tl_seq, so_seq, ts_seq = _scan_outcomes_sequential(
-            close, entry_long, entry_short, atr, profit_mult, stop_mult, vertical_barrier
+            close, close, entry_long, entry_short, atr, profit_mult, stop_mult, vertical_barrier
         )
         lo_numba, tl_numba, so_numba, ts_numba, tag = _run_barrier_scan(
             close,

@@ -40,24 +40,31 @@ def validate_pair_coverage(
 
     for pair in pairs:
         pair_dir = raw_path / pair.upper().replace("/", "")
-        if not pair_dir.exists():
+        hive_pair_dir = raw_path / "granularity=daily" / f"pair={pair}"
+        
+        if hive_pair_dir.exists():
+            # New Hive partitioned structure
+            years = sorted([int(d.name.replace("year=", "")) for d in hive_pair_dir.iterdir() 
+                          if d.is_dir() and d.name.startswith("year=")])
+            n_files = len(list(hive_pair_dir.rglob("*.parquet")))
+        elif pair_dir.exists():
+            # Check for granularity=daily subdirectory (compact structure)
+            granularity_dir = pair_dir / "granularity=daily"
+            if granularity_dir.exists():
+                years = sorted([int(d.name) for d in granularity_dir.iterdir() 
+                              if d.is_dir() and d.name.isdigit()])
+                n_files = len(list(granularity_dir.rglob("*.parquet")))
+            else:
+                # Fallback to old structure (year directories directly under pair)
+                years = sorted([int(d.name) for d in pair_dir.iterdir() 
+                              if d.is_dir() and d.name.isdigit()])
+                n_files = len(list(pair_dir.rglob("*.parquet")))
+        else:
             reports.append({
                 "pair": pair, "status": "MISSING", "years": 0,
-                "message": f"Pair directory not found: {pair_dir}"
+                "message": f"Pair directory not found: {pair_dir} or {hive_pair_dir}"
             })
             continue
-
-        # Check for granularity=daily subdirectory (compact structure)
-        granularity_dir = pair_dir / "granularity=daily"
-        if granularity_dir.exists():
-            years = sorted([int(d.name) for d in granularity_dir.iterdir() 
-                          if d.is_dir() and d.name.isdigit()])
-            n_files = len(list(granularity_dir.rglob("*.parquet")))
-        else:
-            # Fallback to old structure (year directories directly under pair)
-            years = sorted([int(d.name) for d in pair_dir.iterdir() 
-                          if d.is_dir() and d.name.isdigit()])
-            n_files = len(list(pair_dir.rglob("*.parquet")))
 
         if not years:
             reports.append({
@@ -328,3 +335,24 @@ def print_coverage_summary(report: dict):
         print(f"\n📁 Empty dirs: {', '.join(sources['empty'])}")
 
     print(f"{'='*60}\n")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run data coverage check")
+    parser.add_argument("--pairs", nargs="+", default=["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "NZDUSD", "USDCAD", "USDCHF"])
+    parser.add_argument("--data-source", default="dukascopy")
+    parser.add_argument("--min-years", type=int, default=2)
+    parser.add_argument("--expected-years", type=int, default=18)
+    args = parser.parse_args()
+
+    report = run_data_coverage_check(args, min_years=args.min_years, expected_years=args.expected_years)
+    print_coverage_summary(report)
+    save_coverage_report(report)
+    
+    # Fail if insufficient pairs
+    valid_pairs = report.get("valid_pairs", [])
+    if len(valid_pairs) < len(args.pairs):
+        import sys
+        print(f"ERROR: {len(args.pairs) - len(valid_pairs)} pairs failed coverage requirements.", file=sys.stderr)
+        sys.exit(1)

@@ -587,8 +587,17 @@ def _load_scaler_npz(cache_path: Path) -> StandardScaler | None:
     return s
 
 
-def _ticks_have_usable_datetime_index(ticks: pd.DataFrame) -> bool:
-    """True when tick index is time-like enough for OHLC resampling."""
+def _ticks_have_usable_datetime_index(ticks) -> bool:
+    """True when tick frame carries a usable datetime column for OHLC resampling.
+
+    Accepts either a pandas DataFrame (with a DatetimeIndex) or a Polars
+    DataFrame (with a `timestamp_utc` column). The training pipeline now
+    hands Polars frames in by default; we return True for that path so the
+    readiness summary prints correctly.
+    """
+    # Polars FastPath — no index concept, but a timestamp_utc column suffices
+    if hasattr(ticks, "columns") and "timestamp_utc" in ticks.columns:
+        return True
     idx = getattr(ticks, "index", None)
     if idx is None or len(idx) == 0:
         return False
@@ -606,28 +615,38 @@ def _normalize_tick_index_utc(ticks: pd.DataFrame) -> pd.DataFrame:
 
 
 def _multipair_zero_samples_help(
-    pair_ticks: dict[str, pd.DataFrame] | None,
+    pair_ticks: dict | None,
 ) -> str:
     lines = ["Per-pair tick load summary:"]
     if not pair_ticks:
-        lines.append("  (no tick dict ΓÇö loader failed.)")
+        lines.append("  (no tick dict — loader failed.)")
         return "\n".join(lines)
     for p, df in pair_ticks.items():
         if df is None:
             lines.append(f"  {p}: None")
             continue
         n = len(df)
+        # Support both pandas (DatetimeIndex) and Polars (timestamp_utc col)
         idx = getattr(df, "index", None)
-        kind = type(idx).__name__ if idx is not None else "None"
+        kind = type(idx).__name__ if idx is not None else "no-index"
         dt_ok = _ticks_have_usable_datetime_index(df)
         lines.append(
             f"  {p}: ticks={n:,} index={kind} datetime_ok={dt_ok}"
         )
-        if n > 0 and idx is not None:
+        if n > 0:
             try:
-                lines.append(
-                    f"       range: {idx.min()} -> {idx.max()}"
-                )
+                if idx is not None:
+                    lines.append(
+                        f"       range: {idx.min()} -> {idx.max()}"
+                    )
+                elif "timestamp_utc" in df.columns:
+                    ts = df["timestamp_utc"]
+                    # Polars: min/max return scalar Series; pick the item
+                    t0 = ts.min()
+                    t1 = ts.max()
+                    if hasattr(t0, "item"):
+                        t0, t1 = t0.item(), t1.item()
+                    lines.append(f"       range: {t0} -> {t1}")
             except Exception:
                 pass
     lines.append(
@@ -782,7 +801,7 @@ def _bump_reason_counts(entry: dict, field: str, counts: dict | None) -> None:
 
 
 
-def _update_pair_readiness_raw(pair: str, ticks: pd.DataFrame) -> None:
+def _update_pair_readiness_raw(pair: str, ticks) -> None:
     entry = _pair_readiness_entry(pair)
     entry["windows_seen"] += 1
     if ticks is None:
@@ -1571,7 +1590,7 @@ def _chunk_result(
 
 
 def _build_chunk(
-    ticks_chunk: pd.DataFrame,
+    ticks_chunk, # pd.DataFrame or pl.DataFrame — handed to ForexDataPipeline.run, which auto-converts
     fe:          FeatureEngineer,
     scaler:      StandardScaler,
     seq_len:     int,
@@ -2244,7 +2263,7 @@ def _build_multipair_chunk(
             "reason": "no_common_timestamps",
             "input_sequence_counts": {p: len(pair_times.get(p, [])) for p in pair_ticks},
         }
-        raise RuntimeError("No common timestamps found across pairs")
+        return None, None, None, None, None, None, None, None, 0
 
     _sample = next(iter(pair_Xs.values()))
     n_feat_per_pair = _sample.shape[2]
@@ -2626,7 +2645,7 @@ def _build_multipair_dataset(
     n_features    = 0
     total_samples = 0
     z_store       = None   # zarr (primary)
-    pair_ticks: dict[str, pd.DataFrame] | None = None
+    pair_ticks: dict | None = None
     globals()["_PAIR_READINESS_STATS"] = {}
     globals()["_PAIR_ALIGNMENT_STATS"] = {}
 
@@ -2941,35 +2960,49 @@ def _build_multipair_dataset(
                     print(f"  [Window {window_idx+1}/{len(date_windows)}] "
                           f"{win_start} -> {win_end}")
 
-                    if _pool is not None:
-                        pair_ticks = _prefetch.pop(window_idx).result()
-                        _next_q = _q_pos + _look_ahead
-                        if _next_q < len(_pending):
-                            _ni, _ns, _ne = _pending[_next_q]
-                            _prefetch[_ni] = _pool.submit(
-                                _load_window_ticks, _ns, _ne)
-                    else:
-                        pair_ticks = _load_window_ticks(win_start, win_end)
+                    try:
+                        if _pool is not None:
+                            pair_ticks = _prefetch.pop(window_idx).result()
+                            _next_q = _q_pos + _look_ahead
+                            if _next_q < len(_pending):
+                                _ni, _ns, _ne = _pending[_next_q]
+                                _prefetch[_ni] = _pool.submit(
+                                    _load_window_ticks, _ns, _ne)
+                        else:
+                            pair_ticks = _load_window_ticks(win_start, win_end)
 
-                    X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = (
-                        _build_multipair_chunk(
-                        pair_ticks, fe, scalers, args.seq_len,
-                        window_idx, win_start=win_start, label_method=args.label_method,
-                        target_col=_cache_target_col(args),
-                        execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
-                        bar_freq=str(getattr(args, "bar_freq", "1min")),
-                        lookahead_bars=int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
-                        profit_target_atr=float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
-                        stop_loss_atr=float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
-                        cross_asset=cross_asset,
-                        sentiment_pipe=sentiment_pipe,
-                        historical_news_mode=str(getattr(args, "historical_news_mode", "calendar")),
-                        historical_news_file=getattr(args, "historical_news_file", None),
-                        economic_calendar_file=getattr(args, "economic_calendar_file", None),
-                        cot_data=cot_data,
-                        max_bad_frac=float(getattr(args, "max_bad_frac", 0.05)),
-                        max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
-                    ))
+                        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = (
+                            _build_multipair_chunk(
+                            pair_ticks, fe, scalers, args.seq_len,
+                            window_idx, win_start=win_start, label_method=args.label_method,
+                            target_col=_cache_target_col(args),
+                            execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
+                            bar_freq=str(getattr(args, "bar_freq", "1min")),
+                            lookahead_bars=int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
+                            profit_target_atr=float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
+                            stop_loss_atr=float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
+                            cross_asset=cross_asset,
+                            sentiment_pipe=sentiment_pipe,
+                            historical_news_mode=str(getattr(args, "historical_news_mode", "calendar")),
+                            historical_news_file=getattr(args, "historical_news_file", None),
+                            economic_calendar_file=getattr(args, "economic_calendar_file", None),
+                            cot_data=cot_data,
+                            max_bad_frac=float(getattr(args, "max_bad_frac", 0.05)),
+                            max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
+                        ))
+                    except Exception as e:
+                        import traceback
+                        print(f"\n[CRITICAL ERROR] Failed during Window {window_idx+1} ({win_start} -> {win_end}):")
+                        traceback.print_exc()
+                        print(f"[MultiPair] Skipping window {window_idx+1} due to error.")
+                        if _pool is not None and getattr(e, "shutdown", False):
+                             pass # Pool is already shutting down
+                        # We don't want to crash the whole pipeline just because one window threw an error
+                        # unless it's a MemoryError.
+                        if isinstance(e, MemoryError):
+                            sys.exit(1)
+                        continue
+
                     if X_seq is None or X_seq.size == 0:
                         del pair_ticks
                         gc.collect()

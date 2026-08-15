@@ -1,6 +1,6 @@
 strategy:
   mode: scalping
-  bar_freq: 1min
+  bar_freq: 5m
   lookahead_bars: 30
   profit_target_atr: 1.2
   stop_loss_atr: 0.8
@@ -34,11 +34,11 @@ curriculum:
     min_class_share: 0.05
   seq_schedule:
   - epoch_start: 0
-    seq_len: 30
-  - epoch_start: 10
-    seq_len: 75
-  - epoch_start: 1
-    seq_len: 120
+    seq_len: "2h30m"
+  - epoch_start: 8
+    seq_len: "6h15m"
+  - epoch_start: 16
+    seq_len: "10h"
   chunk_early_stop_patience: 3
   chunk_early_stop_min_batches: 50
   feature_groups:
@@ -370,4 +370,4 @@ training:
   batch_size: 128
   epochs: 2
   resume: false
-  seq_len: 120
+  seq_len: "10h"

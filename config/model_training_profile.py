@@ -58,6 +58,12 @@ class ModelTrainingProfile:
     miner_feedback: bool = True
     forgetting_threshold: float = 0.15
     easy_threshold: float = 0.60
+
+    # Continuous Learning
+    enable_ewc: bool = False
+    ewc_lambda: float = 1000.0
+    enable_si: bool = False
+    si_lambda: float = 1.0
     freeze_patience: int = 1
 
     # Pretraining
@@ -188,6 +194,24 @@ MODEL_PROFILES = {
         pretrain_framework="custom",
         swa_enabled=False,
     ),
+    "glm": ModelTrainingProfile(
+        model_name="glm",
+        capacity="low",
+        has_attention=False,
+        has_lstm=False,
+        has_conv=False,
+        has_graph=False,
+        has_positional_encoding=False,
+        primary_loss="cross_entropy",
+        use_multitask=False,
+        adversarial_enabled=False,
+        use_self_paced=False,
+        use_loss_weighting=False,
+        miner_feedback=False,
+        pretrain_method="byol",
+        swa_enabled=False,
+        rl_finetune=False,
+    ),
 }
 
 
@@ -199,6 +223,17 @@ def get_training_profile(model_name: str) -> ModelTrainingProfile:
 
     # Fallback: auto-detect from architecture
     return _auto_detect_profile(name)
+
+
+def pretrain_method_for(model_name: str) -> str:
+    """Get the deterministic pretraining method for a model, resolving aliases."""
+    method = get_training_profile(model_name).pretrain_method
+    aliases = {
+        "masked_or_byol": "masked",
+        "forecast_or_drift": "forecast",
+        "byol_or_tscl": "byol",
+    }
+    return aliases.get(method, method)
 
 
 def _auto_detect_profile(model_name: str) -> ModelTrainingProfile:

@@ -1142,9 +1142,20 @@ class CrossAssetFeatures:
             # Rename value column to the asset name
             if "value" in s_df.columns:
                 s_df = s_df.rename({"value": asset})
-            elif s_df.columns[-1] != "timestamp_utc":
+            elif s_df.columns[-1] not in ["timestamp_utc", "Date", "date", "time", "timestamp"]:
                 s_df = s_df.rename({s_df.columns[-1]: asset})
 
+            for date_col in ["Date", "date", "time", "timestamp", "datetime", "Datetime"]:
+                if date_col in s_df.columns:
+                    s_df = s_df.rename({date_col: "timestamp_utc"})
+
+            if "timestamp_utc" not in s_df.columns:
+                print(f"[CrossAsset] WARNING: Cannot find time column for {asset}. Columns: {s_df.columns}. Skipping.")
+                continue
+
+            s_df = s_df.with_columns(
+                pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+            )
             s_df = s_df.select(["timestamp_utc", asset]).sort("timestamp_utc")
             F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
             # forward fill

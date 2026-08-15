@@ -56,6 +56,11 @@ from training.gpu_datasets import (
     ZarrStreamDataset,
 )
 from training.gpu_device import build_adamw, maybe_torch_compile
+from training.ewc import ElasticWeightConsolidation, apply_ewc_loss
+from training.synaptic_intelligence import (
+    SynapticIntelligence,
+    apply_si_loss,
+)
 from training.model_factory import get_model_training_profile
 from training.gpu_losses import (
     DirectionalHuberLoss,
@@ -133,6 +138,8 @@ _HOST_DEPS = (
     'Sidecar',
     'ElasticWeightConsolidation',
     'apply_ewc_loss',
+    'SynapticIntelligence',
+    'apply_si_loss',
     'PrioritizedDataLoader',
     'run_preflight_sanity_checks',
     'CurriculumController',
@@ -925,10 +932,19 @@ def _apply_curriculum_weights(loss, pred, yb, crit, classification, batch_idx_t,
 
 def _build_train_loss(
     model, xb, yb, y_cls_b, y_conf_b, crit, classification, multitask, direction_only,
-    teacher_model, distill_weight, ewc_module, ewc_lambda, loader, batch_idx_t,
+    teacher_model, distill_weight, ewc_module, ewc_lambda,
+    si_module, si_lambda,
+    loader, batch_idx_t,
     online_miner, accum_steps, sample_weight_lookup=None,
 ):
-    """Shared forward + loss assembly used by both AMP and non-AMP paths."""
+    """Shared forward + loss assembly used by both AMP and non-AMP paths.
+
+    ``si_lambda`` is the effective λ for this epoch, computed by the caller
+    from the FeatureStabilityMonitor's regime-drift estimate
+    (``epoch_si_lambda``): ``λ = base_λ / (1 + max_shift²)`` so the SI penalty
+    relaxes under severe distribution shift and re-locks when the regime
+    stabilizes.
+    """
     pred = model(xb)
     loss = _compute_loss(
         pred, crit, yb, classification,
@@ -948,6 +964,8 @@ def _build_train_loss(
     loss = _apply_kd_loss(pred, teacher_model, xb, loss, distill_weight)
     if ewc_module is not None:
         loss = apply_ewc_loss(loss, ewc_module, ewc_lambda)
+    if si_module is not None:
+        loss = apply_si_loss(loss, si_module, si_lambda)
     return pred, loss / accum_steps
 
 
@@ -957,6 +975,7 @@ def _optimizer_step(
     nan_skips: int,
     epoch: int,
     pbar,
+    si_module=None,
 ) -> tuple[bool, int]:
     """Backward is assumed done. Returns (stepped_ok, updated_nan_skips). """
     if not do_step:
@@ -977,6 +996,10 @@ def _optimizer_step(
         return False, nan_skips
     nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     _maybe_warn_grad_norm(model, batch_idx)
+    # Snapshot params AND raw gradients before GC mutates p.grad in place, so
+    # SI's path integral is computed from the true (unclipped/raw) gradients.
+    if si_module is not None:
+        si_module.pre_step()
     # Shared GC for both AMP (after unscale) and non-AMP paths.
     _centralize_gradients(model)
     if use_fp16_scaler:
@@ -984,6 +1007,8 @@ def _optimizer_step(
         scaler_amp.update()
     else:
         opt.step()
+    if si_module is not None:
+        si_module.post_step()
     opt.zero_grad(set_to_none=True)
     if scheduler is not None:
         scheduler.step()
@@ -1072,6 +1097,8 @@ def _train_batch(
     epoch: int,
     pbar,
     nan_skips: int,
+    si_module=None,
+    si_lambda: float = 1.0,
     sample_weight_lookup=None,
 ) -> tuple[str, float | None, int]:
     """Shared AMP/non-AMP train step: forward → backward → optional opt step.
@@ -1084,7 +1111,7 @@ def _train_batch(
         _, loss = _build_train_loss(
             model, xb, yb, y_cls_b, y_conf_b, crit, classification,
             multitask, direction_only, teacher_model, distill_weight,
-            ewc_module, ewc_lambda, loader, batch_idx_t, online_miner,
+            ewc_module, ewc_lambda, si_module, si_lambda, loader, batch_idx_t, online_miner,
             accum_steps, sample_weight_lookup=sample_weight_lookup,
         )
 
@@ -1110,6 +1137,7 @@ def _train_batch(
         model, opt, scaler_amp, scale, do_step,
         grad_clip, scheduler, batch_idx,
         nan_skips=nan_skips, epoch=epoch, pbar=pbar,
+        si_module=si_module,
     )
     if not ok:
         return "nan_grad", None, nan_skips
@@ -1135,7 +1163,9 @@ def train_epoch(
     adversarial_gen=None,
     adversarial_feature_names: list[str] | None = None,
     ewc_module=None,
-    ewc_lambda: float = 100.0,
+    ewc_lambda: float = 1000.0,
+    si_module=None,
+    si_lambda: float = 1.0,
     sample_weight_lookup=None,
 ):
     """One training epoch via shared ``_prepare_train_batch`` / ``_train_batch``."""
@@ -1189,6 +1219,8 @@ def train_epoch(
                 distill_weight=distill_weight,
                 ewc_module=ewc_module,
                 ewc_lambda=ewc_lambda,
+                si_module=si_module,
+                si_lambda=si_lambda,
                 loader=loader,
                 online_miner=online_miner,
                 accum_steps=accum_steps,
@@ -1663,6 +1695,38 @@ def supervised_train(
     amp_dtype:  torch.dtype = torch.float32,
 ):
     _ensure_bound()
+
+    # ── Lightning training path (opt-in via --training-framework lightning) ──
+    _train_framework = str(getattr(args, "training_framework", "custom") or "custom").lower()
+    if _train_framework == "lightning":
+        try:
+            from training.lightning_trainer import run_lightning_training, is_lightning_available
+            if is_lightning_available():
+                print(f"\n[Training] Using PyTorch Lightning framework for {model_name.upper()}")
+                history, metrics = run_lightning_training(
+                    model_name=model_name,
+                    cache_path=cache_path,
+                    n_samples=n_samples,
+                    n_features=n_features,
+                    args=args,
+                    device=device,
+                    n_gpus=n_gpus,
+                    run=run,
+                    train_idx=train_idx,
+                    val_idx=val_idx,
+                    fold_id=fold_id,
+                    amp_dtype=amp_dtype,
+                )
+                return history, metrics.get("best_sharpe", 0.0)
+            else:
+                print("[Lightning] Not available, falling back to custom training loop")
+        except Exception as _lt_e:
+            print(f"[Lightning] Training failed ({_lt_e}), falling back to custom loop")
+    elif _train_framework == "composer":
+        print("[Composer] Mosaic Composer framework is not fully implemented/installed, falling back to custom loop.")
+    elif _train_framework != "custom":
+        print(f"[Training] Unknown framework '{_train_framework}', falling back to custom loop.")
+        
     global _TRAIN_LOGGER
     _artifact_run_name = str(getattr(args, "run_name_slug", "") or _slug_part(getattr(args, "run_name", "pipeline-run"), max_len=140))
     sidecar = None  # always defined; reused logger path skips Sidecar creation
@@ -1743,6 +1807,27 @@ def supervised_train(
     print(f"  Training: {model_name.upper()} | {n_samples:,} samples | "
           f"batch={args.batch_size} | AMP={args.amp} | loss={args.loss}")
     print(f"{'-'*60}")
+
+    if hasattr(args, "_training_features_report"):
+        report = args._training_features_report
+        print("\n  [Training-Features Report]")
+        for k, v in report.items():
+            print(f"    {k:20s}: {str(v['mode']):<6s} (source: {v['source']})")
+        print()
+        
+        try:
+            import json
+            from pathlib import Path
+            if getattr(args, "checkpoint_dir", None):
+                rep_path = Path(args.checkpoint_dir) / "training_features_report.json"
+                with open(rep_path, "w") as f:
+                    json.dump(report, f, indent=2)
+            if run is not None:
+                # Safely update run config if W&B is active
+                if hasattr(run, "config"):
+                    run.config.update({"features_report": report}, allow_val_change=True)
+        except Exception as e:
+            print(f"  [Warning] Failed to write training_features_report: {e}")
 
     tune_idx = None
     if train_idx is None or val_idx is None:
@@ -2405,7 +2490,28 @@ def supervised_train(
         except Exception as e:
             _ewc = None
             print(f"[EWC] Failed to initialize EWC (continuing without EWC): {e}")
+    elif getattr(args, "enable_ewc", False):
+        print(
+            "[EWC] --enable-ewc set but start_ep == 0 (fresh run): no prior trained "
+            "state exists to protect, so EWC is deferred. It will engage on a resume "
+            "run (start_ep > 0)."
+        )
+    _si = None
+    if getattr(args, "enable_si", False):
+        try:
+            print("[SI] Initializing Synaptic Intelligence tracking...")
+            _si = SynapticIntelligence(model, epsilon=1e-3)
+            print("[SI] Initialized successfully. Tracking path integral.")
+        except Exception as e:
+            _si = None
+            print(f"[SI] Failed to initialize SI (continuing without SI): {e}")
 
+    # ── Dynamic SI λ (regime drift / volatility scaling) ─────────────────
+    # Computed per-epoch from the FeatureStabilityMonitor's max feature shift
+    # (see the Feature Stability Monitor block inside the epoch loop):
+    #     λ_epoch = si_lambda * 1 / (1 + max_shift²)
+    # so the SI penalty relaxes during regime shocks and re-locks after they
+    # stabilize. No per-batch state is needed.
     _adversarial = None
     _adv_feature_names = _feature_schema or list(getattr(args, "_feat_names", []) or [])
     # Check per-model adversarial gating
@@ -2567,10 +2673,8 @@ def supervised_train(
         # -- A4: Feature freeze schedule ---------------------------------------
         _unfreeze_features_for_epoch(model, ep)
 
-        # -- A: Feature stability monitoring -----------------------------------
-        # Sample one batch from the training data to update the EMA stats.
-        # We use a fixed random subset (512 samples) for efficiency ΓÇö no need
-        # to scan the whole dataset; EMA smooths over batch-to-batch noise.
+        # -- Feature Stability Monitor -----------------------------------------
+        epoch_si_lambda = float(getattr(args, "si_lambda", 1.0))
         try:
             _stab_pool  = locals().get("ep_train_idx", train_idx)
             _sample_idx = np.random.choice(_stab_pool,
@@ -2582,17 +2686,23 @@ def supervised_train(
             _feat_mask = _feat_stability.get_mask(device=device)
             _stab_report = _feat_stability.report()
 
+            # Dynamic SI scaling based on regime drift / volatility
+            _max_shift = float(_stab_report["feat_max_shift"])
+            _dyn_w = 1.0 / (1.0 + (_max_shift ** 2))
+            epoch_si_lambda = epoch_si_lambda * _dyn_w
+
             if _stab_report["feat_frozen"] > 0 or _stab_report["feat_noisy"] > 0:
                 _log_info(
                     f"[FeatStab] Ep {ep+1}: frozen={_stab_report['feat_frozen']} "
                     f"noisy={_stab_report['feat_noisy']} "
                     f"active={_stab_report['feat_active']}/{n_features} "
-                    f"max_shift={_stab_report['feat_max_shift']:.2f}sigma"
+                    f"max_shift={_max_shift:.2f}sigma (si_lambda={epoch_si_lambda:.2f})"
                 )
             _safe_wandb_log(run, {
                 "feat/frozen": _stab_report["feat_frozen"],
                 "feat/noisy": _stab_report["feat_noisy"],
-                "feat/max_shift": _stab_report["feat_max_shift"],
+                "feat/max_shift": _max_shift,
+                "feat/si_dynamic_lambda": epoch_si_lambda,
                 "epoch": ep,
             })
         except Exception as _stab_exc:
@@ -2782,7 +2892,9 @@ def supervised_train(
                 adversarial_gen=_adversarial,
                 adversarial_feature_names=_adv_feature_names or None,
                 ewc_module=_ewc,
-                ewc_lambda=float(getattr(args, "ewc_lambda", 100.0)),
+                ewc_lambda=float(getattr(args, "ewc_lambda", 1000.0)),
+                si_module=_si,
+                si_lambda=epoch_si_lambda,
                 sample_weight_lookup=_cm_wl,
             )
         except Exception as _epoch_exc:
@@ -2837,6 +2949,11 @@ def supervised_train(
         # ── Online miner: end epoch (update forgetting tracker) ──────────
         if _online_miner is not None:
             _online_miner.end_epoch()
+        # ──────────────────────────────────────────────────────────────────
+
+        # ── SI: end epoch (update parameter importance) ───────────────────
+        if _si is not None:
+            _si.update_omega()
         # ──────────────────────────────────────────────────────────────────
 
         # SWA: accumulate averaged weights; use constant SWA LR instead of OneCycleLR

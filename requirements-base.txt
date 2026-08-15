@@ -60,3 +60,9 @@ fastapi>=0.100.0
 uvicorn>=0.29.0
 websockets>=12.0
 psutil>=5.9.0
+
+# PyTorch Lightning + SSL frameworks (new)
+pytorch-lightning>=2.0.0
+einops>=0.7.0
+timm>=0.9.0
+lightly>=1.5.0

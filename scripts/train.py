@@ -158,6 +158,11 @@ def parse_args() -> argparse.Namespace:
                    help="Load production/best weights and continue training (fine-tune)")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force dataset cache rebuild (passes --force-rebuild to train_gpu.py)")
+    p.add_argument("--build-only", action="store_true",
+                   help="Only build the dataset pipeline and exit without training")
+    p.add_argument("--skip-news", action="store_true", help="Skip news data")
+    p.add_argument("--skip-cot", action="store_true", help="Skip COT data")
+    p.add_argument("--skip-eco", action="store_true", help="Skip Eco Calendar")
     p.add_argument("--skip-data-check", action="store_true",
                    help="Skip pre-flight data path checks")
     p.add_argument("--fair-sweep", action="store_true",
@@ -214,6 +219,8 @@ def main() -> int:
         train_cmd.append("--finetune-warm-start")
     if args.rebuild_cache:
         train_cmd.append("--force-rebuild")
+    if args.build_only:
+        train_cmd.append("--build-only")
     if args.fair_sweep:
         train_cmd.append("--fair-sweep")
     if args.model_profile is True:

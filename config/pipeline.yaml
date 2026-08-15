@@ -1,0 +1,187 @@
+# Forex Pipeline Configuration
+# ============================
+# Complete configuration for the data pipeline
+
+name: "forex_pipeline"
+version: "1.0.0"
+description: "Full forex data pipeline with validation, quality gates, and feature store"
+created_at: "2026-01-15T00:00:00"
+
+# Data Source Configuration
+data_source:
+  type: "dukascopy"  # dukascopy, databento, tds, synthetic
+  pairs:
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "AUDUSD"
+    - "EURGBP"
+    - "EURJPY"
+    - "GBPJPY"
+    - "USDCAD"
+    - "USDCHF"
+    - "NZDUSD"
+  start_date: "2008-01-01"
+  end_date: "2026-12-31"
+  data_root: "data/raw/dukascopy"
+
+# Bar/Resampling Configuration
+bars:
+  bar_type: "time"  # time, tick, volume, dollar
+  freq: "5m"
+  session_filter: true
+  session_mode: "dst"  # fixed or dst
+  session_start_utc: "07:00"
+  session_end_utc: "21:00"
+  tick_threshold: 500
+  volume_threshold: 10000.0
+  dollar_threshold: 1000000.0
+  gap_policy: "drop"  # drop, ffill, interpolate
+  gap_max_minutes: 5
+  spread_cap_multiplier: 3.0
+  apply_frac_diff: true
+  frac_diff_order: 0.4
+
+# Feature Engineering Configuration
+features:
+  groups:
+    - "core"
+    - "microstructure"
+    - "momentum"
+    - "regime"
+    - "cross_asset"
+    - "macro"
+    - "sentiment"
+    - "candlestick"
+    - "volume_profile"
+    - "volatility_clock"
+    - "risk_control"
+  cache_enabled: true
+  ofi_z_threshold: 2.0
+  slow_cols:
+    - "sentiment_decayed"
+    - "eco_surprise"
+    - "hurst_exponent"
+    - "cot_net_hf"
+  enable_regime_gate: true
+  enable_quality_gate: false
+  enable_no_trade_zones: false
+  finbert_dim: 8
+  ca_corr_window: 60
+  ca_regime_window: 240
+  ca_lags: [1, 5, 15]
+
+# Labeling Configuration
+labeling:
+  method: "rl_reward"  # rl_reward, triple_barrier, both
+  lookahead_bars: 30
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+  transaction_cost_pips: 1.5
+  tb_profit_atr: 2.0
+  tb_stop_atr: 1.0
+  tb_horizon_bars: 60
+  regime_aware: true
+  execution_delay_bars: 1
+
+# Dataset Building Configuration
+dataset:
+  seq_len: 80
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  chunk_size: 500000
+  chunk_overlap: 200
+  output_format: "zarr"  # zarr, npy, parquet
+  output_dir: "data/processed"
+  compression: "lz4"
+  compression_level: 1
+  pairs:
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "AUDUSD"
+    - "EURGBP"
+    - "EURJPY"
+    - "GBPJPY"
+    - "USDCAD"
+    - "USDCHF"
+    - "NZDUSD"
+  label_col: "label"
+  difficulty_enabled: true
+
+# Validation Configuration
+validation:
+  method: "purged_embargo"
+  n_splits: 7
+  purge_bars: 120
+  embargo_bars: 60
+  min_train_size: 50000
+  quality_gates_enabled: true
+  null_threshold: 0.01
+  inf_threshold: 0.0
+  psi_threshold: 0.2
+  correlation_threshold: 0.99
+  drift_detection_enabled: true
+  drift_window: 1000
+  schema_validation: true
+  feature_schema_gate: true
+
+# Quality Gates Configuration
+quality_gates:
+  enabled: true
+  auto_remediate: true
+  log_dir: "logs/quality_gates"
+  stages:
+    ingestion:
+      null_threshold: 0.0
+      inf_threshold: 0.0
+    resampling:
+      null_threshold: 0.01
+      inf_threshold: 0.0
+    feature_engineering:
+      null_threshold: 0.01
+      inf_threshold: 0.0
+      psi_threshold: 0.2
+
+# Lineage Tracking Configuration
+lineage:
+  enabled: true
+  store_type: "file"  # file, sqlite
+  path: "logs/lineage"
+  track_git: true
+  track_config: true
+
+# Feature Store Configuration
+feature_store:
+  enabled: true
+  store_type: "parquet"  # parquet, delta
+  path: "./feature_store"
+  partition_cols:
+    - "pair"
+    - "year"
+    - "month"
+    - "day"
+  compression: "zstd"
+
+# Incremental Processing Configuration
+incremental:
+  enabled: false
+  state_dir: "./feature_state"
+  warmup_bars: 200
+  max_buffer_size: 10000
+
+# Runtime Configuration
+output_dir: "logs/pipeline"
+log_level: "INFO"
+random_seed: 42
+
+# Hardware Configuration
+hardware_profile: "ubuntu_rtx_laptop"
+n_workers: 4
+use_gpu: true
+
+# Tags
+tags:
+  environment: "development"
+  team: "forex-ml"

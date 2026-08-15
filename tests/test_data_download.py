@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from data.sources import (
@@ -699,5 +700,12 @@ class TestCompactedStorage:
 
         df = mgr.query_dukascopy_compacted("EURUSD", start="2024-01-02", end="2024-01-02")
 
-        assert len(df) == 2
-        assert set(df["pair"].astype(str)) == {"EURUSD"}
+        # query_dukascopy_compacted now returns a Polars DataFrame by default.
+        if isinstance(df, pl.DataFrame):
+            assert df.height == 2
+            assert set(df["pair"].to_list()) == {"EURUSD"}
+        elif isinstance(df, pd.DataFrame):
+            assert len(df) == 2
+            assert set(df["pair"].astype(str)) == {"EURUSD"}
+        else:
+            raise AssertionError(f"unexpected type {type(df)}")

@@ -25,7 +25,7 @@ def test_run_yaml_parses_and_strategy_block_loads():
     assert strat["mode"] == "scalping"
     assert float(strat["profit_target_atr"]) == pytest.approx(1.2)
     assert float(strat["stop_loss_atr"]) == pytest.approx(0.8)
-    assert strat["bar_freq"] == "1min"
+    assert strat["bar_freq"] == "5m"
     assert "lookahead_bars" in strat
 
 

@@ -84,6 +84,40 @@ manifest.json
 <model>_model_card.json
 ```
 
+## 3b. Data Pipeline (Linux/macOS: `./run.sh`, Windows: `.\run.ps1`)
+
+The whole data lifecycle is automatic and idempotent:
+
+```bash
+./run.sh download --start 2008-01-01   # prices -> news -> COT -> calendar,
+                                       # then auto-runs the DuckDB migration
+./run.sh migrate                       # refresh consolidated DuckDB only
+./run.sh data                          # download -> migrate -> feature engineering
+./run.sh features                      # feature engineering (auto-migrates first if stale)
+./run.sh train                         # training (auto-migrates first if stale)
+./run.sh backtest                      # backtest (auto-migrates first if stale)
+./run.sh all                           # download -> migrate -> features -> train -> backtest
+```
+
+### Automatic DuckDB migration
+
+`scripts/migrate_to_duckdb.py` consolidates the compacted tick parquet
+(`data/compact/dukascopy/granularity=daily/pair=*/...`) into a single
+`data/store/forex_ticks.duckdb`. It is safe to re-run at any time:
+
+- **New pairs** are appended incrementally.
+- **Re-downloaded pairs** (parquet newer than the last migration) are refreshed
+  via DELETE + INSERT.
+- **Unchanged pairs** are skipped in a ~0.5s no-op.
+- Progress is tracked in `data/store/.migrate_manifest.json`; DuckDB spill
+  directories are cleaned up after each run.
+
+The migration runs automatically (1) at the end of `download`, (2) as part of
+`data`/`all`, and (3) as a pre-flight check when `train`, `backtest`, or
+`features` detect the DB is missing or older than the compact parquet. Disable
+with `--skip-migrate` (download) or `--no-auto-migrate` (train/backtest/features).
+Manual control: `python scripts/migrate_to_duckdb.py --force --dry-run`.
+
 ## 4. Training
 
 Run a small synthetic smoke training pass first:

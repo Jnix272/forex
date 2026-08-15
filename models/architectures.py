@@ -1204,6 +1204,26 @@ if TORCH:
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o
 
+    class GLMBaseline(nn.Module):
+        """Generalized Linear Model (GLM) baseline.
+
+        Flattens the sequence and applies a single linear projection.
+        Serves as an ultra-fast, lightweight baseline against complex deep learning models.
+        """
+        def __init__(self, input_size: int, num_classes: int, seq_len: int = 16):
+            super().__init__()
+            self.seq_len = seq_len
+            self.input_norm = nn.LayerNorm(input_size)
+            self.flatten = nn.Flatten(start_dim=1)
+            # Use LazyLinear to elegantly handle the flattened dimension (seq_len * input_size)
+            self.head = nn.LazyLinear(num_classes)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """x: (B, seq_len, input_size)"""
+            x = self.input_norm(x)
+            x_flat = self.flatten(x)
+            return self.head(x_flat)
+
 
     # ── C: Model role separation ───────────────────────────────────────────
     # Each architecture has an explicit role in the ensemble pipeline.
@@ -1216,6 +1236,7 @@ if TORCH:
         "gnn":         "risk_modulation", # Cross-asset correlation; reduces position on systemic risk
         "transformer": "context",         # iTransformer — variate-level attention
         "expert":      "confirmation",    # EXPERT encoder — conv-based local confirmation
+        "glm":         "baseline",        # Generalized Linear Model baseline
     }
 
     class DiversityLoss(nn.Module):
@@ -1399,6 +1420,7 @@ if TORCH:
         "mamba":       MambaScalper,
         "gnn":         GNNFromSequence,
         "expert":      EXPERTEncoder,
+        "glm":         GLMBaseline,
     }
 
     def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) -> nn.Module:

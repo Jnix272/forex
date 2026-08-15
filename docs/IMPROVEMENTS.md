@@ -153,7 +153,7 @@ Tests: `tests/test_zarr_stream_dataset.py` (14), `tests/test_dataset_builder_rea
 | Ingestion / FE | DST `_apply_dst_sessions` overlap floats; FE prefers bars `london_ny` |
 | Cache | LABEL_REGIME digest `lr*` in cache tag |
 | Labels | Defaults LH=30 / TP=1.2 / SL=0.8 (settings ↔ YAML ↔ scalping) |
-| Ubuntu | `run_ubuntu.yaml` = HW/scale only |
+| Ubuntu | `run_ubuntu.yaml` = synchronized with `run.yaml` for production scale + HW overlays |
 | Backtest | Numba path ≥50k bars; equity-curve metrics when trades empty |
 | Fix-all | `numpy<2.5` (Numba); smoke CUDA isolation |
 
@@ -264,3 +264,4 @@ Residual noted in training audit: hub KD ignores `distill_temperature` (MSE). Op
 5. Rebuild Zarr + paper-promote when ready to train/trade
 6. Optional: Numba backtest path honor `session_spread_mult`
 7. Exercise `--broker mt5` / `ibkr` against a paper terminal
+\n- **Pretraining Method Unification**: Centralized dual-alias resolution (e.g., `masked_or_byol`) into a single `pretrain_method_for` resolver to eliminate silent fallbacks to BYOL.

@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **2026-08-11 — Regime Drift / Volatility Scaled SI λ**: the SI penalty now adapts to market regime via the `FeatureStabilityMonitor`. Per epoch, `epoch_si_lambda = si_lambda * 1/(1 + max_shift²)` where `max_shift` is the max feature drift (σ) measured by the monitor: severe distribution shift drives λ toward 0 so the model can re-fit, then it ramps back up to lock in the new patterns when the regime stabilizes. Plumbed through `train_epoch` → `_build_train_loss` → `apply_si_loss` and logged as `feat/si_dynamic_lambda` in W&B. Replaces the earlier per-batch `DynamicSILambdaConfig` / `compute_dynamic_si_lambda` wiring (that utility is retained in `training/synaptic_intelligence.py`; its CLI/YAML/profile surface was removed).
+
 - **2026-08-09 — Data Pipeline Audit & Fixes (P3-12)**: Deep audit of 14 files across `data/`, `training/`, `labeling/`, `config/`. Found 21 issues — 9 fixed (2 Critical, 3 High, 1 Medium, 2 Low): (C1) Multi-pair Zarr resizeability fixed — arrays now created with `shape=(0,)+dims` for safe `.append()`. (C2) `DataQualityReporter` wired into `build_dataset_chunked()` — generates `data_quality_report.json` after cache build. (H2) Direction label threshold now uses per-bar `tx_pips_arr` from session/slippage multipliers instead of hardcoded 1.5 pips. (H3) `sanitize_array` clip_range disabled for features (NaN/Inf handled by col_medians). (H4) Scaler `n_features_in_` validation added at DataLoader load time. (M7) Feature mask allowlist expanded with `mid`, `spread`, `asia_london`, `london_ny`, `time_idx`. (L1) Triple barrier sequential fallback fixed to use bid/ask exit prices. (L4) Dead expression `tx_cost_pips * pip_size` removed.
 
 - **2026-08-09 — Per-Model Training Profiles (P3-6)**: Central `ModelTrainingProfile` registry in `config/model_training_profile.py` auto-applies 12 training dimensions per architecture (adversarial, curriculum, miner feedback, pretraining, SWA/EMA, RL, framework). Auto-detection fallback inspects architecture for unknown models. Wired into `supervised_loop.py` via `training/model_factory.py::get_model_training_profile()` for adversarial gating (`adversarial_models`), curriculum (self-paced/loss-weighting/miner feedback gating), miner init gating, and SWA. New CLI flags: `--adversarial-models`, `--curriculum-miner-feedback`, `--curriculum-miner-models`, `--curriculum-forgetting-threshold`, `--curriculum-easy-threshold`, `--use-self-paced`, `--use-loss-weighting`, `--self-paced-models`, `--loss-weighting-models`, `--training-framework`, `--pretrain-framework`, `--rl-framework`. Model-specific configs: haelt/tft/transformer get full adversarial+self-paced+miner; mamba gets adversarial+difficulty only; gnn gets graph_pgd+difficulty; expert gets no adversarial/swa/miner.
@@ -82,6 +84,14 @@ All notable changes to this project will be documented in this file.
   - **P3-5: Export scaler in ONNX graph (single artifact)** (`inference/onnx_inference.py`): `core_onnx_export()` and `core_rl_execution_onnx_export()` accept optional `scaler` (sklearn StandardScaler). Creates `ScaledModel`/`ScaledRLModel` wrappers that register scaler `mean_` and `scale_` as ONNX buffers. Exported models accept raw features and internally apply z-score normalization + NaN/Inf sanitization. All export paths updated: `export_to_onnx()`, `export_ensemble_to_onnx()`, `export_rl_to_onnx()`, `export_rl_execution_to_onnx()` now load and fuse scaler automatically.
 
 ### Fixed
+
+- **2026-08-11 — EWC & Synaptic Intelligence setup fixes**:
+  - **YAML config keys wired** (`training/gpu_cli.py`): added `training.enable_ewc`, `training.ewc_lambda`, `training.enable_si`, `training.si_lambda` to `_YAML_MAP`. Previously these settings in `config/run*.yaml` were silently dropped — only the CLI flags `--enable-ewc` / `--enable-si` worked.
+  - **EWC fresh-run gate made visible** (`training/supervised_loop.py`): `--enable-ewc` on a fresh run (`start_ep == 0`) now prints an explicit "deferred to resume runs" notice instead of silently no-oping. EWC still only engages on resume (`start_ep > 0`) because a random-init model has no prior state to protect.
+  - **`ewc_lambda` defaults aligned to 1000.0** (`training/supervised_loop.py`: `train_epoch` signature default + `args` fallback in the epoch loop). The canonical CLI/profile value is 1000.0; the stale 100.0 fallbacks were a 10× inconsistency.
+  - **SI path integral computed from raw gradients** (`training/synaptic_intelligence.py`, `training/supervised_loop.py`): `pre_step()` now snapshots `p.grad` before `clip_grad_norm_` / `_centralize_gradients` mutate it in place, so importance Ω reflects true loss gradients rather than the clipped/centralized surrogate. `_optimizer_step` reordered so `pre_step()` runs before grad clipping.
+  - **Dead import removed** (`training/train_gpu.py`): unused `from training.ewc import ElasticWeightConsolidation, apply_ewc_loss` deleted.
+  - Tests: `tests/test_synaptic_intelligence.py` updated to the new raw-grad contract, plus new regression test `test_si_uses_raw_gradients_not_clipped_or_centralized`.
 
 - **2026-08-08 — Seven remaining audit bugs fixed (R-1/R-2, P1, A8/A9, I3, A4, EWC, RA2)**:
 
@@ -955,3 +965,12 @@ Per-model artifacts are written under `<checkpoint_dir>/<model>/`:
 - **Execution Modeling** (`backtesting/backtest.py`): Added clamped market-impact spread estimation.
 - **RL Action Expansion** (`models/rl_agents.py`): Expanded the trading environment to the 10-class `ScalingAction` state space.
 - **RL Replay Weighting** (`models/rl_agents.py`): Added inverse-frequency weighted sampling for rare scaling events.
+
+- **2026-08-13 — Data Building Pipeline Improvements (P1-P6)**: Full framework for data quality and auditability.
+  - **P1: Unified Data Contracts**: 5 Pydantic contracts (Tick, Bar, Feature, Label, Dataset) with schema hashing, column constraints, and SQL-expression invariants. Replaces ad-hoc validation with structured Pydantic models that validate schema, enforce column constraints, and compute schema hashes for provenance.
+  - **P2: Data Lineage Tracking**: LineageTracker with 9 EventType enum values (SOURCE_LOAD, TRANSFORM, VALIDATION, JOIN, FEATURE_COMPUTE, LABEL_COMPUTE, DATASET_BUILD, MODEL_TRAIN, MODEL_EVAL), SQLite/File store, graph reconstruction, git/config hash tracking for reproducibility.
+  - **P3: Incremental/Streaming Feature Computation**: IncrementalFeatureEngine with EMA states and rolling buffers, StreamingFeatureProcessor with warmup phase, FeatureStateStore with pickle persistence and Redis fallback.
+  - **P5: Feature Store Integration**: ParquetFeatureStore with partitioned storage (pair/year/month/day), FeatureVersion metadata, FeatureRegistry with categorization/deprecation tracking, FeatureMaterializer orchestrating full pipeline (load → validate → feature compute → store).
+  - **P6: Configuration-Driven Pipeline Orchestration**: PipelineConfig hierarchical dataclasses from YAML, PipelineOrchestrator sequential stages with validation/quality/gates/drift/lineage, SchemaDriftDetector PSI-based drift detection, ValidationReporter JSON+HTML output.
+
+*Note: P4 overlaps with P1-P3 and P5-P6 in the pipeline improvement framework; all phases are described together as a complete framework launch.*

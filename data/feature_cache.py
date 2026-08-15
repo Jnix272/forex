@@ -43,7 +43,7 @@ def build_pair_feature_cache(
     end: str,
     *,
     cache_dir: str = DEFAULT_CACHE_DIR,
-    bar_freq: str = "1min",
+    bar_freq: str = "5m",
     fe_kwargs: dict = None,
     news_mode: str = "calendar",
     news_file: str = None,
@@ -132,7 +132,7 @@ def build_pair_feature_cache(
         # Resample bars
         from training.dataset_builder import ForexDataPipeline
         pipeline = ForexDataPipeline(
-            bar_freq=bar_freq or "1min",
+            bar_freq=bar_freq or "5m",
             session_filter=False,
             apply_frac_diff=False,
             session_mode="dst",

@@ -149,7 +149,10 @@ def _load_tick_data_frame(
 def _filter_lazy_by_time(lf, start: str | None = None, end: str | None = None):
     """Apply a UTC date-range filter on a lazy frame's timestamp column."""
     ts_col = None
-    for col in lf.columns:
+    # Use collect_schema().names() on a LazyFrame — it does not trigger IO
+    # (resolving the .columns attribute on a LazyFrame does, hence the warning).
+    cols = lf.collect_schema().names() if hasattr(lf, "collect_schema") else lf.columns
+    for col in cols:
         if col in ("timestamp_utc", "timestamp", "datetime", "ts_event", "__index_level_0__"):
             ts_col = col
             break
@@ -274,7 +277,7 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     # Databento's ts_event in addition to the conventional names. Without this,
     # raw Dukascopy parquet exports raise "No timestamp column found".
     time_col = None
-    for col in ["timestamp", "timestamp_utc", "datetime", "ts_event", "time", "__index_level_0__"]:
+    for col in ["timestamp", "timestamp_utc", "datetime", "ts_event", "time", "__index_level_0__", "Date", "date", "DATE"]:
         if col in df.columns:
             time_col = col
             break
@@ -1070,12 +1073,22 @@ def load_or_generate(
         try:
             mgr = ForexDataManager(verbose=False)
             df = mgr.load(_pair, source=_source, start=start, end=end)
-            if not df.empty:
-                # mgr.load returns Pandas, convert to Polars
-                df_pl = pl.from_pandas(df.reset_index())
-                if "timestamp" in df_pl.columns:
-                    df_pl = df_pl.rename({"timestamp": "timestamp_utc"})
-                return df_pl
+            # mgr.load returns a Polars DataFrame by default (zero-copy Arrow
+            # from DuckDB when the consolidated store is present, otherwise a
+            # Polars scan+collect over the per-day parquet files). The shape
+            # already has `timestamp_utc` / `bid` / `ask` / `mid` / `spread`
+            # / `volume` / `pair` / `source` — no pandas round-trip needed.
+            if isinstance(df, pl.DataFrame):
+                if df.height > 0:
+                    if "timestamp" in df.columns and "timestamp_utc" not in df.columns:
+                        df = df.rename({"timestamp": "timestamp_utc"})
+                    return df
+            elif isinstance(df, pd.DataFrame):
+                if not df.empty:
+                    df_pl = pl.from_pandas(df.reset_index() if df.index.name else df)
+                    if "timestamp" in df_pl.columns:
+                        df_pl = df_pl.rename({"timestamp": "timestamp_utc"})
+                    return df_pl
         except Exception as e:
             print(f"[DataLoader] {_source} failed for {_pair}: {e} — falling back to synthetic data")
 

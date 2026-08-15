@@ -84,11 +84,46 @@ The core architecture is built around regime-aware pretraining and continuous mo
 4. **Backtesting**
    Test signals against the `ForexScalingBacktest` engine. Ensure you pass your `bars` (with bid/ask spread data) and generated `signals` containing `ScalingAction` states (e.g., `OPEN_LONG`, `SCALE_IN_50`).
 
-## Latest Updates (2026-08-09)
+## Data Pipeline & CLI (automatic)
 
-### Test Suite Stabilization & Bug Fixes
+The end-to-end data lifecycle is one command — downloads, consolidated-DuckDB
+migration, feature engineering, training, and backtesting are automated and
+idempotent. Use `./run.sh` (Linux/macOS) or `.\run.ps1` (Windows), which wrap
+`scripts/run_pipeline.py`:
+
+```bash
+./run.sh download --start 2008-01-01   # prices -> news -> COT -> calendar,
+                                       # then auto-runs the DuckDB migration
+./run.sh migrate                       # refresh consolidated DuckDB only
+./run.sh validate                      # runs data quality checks on consolidated DB
+./run.sh data                          # download -> migrate -> validate
+./run.sh train                         # training (auto-migrates first if stale)
+./run.sh backtest                      # backtest (auto-migrates first if stale)
+./run.sh all                           # download -> migrate -> validate -> train -> backtest
+```
+
+- **Automatic DuckDB migration** (`scripts/migrate_to_duckdb.py`): consolidates
+  the compacted tick parquet into `data/store/forex_ticks.duckdb`. It appends new
+  pairs, refreshes re-downloaded pairs (DELETE + INSERT), and skips unchanged
+  pairs in a ~0.5s no-op, tracked in `data/store/.migrate_manifest.json`.
+- The migration is auto-triggered after `download`, as part of `data`/`all`, and as
+  a pre-flight check before `train`/`backtest` when the DB is stale.
+  Disable with `--skip-migrate` or `--no-auto-migrate`.
+- **Secondary indexes**: DuckDB's native row-group min/max zonemaps automatically accelerate `WHERE pair AND timestamp` filters on the 1.74B-row table. Secondary ART indexes (`idx_ticks_pair`, `idx_ticks_ts`, `idx_ticks_pair_ts`) were evaluated but failed commit on this 14 GB RAM configuration regardless of `memory_limit`. The zonemap approach is lower‑overhead and the recommended path for this dataset.
+
+## Latest Updates (2026-08-13)
+
+### Data Building Pipeline Improvements (2026-08-13)
+- **P1**: Unified Data Contracts with Pydantic validation for tick/bar/feature/label/dataset stages - 5 stage-specific contracts with schema hashing, column constraints, and SQL-expression invariants
+- **P2**: Data Lineage tracking with LineageTracker, FileLineageStore/SQLiteLineageStore, EventType enum, and graph reconstruction
+- **P3**: Incremental/Streaming Feature Computation with IncrementalFeatureEngine featuring EMA/rolling state, StreamingFeatureProcessor with warmup, and FeatureStateStore with Redis fallback
+- **P4**: Automated Data Quality Gates with 12 quality checks (nulls, infinities, duplicates, monotonicity, weekends, bid/ask, OHLC, spread, variance, correlations) and 11 remediation actions with auto-remediation
+- **P5**: Feature Store Integration with ParquetFeatureStore (partitioned storage), FeatureVersion metadata, FeatureRegistry with categorization/deprecation, and FeatureMaterializer orchestrating full pipeline
+- **P6**: Configuration-Driven Pipeline with PipelineConfig hierarchical dataclasses from YAML, PipelineOrchestrator sequential stages with validation/quality/gates/drift/lineage, SchemaDriftDetector PSI-based detection, and ValidationReporter JSON+HTML
+
+### Test Suite Stabilization & Bug Fixes (2026-08-09)
 - Critical bugs fixed in iTransformer, ClusterContrastiveTrainer, ZarrStreamDataset, promotion gates, visualizer, and supervised loop
-- ✅ **The `supervised_loop.py` epoch loop is repaired** (2026-08-09): stripped all legacy adaptive-curriculum references, routed through `CurriculumManager`, wired `graph_pgd` auto-select for GNN models, applied per-sample curriculum weights to the loss, and switched `OneCycleLR` to `total_steps` mode. Training smoke test passes. See [`docs/FIXES.md`](docs/FIXES.md) for the full audit + verdicts.
+- ✅ **The `supervised_loop.py` epoch loop is repaired** (2026-08-09): stripped all legacy adaptive-curriculum references, routed through `CurriculumManager`, wired `graph_pgd` auto-select for GNN models, applied per-sample curriculum weights to the loss, and switched `OneCycleLR` to `total_steps` mode. Training smoke test passes.
 - Fixed `iTransformerScalper` LayerNorm shape mismatch when used with `MultiTaskWrapper`
 - Fixed `ClusterContrastiveTrainer.nt_xent` undefined variables
 - Fixed `_fit_fold_scaler` and `_decompress_block` StandardScaler 3D input handling
@@ -97,12 +132,12 @@ The core architecture is built around regime-aware pretraining and continuous mo
 - Fixed `supervised_loop.py` indentation error in epoch loop
 
 ### Data Quality & Observability (2026-08-09)
-- **Structured logging infrastructure** across entire data pipeline (replaces 20k+ bare print statements)
-- **Cross-asset per-asset logging** with full fallback chain visibility
-- **FRED dual-path visibility** - explicit logging of real vs synthetic data
-- **COT load unification** - single helper with logging for main + worker paths
-- **Regime detection structured logging** - success vs fallback tracking
-- **Pipeline standardization fix** - resolves `ColumnNotFoundError: unable to find column "mid"`
+- Structured logging infrastructure across entire data pipeline (replaces 20k+ bare print statements)
+- Cross-asset per-asset logging with full fallback chain visibility
+- FRED dual-path visibility - explicit logging of real vs synthetic data
+- COT load unification - single helper with logging for main + worker paths
+- Regime detection structured logging - success vs fallback tracking
+- Pipeline standardization fix - resolves `ColumnNotFoundError: unable to find column "mid"`
 
 ### Phase 3 Architectural Replacements (2026-08-08)
 - **P3-1**: Replace AdversarialGenerator with PGD/FGSM/FreeLB gradient-based attacks — classes + factory done; `supervised_loop` wiring (`graph_pgd`) **pending**
@@ -119,6 +154,13 @@ The core architecture is built around regime-aware pretraining and continuous mo
 - **A4**: Positional encoding for Transformer branches
 - **EWC**: Fisher diagonal normalization (divide by samples_processed)
 - **RA2**: HER self-match (strict future sampling)
+
+### EWC / Synaptic Intelligence Setup Fixes (2026-08-11)
+- **YAML wiring**: `training.enable_ewc/ewc_lambda/enable_si/si_lambda` now map through `_YAML_MAP` (previously silently dropped)
+- **SI raw-gradient path integral**: importance Ω computed from unclipped/uncentralized backward gradients, not the clipped/centralized surrogate
+- **`ewc_lambda` fallback aligned to 1000.0** (was 100.0 in two spots)
+- **Regime-drift SI λ**: `si_lambda` scaled per epoch by `1/(1 + max_shift²)` from the FeatureStabilityMonitor (λ↘ on regime shocks, re-locks when the regime stabilizes)
+- **Dead EWC import removed** from `train_gpu.py`; `--enable-ewc` on a fresh run now prints a deferred notice instead of silently no-oping
 
 ## Changelog
 See [CHANGELOG.md](CHANGELOG.md) for the latest project updates and version history.

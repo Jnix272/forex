@@ -201,6 +201,12 @@ _YAML_MAP = {
     "training.adversarial.eps_curriculum_scale": "adversarial_eps_curriculum_scale",
     "training.adversarial.models": "adversarial_models",
 
+    # Continuous learning (EWC / Synaptic Intelligence)
+    "training.enable_ewc": "enable_ewc",
+    "training.ewc_lambda": "ewc_lambda",
+    "training.enable_si": "enable_si",
+    "training.si_lambda": "si_lambda",
+
     # Framework selection (new)
     "training.training_framework": "training_framework",
     "training.pretrain_framework": "pretrain_framework",
@@ -429,13 +435,13 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     if isinstance(cfg.get("curriculum"), dict):
         miner_fb = cfg["curriculum"].get("miner_feedback")
         if isinstance(miner_fb, dict):
-            defaults["curriculum_miner_feedback"] = miner_fb
+            defaults["curriculum_miner_feedback"] = bool(miner_fb.get("enabled", False))
         sp = cfg["curriculum"].get("self_paced")
         if isinstance(sp, dict):
-            defaults["curriculum_self_paced"] = sp
+            defaults["use_self_paced"] = bool(sp.get("enabled", False))
         lw = cfg["curriculum"].get("loss_weighting")
         if isinstance(lw, dict):
-            defaults["curriculum_loss_weighting"] = lw
+            defaults["use_loss_weighting"] = bool(lw.get("enabled", False))
     if isinstance(cfg.get("feature_ablation"), dict):
 
         defaults["feature_ablation"] = cfg["feature_ablation"]
@@ -612,6 +618,26 @@ def _sync_runtime_config(args) -> None:
             pass
 
 
+def _resolve_seq_len(val, bar_freq: str) -> int:
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and val.isdigit():
+        return int(val)
+    if isinstance(val, str):
+        try:
+            import pandas as pd
+            t_val = pd.Timedelta(val).total_seconds()
+            t_freq = pd.Timedelta(bar_freq or "5m").total_seconds()
+            if t_freq > 0:
+                bars = max(1, int(t_val / t_freq))
+                print(f"[Config] Resolved time-anchored seq_len '{val}' -> {bars} bars (at {bar_freq})")
+                return bars
+        except Exception as e:
+            print(f"[Config] WARNING: Failed to parse time-anchored seq_len '{val}' ({e}). Defaulting to 60.")
+            return 60
+    return int(val) if val else 60
+
+
 def parse_args():
     _ensure_bound()
     p = argparse.ArgumentParser(description="Forex Model ΓÇö 20M Tick GPU Trainer")
@@ -712,7 +738,7 @@ def parse_args():
 
     # Model
     p.add_argument("--model",        type=str,   default="haelt",
-                   choices=["tft","transformer","haelt","mamba","gnn","expert"])
+                   choices=["tft","transformer","haelt","mamba","gnn","expert","glm"])
     p.add_argument("--all-models", dest="all_models", action="store_true")
 
     p.add_argument("--no-all-models", dest="all_models", action="store_false",
@@ -750,7 +776,7 @@ def parse_args():
                    help="OneCycleLR warmup fraction (legacy path).")
     p.add_argument("--onecycle-max-lr-mult", type=float, default=10.0,
                    help="OneCycleLR peak multiplier over base lr (legacy path).")
-    p.add_argument("--seq-len",      type=int,   default=60)
+    p.add_argument("--seq-len",      type=str,   default="60")
     p.add_argument("--patience",     type=int,   default=10)
     p.add_argument("--seed",         type=int, default=1337,
                    help="Global random seed (A-M3: seeded by default for reproducibility). "
@@ -1285,6 +1311,8 @@ def parse_args():
     p.add_argument("--force-rebuild", "--rebuild-cache", dest="force_rebuild", action="store_true",
 
                    help="Ignore cached Zarr/NPY store and rebuild from scratch")
+    p.add_argument("--build-only", action="store_true",
+                   help="Only build the dataset pipeline and exit")
     p.add_argument("--quick-mode", action="store_true",
                    help="Fast sanity run: fewer folds/epochs, no ensemble or RL.")
     p.add_argument("--drift-gate", dest="drift_gate",
@@ -1412,6 +1440,13 @@ def parse_args():
                    help="Enable Elastic Weight Consolidation to prevent catastrophic forgetting.")
     p.add_argument("--ewc-lambda", type=float, default=1000.0,
                    help="EWC penalty weight (default: 1000.0).")
+                   
+    p.add_argument("--enable-si", action="store_true",
+                   help="Enable Synaptic Intelligence (SI) to prevent catastrophic forgetting.")
+    p.add_argument("--si-lambda", type=float, default=1.0,
+                   help="SI penalty weight (default: 1.0). "
+                        "When the FeatureStabilityMonitor is active, this base lambda is "
+                        "scaled per epoch by 1/(1 + max_shift^2) as the SI dynamic lambda.")
 
     p.add_argument("--enable-per", action="store_true",
                    help="Enable Prioritized Experience Replay (PER).")
@@ -1601,6 +1636,17 @@ def parse_args():
             args.risk_engine = None
     else:
         args.risk_engine = None
+
+    # Time-anchored seq_len resolution
+    _bf = getattr(args, "bar_freq", "5m")
+    args.seq_len = _resolve_seq_len(args.seq_len, _bf)
+    if hasattr(args, "curriculum") and isinstance(args.curriculum, dict):
+        sched = args.curriculum.get("seq_schedule")
+        if isinstance(sched, list):
+            for entry in sched:
+                if isinstance(entry, dict) and "seq_len" in entry:
+                    entry["seq_len"] = _resolve_seq_len(entry["seq_len"], _bf)
+
     return args
 
 
@@ -1920,6 +1966,11 @@ def _apply_training_profile(args, model_name: str, cli_overrides: set, log_parts
         "curriculum_forgetting_threshold": tprofile.forgetting_threshold,
         "curriculum_easy_threshold": tprofile.easy_threshold,
         "curriculum_freeze_patience": tprofile.freeze_patience,
+        # Continuous Learning
+        "enable_ewc": tprofile.enable_ewc,
+        "ewc_lambda": tprofile.ewc_lambda,
+        "enable_si": tprofile.enable_si,
+        "si_lambda": tprofile.si_lambda,
         # Pretraining
         "pretrain_method": tprofile.pretrain_method,
         "pretrain_framework": tprofile.pretrain_framework,
@@ -1936,11 +1987,36 @@ def _apply_training_profile(args, model_name: str, cli_overrides: set, log_parts
         "rl_use_lstm": tprofile.rl_use_lstm,
     }
 
+    features_report = {}
+    report_keys = {
+        "curriculum_manager": "curriculum_manager_mode",
+        "self_paced": "use_self_paced",
+        "loss_weighting": "use_loss_weighting",
+        "miner_feedback": "curriculum_miner_feedback",
+    }
+    
+    for label, dest in report_keys.items():
+        yaml_val = getattr(args, dest, None)
+        prof_val = training_fields.get(dest)
+        
+        if dest in cli_overrides:
+            source = "CLI"
+            val = getattr(args, dest, None)
+        else:
+            if yaml_val != prof_val:
+                source = "profile"
+            else:
+                source = "yaml"
+            val = prof_val
+        features_report[label] = {"mode": val, "source": source}
+
     for dest, value in training_fields.items():
         if dest in cli_overrides or not hasattr(args, dest):
             continue
         setattr(args, dest, value)
         log_parts.append(f"{dest}={value}")
+
+    args._training_features_report = features_report
 
 
 def _member_training_args(base_args, model_name: str, member_idx: int, total_members: int):
@@ -1982,16 +2058,8 @@ def _member_training_args(base_args, model_name: str, member_idx: int, total_mem
     print(f"[EnsembleDiversity] {model_name}: seed={getattr(out, 'seed', None)} "
           f"lr={out.lr:.3e} dropout={out.dropout:.3f} (member {member_idx+1}/{total_members})")
     if getattr(out, "pretrain", False) or getattr(out, "ablate_pretrain", False):
-        if "haelt" in model_name.lower():
-            out.pretrain_method = "masked"
-        elif "mamba" in model_name.lower():
-            out.pretrain_method = "forecast"
-        elif "tft" in model_name.lower():
-            out.pretrain_method = "masked"
-        elif "gnn" in model_name.lower():
-            out.pretrain_method = "cluster"
-        elif "expert" in model_name.lower():
-            out.pretrain_method = "tscl"
+        from config.model_training_profile import pretrain_method_for
+        out.pretrain_method = pretrain_method_for(model_name)
 
     return out
 
