@@ -25,7 +25,7 @@ except Exception:
     _TrainingLogger = None
 
 try:
-    from torch.utils.tensorboard import SummaryWriter
+    from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
     TENSORBOARD = True
 except ImportError:
     TENSORBOARD = False
@@ -147,6 +147,7 @@ _HOST_DEPS = (
     'WANDB',
     'OPTUNA',
     'RICH_DISPLAY',
+    '_RichDisplay',
     '_GPU_CFG',
     'maybe_torch_compile',
 )
@@ -1056,7 +1057,16 @@ def _prepare_train_batch(
 
     if adversarial_gen is not None:
         try:
-            y_adv = y_cls_b if (classification or multitask) else yb
+            if classification or multitask:
+                y_adv = y_cls_b if y_cls_b is not None else yb
+                # Class targets are cached as {-1,0,1} floats; CE needs long
+                # {0,1,2}. Match MultiTaskLoss.forward / lightning_trainer by
+                # clamping to [0,2] so the -1 (Sell) rows don't hit the CUDA
+                # nll kernel's `t >= 0 && t < n_classes` device-side assert.
+                if y_adv.dtype in (torch.float16, torch.float32, torch.float64):
+                    y_adv = y_adv.long().clamp(0, 2)
+            else:
+                y_adv = yb
             res = adversarial_gen(model, xb, y_adv, crit)
             xb = res[0] if isinstance(res, (tuple, list)) else res
         except TypeError:
@@ -1817,9 +1827,9 @@ def supervised_train(
         
         try:
             import json
-            from pathlib import Path
+            from pathlib import Path as _Path
             if getattr(args, "checkpoint_dir", None):
-                rep_path = Path(args.checkpoint_dir) / "training_features_report.json"
+                rep_path = _Path(args.checkpoint_dir) / "training_features_report.json"
                 with open(rep_path, "w") as f:
                     json.dump(report, f, indent=2)
             if run is not None:

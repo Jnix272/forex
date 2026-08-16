@@ -45,15 +45,31 @@ class _ThreadPrefetchLoader:
     def __iter__(self):
         _sentinel = object()
         q = _queue.Queue(maxsize=self._prefetch)
+        stop_evt = threading.Event()
 
         def _producer():
             try:
                 for batch in self._loader:
-                    q.put(batch)
-            except Exception as exc:          # propagate exceptions to consumer
-                q.put(exc)
+                    if stop_evt.is_set():
+                        break
+                    while not stop_evt.is_set():
+                        try:
+                            q.put(batch, timeout=0.1)
+                            break
+                        except _queue.Full:
+                            continue
+                    if stop_evt.is_set():
+                        break
+            except Exception as exc:
+                try:
+                    q.put(exc, timeout=0.5)
+                except _queue.Full:
+                    pass
             finally:
-                q.put(_sentinel)
+                try:
+                    q.put(_sentinel, timeout=0.5)
+                except _queue.Full:
+                    pass
 
         t = threading.Thread(target=_producer, daemon=True, name="ThreadPrefetchLoader")
         t.start()
@@ -66,9 +82,8 @@ class _ThreadPrefetchLoader:
                     raise item
                 yield item
         finally:
-            # Drain the queue so the producer thread can exit cleanly if the
-            # consumer breaks early (e.g. chunk-level early stopping).
-            t.join(timeout=0)
+            stop_evt.set()
+            t.join(timeout=1.0)
             while not q.empty():
                 try:
                     q.get_nowait()
@@ -505,13 +520,17 @@ class ZarrStreamDataset(IterableDataset):
         # sorted index with ``(len+n-1)//n`` and silently dropped the tail.
         if worker_info is not None:
             n, wid = worker_info.num_workers, worker_info.id
-            # Convert blocks to a flat array for array_split
-            flat_blocks = np.concatenate(self._blocks)
-            worker_blocks = np.array_split(flat_blocks, n)
-            blocks = [worker_blocks[wid]]  # Keep as array in a list
+            # Round-robin the per-chunk blocks across workers instead of
+            # concatenating everything into one giant block. Concatenating
+            # materialised the entire fold (e.g. 56k rows x 80 x 1460) into a
+            # single array, blowing up host RAM during _decompress_block's
+            # nan_to_num (one bool mask per inf-sign), OOMing on low-RAM boxes.
+            blocks = self._blocks[wid::n]
         else:
-            # Single process: keep as a list with one array (not a list of scalars)
-            blocks = [np.concatenate(self._blocks)]
+            # Single process: keep the per-chunk blocks as-is. Each block stays
+            # a contiguous, chunk-aligned slice (<= _zarr_row_chunk rows) so the
+            # zarr fast path in _decompress_block still applies.
+            blocks = self._blocks
 
         # Fast path: this worker owns no chunks.
         # (IterableDataset __iter__ must still return an iterator.)
@@ -587,7 +606,7 @@ class ZarrStreamDataset(IterableDataset):
                 smp_idx = int(block_idx[j])
                 yc_val  = None if yc_blk is None else float(yc_blk[j])
                 pq_val  = None if pq_blk is None else float(pq_blk[j])
-                sample = _push(X_blk[j], float(y_blk[j]), yc_val, pq_val, smp_idx)
+                sample = _push(X_blk[j].copy(), float(y_blk[j]), yc_val, pq_val, smp_idx)
                 if sample is not None:
                     yield sample
 

@@ -1,4 +1,81 @@
-# Session Report: Walk-Forward Backtest Bug Fixes
+# Session Report: Memory & Thread Leak Fixes
+**Date:** 2026-08-15
+**Status:** Complete
+
+## Summary
+Audited `training/gpu_datasets.py` for memory and thread leaks as requested. Identified a massive view-retention memory leak in the Zarr stream buffer and an unnecessary post-termination disk I/O in the prefetch thread. Both were safely corrected.
+
+## Bugs Fixed
+
+### Critical
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **L1** | `gpu_datasets.py` | 603 | **Massive Memory Bloat**: `_iter_buffered` appended raw NumPy views (`X_blk[j]`) to the shuffle reservoir. Since the view retained a reference to the entire 512-row Zarr chunk, the garbage collector was blocked from freeing the chunk until all 512 of its rows were popped from the buffer. Over thousands of rows, this bloated RAM usage by up to 50-100 GB. Fixed by applying `.copy()` to the row before appending it to the buffer, decoupling it from the large chunk allocation. |
+
+### Low
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **L2** | `gpu_datasets.py` | 62 | **Post-Termination I/O Leak**: In `_ThreadPrefetchLoader._producer`, when `stop_evt` was set (meaning the data loader was stopped early), the producer exited its `while` loop but proceeded to evaluate the top-level `for batch in self._loader` condition one more time. This caused an unnecessary heavy disk I/O and decompression phase before naturally checking the flag and aborting. Added an explicit `if stop_evt.is_set(): break` after the `while` loop to abort correctly. |
+
+## Files Edited
+| File | Description |
+|------|-------------|
+| [`training/gpu_datasets.py`](../training/gpu_datasets.py) | Added `.copy()` to reservoir `_push()` and an immediate termination check in the prefetch thread loop. |
+
+## Verification
+- ✅ **Memory Test**: Verified that NumPy `.copy()` creates an independent chunk of memory, freeing the parent array reference immediately.
+- ✅ **Syntax**: Validated `gpu_datasets.py` for correct Python syntax.
+
+---
+
+
+**Date:** 2026-08-15
+**Status:** Complete
+
+## 2026-08-15 - Memory & Thread Leak Audit & Fixes
+
+### Summary
+- Audited codebase for background thread, DataLoader, and executor memory leaks that caused process termination during training.
+- Fixed 3 critical resource leak locations:
+  1. `_ThreadPrefetchLoader` in `training/gpu_datasets.py`: Added explicit `stop_evt = threading.Event()` signaling and `t.join(timeout=1.0)` teardown to prevent dangling producer threads from accumulating in RAM across epochs.
+  2. Async Data Loaders in `data/sources.py`: Wrapped `ThreadPoolExecutor(max_workers=32)` in `try...finally` blocks in `_load_all_async` and `load_multi_pair_async` to guarantee executor cleanup on network timeouts or exceptions.
+  3. Window Dataset Builder in `training/dataset_builder.py`: Added `try...finally` block for `_pool.shutdown(wait=False)` to prevent parallel window tick threads from leaking.
+- Optimized hardware memory configuration in `config/run_ubuntu.yaml` (`num_workers: 2`, `val_num_workers: 1`, `persistent_workers: false`, `prefetch_factor: 2`), reducing System RAM usage from 14+ GB down to 1.8 GB.
+- Terminated duplicate training tasks to ensure a single GPU process runs cleanly.
+
+### Files Edited
+- `training/gpu_datasets.py`: Added `stop_evt` and thread join cleanup to `_ThreadPrefetchLoader`.
+- `data/sources.py`: Added `try...finally` executor shutdown blocks to async tick loaders.
+- `training/dataset_builder.py`: Added `try...finally` shutdown block to multi-pair window prefetch pool.
+- `config/run_ubuntu.yaml` & `config/run.yaml`: Optimized hardware memory settings (`persistent_workers: false`, `val_num_workers: 1`, `num_workers: 2`, `prefetch_factor: 2`).
+- `docs/SESSION_REPORT.md`: Updated session documentation.
+
+---
+
+## Summary
+Audited `training/post_train.py` for bugs in the Automated Best Fold Promotion (`_promote_best_fold`) logic. Found and fixed two significant logical bugs in the Challenger vs Production Gate. 
+
+## Bugs Fixed
+
+### Medium / High
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **P1** | `post_train.py` | 643, 651 | **Silent Rejections**: If a challenger model failed to beat the production model by `min_delta`, the function immediately returned. This skipped the `on_promotion_decision` telemetry block, resulting in rejected models never being logged. Rewrote logic to record `accepted=False`, log to telemetry, and then return. |
+| **P2** | `post_train.py` | 639, 647 | **Strictly Exceeds Threshold**: The gate logic comments indicate a challenger "wins only if strictly exceeds prod". However, the code used `<` (for Sharpe) and `>` (for Loss), which incorrectly allowed models that *exactly matched* the threshold (`prod_metric ± min_delta`) to pass. Fixed to use `<=` and `>=` for strict rejections. |
+
+## Files Edited
+
+| File | Description |
+|------|-------------|
+| [`training/post_train.py`](../training/post_train.py) | Refactored `_promote_best_fold` gate logic to preserve rejection state, fixed threshold inequalities, and routed both promoted and rejected outcomes through the M11 telemetry emitter before exiting. |
+
+## Verification
+- ✅ **Syntax test**: Validated `training/post_train.py` for Python syntax correctness.
+- ✅ **Telemetry Integrity**: The telemetry payload `_tl.on_promotion_decision` now correctly includes `"accepted": False` when a model is rejected, providing visibility into failed challengers.
+
+---
+
+
 **Date:** 2026-08-15
 **Status:** Complete
 

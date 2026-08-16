@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from training.feature_ablation import _atomic_copy
+from training.feature_ablation import _atomic_copy, _feature_ablation_config
 
 _HOST = None
 _BOUND = False
@@ -616,6 +616,8 @@ def _promote_best_fold(
     metric_val   = best_score if use_sharpe else -best_score
 
     # Challenger vs Production Gate
+    accepted = True
+    reject_reason = ""
     deployment_json = ckpt_dir / "deployment.json"
     if deployment_json.exists() and not force_promotion:
         try:
@@ -629,28 +631,23 @@ def _promote_best_fold(
                 #   (must beat prod by strictly more than min_delta)
                 # For loss (lower=better): reject if challenger >= prod - min_delta
                 #   (must be lower than prod by strictly more than min_delta)
-                # Bug was: min_delta was -0.001 for loss AND the comparator was
-                # "metric_val > prod_metric + min_delta" (i.e.
-                #   loss > prod_loss - 0.001), which accepts a slight REGRESSION
-                #   and rejects a slight IMPROVEMENT. Inverted both.
                 min_delta = 0.001
                 if use_sharpe:
                     # higher is better — challenger wins only if strictly exceeds prod
-                    if metric_val < prod_metric + min_delta:
-                        print(f"[ChallengerGate] Rejected: new sharpe {metric_val:.4f} "
-                              f"is not significantly better than deployed {prod_metric:.4f} "
-                              f"(needs +{min_delta})")
-                        return
+                    if metric_val <= prod_metric + min_delta:
+                        reject_reason = f"Rejected: new sharpe {metric_val:.4f} is not significantly better than deployed {prod_metric:.4f} (needs >{prod_metric + min_delta:.4f})"
+                        accepted = False
                 else:
                     # loss direction: lower is better — challenger wins only if
                     # strictly lower than prod by at least min_delta
-                    if metric_val > prod_metric - min_delta:
-                        print(f"[ChallengerGate] Rejected: new loss {metric_val:.4f} "
-                              f"is not significantly lower than deployed {prod_metric:.4f} "
-                              f"(needs -{min_delta})")
-                        return
-                print(f"[ChallengerGate] Accepted: new {metric_label} {metric_val:.4f} vs "
-                      f"deployed {prod_metric:.4f}")
+                    if metric_val >= prod_metric - min_delta:
+                        reject_reason = f"Rejected: new loss {metric_val:.4f} is not significantly lower than deployed {prod_metric:.4f} (needs <{prod_metric - min_delta:.4f})"
+                        accepted = False
+                
+                if accepted:
+                    print(f"[ChallengerGate] Accepted: new {metric_label} {metric_val:.4f} vs deployed {prod_metric:.4f}")
+                else:
+                    print(f"[ChallengerGate] {reject_reason}")
         except Exception as e:
             print(f"[ChallengerGate] Warning: failed to parse existing deployment.json: {e}")
 
@@ -658,7 +655,6 @@ def _promote_best_fold(
     try:
         _tl = getattr(_HOST, "_TRAIN_LOGGER", None)
         if _tl is not None and hasattr(_tl, "on_promotion_decision"):
-            _challenger_rejected = False
             _prod_metric_val = None
             try:
                 if deployment_json.exists() and not force_promotion:
@@ -668,24 +664,28 @@ def _promote_best_fold(
                         _prod_metric_val = _pd["metric_value"]
             except Exception:
                 pass
+            
             _tl.on_promotion_decision(
                 model_name=model_name,
-                promoted=True,
+                promoted=accepted,
                 metric_name=metric_label,
                 metric_value=float(metric_val) if metric_val is not None else None,
-                gate_summary=f"challenger accepted ({metric_label}={metric_val:.4f})",
-                gate_reasons=None,
+                gate_summary=f"challenger accepted ({metric_label}={metric_val:.4f})" if accepted else reject_reason,
+                gate_reasons=[reject_reason] if not accepted else None,
                 gate_details={"selected_fold": best_fold, "n_candidates": len(candidate_folds)},
                 challenger_vs_prod={
                     "prod_metric": _prod_metric_val,
                     "challenger_metric": float(metric_val) if metric_val is not None else None,
                     "direction": "sharpe" if use_sharpe else "loss",
                     "min_delta": 0.001,
-                    "accepted": True,
+                    "accepted": accepted,
                 },
             )
     except Exception:
         pass
+
+    if not accepted:
+        return
 
     dst_flat = ckpt_dir / f"{model_name}_best.pt"
     dst_nested = ckpt_dir / model_name / f"{model_name}_best.pt"
@@ -1591,9 +1591,8 @@ def _evaluate_tune_split(model, cache_path: str, tune_idx: np.ndarray, args,
 
     try:
         tune_ds = ZarrStreamDataset(
-            cache_path, tune_idx_sorted, seq_len,
-            targets="direction" if getattr(args, "classification", False) or getattr(args, "multitask", False) else "returns",
-            augment=False,
+            cache_path, tune_idx_sorted,
+            multitask_targets=bool(getattr(args, "classification", False) or getattr(args, "multitask", False)),
         )
         tune_loader = DataLoader(tune_ds, batch_size=batch_size, shuffle=False,
                                  num_workers=0, pin_memory=False)

@@ -450,7 +450,8 @@ def _init_multitask_direction_bias(model: nn.Module, class_prior: torch.Tensor) 
             continue
         for layer in reversed(list(direction.modules())):
             if isinstance(layer, nn.Linear) and layer.out_features == 3 and layer.bias is not None:
-                layer.bias.copy_(bias.to(layer.bias.device, dtype=layer.bias.dtype))
+                with torch.no_grad():
+                    layer.bias.copy_(bias.to(layer.bias.device, dtype=layer.bias.dtype))
                 return
 
 def labels_to_class_index(yb: torch.Tensor) -> torch.Tensor:

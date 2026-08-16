@@ -17,7 +17,7 @@ Enhancements
 
 Usage
 -----
-miner = OnlineOnlineHardExampleMiner(n_samples=n_train_samples)
+miner = OnlineHardExampleMiner(n_samples=n_train_samples)
 
 # During training, feed each batch's per-sample losses:
 miner.update_batch(sample_indices=batch_idx, per_sample_losses=per_sample_loss)
@@ -140,7 +140,7 @@ class ForgettingTracker:
 # ONLINE HARD-EXAMPLE MINER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class OnlineOnlineHardExampleMiner:
+class OnlineHardExampleMiner:
     """Tracks per-sample loss over epochs and identifies hard/forgotten samples
     during training, enabling online data augmentation.
 

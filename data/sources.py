@@ -599,27 +599,28 @@ class DukascopyLoader:
             combined = pd.concat(non_empty, copy=False)
             return _enforce_schema(combined, pair, "dukascopy")
 
-        if own_session:
-            conn_limit = self.concurrency + 5
-            connector  = aiohttp.TCPConnector(
-                limit=conn_limit,
-                limit_per_host=conn_limit,
-                ttl_dns_cache=300,
-                enable_cleanup_closed=True,
-                keepalive_timeout=30,
-            )
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=None, connect=30),
-                connector=connector,
-                headers={"User-Agent": "ForexScaler/2.0 (research)"},
-            ) as sess:
-                result = await _run(sess)
-        else:
-            result = await _run(session)
-
-        if own_executor:
-            executor.shutdown(wait=True)
-        return result
+        try:
+            if own_session:
+                conn_limit = self.concurrency + 5
+                connector  = aiohttp.TCPConnector(
+                    limit=conn_limit,
+                    limit_per_host=conn_limit,
+                    ttl_dns_cache=300,
+                    enable_cleanup_closed=True,
+                    keepalive_timeout=30,
+                )
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=None, connect=30),
+                    connector=connector,
+                    headers={"User-Agent": "ForexScaler/2.0 (research)"},
+                ) as sess:
+                    result = await _run(sess)
+            else:
+                result = await _run(session)
+            return result
+        finally:
+            if own_executor and executor is not None:
+                executor.shutdown(wait=False)
 
     def load_multiple(
         self,
@@ -665,21 +666,23 @@ class DukascopyLoader:
                 session=sess, semaphore=semaphores[pair], executor=executor,
             )
 
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=None, connect=30),
-            connector=connector,
-            headers={"User-Agent": "ForexScaler/2.0 (research)"},
-        ) as sess:
-            pair_results: list[tuple] = []
-            n = len(pairs)
-            batch = max(1, self.max_parallel_pairs)
-            for i in range(0, n, batch):
-                chunk = pairs[i : i + batch]
-                part = await asyncio.gather(*[_one_pair(sess, p) for p in chunk])
-                pair_results.extend(part)
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None, connect=30),
+                connector=connector,
+                headers={"User-Agent": "ForexScaler/2.0 (research)"},
+            ) as sess:
+                pair_results: list[tuple] = []
+                n = len(pairs)
+                batch = max(1, self.max_parallel_pairs)
+                for i in range(0, n, batch):
+                    chunk = pairs[i : i + batch]
+                    part = await asyncio.gather(*[_one_pair(sess, p) for p in chunk])
+                    pair_results.extend(part)
 
-        executor.shutdown(wait=True)
-        return {p: df for p, df in pair_results}
+            return {p: df for p, df in pair_results}
+        finally:
+            executor.shutdown(wait=False)
 
     def load_eurusd_gbpusd(
         self,

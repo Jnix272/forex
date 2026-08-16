@@ -424,16 +424,16 @@ feature_store:
   root: data/feature_store
 # ── DataLoader worker and memory config ─────────────────────────────────────
 hardware:
-  num_workers: 4
-  persistent_workers: true
+  num_workers: 2
+  persistent_workers: false
   pin_memory: true
-  prefetch_factor: 4
+  prefetch_factor: 2
   force_thread_prefetch: false
   profile: ubuntu_rtx_laptop
-  thread_prefetch_batches: 8
+  thread_prefetch_batches: 4
   torch_compile: true
   torch_compile_mode: reduce-overhead
-  val_num_workers: 4
+  val_num_workers: 0
   val_prefetch_factor: 2
 # ── Model maturity stage (dev → paper → production) – gates promotion ──────
 maturity:

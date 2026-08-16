@@ -66,6 +66,7 @@ from training.cache_integrity import (
     _verify_dataset,
     _warn_multitask_cache_sidecars,
 )
+from training.config_validate import _effective_max_seq_len
 from data.dataset_manifest import DatasetManifest
 
 # Local module state (was train_gpu globals)
@@ -1101,7 +1102,7 @@ def _finalize_pair_readiness_report(args, cache_path, pairs, *, alignment: dict 
         "data_source": str(getattr(args, "data_source", "")),
         "start_date": str(getattr(args, "data_start", "")),
         "end_date": str(getattr(args, "data_end", "")),
-        "bar_freq": str(getattr(args, "bar_freq", "1min")),
+        "bar_freq": str(getattr(args, "bar_freq", "5min")),
         "seq_len": int(getattr(args, "seq_len", 0) or 0),
         "pairs": pair_reports,
         "alignment": alignment or {},
@@ -2840,11 +2841,11 @@ def _build_multipair_dataset(
                     "pairs": list(pairs),
                     "data_source": args.data_source,
                     "full_day_data": bool(getattr(args, "full_day_data", False)),
-                    "seq_len": args.seq_len,
+                    "seq_len": _effective_max_seq_len(args),
                     "label_method": args.label_method,
                     "target_col": _cache_target_col(args),
                     "execution_delay_bars": int(getattr(args, "execution_delay_bars", 1)),
-                    "bar_freq": str(getattr(args, "bar_freq", "1min")),
+                    "bar_freq": str(getattr(args, "bar_freq", "5min")),
                     "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
                     "profit_target_atr": float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
                     "stop_loss_atr": float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
@@ -2977,7 +2978,7 @@ def _build_multipair_dataset(
                             window_idx, win_start=win_start, label_method=args.label_method,
                             target_col=_cache_target_col(args),
                             execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
-                            bar_freq=str(getattr(args, "bar_freq", "1min")),
+                            bar_freq=str(getattr(args, "bar_freq", "5min")),
                             lookahead_bars=int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
                             profit_target_atr=float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
                             stop_loss_atr=float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
@@ -3049,7 +3050,7 @@ def _build_multipair_dataset(
                 target_col=_cache_target_col(args),
 
                 execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
-                bar_freq=str(getattr(args, "bar_freq", "1min")),
+                bar_freq=str(getattr(args, "bar_freq", "5min")),
                 lookahead_bars=int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
                 profit_target_atr=float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
                 stop_loss_atr=float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
@@ -3099,7 +3100,7 @@ def _build_multipair_dataset(
             target_col=_cache_target_col(args),
 
             execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
-            bar_freq=str(getattr(args, "bar_freq", "1min")),
+            bar_freq=str(getattr(args, "bar_freq", "5min")),
             lookahead_bars=int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             profit_target_atr=float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
             stop_loss_atr=float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
@@ -3138,21 +3139,21 @@ def _build_multipair_dataset(
     if use_zarr and z_store is not None:
         z_store.attrs["total_samples"] = total_samples
         z_store.attrs["n_features"] = n_features
-        z_store.attrs["seq_len"]    = args.seq_len
+        z_store.attrs["seq_len"]    = _effective_max_seq_len(args)
         z_store.attrs["n_pairs"]    = len(pairs)
         z_store.attrs["pairs"]      = ",".join(pairs)
         z_store.attrs["strategy_mode"] = str(getattr(args, "strategy_mode", "scalping"))
-        z_store.attrs["bar_freq"] = str(getattr(args, "bar_freq", "1min"))
+        z_store.attrs["bar_freq"] = str(getattr(args, "bar_freq", "5min"))
         z_store.attrs["lookahead_bars"] = int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"]))
         import json
         meta = {
             "total_samples": int(total_samples),
             "n_features": int(n_features),
-            "seq_len": int(args.seq_len),
+            "seq_len": int(_effective_max_seq_len(args)),
             "n_pairs": len(pairs),
             "pairs": list(pairs),
             "strategy_mode": str(getattr(args, "strategy_mode", "scalping")),
-            "bar_freq": str(getattr(args, "bar_freq", "1min")),
+            "bar_freq": str(getattr(args, "bar_freq", "5min")),
             "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             "has_rl_market": True,
             "target_col": _cache_target_col(args),
@@ -3223,11 +3224,11 @@ def _build_multipair_dataset(
             meta = {
                 "total_samples": bin_state["total"],
                 "n_features": final_x_shape[2],
-                "seq_len": args.seq_len,
+                "seq_len": _effective_max_seq_len(args),
                 "n_pairs": len(pairs),
                 "pairs": list(pairs),
                 "strategy_mode": str(getattr(args, "strategy_mode", "scalping")),
-                "bar_freq": str(getattr(args, "bar_freq", "1min")),
+                "bar_freq": str(getattr(args, "bar_freq", "5min")),
                 "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
                 "has_rl_market": True,
                 "target_col": _cache_target_col(args),
@@ -3283,7 +3284,7 @@ def _build_multipair_dataset(
             pairs=pairs,
             start=str(getattr(args, "data_start", "")),
             end=str(getattr(args, "data_end", "")),
-            freq=str(getattr(args, "bar_freq", "1min")),
+            freq=str(getattr(args, "bar_freq", "5min")),
             news_mode=str(getattr(args, "historical_news_mode", "calendar")).lower(),
             feature_count=n_features,
             label_method=str(getattr(args, "label_method", "rl_reward")),
@@ -3609,14 +3610,14 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             X_seq, y_seq, diff_seq, pq_seq, y_cls_seq, close_seq, atr_seq, spread_seq, n_feat, _time_idx = (
                 _build_chunk(
                 ticks_chunk, fe, scaler,
-                seq_len    = args.seq_len,
+                seq_len    = _effective_max_seq_len(args),
                 chunk_idx  = chunk_n,
                 win_start  = win_start,
                 label_method = args.label_method,
                 target_col = _cache_target_col(args),
 
                 execution_delay_bars = int(getattr(args, "execution_delay_bars", 1)),
-                bar_freq = str(getattr(args, "bar_freq", "1min")),
+                bar_freq = str(getattr(args, "bar_freq", "5min")),
                 lookahead_bars = int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
                 profit_target_atr = float(getattr(args, "profit_target_atr", LABELING["profit_target_atr"])),
                 stop_loss_atr = float(getattr(args, "stop_loss_atr", LABELING["stop_loss_atr"])),
@@ -3764,17 +3765,17 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
     if use_zarr and z_store is not None:
         z_store.attrs["total_samples"] = total_samples
         z_store.attrs["n_features"] = n_features_total
-        z_store.attrs["seq_len"]    = args.seq_len
+        z_store.attrs["seq_len"]    = _effective_max_seq_len(args)
         z_store.attrs["strategy_mode"] = str(getattr(args, "strategy_mode", "scalping"))
-        z_store.attrs["bar_freq"] = str(getattr(args, "bar_freq", "1min"))
+        z_store.attrs["bar_freq"] = str(getattr(args, "bar_freq", "5min"))
         z_store.attrs["lookahead_bars"] = int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"]))
         meta = {
             "total_samples": int(total_samples),
-            "seq_len": int(args.seq_len),
+            "seq_len": int(_effective_max_seq_len(args)),
             "n_features": int(n_features_total),
             "label_method": args.label_method,
             "strategy_mode": str(getattr(args, "strategy_mode", "scalping")),
-            "bar_freq": str(getattr(args, "bar_freq", "1min")),
+            "bar_freq": str(getattr(args, "bar_freq", "5min")),
             "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             "has_rl_market": True,
             "pairs": pairs,
@@ -3841,11 +3842,11 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         # Save metadata for memmap loading
         meta = {
             "total_samples": _n_samples_written,
-            "seq_len": args.seq_len,
+            "seq_len": _effective_max_seq_len(args),
             "n_features": n_features_total,
             "label_method": args.label_method,
             "strategy_mode": str(getattr(args, "strategy_mode", "scalping")),
-            "bar_freq": str(getattr(args, "bar_freq", "1min")),
+            "bar_freq": str(getattr(args, "bar_freq", "5min")),
             "lookahead_bars": int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"])),
             "has_rl_market": True,
             "pairs": pairs,
@@ -3890,7 +3891,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             pairs=pairs,
             start=str(getattr(args, "data_start", "")),
             end=str(getattr(args, "data_end", "")),
-            freq=str(getattr(args, "bar_freq", "1min")),
+            freq=str(getattr(args, "bar_freq", "5min")),
             news_mode=str(getattr(args, "historical_news_mode", "calendar")).lower(),
             feature_count=n_features_total,
             label_method=str(getattr(args, "label_method", "rl_reward")),
