@@ -4,9 +4,8 @@ NaN/Inf Detection Checks.
 Detects NaN and Inf values in tensors during training.
 """
 
-import torch
 import numpy as np
-from typing import Any
+import torch
 
 from monitoring.checks import CheckContext, CheckResult, CheckStatus, register_check
 
@@ -14,7 +13,7 @@ from monitoring.checks import CheckContext, CheckResult, CheckStatus, register_c
 def check_batch_nan(context: CheckContext) -> CheckResult:
     """Check for NaN/Inf in batch inputs and targets."""
     issues = []
-    
+
     if context.batch_data is not None:
         data = context.batch_data
         if isinstance(data, torch.Tensor):
@@ -27,7 +26,7 @@ def check_batch_nan(context: CheckContext) -> CheckResult:
                 issues.append("NaN in batch_data")
             if np.isinf(data).any():
                 issues.append("Inf in batch_data")
-    
+
     if context.batch_targets is not None:
         targets = context.batch_targets
         if isinstance(targets, torch.Tensor):
@@ -40,7 +39,7 @@ def check_batch_nan(context: CheckContext) -> CheckResult:
                 issues.append("NaN in batch_targets")
             if np.isinf(targets).any():
                 issues.append("Inf in batch_targets")
-    
+
     passed = len(issues) == 0
     return CheckResult(
         name="batch_nan",
@@ -60,18 +59,18 @@ def check_model_output_nan(context: CheckContext) -> CheckResult:
             passed=True,
             message="No outputs to check",
         )
-    
+
     outputs = context.outputs
     if isinstance(outputs, (tuple, list)):
         outputs = outputs[0]
-    
+
     issues = []
     if isinstance(outputs, torch.Tensor):
         if torch.isnan(outputs).any():
             issues.append("NaN in model outputs")
         if torch.isinf(outputs).any():
             issues.append("Inf in model outputs")
-    
+
     passed = len(issues) == 0
     return CheckResult(
         name="output_nan",
@@ -91,19 +90,19 @@ def check_loss_nan(context: CheckContext) -> CheckResult:
             passed=True,
             message="No loss to check",
         )
-    
+
     loss = context.loss
     if isinstance(loss, torch.Tensor):
         loss_val = loss.item()
     else:
         loss_val = float(loss)
-    
+
     issues = []
     if np.isnan(loss_val):
         issues.append(f"Loss is NaN: {loss_val}")
     elif np.isinf(loss_val):
         issues.append(f"Loss is Inf: {loss_val}")
-    
+
     passed = len(issues) == 0
     return CheckResult(
         name="loss_nan",
@@ -124,11 +123,11 @@ def check_gradient_nan(context: CheckContext) -> CheckResult:
             passed=True,
             message="No model to check gradients",
         )
-    
+
     issues = []
     nan_params = 0
     inf_params = 0
-    
+
     for name, param in context.model.named_parameters():
         if param.grad is not None:
             if torch.isnan(param.grad).any():
@@ -137,7 +136,7 @@ def check_gradient_nan(context: CheckContext) -> CheckResult:
             if torch.isinf(param.grad).any():
                 issues.append(f"Inf gradient in {name}")
                 inf_params += 1
-    
+
     passed = len(issues) == 0
     return CheckResult(
         name="grad_nan",

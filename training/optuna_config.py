@@ -9,6 +9,7 @@ from typing import Any
 
 try:
     import yaml as _yaml
+
     _YAML = True
 except ImportError:
     _YAML = False
@@ -98,11 +99,7 @@ def apply_optuna_overlay_if_needed(
     except Exception:
         return
 
-    model = str(
-        defaults.get("model")
-        or (base_cfg.get("model") or {}).get("name")
-        or "haelt"
-    ).lower()
+    model = str(defaults.get("model") or (base_cfg.get("model") or {}).get("name") or "haelt").lower()
     optuna_path = resolve_optuna_config_path(model, base_cfg)
     if optuna_path is None:
         return

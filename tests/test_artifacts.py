@@ -57,5 +57,6 @@ class TestArtifacts(unittest.TestCase):
         self.assertTrue(dest_file.exists())
         self.assertEqual(dest_file.read_text(), "DUMMY_WEIGHTS")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

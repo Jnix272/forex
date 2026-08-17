@@ -1,6 +1,7 @@
 """
 Tests for off-policy rewards & QR-DQN labels (Improvement #5)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -17,6 +18,7 @@ from labeling.off_policy_rewards import (
 # ---------------------------------------------------------------------------
 # softmax_probs
 # ---------------------------------------------------------------------------
+
 
 def test_softmax_probs():
     # 1-D logits -> probabilities
@@ -35,6 +37,7 @@ def test_softmax_probs():
 
 def test_extract_act_prob_1d():
     from labeling.off_policy_rewards import _extract_act_prob
+
     probs = np.array([0.1, 0.2, 0.7])
     actions = np.array([0, 1, 2])
     assert np.allclose(_extract_act_prob(probs, actions), [0.1, 0.2, 0.7])
@@ -42,6 +45,7 @@ def test_extract_act_prob_1d():
 
 def test_extract_act_prob_2d():
     from labeling.off_policy_rewards import _extract_act_prob
+
     probs = np.array([[0.1, 0.2, 0.7], [0.2, 0.3, 0.5]])
     actions = np.array([0, 2])
     assert np.allclose(_extract_act_prob(probs, actions), [0.1, 0.5])
@@ -50,6 +54,7 @@ def test_extract_act_prob_2d():
 # ---------------------------------------------------------------------------
 # IPS estimator
 # ---------------------------------------------------------------------------
+
 
 def test_ipw_value_estimate_simple():
     acts = np.array([0, 1, 0])
@@ -93,6 +98,7 @@ def test_ipw_value_estimate_bootstrap():
 # Per-action IPS
 # ---------------------------------------------------------------------------
 
+
 def test_counterfactual_reward_by_action():
     acts = np.array([0, 1, 0, 2])
     rew = np.array([1.0, 2.0, 3.0, 4.0])
@@ -121,6 +127,7 @@ def test_counterfactual_reward_by_action_clip():
 # ---------------------------------------------------------------------------
 # Doubly-robust
 # ---------------------------------------------------------------------------
+
 
 def test_doubly_robust_reward_by_action():
     acts = np.array([0, 1, 0, 2])
@@ -172,11 +179,13 @@ def test_doubly_robust_no_missing():
 # QR-DQN quantile labels
 # ---------------------------------------------------------------------------
 
+
 def test_quantile_reward_labels_basic():
     close = np.array([100, 101, 102, 103, 104, 105])
     atr = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-    res = quantile_reward_labels(close, atr, lookahead=2, pip_size=0.0001,
-                                 tx_cost_pips=1.5, profit_atr_mult=2.0, stop_atr_mult=1.0)
+    res = quantile_reward_labels(
+        close, atr, lookahead=2, pip_size=0.0001, tx_cost_pips=1.5, profit_atr_mult=2.0, stop_atr_mult=1.0
+    )
     assert len(res) == 6
     assert "reward_q05" in res.columns
     assert "reward_q95" in res.columns
@@ -188,8 +197,7 @@ def test_quantile_reward_labels_basic():
 def test_quantile_reward_labels_order():
     close = np.array([100, 100, 100, 100, 200])
     atr = np.ones(5)
-    res = quantile_reward_labels(close, atr, lookahead=2, pip_size=0.0001,
-                                 tx_cost_pips=0.0)
+    res = quantile_reward_labels(close, atr, lookahead=2, pip_size=0.0001, tx_cost_pips=0.0)
     # reward should be non-decreasing with quantile level
     assert (res["reward_q05"].to_numpy() <= res["reward_q25"].to_numpy() + 1e-9).all()
     assert (res["reward_q25"].to_numpy() <= res["reward_q50"].to_numpy() + 1e-9).all()
@@ -208,8 +216,7 @@ def test_quantile_reward_labels_empty_path():
 def test_quantile_reward_labels_target():
     close = np.array([100, 101, 102, 103, 104, 105])
     atr = np.ones(6)
-    res = quantile_reward_labels(close, atr, lookahead=2, pip_size=0.0001,
-                                 tx_cost_pips=1.5)
+    res = quantile_reward_labels(close, atr, lookahead=2, pip_size=0.0001, tx_cost_pips=1.5)
     # bar 1: reward_median ≈ (TP- entry)/pip - 1.5 = (101+0.0002 - 100)/0.0001 -1.5 = 10.002 - 1.5 ≈ 8.5 -> positive -> label=+1
     # (exact depends on barrier choices and exit events)
     assert res["label_quantile"].to_list()[1] in (-1, 0, 1)
@@ -218,6 +225,7 @@ def test_quantile_reward_labels_target():
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
+
 
 def test_compute_off_policy_rewards_basic():
     acts = np.array([0, 1, 2, 0, 1])
@@ -252,7 +260,6 @@ def test_compute_off_policy_rewards_no_clip():
     rew = np.array([10.0, -10.0])
     behavior = np.array([[0.5, 0.5], [0.5, 0.5]])
     target = np.array([[1.0, 0.01], [0.01, 1.0]])
-    R = compute_off_policy_rewards(acts, rew, behavior_probs=behavior, target_probs=target,
-                                   n_actions=2, clip=None)
+    R = compute_off_policy_rewards(acts, rew, behavior_probs=behavior, target_probs=target, n_actions=2, clip=None)
     # weights large, resulting in large ips_reward
     assert "ips_reward" in R.columns

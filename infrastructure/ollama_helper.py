@@ -9,17 +9,21 @@ import requests
 
 try:
     from infrastructure.discord_notifier import send_fix_notification, send_training_alert, send_tune_notification
+
     _DISCORD = True
 except ImportError:
     try:
         # Fallback: run directly as python infrastructure/ollama_helper.py
         import os as _os
         import sys as _sys
+
         _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
         from infrastructure.discord_notifier import send_fix_notification, send_training_alert, send_tune_notification
+
         _DISCORD = True
     except ImportError:
         _DISCORD = False
+
 
 class OllamaHelper:
     def __init__(self, model: str = "gemma4:e2b", base_url: str = "http://localhost:11434"):
@@ -37,11 +41,7 @@ class OllamaHelper:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False
-        }
+        payload = {"model": self.model, "messages": messages, "stream": False}
         try:
             response = requests.post(self.api_url, json=payload, timeout=120)
             response.raise_for_status()
@@ -58,23 +58,25 @@ class OllamaHelper:
         """Attempt to extract JSON from a markdown response."""
         try:
             # Look for JSON code blocks
-            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
             if match:
                 return json.loads(match.group(1))
             # Fallback 1: regex for braces
-            match = re.search(r'\{.*?\}', text, re.DOTALL)
+            match = re.search(r"\{.*?\}", text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
             # Fallback 2: aggressive substring extraction
-            start = text.find('{')
-            end = text.rfind('}')
+            start = text.find("{")
+            end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
-                return json.loads(text[start:end+1])
+                return json.loads(text[start : end + 1])
         except Exception as e:
             print(f"[OllamaHelper] JSON parsing error: {e}")
         return None
 
-    def monitor_training(self, epoch: int, train_loss: float, val_loss: float, additional_metrics: dict[str, Any] = None) -> None:
+    def monitor_training(
+        self, epoch: int, train_loss: float, val_loss: float, additional_metrics: dict[str, Any] | None = None
+    ) -> None:
         """Monitors training per epoch. Only queries Ollama when anomalies are detected."""
         if self._last_applied and additional_metrics:
             try:
@@ -82,36 +84,36 @@ class OllamaHelper:
                 prev_sh = float(self._last_pre_metrics.get("val_sharpe", 0.0))
                 cur_sh = float(additional_metrics.get("sharpe", additional_metrics.get("val_sharpe", 0.0)) or 0.0)
                 if prev_vl > 0.0 and (val_loss > prev_vl) and (cur_sh < prev_sh):
-                    print(f"[OllamaHelper] Rollback signal after tune {self._last_applied}: "
-                          f"val_loss {prev_vl:.4f}->{val_loss:.4f}, sharpe {prev_sh:.4f}->{cur_sh:.4f}")
+                    print(
+                        f"[OllamaHelper] Rollback signal after tune {self._last_applied}: "
+                        f"val_loss {prev_vl:.4f}->{val_loss:.4f}, sharpe {prev_sh:.4f}->{cur_sh:.4f}"
+                    )
             except Exception:
                 pass
-        # Avoid spamming on every epoch — only alert when there is a suspected issue:
+        # Avoid spamming on every epoch - only alert when there is a suspected issue:
         #   overfitting: val_loss > train_loss * 1.3
         #   exploding:   val_loss > 100.0 or train_loss > 100.0
         #   stagnation:  not checked here (needs history), handled by chunk early stop
-        overfitting  = val_loss > train_loss * 1.3 and epoch > 3
-        exploding    = val_loss > 100.0 or train_loss > 100.0
+        overfitting = val_loss > train_loss * 1.3 and epoch > 3
+        exploding = val_loss > 100.0 or train_loss > 100.0
         if not (overfitting or exploding):
             return
 
-        prompt = (f"Training Epoch: {epoch}\n"
-                  f"Train Loss: {train_loss:.4f}\n"
-                  f"Validation Loss: {val_loss:.4f}\n")
+        prompt = f"Training Epoch: {epoch}\nTrain Loss: {train_loss:.4f}\nValidation Loss: {val_loss:.4f}\n"
         if additional_metrics:
             prompt += f"Additional Metrics: {json.dumps(additional_metrics)}\n"
         if overfitting:
             prompt += (
                 "\nValidation loss is much higher than training loss (overfitting). "
                 "Suggest regularization fixes only: increase dropout or weight decay, "
-                "enable or tighten early stopping, add more data augmentation — "
+                "enable or tighten early stopping, add more data augmentation - "
                 "do NOT suggest raising learning rate."
             )
         prompt += "\nAn anomaly has been detected. Explain in 2 sentences and suggest a fix."
         system_prompt = (
             "You are an AI monitoring a deep learning training run. Be brief and actionable. "
             "When validation loss exceeds training loss, recommend LOWER learning rate, "
-            "higher dropout, higher weight decay, or earlier stopping — never suggest "
+            "higher dropout, higher weight decay, or earlier stopping - never suggest "
             "increasing learning rate for overfitting."
         )
 
@@ -141,7 +143,9 @@ class OllamaHelper:
             "```\n"
             "Provide the exact string matches including indentation."
         )
-        prompt = f"Error Traceback:\n```python\n{error_traceback}\n```\nContext: {script_context}\nProvide the JSON fix."
+        prompt = (
+            f"Error Traceback:\n```python\n{error_traceback}\n```\nContext: {script_context}\nProvide the JSON fix."
+        )
 
         response = self._generate_response(prompt, system=system_prompt)
         if not response:
@@ -177,7 +181,7 @@ class OllamaHelper:
                     except Exception:
                         pass
                 # Auto-restart the script safely
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                os.execv(sys.executable, [sys.executable, *sys.argv])
             else:
                 print(f"[OllamaHelper] Failed to apply patch: search_string not found in {target_file}.")
         except Exception as e:
@@ -214,10 +218,14 @@ class OllamaHelper:
         epoch = int(metrics.get("epoch", 0) or 0)
         if epoch > 0 and self._last_tune_epoch is not None:
             if (epoch - self._last_tune_epoch) < self._cooldown_epochs:
-                print(f"[OllamaHelper] Cooldown active ({epoch - self._last_tune_epoch}/{self._cooldown_epochs} epochs). Skipping auto-apply.")
+                print(
+                    f"[OllamaHelper] Cooldown active ({epoch - self._last_tune_epoch}/{self._cooldown_epochs} epochs). Skipping auto-apply."
+                )
                 return
         elif epoch <= 0 and self._tune_apply_count > 0:
-            print("[OllamaHelper] Cooldown active (epoch not provided; only one auto-apply allowed per process run). Skipping auto-apply.")
+            print(
+                "[OllamaHelper] Cooldown active (epoch not provided; only one auto-apply allowed per process run). Skipping auto-apply."
+            )
             return
 
         protected = {"loss", "label_method", "seq_len", "folds", "data_source", "amp"}
@@ -250,10 +258,7 @@ class OllamaHelper:
         cur_lr = _read_current("lr")
         val_loss = _to_float(metrics.get("val_loss"))
         train_loss = _to_float(metrics.get("train_loss"))
-        overfit = (
-            val_loss is not None and train_loss is not None
-            and val_loss > train_loss * 1.2
-        )
+        overfit = val_loss is not None and train_loss is not None and val_loss > train_loss * 1.2
         if "lr" in filtered and cur_lr is not None:
             new_lr = _to_float(filtered["lr"])
             if new_lr is not None:
@@ -282,10 +287,10 @@ class OllamaHelper:
             print("[OllamaHelper] No safe tuning keys to apply after guardrails.")
             return
 
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print(f"🤖 OLLAMA APPLYING TUNING FOR {model_name.upper()}:")
         print(json.dumps(safe_params, indent=2))
-        print("="*50 + "\n")
+        print("=" * 50 + "\n")
         if _DISCORD:
             try:
                 send_tune_notification(model_name, safe_params)
@@ -315,9 +320,10 @@ class OllamaHelper:
                     "val_sharpe": float(metrics.get("val_sharpe", 0.0) or 0.0),
                 }
                 print(f"[OllamaHelper] Updated {config_path}. Restarting training...")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                os.execv(sys.executable, [sys.executable, *sys.argv])
             except Exception as e:
                 print(f"[OllamaHelper] Failed to update config: {e}")
+
 
 # Singleton-like instance
 ollama = OllamaHelper()

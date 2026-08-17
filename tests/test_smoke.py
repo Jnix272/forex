@@ -12,21 +12,30 @@ def test_train_gpu_synthetic_smoke(tmp_path):
     """
     import os
     import sys
+
     checkpoint_dir = tmp_path / "checkpoints"
 
     cmd = [
-        sys.executable, "training/train_gpu.py",
-        "--epochs", "2",
+        sys.executable,
+        "training/train_gpu.py",
+        "--epochs",
+        "2",
         "--force-rebuild",
         "--no-wandb",
-        "--data-source", "synthetic",
-        "--model", "haelt",
-        "--checkpoint-dir", str(checkpoint_dir),
+        "--data-source",
+        "synthetic",
+        "--model",
+        "haelt",
+        "--checkpoint-dir",
+        str(checkpoint_dir),
         "--amp",
         "--quick-mode",
-        "--n-ticks", "50000",
-        "--chunk-size", "25000",
-        "--pretrain-ablation", "false",
+        "--n-ticks",
+        "500000",
+        "--chunk-size",
+        "250000",
+        "--pretrain-ablation",
+        "false",
     ]
 
     # Isolate from a busy host GPU (OOM from unrelated processes) so this

@@ -1,4 +1,5 @@
 """Smoke tests for code-review fix items (no training runs)."""
+
 from __future__ import annotations
 
 import ast
@@ -75,17 +76,19 @@ def test_live_feature_path_keeps_polars_for_realistic_bars():
 
     ts = pd.date_range("2024-01-02", periods=90, freq="1min", tz="UTC")
     close = 1.0850 + np.sin(np.arange(len(ts)) / 12.0) * 0.0005
-    bars = pl.DataFrame({
-        "timestamp_utc": ts,
-        "open": close - 0.00005,
-        "high": close + 0.00020,
-        "low": close - 0.00020,
-        "close": close,
-        "volume": np.full(len(ts), 100),
-        "bid_close": close - 0.00005,
-        "ask_close": close + 0.00005,
-        "spread_avg": np.full(len(ts), 0.00010),
-    })
+    bars = pl.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "open": close - 0.00005,
+            "high": close + 0.00020,
+            "low": close - 0.00020,
+            "close": close,
+            "volume": np.full(len(ts), 100),
+            "bid_close": close - 0.00005,
+            "ask_close": close + 0.00005,
+            "spread_avg": np.full(len(ts), 0.00010),
+        }
+    )
 
     bars = _ensure_polars_frame(bars)
     feats = FeatureEngineer(atr_window=6, lag_windows=[5, 20, 60]).build(bars)
@@ -101,24 +104,28 @@ def test_polars_rl_labels_and_alignment():
 
     ts = pd.date_range("2024-01-02", periods=30, freq="1min", tz="UTC")
     close = 1.1000 + np.arange(len(ts)) * 0.00005
-    bars = pl.DataFrame({
-        "timestamp_utc": ts,
-        "open": close,
-        "high": close + 0.0001,
-        "low": close - 0.0001,
-        "close": close,
-        "bid_close": close - 0.00005,
-        "ask_close": close + 0.00005,
-    })
-    feats = pl.DataFrame({
-        "timestamp_utc": ts,
-        "atr_6": np.full(len(ts), 0.0002),
-        "spread_pips": np.full(len(ts), 1.0),
-        "feature_x": np.arange(len(ts), dtype=float),
-    })
+    bars = pl.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "open": close,
+            "high": close + 0.0001,
+            "low": close - 0.0001,
+            "close": close,
+            "bid_close": close - 0.00005,
+            "ask_close": close + 0.00005,
+        }
+    )
+    feats = pl.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "atr_6": np.full(len(ts), 0.0002),
+            "spread_pips": np.full(len(ts), 1.0),
+            "feature_x": np.arange(len(ts), dtype=float),
+        }
+    )
 
     labels = compute_rl_reward_labels(bars, feats, lookahead_bars=3, execution_delay_bars=1)
-    X, y, sidecar = align_labels_with_features(labels, feats)
+    X, y, _sidecar = align_labels_with_features(labels, feats)
 
     assert isinstance(labels, pl.DataFrame)
     assert isinstance(X, pl.DataFrame)
@@ -132,11 +139,14 @@ def test_alignment_keeps_direction_label_when_target_is_reward():
 
     ts = pd.date_range("2024-01-02", periods=4, freq="1min", tz="UTC")
     feats = pd.DataFrame({"feature_x": np.arange(len(ts), dtype=float)}, index=ts)
-    labels = pd.DataFrame({
-        "reward": [0.10, 0.05, -0.02, 0.00],
-        "label": [1, -1, -1, 0],
-        "path_quality": [0.9, 0.8, 0.7, 0.6],
-    }, index=ts)
+    labels = pd.DataFrame(
+        {
+            "reward": [0.10, 0.05, -0.02, 0.00],
+            "label": [1, -1, -1, 0],
+            "path_quality": [0.9, 0.8, 0.7, 0.6],
+        },
+        index=ts,
+    )
 
     X, y, sidecar = align_labels_with_features(labels, feats, target_col="reward")
 
@@ -230,15 +240,19 @@ def test_oanda_env_alias_and_net_short_exposure(monkeypatch):
     class _Resp:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             return False
+
         def read(self):
-            return json.dumps({
-                "positions": [
-                    {"instrument": "EUR_USD", "long": {"units": "20000"}, "short": {"units": "5000"}},
-                    {"instrument": "GBP_USD", "long": {"units": "0"}, "short": {"units": "-12000"}},
-                ]
-            }).encode("utf-8")
+            return json.dumps(
+                {
+                    "positions": [
+                        {"instrument": "EUR_USD", "long": {"units": "20000"}, "short": {"units": "5000"}},
+                        {"instrument": "GBP_USD", "long": {"units": "0"}, "short": {"units": "-12000"}},
+                    ]
+                }
+            ).encode("utf-8")
 
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: _Resp())
 
@@ -251,21 +265,27 @@ def test_backtest_net_pnl_matches_equity_delta():
     from backtesting.backtest import ForexScalingBacktest, ScalingAction
 
     idx = pd.date_range("2024-01-02", periods=3, freq="1min", tz="UTC")
-    bars = pd.DataFrame({
-        "open": [1.0000, 1.0010, 1.0010],
-        "high": [1.0002, 1.0012, 1.0012],
-        "low": [0.9998, 1.0008, 1.0008],
-        "close": [1.0000, 1.0010, 1.0010],
-        "bid_close": [1.0000, 1.0010, 1.0010],
-        "ask_close": [1.0000, 1.0010, 1.0010],
-        "spread_avg": [0.0, 0.0, 0.0],
-    }, index=idx)
-    signals = pd.DataFrame({
-        "action": [ScalingAction.OPEN_LONG, ScalingAction.CLOSE_ALL, ScalingAction.HOLD],
-        "lots": [1.0, 1.0, 1.0],
-        "stop_loss": [0.5, 0.5, 0.5],
-        "take_profit": [2.0, 2.0, 2.0],
-    }, index=idx)
+    bars = pd.DataFrame(
+        {
+            "open": [1.0000, 1.0010, 1.0010],
+            "high": [1.0002, 1.0012, 1.0012],
+            "low": [0.9998, 1.0008, 1.0008],
+            "close": [1.0000, 1.0010, 1.0010],
+            "bid_close": [1.0000, 1.0010, 1.0010],
+            "ask_close": [1.0000, 1.0010, 1.0010],
+            "spread_avg": [0.0, 0.0, 0.0],
+        },
+        index=idx,
+    )
+    signals = pd.DataFrame(
+        {
+            "action": [ScalingAction.OPEN_LONG, ScalingAction.CLOSE_ALL, ScalingAction.HOLD],
+            "lots": [1.0, 1.0, 1.0],
+            "stop_loss": [0.5, 0.5, 0.5],
+            "take_profit": [2.0, 2.0, 2.0],
+        },
+        index=idx,
+    )
 
     bt = ForexScalingBacktest(
         bars,
@@ -297,7 +317,7 @@ def test_nonfinite_training_targets_are_sanitized():
     xb, yb, y_cls, y_conf, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
 
     assert torch.isfinite(xb).all()
-    # Targets are NOT silently zeroed — keep mask surfaces bad rows for the caller to drop.
+    # Targets are NOT silently zeroed - keep mask surfaces bad rows for the caller to drop.
     assert keep is not None
     assert bool(keep[0]) is False
     assert not torch.isfinite(yb).all()
@@ -332,8 +352,14 @@ def test_train_epoch_without_teacher_model_does_not_name_error():
     scaler = torch.amp.GradScaler(enabled=False)
 
     loss = train_epoch(
-        model, loader, opt, torch.nn.CrossEntropyLoss(),
-        scaler, torch.device("cpu"), False, True,
+        model,
+        loader,
+        opt,
+        torch.nn.CrossEntropyLoss(),
+        scaler,
+        torch.device("cpu"),
+        False,
+        True,
         thermal_limit=0,
     )
 
@@ -367,6 +393,7 @@ def test_haelt_sanitizes_nonfinite_inputs():
 
 def test_triple_barrier_accepts_execution_delay():
     from labeling.triple_barrier_labeling import compute_triple_barrier_labels
+
     sig = inspect.signature(compute_triple_barrier_labels)
     assert "execution_delay_bars" in sig.parameters
 
@@ -513,9 +540,7 @@ def test_balanced_direction_indices_uses_all_classes(monkeypatch):
 
     idx = np.arange(9, dtype=np.int64)
     y_cls = np.array([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=np.float32)
-    monkeypatch.setattr(
-        dc, "_read_y_cls_indices", lambda cache_path, indices: y_cls[indices]
-    )
+    monkeypatch.setattr(dc, "_read_y_cls_indices", lambda cache_path, indices: y_cls[indices])
 
     out = tg._balanced_direction_indices("cache", idx, total_samples=6, seed=7)
     out_labels = y_cls[out]

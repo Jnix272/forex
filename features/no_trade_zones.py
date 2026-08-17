@@ -2,12 +2,12 @@
 No-Trade Zones: Learned Abstention + Conformal Prediction (Improvement #7)
 ==========================================================================
 Extends the existing heuristic `no_trade_score` with:
-  1. **Learned Abstention Model** — predicts when to abstain based on
+  1. **Learned Abstention Model** - predicts when to abstain based on
      prediction uncertainty, market regime, feature quality, etc.
-  2. **Conformal Prediction for Abstention** — uses calibration to produce
+  2. **Conformal Prediction for Abstention** - uses calibration to produce
      prediction sets with guaranteed coverage; abstain when set contains
      both long and short (i.e., ambiguous).
-  3. **Unified No-Trade Decision** — combines heuristic score, learned
+  3. **Unified No-Trade Decision** - combines heuristic score, learned
      abstention probability, and conformal prediction set ambiguity.
 
 All components are self-contained and integrate with existing TBM labels
@@ -28,9 +28,11 @@ import pandas as pd
 # 1. Learned Abstention Model
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class AbstentionConfig:
     """Configuration for learned abstention model."""
+
     # Base model (sklearn-compatible, must have predict_proba)
     model: Any = None
     # Features to use for abstention prediction
@@ -90,7 +92,11 @@ class LearnedAbstentionModel:
 
         return np.hstack(feat_list)
 
-    def _make_target(self, tbm_labels: np.ndarray, primary_pred: np.ndarray) -> np.ndarray:
+    def _make_target(
+        self,
+        tbm_labels: np.ndarray,
+        primary_pred: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Create abstention target from TBM labels and primary predictions.
 
@@ -111,8 +117,7 @@ class LearnedAbstentionModel:
 
         # For trades: profitable if TBM label matches primary direction
         target[trade_mask] = (
-            (primary[trade_mask] > 0) & (tbm[trade_mask] == 1) |
-            (primary[trade_mask] < 0) & (tbm[trade_mask] == -1)
+            (primary[trade_mask] > 0) & (tbm[trade_mask] == 1) | (primary[trade_mask] < 0) & (tbm[trade_mask] == -1)
         ).astype(int)
 
         return target, trade_mask
@@ -131,16 +136,16 @@ class LearnedAbstentionModel:
 
         # Only train on bars where a trade was signaled
         if not trade_mask.any():
-            warnings.warn("[LearnedAbstentionModel] No trades signaled by primary model.")
+            warnings.warn("[LearnedAbstentionModel] No trades signaled by primary model.", stacklevel=2)
             return self
 
         y = target[trade_mask]
-        X_trades = X.iloc[trade_mask] if hasattr(X, 'iloc') else X[trade_mask]
+        X_trades = X.iloc[trade_mask] if hasattr(X, "iloc") else X[trade_mask]
 
         if len(y) < self.config.min_samples:
             warnings.warn(
                 f"[LearnedAbstentionModel] Only {len(y)} trade samples, "
-                f"minimum {self.config.min_samples}. Skipping training."
+                f"minimum {self.config.min_samples}. Skipping training.", stacklevel=2
             )
             return self
 
@@ -158,6 +163,7 @@ class LearnedAbstentionModel:
         if self.model is None:
             try:
                 from sklearn.ensemble import RandomForestClassifier
+
                 self.model = RandomForestClassifier(
                     n_estimators=200,
                     max_depth=5,
@@ -174,8 +180,10 @@ class LearnedAbstentionModel:
         val_acc = self.model.score(X_val, y_val) if len(X_val) > 0 else 0.0
 
         self._is_fitted = True
-        print(f"[LearnedAbstentionModel] Trained: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}, "
-              f"n_train={len(X_train)}, n_val={len(X_val)}, pos_rate={y.mean():.3f}")
+        print(
+            f"[LearnedAbstentionModel] Trained: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}, "
+            f"n_train={len(X_train)}, n_val={len(X_val)}, pos_rate={y.mean():.3f}"
+        )
         return self
 
     def _get_feature_names(self, X: pd.DataFrame) -> list[str]:
@@ -196,16 +204,19 @@ class LearnedAbstentionModel:
         """Predict P(trade_profitable | features, primary_pred). Returns [0,1]."""
         if not self._is_fitted:
             # Return 0.5 (neutral) if not fitted
-            n = len(X) if hasattr(X, '__len__') else len(primary_pred) if primary_pred is not None else 0
+            n = len(X) if hasattr(X, "__len__") else len(primary_pred) if primary_pred is not None else 0
             return np.full(n, 0.5)
 
         X_feat = self._prepare_features(X, primary_pred)
         if hasattr(self.model, "predict_proba"):
             return self.model.predict_proba(X_feat)[:, 1]
-        if hasattr(self.model, "decision_function"):
-            scores = self.model.decision_function(X_feat)
+
+        model_obj: Any = self.model
+        if hasattr(model_obj, "decision_function"):
+            scores = model_obj.decision_function(X_feat)
             return 1 / (1 + np.exp(-scores))
-        preds = self.model.predict(X_feat)
+
+        preds = model_obj.predict(X_feat)
         return preds.astype(float)
 
     def should_trade(
@@ -221,6 +232,7 @@ class LearnedAbstentionModel:
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Conformal Prediction for Abstention
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def conformal_abstention_scores(
     logits: np.ndarray,
@@ -281,7 +293,7 @@ def conformal_should_abstain(
         abstain_mask: True where should abstain
         info: conformal info dict
     """
-    sets, threshold, info = conformal_abstention_scores(logits, labels, alpha)
+    sets, _threshold, info = conformal_abstention_scores(logits, labels, alpha)
 
     if abstain_on_ambiguous:
         # Abstain if prediction set contains both long and short
@@ -309,6 +321,7 @@ def conformal_should_abstain(
 # 3. Heuristic No-Trade Score (enhanced)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def compute_heuristic_no_trade_score(
     features: pd.DataFrame,
     atr_col: str = "atr_6",
@@ -335,7 +348,7 @@ def compute_heuristic_no_trade_score(
     vol_q = np.full(n, np.nan)
     window = min(200, n // 2)
     for i in range(window, n):
-        vol_q[i] = np.quantile(atr[i-window:i], vol_quantile)
+        vol_q[i] = np.quantile(atr[i - window : i], vol_quantile)
     vol_q = pd.Series(vol_q).ffill().fillna(atr.max()).values
     low_vol = (atr < vol_q).astype(float)
 
@@ -345,23 +358,26 @@ def compute_heuristic_no_trade_score(
         ofi_proxy = ofi_proxy.values
     ofi_q = np.full(n, np.nan)
     for i in range(window, n):
-        ofi_q[i] = np.quantile(np.abs(ofi_proxy[i-window:i]), ofi_quantile)
+        ofi_q[i] = np.quantile(np.abs(ofi_proxy[i - window : i]), ofi_quantile)
     ofi_q = pd.Series(ofi_q).ffill().fillna(np.abs(ofi_proxy).max()).values
     neutral_ofi = (np.abs(ofi_proxy) < ofi_q).astype(float)
 
     # Choppy trend: low ADX (using causal rolling 0.3 quantile) or flat RSI
     adx = features.get("adx_14", np.zeros(n))
     if isinstance(adx, pd.Series):
-        adx = adx.values
+        adx = adx.to_numpy(dtype=float)
+    adx_arr = np.asarray(adx, dtype=float)
+
     rsi = features.get("rsi_14", np.zeros(n))
     if isinstance(rsi, pd.Series):
-        rsi = rsi.values
+        rsi = rsi.to_numpy(dtype=float)
+    rsi_arr = np.asarray(rsi, dtype=float)
 
     # Causal rolling quantile (D4 fix)
-    adx_s = pd.Series(adx)
-    adx_q = adx_s.replace(0, np.nan).rolling(window=200, min_periods=10).quantile(0.3).ffill().fillna(0).values
-    
-    trend_unstable = ((adx < adx_q) & (np.abs(rsi - 50) < 10)).astype(float)
+    adx_s = pd.Series(adx_arr)
+    adx_q = adx_s.replace(0, np.nan).rolling(window=200, min_periods=10).quantile(0.3).ffill().fillna(0).to_numpy(dtype=float)
+
+    trend_unstable = ((adx_arr < adx_q) & (np.abs(rsi_arr - 50.0) < 10.0)).astype(float)
 
     score = (low_vol + neutral_ofi + trend_unstable) / 3.0
     return np.clip(score, 0.0, 1.0)
@@ -371,9 +387,11 @@ def compute_heuristic_no_trade_score(
 # 4. Unified No-Trade Decision
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class NoTradeConfig:
     """Unified configuration for no-trade decision."""
+
     # Heuristic score weight
     heuristic_weight: float = 0.3
     # Learned abstention weight
@@ -438,8 +456,10 @@ class NoTradeZoneManager:
         self._conformal_alpha = alpha
         _, info = conformal_should_abstain(val_logits, val_labels, alpha=alpha, abstain_on_ambiguous=True)
         self._conformal_info = info
-        print(f"[NoTradeZoneManager] Conformal calibrated: coverage={info['coverage']:.3f}, "
-              f"ambiguity_rate={info['ambiguity_rate']:.3f}, abstain_rate={info['abstain_rate']:.3f}")
+        print(
+            f"[NoTradeZoneManager] Conformal calibrated: coverage={info['coverage']:.3f}, "
+            f"ambiguity_rate={info['ambiguity_rate']:.3f}, abstain_rate={info['abstain_rate']:.3f}"
+        )
         return self
 
     def compute_no_trade_mask(
@@ -457,7 +477,7 @@ class NoTradeZoneManager:
             info: dict with individual scores and final decision
         """
         n = len(X)
-        primary = np.asarray(primary_pred, dtype=float).ravel()
+        np.asarray(primary_pred, dtype=float).ravel()
 
         # 1. Heuristic score
         heuristic_score = compute_heuristic_no_trade_score(X)
@@ -504,13 +524,11 @@ class NoTradeZoneManager:
             combined_score = np.maximum.reduce([heuristic_score, learned_abstain, conformal_abstain])
         else:
             # Weighted average
-            weights = np.array([self.config.heuristic_weight,
-                               self.config.learned_weight,
-                               self.config.conformal_weight])
+            weights = np.array([self.config.heuristic_weight, self.config.learned_weight, self.config.conformal_weight])
             weights = weights / weights.sum()
-            combined_score = (weights[0] * heuristic_score +
-                             weights[1] * learned_abstain +
-                             weights[2] * conformal_abstain)
+            combined_score = (
+                weights[0] * heuristic_score + weights[1] * learned_abstain + weights[2] * conformal_abstain
+            )
             no_trade_mask = combined_score > self.config.no_trade_threshold
 
         info = {
@@ -526,6 +544,7 @@ class NoTradeZoneManager:
 # ════════════════════════════════════════════════════════════════════════════
 # 5. Integration with existing pipeline
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def apply_no_trade_zones(
     features: pd.DataFrame,
@@ -548,13 +567,13 @@ def apply_no_trade_zones(
         no_trade_config = NoTradeConfig()
 
     n = len(features)
-    primary = np.asarray(primary_pred, dtype=float).ravel()
+    np.asarray(primary_pred, dtype=float).ravel()
 
     # Heuristic score (always available)
     heuristic_score = compute_heuristic_no_trade_score(features)
 
     # Learned abstention (if model provided)
-    if abstention_model is not None and hasattr(abstention_model, '_is_fitted') and abstention_model._is_fitted:
+    if abstention_model is not None and hasattr(abstention_model, "_is_fitted") and abstention_model._is_fitted:
         learned_prob = abstention_model.predict_proba(features, primary_pred)
         learned_abstain = 1.0 - learned_prob
     else:
@@ -578,8 +597,8 @@ def apply_no_trade_zones(
             conformal_abstain = np.full(n, float(conformal_abstain_cal.mean()))
 
     # Combine
-    weights = np.array([0.3, 0.4, 0.3])
-    combined = (0.3 * heuristic_score + 0.4 * learned_abstain + 0.3 * conformal_abstain)
+    np.array([0.3, 0.4, 0.3])
+    combined = 0.3 * heuristic_score + 0.4 * learned_abstain + 0.3 * conformal_abstain
     no_trade_mask = combined > 0.5
 
     # Add to features

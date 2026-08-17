@@ -34,8 +34,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RL Execution Layer")
-    parser.add_argument("--model-name", type=str, default="haelt", help="Supervised model name (e.g. haelt, mamba, ensemble)")
-    parser.add_argument("--ensemble-bases", nargs="+", default=["haelt", "mamba", "gnn"], help="Bases if model is ensemble")
+    parser.add_argument(
+        "--model-name", type=str, default="haelt", help="Supervised model name (e.g. haelt, mamba, ensemble)"
+    )
+    parser.add_argument(
+        "--ensemble-bases", nargs="+", default=["haelt", "mamba", "gnn"], help="Bases if model is ensemble"
+    )
     parser.add_argument("--cache", type=str, required=True, help="Zarr cache path")
     parser.add_argument("--episodes", type=int, default=100, help="Number of RL episodes")
     parser.add_argument("--agent", type=str, choices=["ppo", "dqn"], default="ppo")
@@ -86,16 +90,16 @@ def main():
         logging.error(f"Zarr cache not found: {cache_path}")
         sys.exit(1)
 
-    z = zarr.open(str(cache_path), mode='r')
-    expected_keys = ['X', 'close', 'atr', 'spread']
+    z = zarr.open(str(cache_path), mode="r")
+    expected_keys = ["X", "close", "atr", "spread"]
     for k in expected_keys:
         if k not in z:
             logging.error(f"Zarr cache missing required array: {k}")
             sys.exit(1)
 
-    num_samples = z['X'].shape[0]
-    seq_len = z['X'].shape[1]
-    num_features = z['X'].shape[2]
+    num_samples = z["X"].shape[0]
+    seq_len = z["X"].shape[1]
+    num_features = z["X"].shape[2]
 
     logging.info(f"Loaded Zarr: {num_samples} samples, seq_len={seq_len}, features={num_features}")
 
@@ -136,12 +140,12 @@ def main():
     logging.info(f"Extracted signals shape: {signals.shape}")
 
     # Extract market arrays
-    prices = np.array(z['close'])
-    atr = np.array(z['atr'])
-    spreads = np.array(z['spread'])
+    prices = np.array(z["close"])
+    atr = np.array(z["atr"])
+    spreads = np.array(z["spread"])
 
     # Extract raw X for state enrichment
-    raw_x = np.array(z['X'])
+    raw_x = np.array(z["X"])
 
     min_len = min(len(signals), len(prices), len(raw_x))
     signals = signals[:min_len]
@@ -153,7 +157,7 @@ def main():
     if raw_x.ndim == 3:
         raw_x = raw_x[:min_len, -1, :]  # Take the last timestep's features
     else:
-        raw_x = raw_x[:min_len]         # Already (N, F) — use directly
+        raw_x = raw_x[:min_len]  # Already (N, F) - use directly
 
     # Enrich the RL state: supervised signal + raw market features
     enriched_features = np.concatenate([signals, raw_x], axis=1)
@@ -170,7 +174,7 @@ def main():
         commission_per_lot=3.5,
         slippage_pips=0.5,
         random_reset=True,
-        episode_len=min(5000, min_len - 1)
+        episode_len=min(5000, min_len - 1),
     )
 
     if args.agent == "ppo":
@@ -192,7 +196,7 @@ def main():
         "train_return_pct": float(np.mean(returns[-10:]) if len(returns) >= 10 else np.mean(returns)),
         "max_drawdown_pct": float(final_summary["max_dd_pct"]),
         "n_trades": int(final_summary["n_trades"]),
-        "sharpe": float(final_summary["sharpe"])
+        "sharpe": float(final_summary["sharpe"]),
     }
 
     out_dir = ckpt_dir / args.model_name

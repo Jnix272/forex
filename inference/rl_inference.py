@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import RL
-from inference.onnx_inference import torch_load_safe
 from inference._scaler_load import apply_inference_scaler
+from inference.onnx_inference import torch_load_safe
 from models.rl_agents import DQNAgent, PPOAgent
 from trading.inference_engines import BaseInferenceEngine
 from trading.live_actions import LiveAction, scaling_action_to_live_action
@@ -56,7 +56,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         import torch
 
         from inference.pytorch_inference import load_pytorch_model
-        from training.train_gpu import _core_model
+        from training.model_factory import _core_model
 
         self.algo = str(algo).lower()
         self.seq_len = int(seq_len)
@@ -71,11 +71,13 @@ class RLInferenceAgent(BaseInferenceEngine):
             n_features=n_features,
             device=self.device,
         )
-        core = _core_model(self._model)
-        self._encoder = core.backbone if hasattr(core, "backbone") else core
-        if hasattr(self._encoder, "head"):
-            self._encoder.head = torch.nn.Identity()
-        self._encoder.eval()
+        core_any = cast(Any, _core_model(self._model))
+        self._encoder = getattr(core_any, "backbone", core_any)
+        encoder_any = cast(Any, self._encoder)
+        if hasattr(encoder_any, "head"):
+            encoder_any.head = torch.nn.Identity()
+        encoder_any.eval()
+        self._encoder = encoder_any
 
         ckpt = torch_load_safe(rl_checkpoint, map_location=self.device)
         meta_path = Path(rl_checkpoint).parent / f"rl_{self.algo}_best.json"
@@ -83,6 +85,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         n_actions = None
         if meta_path.is_file():
             import json
+
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             obs_size = int(meta.get("obs_size", 0)) or None
             n_actions = int(meta.get("n_actions", 0)) or None
@@ -95,14 +98,17 @@ class RLInferenceAgent(BaseInferenceEngine):
         algo_kw = dict(RL.get(self.algo, {}))
         if self.algo == "dqn":
             self._agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
-            self._agent.policy_net.load_state_dict(ckpt, strict=False)
-            self._agent.target_net.load_state_dict(self._agent.policy_net.state_dict())
-            self._agent.eps = 0.0
+            agent_any = cast(Any, self._agent)
+            agent_any.policy_net.load_state_dict(ckpt, strict=False)
+            agent_any.target_net.load_state_dict(agent_any.policy_net.state_dict())
+            agent_any.eps = 0.0
         else:
             self._agent = PPOAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
-            self._agent.net.load_state_dict(ckpt, strict=False)
+            agent_any = cast(Any, self._agent)
+            agent_any.net.load_state_dict(ckpt, strict=False)
 
         from collections import deque
+
         self._feat_buffer: deque[np.ndarray] = deque(maxlen=self.seq_len)
         self._position = 0.0
         self._entry_price = 0.0
@@ -116,6 +122,7 @@ class RLInferenceAgent(BaseInferenceEngine):
 
     def _infer_obs_size(self) -> int:
         import torch
+
         dummy = torch.zeros(1, self.seq_len, self.n_features, device=self.device)
         with torch.no_grad():
             h = self._encoder(dummy)
@@ -128,9 +135,7 @@ class RLInferenceAgent(BaseInferenceEngine):
             return 10
         if self.algo == "dqn":
             for key, value in reversed(list(ckpt.items())):
-                if getattr(value, "ndim", 0) in (1, 2) and (
-                    key.endswith("net.4.bias") or key.endswith("net.4.weight")
-                ):
+                if getattr(value, "ndim", 0) in (1, 2) and (key.endswith("net.4.bias") or key.endswith("net.4.weight")):
                     return int(value.shape[0])
         else:
             for key, value in ckpt.items():
@@ -165,7 +170,7 @@ class RLInferenceAgent(BaseInferenceEngine):
             return int(LiveAction.HOLD)
 
         window = np.stack(list(self._feat_buffer), axis=0)
-        # Apply the training-time scaler (if available) — matches ZarrStreamDataset
+        # Apply the training-time scaler (if available) - matches ZarrStreamDataset
         if self._scaler is not None:
             window = apply_inference_scaler(self._scaler, window)
         xb = torch.as_tensor(window[np.newaxis], dtype=torch.float32, device=self.device)
@@ -183,13 +188,16 @@ class RLInferenceAgent(BaseInferenceEngine):
             if self._position != 0 and price > 0
             else 0.0
         )
-        agent_state = np.array([
-            np.clip(self._position / self.max_lots, -1, 1),
-            np.clip(upnl / self.initial_equity, -0.5, 0.5),
-            min(self._holding / 100.0, 1.0),
-            np.clip((self._equity - self.initial_equity) / self.initial_equity, -0.5, 0.5),
-            float(self._position != 0),
-        ], dtype=np.float32)
+        agent_state = np.array(
+            [
+                np.clip(self._position / self.max_lots, -1, 1),
+                np.clip(upnl / self.initial_equity, -0.5, 0.5),
+                min(self._holding / 100.0, 1.0),
+                np.clip((self._equity - self.initial_equity) / self.initial_equity, -0.5, 0.5),
+                float(self._position != 0),
+            ],
+            dtype=np.float32,
+        )
         full_obs = np.concatenate([emb, agent_state]).astype(np.float32)
 
         # I3 fix (2026-08-07): live inference must be deterministic.
@@ -199,12 +207,13 @@ class RLInferenceAgent(BaseInferenceEngine):
         try:
             # PPO exposes `greedy=` kwarg on select_action; DQN does not, so we
             # guard with try/except to stay backward-compatible with DQN agents.
-            action_t = self._agent.select_action(full_obs, greedy=True)
+            agent_any = cast(Any, self._agent)
+            action_t = agent_any.select_action(full_obs, greedy=True)
             # PPO returns (action, log_prob, value); DQN-style returns scalar
             action_int = int(action_t[0]) if isinstance(action_t, tuple) else int(action_t)
         except TypeError:
-            # DQN-style agent without greedy kwarg — fall through to default
-            action_int = int(self._agent.select_action(full_obs))
+            # DQN-style agent without greedy kwarg - fall through to default
+            action_int = int(cast(Any, self._agent).select_action(full_obs))
         action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)
 

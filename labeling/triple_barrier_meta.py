@@ -23,12 +23,14 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 try:
     import optuna
+
     _OPTUNA_AVAILABLE = True
 except ImportError:
     _OPTUNA_AVAILABLE = False
@@ -38,11 +40,13 @@ except ImportError:
 # 1. Meta-Labeling
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class MetaLabelConfig:
     """Configuration for meta-labeling."""
+
     # Model for meta-classifier (any sklearn-compatible estimator)
-    meta_model: any = None  # e.g., XGBClassifier, RandomForestClassifier
+    meta_model: Any | None = None  # e.g., XGBClassifier, RandomForestClassifier
     # Features to use for meta-model (in addition to primary prediction)
     meta_features: list[str] | None = None  # column names from features DataFrame
     # How to map primary predictions: -1/0/1 -> direction
@@ -71,7 +75,7 @@ class MetaLabeler:
 
     def __init__(self, config: MetaLabelConfig):
         self.config = config
-        self.meta_model = config.meta_model
+        self.meta_model: Any | None = config.meta_model
         self._is_fitted = False
         self._feature_names: list[str] = []
         self._scaler = None
@@ -106,38 +110,36 @@ class MetaLabeler:
         primary = np.asarray(primary_pred, dtype=float).ravel()
         y = np.asarray(labels, dtype=int).ravel()
 
-# Only use bars where primary made a non-hold prediction
+        # Only use bars where primary made a non-hold prediction
         trade_mask = primary != 0
-        if not trade_mask.any():
-            warnings.warn("[MetaLabeler] No trades signaled by primary model.")
+        trade_mask_np = np.asarray(trade_mask, dtype=bool)
+        if not bool(trade_mask_np.any()):
+            warnings.warn("[MetaLabeler] No trades signaled by primary model.", stacklevel=2)
             return self
 
-        primary_trades = primary[trade_mask]
-        y_trades = y[trade_mask]
+        primary_trades = primary[trade_mask_np]
+        y_trades = y[trade_mask_np]
 
         # Target: 1 if trade was profitable (hit TP before SL), 0 otherwise
         # (only defined for bars where primary made a non-hold prediction)
         meta_y = np.where(
-            (primary_trades > 0) & (y_trades == 1) |
-            (primary_trades < 0) & (y_trades == -1),
-            1, 0
+            ((primary_trades > 0) & (y_trades == 1)) | ((primary_trades < 0) & (y_trades == -1)),
+            1,
+            0,
         )
 
         if len(meta_y) < self.config.min_meta_samples:
             warnings.warn(
                 f"[MetaLabeler] Only {len(meta_y)} trade samples, "
-                f"minimum {self.config.min_meta_samples}. Skipping meta-training."
+                f"minimum {self.config.min_meta_samples}. Skipping meta-training.", stacklevel=2
             )
             return self
 
         # Build meta features
         if features is not None and self.config.meta_features:
             feat_trades = features.iloc[trade_mask][self.config.meta_features]
-            X = np.hstack([
-                primary_trades.reshape(-1, 1),
-                feat_trades.values.astype(float)
-            ])
-            self._feature_names = ["primary_pred"] + list(self.config.meta_features)
+            X = np.hstack([primary_trades.reshape(-1, 1), feat_trades.values.astype(float)])
+            self._feature_names = ["primary_pred", *list(self.config.meta_features)]
         else:
             X = primary_trades.reshape(-1, 1)
             self._feature_names = ["primary_pred"]
@@ -152,6 +154,7 @@ class MetaLabeler:
         if self.meta_model is None:
             try:
                 from sklearn.ensemble import RandomForestClassifier
+
                 self.meta_model = RandomForestClassifier(
                     n_estimators=200,
                     max_depth=5,
@@ -169,8 +172,10 @@ class MetaLabeler:
         val_score = self.meta_model.score(X_val, y_val) if len(X_val) > 0 else 0.0
 
         self._is_fitted = True
-        print(f"[MetaLabeler] Trained: train_acc={train_score:.3f}, val_acc={val_score:.3f}, "
-              f"n_train={len(X_train)}, n_val={len(X_val)}")
+        print(
+            f"[MetaLabeler] Trained: train_acc={train_score:.3f}, val_acc={val_score:.3f}, "
+            f"n_train={len(X_train)}, n_val={len(X_val)}"
+        )
         return self
 
     def predict_proba(self, primary_pred: np.ndarray, features: pd.DataFrame | None = None) -> np.ndarray:
@@ -178,15 +183,21 @@ class MetaLabeler:
         if not self._is_fitted:
             # Return zeros if not fitted (e.g., no trades to train on)
             return np.zeros(len(primary_pred))
+        model = self.meta_model
+        if model is None:
+            return np.zeros(len(primary_pred))
+
         X = self._prepare_meta_features(primary_pred, features)
-        if hasattr(self.meta_model, "predict_proba"):
-            return self.meta_model.predict_proba(X)[:, 1]
+        if hasattr(model, "predict_proba"):
+            probs = np.asarray(model.predict_proba(X), dtype=float)
+            return probs[:, 1]
         # Fallback: use decision_function or predict
-        if hasattr(self.meta_model, "decision_function"):
-            scores = self.meta_model.decision_function(X)
-            return 1 / (1 + np.exp(-scores))
-        preds = self.meta_model.predict(X)
-        return preds.astype(float)
+        decision_fn = getattr(model, "decision_function", None)
+        if callable(decision_fn):
+            scores = np.asarray(decision_fn(X), dtype=float)
+            return 1.0 / (1.0 + np.exp(-scores))
+        preds = np.asarray(model.predict(X), dtype=float)
+        return preds
 
     def should_trade(
         self,
@@ -202,12 +213,14 @@ class MetaLabeler:
 # 2. Bayesian Barrier Search
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class BarrierSearchSpace:
     """Search space for barrier parameters."""
-    profit_mult: tuple[float, float] = (0.5, 3.0)   # profit_target_atr
-    stop_mult: tuple[float, float] = (0.3, 2.0)     # stop_loss_atr
-    vertical_bars: tuple[int, int] = (5, 40)        # lookahead_bars
+
+    profit_mult: tuple[float, float] = (0.5, 3.0)  # profit_target_atr
+    stop_mult: tuple[float, float] = (0.3, 2.0)  # stop_loss_atr
+    vertical_bars: tuple[int, int] = (5, 40)  # lookahead_bars
     # Optional: execution delay, pip size (if variable)
     execution_delay_bars: tuple[int, int] = (0, 3)
     # Pip size (for JPY vs non-JPY)
@@ -217,6 +230,7 @@ class BarrierSearchSpace:
 @dataclass
 class BarrierSearchConfig:
     """Configuration for Bayesian barrier search."""
+
     search_space: BarrierSearchSpace = field(default_factory=BarrierSearchSpace)
     n_trials: int = 50
     timeout: float | None = None  # seconds
@@ -295,14 +309,16 @@ class BayesianBarrierOptimizer:
         _features = features.iloc[:_split] if hasattr(features, "iloc") else features[:_split]
 
         # Get primary model predictions on this (in-sample) data only
-        primary_pred = primary_pred_fn(_bars, _features)
+        bars_data = _bars if isinstance(_bars, pd.DataFrame) else pd.DataFrame(_bars)
+        features_data = _features if isinstance(_features, pd.DataFrame) else pd.DataFrame(_features)
+        primary_pred_fn(bars_data, features_data)
 
         # Run TBM with candidate parameters
         from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 
         tbm_result = compute_triple_barrier_labels(
-            bars=_bars,
-            features=_features,
+            bars=bars_data,
+            features=features_data,
             profit_atr_mult=profit_mult,
             stop_atr_mult=stop_mult,
             vertical_bars=vertical_bars,
@@ -312,19 +328,19 @@ class BayesianBarrierOptimizer:
         if len(tbm_result) == 0:
             return -1e9  # penalty for no labels
 
-        labels = tbm_result["label"].values
+        labels = np.asarray(tbm_result["label"].to_numpy(), dtype=float)
         n_trades = np.sum(labels != 0)
 
         if n_trades < self.config.min_trades_per_trial:
             return -1e9  # penalty for too few trades
 
         # Compute objective
-        rewards_long = tbm_result["reward_long"].values
-        rewards_short = tbm_result["reward_short"].values
+        rewards_long = np.asarray(tbm_result["reward_long"].to_numpy(), dtype=float)
+        rewards_short = np.asarray(tbm_result["reward_short"].to_numpy(), dtype=float)
 
         # Only consider trades that were actually taken (non-zero label)
         trade_mask = labels != 0
-        if not trade_mask.any():
+        if not bool(np.asarray(trade_mask).any()):
             return -1e9
 
         # For each trade, use the reward in the direction of the label
@@ -356,7 +372,7 @@ class BayesianBarrierOptimizer:
         bars: pd.DataFrame,
         features: pd.DataFrame,
         primary_pred_fn: Callable[[pd.DataFrame, pd.DataFrame], np.ndarray],
-    ) -> dict[str, any]:
+    ) -> dict[str, Any]:
         """
         Run Bayesian optimization to find best barrier parameters.
 
@@ -390,7 +406,7 @@ class BayesianBarrierOptimizer:
             show_progress_bar=True,
         )
 
-        self._best_params = self.study.best_params
+        self._best_params = dict(self.study.best_params)
         print(f"[BayesianBarrierOptimizer] Best params: {self._best_params}")
         print(f"[BayesianBarrierOptimizer] Best value: {self.study.best_value:.4f}")
         return {
@@ -400,7 +416,7 @@ class BayesianBarrierOptimizer:
         }
 
     @property
-    def best_params(self) -> dict | None:
+    def best_params(self) -> dict[str, Any] | None:
         return self._best_params
 
 
@@ -408,13 +424,14 @@ class BayesianBarrierOptimizer:
 # 3. Integrated Pipeline: TBM + Meta-Labeling + Bayesian Search
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def run_meta_tbm_pipeline(
     bars: pd.DataFrame,
     features: pd.DataFrame,
     primary_model,
     meta_features: list[str] | None = None,
-    meta_model: any = None,
-    tbm_params: dict | None = None,
+    meta_model: Any | None = None,
+    tbm_params: dict[str, Any] | None = None,
     bayesian_search: bool = False,
     bayesian_config: BarrierSearchConfig | None = None,
 ) -> tuple[pd.DataFrame, MetaLabeler, BayesianBarrierOptimizer | None]:
@@ -441,11 +458,13 @@ def run_meta_tbm_pipeline(
         optimizer.optimize(
             bars=bars,
             features=features,
-            primary_pred_fn=lambda b, f: primary_model.predict(b, f) if hasattr(primary_model, "predict") else primary_model(b, f),
+            primary_pred_fn=lambda b, f: (
+                primary_model.predict(b, f) if hasattr(primary_model, "predict") else primary_model(b, f)
+            ),
         )
         bayesian_opt = optimizer
         tbm_params = tbm_params or {}
-        best_p = dict(optimizer.best_params)
+        best_p: dict[str, Any] = dict(optimizer.best_params or {})
         if "profit_mult" in best_p:
             best_p["profit_atr_mult"] = best_p.pop("profit_mult")
         if "stop_mult" in best_p:
@@ -462,6 +481,7 @@ def run_meta_tbm_pipeline(
     tbm_defaults.update(tbm_params or {})
 
     from labeling.triple_barrier_labeling import compute_triple_barrier_labels
+
     tbm_result = compute_triple_barrier_labels(
         bars=bars,
         features=features,
@@ -484,7 +504,8 @@ def run_meta_tbm_pipeline(
         meta_features=meta_features,
     )
     meta = MetaLabeler(meta_config)
-    meta.fit(primary_pred, tbm_result["label"].values, features)
+    labels = np.asarray(tbm_result["label"].to_numpy(), dtype=int)
+    meta.fit(np.asarray(primary_pred, dtype=float), labels, features)
 
     # Step 6: Filter labels by meta-model confidence
     trade_mask = meta.should_trade(primary_pred, features)
@@ -498,6 +519,7 @@ def run_meta_tbm_pipeline(
 # 4. Convenience: quick evaluation of barrier parameters
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def evaluate_barrier_params(
     bars: pd.DataFrame,
     features: pd.DataFrame,
@@ -506,11 +528,11 @@ def evaluate_barrier_params(
     vertical_bars: int,
     primary_pred_fn: Callable,
     delay: int = 1,
-) -> dict[str, float]:
+) -> dict[str, float | int | str]:
     """Quick evaluation of a single parameter set. Returns metrics dict."""
     from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 
-    primary_pred = primary_pred_fn(bars, features)
+    primary_pred_fn(bars, features)
     tbm = compute_triple_barrier_labels(
         bars=bars,
         features=features,
@@ -523,13 +545,13 @@ def evaluate_barrier_params(
     if len(tbm) == 0:
         return {"error": "no_labels"}
 
-    labels = tbm["label"].values
+    labels = np.asarray(tbm["label"].to_numpy(), dtype=float)
     trade_mask = labels != 0
-    if not trade_mask.any():
+    if not bool(np.asarray(trade_mask).any()):
         return {"n_trades": 0}
 
-    rewards_long = tbm["reward_long"].values
-    rewards_short = tbm["reward_short"].values
+    rewards_long = np.asarray(tbm["reward_long"].to_numpy(), dtype=float)
+    rewards_short = np.asarray(tbm["reward_short"].to_numpy(), dtype=float)
     trade_rewards = np.where(
         labels[trade_mask] > 0,
         rewards_long[trade_mask],
@@ -537,11 +559,13 @@ def evaluate_barrier_params(
     )
 
     return {
-        "n_trades": int(trade_mask.sum()),
+        "n_trades": int(np.sum(trade_mask)),
         "win_rate": float((trade_rewards > 0).mean()),
         "avg_reward": float(trade_rewards.mean()),
-        "sharpe": float(trade_rewards.mean() / trade_rewards.std() * np.sqrt(252)) if trade_rewards.std() > 0 else 0,
-        "profit_factor": float(trade_rewards[trade_rewards > 0].sum() / -trade_rewards[trade_rewards < 0].sum()) if (trade_rewards < 0).any() else 1e6,
+        "sharpe": float(trade_rewards.mean() / trade_rewards.std() * np.sqrt(252)) if trade_rewards.std() > 0 else 0.0,
+        "profit_factor": float(trade_rewards[trade_rewards > 0].sum() / -trade_rewards[trade_rewards < 0].sum())
+        if bool(np.asarray(trade_rewards < 0).any())
+        else 1e6,
         "expectancy": float(trade_rewards.mean()),
         "max_dd": float((np.maximum.accumulate(trade_rewards.cumsum()) - trade_rewards.cumsum()).max()),
     }

@@ -1,8 +1,16 @@
+from __future__ import annotations
+
+from torch.nn.parameter import UninitializedParameter
+
+
+def _is_uninitialized_parameter(p):
+    return isinstance(p, UninitializedParameter)
+
+
 """Direction-class helpers and balance gates for supervised multi-task training.
 
 See docs/CONTINUE.md.
 """
-from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +23,8 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from infrastructure.numerics import sanitize_array
+from training.cache_integrity import _cache_length_snapshot
+from training.dataset_builder import _safe_save_json
 from training.gpu_cache_io import (
     ZARR,
     _diff_path,
@@ -23,66 +33,8 @@ from training.gpu_cache_io import (
     _y_path,
     _zarr_open_group,
 )
-
-_HOST = None
-_BOUND = False
-_HOST_DEPS = (
-    "_log_error",
-    "_log_warn",
-    "_log_info",
-    "_slug_part",
-    "_safe_save_json",
-    "_cache_length_snapshot",
-    "_on_disk_sequence_count",
-    "ZarrStreamDataset",
-    # train_epoch / validate_epoch / build_criterion come from supervised_loop
-    # (see _ensure_bound) — not via train_gpu, to avoid a circular import.
-    "build_model",
-    "_match_target_shape",
-    "_crop_to_seq_len",
-    "_is_uninitialized_parameter",
-    "PATHS",
-    "ZARR",
-)
-
-
-def bind_host(host_mod) -> None:
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
-
-
-def _ensure_bound() -> None:
-    """Bind host deps without forcing a circular import of train_gpu.
-
-    Prefer symbols already present on a partially-initialized ``train_gpu``
-    module (``sys.modules``) and pull ``train_epoch`` / ``validate_epoch`` from
-    ``supervised_loop`` directly so probe code does not re-enter train_gpu.
-    """
-    import sys
-
-    global _BOUND
-    g = globals()
-
-    sl = sys.modules.get("training.supervised_loop")
-    if sl is None:
-        from training import supervised_loop as sl
-    for name in ("train_epoch", "validate_epoch", "build_criterion"):
-        if hasattr(sl, name):
-            g[name] = getattr(sl, name)
-
-    tg = sys.modules.get("training.train_gpu")
-    if tg is not None:
-        bind_host(tg)
-        return
-
-    # train_gpu not loaded yet — mark bound with what we have; later bind_host
-    # from train_gpu.main / import side will overlay remaining helpers.
-    _BOUND = True
+from training.gpu_cli import _slug_part
+from training.gpu_datasets import ZarrStreamDataset
 
 
 def direction_recall_from_confusion(confusion: list[list[int]]) -> list[float]:
@@ -113,6 +65,7 @@ def direction_gate_failed(diag: dict[str, Any], args) -> tuple[bool, str]:
 _direction_recall_from_confusion = direction_recall_from_confusion
 _direction_gate_failed = direction_gate_failed
 
+
 def _load_diff_array(cache_path: str, n_samples: int) -> np.ndarray | None:
     """
     B: Load the full per-sample difficulty array (uint8) from cache.
@@ -133,6 +86,7 @@ def _load_diff_array(cache_path: str, n_samples: int) -> np.ndarray | None:
             pass
     return None
 
+
 def _load_feature_schema(cache_path: str, n_features: int) -> list[str] | None:
     """Load the ordered feature schema saved next to a processed cache."""
     schema_path = Path(str(cache_path) + "_feature_schema.json")
@@ -140,12 +94,14 @@ def _load_feature_schema(cache_path: str, n_features: int) -> list[str] | None:
         return None
     try:
         import json
+
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         if isinstance(schema, list) and len(schema) == int(n_features):
             return [str(c) for c in schema]
     except Exception:
         pass
     return None
+
 
 def _coerce_auto_int(value, auto_value: int, *, minimum: int = 1) -> int:
     """Return an integer config value, accepting 'auto' as a computed default."""
@@ -160,6 +116,7 @@ def _coerce_auto_int(value, auto_value: int, *, minimum: int = 1) -> int:
         return max(minimum, int(value))
     except (TypeError, ValueError):
         return max(minimum, int(auto_value))
+
 
 def _read_y_cls_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000) -> np.ndarray | None:
     """Read direction-class sidecar; None if missing (legacy caches)."""
@@ -180,6 +137,7 @@ def _read_y_cls_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_0
     parts = [np.asarray(arr[indices[s : s + chunk]]) for s in range(0, len(indices), chunk)]
     return np.concatenate(parts) if parts else np.array([])
 
+
 def _read_pq_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000) -> np.ndarray | None:
     if ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir():
         z = _zarr_open_group(cache_path, mode="r")
@@ -198,6 +156,7 @@ def _read_pq_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000)
     parts = [np.asarray(arr[indices[s : s + chunk]]) for s in range(0, len(indices), chunk)]
     return np.concatenate(parts) if parts else np.array([])
 
+
 def _read_y_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000) -> np.ndarray:
     parts: list[np.ndarray] = []
     if ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir():
@@ -205,7 +164,7 @@ def _read_y_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000) 
         y = z["y"]
         for s in range(0, len(indices), chunk):
             sl = indices[s : s + chunk]
-            parts.append(np.asarray(y.oindex[sl]))   # oindex = fancy/out-of-order indexing
+            parts.append(np.asarray(y.oindex[sl]))  # oindex = fancy/out-of-order indexing
     else:
         ym = np.load(_y_path(cache_path), mmap_mode="r")
         for s in range(0, len(indices), chunk):
@@ -214,8 +173,12 @@ def _read_y_indices(cache_path: str, indices: np.ndarray, chunk: int = 500_000) 
     y = np.concatenate(parts) if parts else np.array([])
     return sanitize_array(y, context="cached labels")
 
+
 def _class_weights_tensor(
-    cache_path: str, train_idx: np.ndarray, device: torch.device, max_samples: int = 2_000_000,
+    cache_path: str,
+    train_idx: np.ndarray,
+    device: torch.device,
+    max_samples: int = 2_000_000,
     use_direction_sidecar: bool = False,
 ) -> torch.Tensor:
     prior = _class_prior_array(
@@ -229,8 +192,11 @@ def _class_weights_tensor(
     weights = np.clip(weights, 0.85, 1.15).astype(np.float32)
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
+
 def _class_prior_array(
-    cache_path: str, train_idx: np.ndarray, max_samples: int = 2_000_000,
+    cache_path: str,
+    train_idx: np.ndarray,
+    max_samples: int = 2_000_000,
     use_direction_sidecar: bool = False,
 ) -> np.ndarray:
     if len(train_idx) > max_samples:
@@ -252,21 +218,27 @@ def _class_prior_array(
     y = y[np.isin(y, [-1, 0, 1])]
 
     counts = np.ones(3, dtype=np.float64)  # Laplace smoothing keeps absent classes finite
-    for label, count in zip(*np.unique(y, return_counts=True)):
+    for label, count in zip(*np.unique(y, return_counts=True), strict=False):
         idx = int(label) + 1
         if 0 <= idx < 3:
             counts[idx] += float(count)
     prior = counts / max(float(counts.sum()), 1.0)
     return prior.astype(np.float32)
 
+
 def _class_prior_tensor(
-    cache_path: str, train_idx: np.ndarray, device: torch.device,
+    cache_path: str,
+    train_idx: np.ndarray,
+    device: torch.device,
     use_direction_sidecar: bool = False,
 ) -> torch.Tensor:
     prior = _class_prior_array(
-        cache_path, train_idx, use_direction_sidecar=use_direction_sidecar,
+        cache_path,
+        train_idx,
+        use_direction_sidecar=use_direction_sidecar,
     )
     return torch.tensor(prior, dtype=torch.float32, device=device)
+
 
 def _class_counts_from_y_cls(cache_path: str, indices: np.ndarray) -> dict:
     """Return S/H/B counts and shares from authoritative y_cls sidecar."""
@@ -277,7 +249,7 @@ def _class_counts_from_y_cls(cache_path: str, indices: np.ndarray) -> dict:
     y = np.round(np.asarray(y_raw, dtype=np.float64)).astype(np.int8)
     invalid = y[~np.isin(y, [-1, 0, 1])]
     counts = np.zeros(3, dtype=np.int64)
-    for label, count in zip(*np.unique(y[np.isin(y, [-1, 0, 1])], return_counts=True)):
+    for label, count in zip(*np.unique(y[np.isin(y, [-1, 0, 1])], return_counts=True), strict=False):
         counts[int(label) + 1] = int(count)
     total = max(1, int(counts.sum()))
     return {
@@ -287,6 +259,7 @@ def _class_counts_from_y_cls(cache_path: str, indices: np.ndarray) -> dict:
         "total": int(total),
     }
 
+
 def _balanced_direction_indices(
     cache_path: str,
     indices: np.ndarray,
@@ -295,7 +268,6 @@ def _balanced_direction_indices(
     seed: int = 1337,
 ) -> np.ndarray:
     """Build an approximately class-balanced index list using y_cls labels."""
-    _ensure_bound()
     idx = np.asarray(indices, dtype=np.int64)
     if len(idx) == 0:
         return idx
@@ -315,17 +287,14 @@ def _balanced_direction_indices(
         per_class = min(len(b) for b in buckets)
     else:
         per_class = max(1, int(total_samples) // 3)
-    parts = [
-        rng.choice(bucket, size=per_class, replace=(len(bucket) < per_class))
-        for bucket in buckets
-    ]
+    parts = [rng.choice(bucket, size=per_class, replace=(len(bucket) < per_class)) for bucket in buckets]
     out = np.concatenate(parts).astype(np.int64)
     rng.shuffle(out)
     return out
 
+
 def _direction_preflight(cache_path: str, train_idx: np.ndarray, val_idx: np.ndarray, args) -> dict:
     """Hard gate before supervised direction training starts."""
-    _ensure_bound()
     snap = _cache_length_snapshot(cache_path)
     required = ("zarr_X", "zarr_y", "zarr_y_cls", "zarr_pq", "zarr_diff", "zarr_close", "zarr_atr", "zarr_spread")
     if snap and any(k.startswith("zarr_") for k in snap):
@@ -345,8 +314,7 @@ def _direction_preflight(cache_path: str, train_idx: np.ndarray, val_idx: np.nda
             raise RuntimeError(f"[DirectionPreflight] {split} y_cls has {stats['invalid_count']} invalid labels.")
         if min(stats["shares"]) < min_share:
             raise RuntimeError(
-                f"[DirectionPreflight] {split} class prior too thin: "
-                f"S/H/B={stats['shares']} min_required={min_share}"
+                f"[DirectionPreflight] {split} class prior too thin: S/H/B={stats['shares']} min_required={min_share}"
             )
 
     forced = torch.tensor([[9.0, 0.0, 0.0], [0.0, 9.0, 0.0], [0.0, 0.0, 9.0]])
@@ -360,11 +328,11 @@ def _direction_preflight(cache_path: str, train_idx: np.ndarray, val_idx: np.nda
     )
     return report
 
+
 def _write_class_balance_failure(run_name: str, model_name: str, epoch: int, diag: dict, reason: str) -> Path:
-    _ensure_bound()
     out_dir = Path("logs/tests")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"class_balance_failure_{_slug_part(run_name, 120)}_{_slug_part(model_name, 40)}_ep{epoch+1}.json"
+    out = out_dir / f"class_balance_failure_{_slug_part(run_name, 120)}_{_slug_part(model_name, 40)}_ep{epoch + 1}.json"
     payload = {
         "run_name": run_name,
         "model": model_name,
@@ -376,6 +344,7 @@ def _write_class_balance_failure(run_name: str, model_name: str, epoch: int, dia
     }
     _safe_save_json(payload, out)
     return out
+
 
 def _direction_probe(
     model,
@@ -390,14 +359,15 @@ def _direction_probe(
     amp_dtype: torch.dtype,
 ) -> dict:
     """Short balanced probe that must pass before full supervised training."""
-    _ensure_bound()
     if not bool(getattr(args, "direction_probe", True)):
         return {"enabled": False, "passed": True}
     epochs = max(1, int(getattr(args, "direction_probe_epochs", 2)))
     samples = max(96, int(getattr(args, "direction_probe_samples", 4096)))
     seed = int(getattr(args, "seed", 1337))
     probe_train_idx = _balanced_direction_indices(cache_path, train_idx, total_samples=samples, seed=seed)
-    probe_val_idx = _balanced_direction_indices(cache_path, val_idx, total_samples=max(96, samples // 2), seed=seed + 17)
+    probe_val_idx = _balanced_direction_indices(
+        cache_path, val_idx, total_samples=max(96, samples // 2), seed=seed + 17
+    )
     train_ds = ZarrStreamDataset(cache_path, probe_train_idx, shuffle_chunks=True, multitask_targets=True)
     val_ds = ZarrStreamDataset(cache_path, probe_val_idx, shuffle_chunks=False, multitask_targets=True)
     bs = min(max(32, int(getattr(args, "batch_size", 128))), 256)
@@ -406,34 +376,64 @@ def _direction_probe(
     crit = nn.CrossEntropyLoss()
     opt = torch.optim.AdamW(model.parameters(), lr=max(float(getattr(args, "lr", 1e-4)), 1e-4), weight_decay=0.0)
     print(f"[DirectionProbe] START | samples={len(probe_train_idx):,} val={len(probe_val_idx):,} epochs={epochs}")
+    from training.supervised_loop import train_epoch, validate_epoch
     last = {}
     classification = True
     for ep in range(epochs):
         tl = train_epoch(
-            model, train_dl, opt, crit, GradScaler(enabled=False), device,
-            use_amp=False, classification=classification,
+            model,
+            train_dl,
+            opt,
+            crit,
+            GradScaler(enabled=False),
+            device,
+            use_amp=False,
+            classification=classification,
             grad_clip=float(getattr(args, "grad_clip", 1.0)),
-            amp_dtype=amp_dtype, seq_len=int(getattr(args, "seq_len", 80)),
-            multitask=True, epoch=ep, direction_only=True,
+            amp_dtype=amp_dtype,
+            seq_len=int(getattr(args, "seq_len", 80)),
+            multitask=True,
+            epoch=ep,
+            direction_only=True,
         )
         vl, da, _ = validate_epoch(
-            model, val_dl, crit, device, classification,
-            amp=False, amp_dtype=amp_dtype,
-            seq_len=int(getattr(args, "seq_len", 80)), multitask=True,
+            model,
+            val_dl,
+            crit,
+            device,
+            classification,
+            amp=False,
+            amp_dtype=amp_dtype,
+            seq_len=int(getattr(args, "seq_len", 80)),
+            multitask=True,
             direction_only=True,
         )
         diag = getattr(validate_epoch, "last_class_diag", {})
         failed, reason = _direction_gate_failed(diag, args)
-        last = {"train_loss": float(tl), "val_loss": float(vl), "dir_acc": float(da), "diag": diag, "failed": failed, "reason": reason}
+        last = {
+            "train_loss": float(tl),
+            "val_loss": float(vl),
+            "dir_acc": float(da),
+            "diag": diag,
+            "failed": failed,
+            "reason": reason,
+        }
         print(
-            f"[DirectionProbe] Epoch {ep+1}/{epochs} train={tl:.4f} val={vl:.4f} acc={da:.4f} "
+            f"[DirectionProbe] Epoch {ep + 1}/{epochs} train={tl:.4f} val={vl:.4f} acc={da:.4f} "
             f"pred={diag.get('pred')} recall={[round(x, 4) for x in diag.get('recall', [])]} reason={reason}"
         )
     if last.get("failed", True):
-        out = _write_class_balance_failure(getattr(args, "run_name", "direction_probe"), model_name, 0, last.get("diag", {}), last.get("reason", "probe_failed"))
+        out = _write_class_balance_failure(
+            getattr(args, "run_name", "direction_probe"),
+            model_name,
+            0,
+            last.get("diag", {}),
+            last.get("reason", "probe_failed"),
+        )
         raise RuntimeError(f"[DirectionProbe] FAILED: {last.get('reason')} | diagnostics -> {out}")
     print("[DirectionProbe] PASS")
     return {"enabled": True, "passed": True, **last}
+
 
 def _init_multitask_direction_bias(model: nn.Module, class_prior: torch.Tensor) -> None:
     """Start the direction head from the fold label prior instead of a random class bias."""
@@ -454,6 +454,7 @@ def _init_multitask_direction_bias(model: nn.Module, class_prior: torch.Tensor) 
                     layer.bias.copy_(bias.to(layer.bias.device, dtype=layer.bias.dtype))
                 return
 
+
 def labels_to_class_index(yb: torch.Tensor) -> torch.Tensor:
     """Map {-1,0,+1} direction labels to CE indices {0,1,2}.
 
@@ -461,28 +462,19 @@ def labels_to_class_index(yb: torch.Tensor) -> torch.Tensor:
     sanitize/drop first; remaining non-finites warn and stay invalid until
     ``round().long().clamp`` (prefer drop via ``_sanitize_batch_tensors``).
     """
-    _ensure_bound()
     yb = yb.float()
     if not torch.isfinite(yb).all():
         n_bad = int((~torch.isfinite(yb)).sum().item())
-        print(
-            f"[labels_to_class_index] WARN: {n_bad} non-finite label(s) "
-            "(not zeroed to hold — drop via sanitize)"
-        )
+        print(f"[labels_to_class_index] WARN: {n_bad} non-finite label(s) (not zeroed to hold - drop via sanitize)")
     return (yb + 1.0).round().long().clamp(0, 2)
 
+
 def _direction_class_index(
-
     yb: torch.Tensor,
-
     y_cls: torch.Tensor | None = None,
-
     *,
-
     classification: bool = True,
-
 ) -> torch.Tensor:
-
     """Return class indices, preferring the explicit direction sidecar.
 
 
@@ -496,14 +488,13 @@ def _direction_class_index(
     """
 
     if y_cls is not None:
-
         return labels_to_class_index(y_cls)
 
     if classification:
-
         return labels_to_class_index(yb)
 
     return _reward_to_class_index(yb)
+
 
 def _reward_to_class_index(y_reward: torch.Tensor, hold_eps: float = 0.5) -> torch.Tensor:
     """Fallback when y_cls sidecar is absent: threshold continuous rewards to classes."""
@@ -513,11 +504,10 @@ def _reward_to_class_index(y_reward: torch.Tensor, hold_eps: float = 0.5) -> tor
     cls[r < -hold_eps] = 0
     return cls
 
+
 def _gradients_are_finite(model: nn.Module) -> bool:
-    for p in model.parameters():
-        if p.grad is not None and not torch.isfinite(p.grad).all():
-            return False
-    return True
+    return all(not (p.grad is not None and not torch.isfinite(p.grad).all()) for p in model.parameters())
+
 
 def _recover_nonfinite_training_state(model: nn.Module, opt: torch.optim.Optimizer) -> None:
     for p in model.parameters():
@@ -530,4 +520,3 @@ def _recover_nonfinite_training_state(model: nn.Module, opt: torch.optim.Optimiz
             if torch.is_tensor(value) and not torch.isfinite(value).all():
                 value.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
     opt.zero_grad(set_to_none=True)
-

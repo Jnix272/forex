@@ -7,23 +7,28 @@ Run AFTER all three checkpoints exist:
   checkpoints/haelt_5m/haelt_5m_best.pt
   checkpoints/haelt_15m/haelt_15m_best.pt
 """
+
 import argparse
-from pathlib import Path
-import torch
-import torch.nn as nn
-from types import SimpleNamespace
 
 # Ensure project root on path
 import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+import torch.nn as nn
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.ensemble import MultiTimeframeAttention
 from models.architectures import HAELTHybrid
+from models.ensemble import MultiTimeframeAttention
 
 
-def load_haelt_encoder(ckpt_path: Path, n_features: int, seq_len: int, d_model: int, nhead: int, num_layers: int, dropout: float) -> tuple:
+def load_haelt_encoder(
+    ckpt_path: Path, n_features: int, seq_len: int, d_model: int, nhead: int, num_layers: int, dropout: float
+) -> tuple:
     """
     Load HAELT checkpoint and extract the Transformer encoder branch.
     Returns (proj, pos_emb, transformer_encoder) for injection into MTF.
@@ -50,7 +55,7 @@ def load_haelt_encoder(ckpt_path: Path, n_features: int, seq_len: int, d_model: 
         dropout=args.dropout,
         num_classes=1,
     )
-    
+
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     # Handle various checkpoint formats
     if isinstance(state, dict):
@@ -58,16 +63,16 @@ def load_haelt_encoder(ckpt_path: Path, n_features: int, seq_len: int, d_model: 
             if key in state and isinstance(state[key], dict):
                 state = state[key]
                 break
-    
+
     model.load_state_dict(state, strict=False)
     model.eval()
-    
+
     # Extract the transformer branch components
     # The transformer branch consists of: proj -> pos_emb -> trf (TransformerEncoder)
     proj = model.proj
     pos_emb = model.pos_emb
     trf = model.trf
-    
+
     return proj, pos_emb, trf
 
 
@@ -93,28 +98,25 @@ def main():
     # Load encoder components from each HAELT checkpoint
     print(f"Loading 1m encoder from {args.ckpt_1m}...")
     proj_1m, pos_emb_1m, trf_1m = load_haelt_encoder(
-        Path(args.ckpt_1m), args.n_features, args.seq_len_1m,
-        args.d_model, args.nhead, args.num_layers, args.dropout
+        Path(args.ckpt_1m), args.n_features, args.seq_len_1m, args.d_model, args.nhead, args.num_layers, args.dropout
     )
-    
+
     print(f"Loading 5m encoder from {args.ckpt_5m}...")
     proj_5m, pos_emb_5m, trf_5m = load_haelt_encoder(
-        Path(args.ckpt_5m), args.n_features, args.seq_len_5m,
-        args.d_model, args.nhead, args.num_layers, args.dropout
+        Path(args.ckpt_5m), args.n_features, args.seq_len_5m, args.d_model, args.nhead, args.num_layers, args.dropout
     )
-    
+
     print(f"Loading 15m encoder from {args.ckpt_15m}...")
     proj_15m, pos_emb_15m, trf_15m = load_haelt_encoder(
-        Path(args.ckpt_15m), args.n_features, args.seq_len_15m,
-        args.d_model, args.nhead, args.num_layers, args.dropout
+        Path(args.ckpt_15m), args.n_features, args.seq_len_15m, args.d_model, args.nhead, args.num_layers, args.dropout
     )
 
     # Build MultiTimeframeAttention with per-timeframe encoders
     print("Building MultiTimeframeAttention with per-timeframe encoders...")
-    
+
     class MTFWithPerTFEncoders(MultiTimeframeAttention):
         """Extended MTF that uses separate encoders per timeframe."""
-        
+
         def __init__(
             self,
             input_size: int,
@@ -122,9 +124,11 @@ def main():
             nhead: int = 4,
             n_tf_layers: int = 2,
             dropout: float = 0.1,
-            timeframes: list[int] = [1, 5, 15],
+            timeframes: list[int] | None = None,
         ):
             # Initialize base but we'll replace the encoder
+            if timeframes is None:
+                timeframes = [1, 5, 15]
             super().__init__(
                 input_size=input_size,
                 d_model=d_model,
@@ -137,13 +141,13 @@ def main():
             self.per_tf_proj = nn.ModuleList()
             self.per_tf_pos_emb = nn.ModuleList()
             self.per_tf_encoder = nn.ModuleList()
-        
+
         def set_per_tf_encoders(self, projs, pos_embs, encoders):
             """Set per-timeframe encoders."""
             self.per_tf_proj = nn.ModuleList(projs)
             self.per_tf_pos_emb = nn.ModuleList(pos_embs)
             self.per_tf_encoder = nn.ModuleList(encoders)
-            
+
         def forward(self, x_list: list[torch.Tensor]) -> torch.Tensor:
             """
             x_list: list of (B, T_i, input_size) tensors, one per timeframe.
@@ -155,7 +159,7 @@ def main():
                 h = self.per_tf_proj[i](x)
                 # Inject positional embedding
                 T = h.size(1)
-                if T <= self.per_tf_pos_emb[i].num_embeddings:
+                if self.per_tf_pos_emb[i].num_embeddings >= T:
                     pos = self.per_tf_pos_emb[i].weight[:T]
                     h = h + pos.unsqueeze(0)
                 else:
@@ -167,8 +171,8 @@ def main():
 
             # Cross-timeframe attention: fine (1m) queries, coarse (5m, 15m) as K/V
             if len(encoded) > 1:
-                query   = encoded[0].unsqueeze(1)            # (B, 1, d)
-                context = torch.stack(encoded[1:], dim=1)    # (B, n_tf-1, d)
+                query = encoded[0].unsqueeze(1)  # (B, 1, d)
+                context = torch.stack(encoded[1:], dim=1)  # (B, n_tf-1, d)
                 attn_out, _ = self.cross_attn(query, context, context)
                 fine = self.cross_norm(encoded[0] + attn_out.squeeze(1))
                 encoded[0] = fine
@@ -196,25 +200,28 @@ def main():
     # Save fused checkpoint
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model_state": mtf.state_dict(),
-        "config": {
-            "n_features": args.n_features,
-            "seq_len_1m": args.seq_len_1m,
-            "seq_len_5m": args.seq_len_5m,
-            "seq_len_15m": args.seq_len_15m,
-            "d_model": args.d_model,
-            "nhead": args.nhead,
-            "num_layers": args.num_layers,
-            "dropout": args.dropout,
+    torch.save(
+        {
+            "model_state": mtf.state_dict(),
+            "config": {
+                "n_features": args.n_features,
+                "seq_len_1m": args.seq_len_1m,
+                "seq_len_5m": args.seq_len_5m,
+                "seq_len_15m": args.seq_len_15m,
+                "d_model": args.d_model,
+                "nhead": args.nhead,
+                "num_layers": args.num_layers,
+                "dropout": args.dropout,
+            },
+            "source_checkpoints": {
+                "1m": args.ckpt_1m,
+                "5m": args.ckpt_5m,
+                "15m": args.ckpt_15m,
+            },
         },
-        "source_checkpoints": {
-            "1m": args.ckpt_1m,
-            "5m": args.ckpt_5m,
-            "15m": args.ckpt_15m,
-        }
-    }, output_path)
-    
+        output_path,
+    )
+
     print(f"\nFused model saved to: {output_path}")
     print("Ready for inference or ensemble meta-training.")
 

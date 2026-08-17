@@ -18,7 +18,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +27,7 @@ if str(_ROOT) not in sys.path:
 # We can't easily import supervised_loop directly (torch deps), so test the
 # sentinel logic via a pure-Python reimplementation that mirrors the
 # exact contract. If the implementation changes, these tests will fail.
+
 
 def _validate_epoch_contract():
     """The new validate_epoch returns (val_loss, dir_acc, sharpe_or_None).
@@ -55,7 +55,6 @@ def test_early_stopping_rejects_sentinel():
     must NOT treat it as an improvement (and must NOT save it as best)."""
     best_sharpe = float("-inf")
     min_delta = 0.0
-    stop_on_sharpe = True
 
     # Old buggy behaviour: 0.0 > -inf + 0.0 -> True (would save bad epoch)
     # New correct behaviour: sentinel None -> False
@@ -79,8 +78,7 @@ def test_best_checkpoint_sharpe_floor():
     """Even if a real Sharpe is computed, it must clear a minimum floor
     to be saved as 'best'. Default floor = 0.0 (configurable via
     early_stop_min_sharpe)."""
-    best_sharpe = float("-inf")
-    min_delta = 0.0
+    float("-inf")
     sharpe_floor = 0.0  # default
 
     def is_eligible(candidate, floor):
@@ -108,15 +106,15 @@ def test_best_sharpe_initialization_floor():
     min_delta = 0.0
     # First epoch with 0.5 Sharpe: 0.5 > 0.0 + 0.0 -> improves (correct)
     # First epoch with -0.1 Sharpe: -0.1 > 0.0 -> does NOT improve (correct)
-    assert 0.5 > (best_sharpe + min_delta)
-    assert not (-0.1 > (best_sharpe + min_delta))
+    assert (best_sharpe + min_delta) < 0.5
+    assert not ((best_sharpe + min_delta) < -0.1)
 
     # Update best_sharpe after improvement
     best_sharpe = 0.5
     # Second epoch with 0.6 Sharpe: 0.6 > 0.5 -> improves
-    assert 0.6 > (best_sharpe + min_delta)
+    assert (best_sharpe + min_delta) < 0.6
     # Second epoch with 0.5 Sharpe: 0.5 > 0.5 -> no improvement (correct)
-    assert not (0.5 > (best_sharpe + min_delta))
+    assert not ((best_sharpe + min_delta) < 0.5)
 
 
 def test_validate_epoch_returns_sentinel_on_all_skip():

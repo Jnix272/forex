@@ -10,7 +10,7 @@ PPO and Deep Q-Learning agents with:
 
 import collections
 import random
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -19,6 +19,7 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     import torch.optim as optim
+
     TORCH = True
 except ImportError:
     TORCH = False
@@ -32,6 +33,7 @@ ACTION_NAMES = {a.value: a.name for a in ScalingAction}
 # ─────────────────────────────────────────────────────────────────────────────
 # TRADING ENVIRONMENT  (10-action, combined scaling, dynamic SL)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class ForexTradingEnv:
     """
@@ -53,61 +55,71 @@ class ForexTradingEnv:
 
     def __init__(
         self,
-        features:       np.ndarray,
-        prices:         np.ndarray,
-        atr:            np.ndarray,
-        spreads:        np.ndarray,
+        features: np.ndarray,
+        prices: np.ndarray,
+        atr: np.ndarray,
+        spreads: np.ndarray,
         initial_equity: float = 10_000.0,
-        lot_size:       float = 10_000.0,
-        max_lots:       float = 3.0,
+        lot_size: float = 10_000.0,
+        max_lots: float = 3.0,
         commission_per_lot: float = 3.5,
-        slippage_pips:  float = 0.5,
-        pip_size:       float = 0.0001,
+        slippage_pips: float = 0.5,
+        pip_size: float = 0.0001,
         reward_weights: dict | None = None,
         # Dynamic SL params
-        atr_sl_mult:    float = 1.5,
+        atr_sl_mult: float = 1.5,
         trail_activation_r: float = 1.0,
         breakeven_at_r: float = 0.5,
         # Scaling params (both)
-        pyramid_pct:    float = 0.25,
+        pyramid_pct: float = 0.25,
         martingale_pct: float = 0.25,
-        # A-H1: episode sampling — randomise start offset / sub-window each reset
+        # A-H1: episode sampling - randomise start offset / sub-window each reset
         # so the agent doesn't replay the identical trajectory every episode.
-        random_reset:   bool = True,
-        episode_len:    int | None = None,
+        random_reset: bool = True,
+        episode_len: int | None = None,
         # Annualised bars for Sharpe: 252 * 24 * 60 for 1-min bars. Pass
         # 252 * 24 * (60 // m) for m-minute bars (e.g. 3024 for 5-min).
-        bars_per_year:  int = 252 * 24 * 60,
+        bars_per_year: int = 252 * 24 * 60,
     ):
-        self.features       = features.astype(np.float32)
-        self.prices         = prices.astype(np.float32)
-        self.atr            = atr.astype(np.float32)
-        self.spreads        = spreads.astype(np.float32)
+        self.features = features.astype(np.float32)
+        self.prices = prices.astype(np.float32)
+        self.atr = atr.astype(np.float32)
+        self.spreads = spreads.astype(np.float32)
         self.initial_equity = initial_equity
-        self.lot_size       = lot_size
-        self.max_lots       = max_lots
-        self.commission     = commission_per_lot
-        self.slippage_pips  = slippage_pips
-        self.pip_size       = pip_size
-        self.rw             = {
-            "pnl": 1.0, "drawdown": 0.5, "tx_cost": 0.3, "overtrade": 0.2, "holding": 0.01
-        }
+        self.lot_size = lot_size
+        self.max_lots = max_lots
+        self.commission = commission_per_lot
+        self.slippage_pips = slippage_pips
+        self.pip_size = pip_size
+        self.rw = {"pnl": 1.0, "drawdown": 0.5, "tx_cost": 0.3, "overtrade": 0.2, "holding": 0.01}
         if reward_weights:
-            self.rw.update({
-                "pnl": float(reward_weights.get("pnl", reward_weights.get("pnl_weight", self.rw["pnl"]))),
-                "drawdown": float(reward_weights.get("drawdown", reward_weights.get("drawdown_penalty", self.rw["drawdown"]))),
-                "tx_cost": float(reward_weights.get("tx_cost", reward_weights.get("transaction_cost_penalty", self.rw["tx_cost"]))),
-                "overtrade": float(reward_weights.get("overtrade", reward_weights.get("overtrading_penalty", self.rw["overtrade"]))),
-                "holding": float(reward_weights.get("holding", reward_weights.get("holding_cost", self.rw["holding"]))),
-            })
-        self.atr_sl_mult    = atr_sl_mult
-        self.trail_act_r    = trail_activation_r
-        self.be_r           = breakeven_at_r
-        self.pyramid_pct    = pyramid_pct
+            self.rw.update(
+                {
+                    "pnl": float(reward_weights.get("pnl", reward_weights.get("pnl_weight", self.rw["pnl"]))),
+                    "drawdown": float(
+                        reward_weights.get("drawdown", reward_weights.get("drawdown_penalty", self.rw["drawdown"]))
+                    ),
+                    "tx_cost": float(
+                        reward_weights.get(
+                            "tx_cost", reward_weights.get("transaction_cost_penalty", self.rw["tx_cost"])
+                        )
+                    ),
+                    "overtrade": float(
+                        reward_weights.get("overtrade", reward_weights.get("overtrading_penalty", self.rw["overtrade"]))
+                    ),
+                    "holding": float(
+                        reward_weights.get("holding", reward_weights.get("holding_cost", self.rw["holding"]))
+                    ),
+                }
+            )
+        self.atr_sl_mult = atr_sl_mult
+        self.trail_act_r = trail_activation_r
+        self.be_r = breakeven_at_r
+        self.pyramid_pct = pyramid_pct
         self.martingale_pct = martingale_pct
-        self.random_reset   = bool(random_reset)
+        self.random_reset = bool(random_reset)
         # Sub-window length per episode. None or >= series length => use full series.
-        self.episode_len    = int(episode_len) if episode_len else None
+        self.episode_len = int(episode_len) if episode_len else None
 
         self.obs_size = features.shape[1] + 5  # + agent state
         self.n_actions = 10
@@ -122,7 +134,8 @@ class ForexTradingEnv:
         if valid_starts is not None and len(valid_starts) > 0:
             if self.episode_len is not None:
                 valid = valid_starts[valid_starts <= n - self.episode_len - 1]
-                if len(valid) == 0: valid = np.array([0])
+                if len(valid) == 0:
+                    valid = np.array([0])
             else:
                 valid = valid_starts
             self.start_idx = int(np.random.choice(valid)) if self.random_reset else int(valid[0])
@@ -130,41 +143,43 @@ class ForexTradingEnv:
         elif self.episode_len is not None and self.episode_len < n - 1:
             max_start = max(0, n - self.episode_len - 1)  # guard against negative when episode_len >= n
             self.start_idx = int(np.random.randint(0, max_start + 1)) if self.random_reset else 0
-            self.end_idx   = self.start_idx + self.episode_len
+            self.end_idx = self.start_idx + self.episode_len
         else:
-            self.start_idx = (int(np.random.randint(0, max(1, (n - 1) // 4)))
-                              if self.random_reset else 0)
-            self.end_idx   = n - 1
-        self.idx        = self.start_idx
-        self.equity     = self.initial_equity
-        self.peak       = self.initial_equity
-        self.position   = 0.0      # lots (+long, -short)
+            self.start_idx = int(np.random.randint(0, max(1, (n - 1) // 4))) if self.random_reset else 0
+            self.end_idx = n - 1
+        self.idx = self.start_idx
+        self.equity = self.initial_equity
+        self.peak = self.initial_equity
+        self.position = 0.0  # lots (+long, -short)
         self.entry_price = 0.0
         # _initial_entry_price is locked at trade open and never updated on
         # scale-in. SL/TP always reference this so stops don't slip when we pyramid.
         self._initial_entry_price = 0.0
-        self.stop_loss  = 0.0
+        self.stop_loss = 0.0
         self.take_profit = 0.0
-        self.holding    = 0
-        self.n_trades   = 0
+        self.holding = 0
+        self.n_trades = 0
         self.total_costs = 0.0
         self.episode_pnl = []
-        self.done       = False
+        self.done = False
         self._prev_mtm_equity = self.initial_equity  # Track MTM equity for reward consistency
-        self._last_obs  = self._obs()
+        self._last_obs = self._obs()
         return self._last_obs
 
     def _obs(self) -> np.ndarray:
         mkt = self.features[self.idx]
-        p   = self.prices[self.idx]
+        p = self.prices[self.idx]
         upnl = (p - self.entry_price) * self.position * self.lot_size if self.position != 0 else 0.0
-        agent = np.array([
-            np.clip(self.position / self.max_lots, -1, 1),
-            np.clip(upnl / self.initial_equity, -0.5, 0.5),
-            min(self.holding / 100, 1.0),
-            np.clip((self.equity - self.initial_equity) / self.initial_equity, -0.5, 0.5),
-            int(self.position != 0),
-        ], dtype=np.float32)
+        agent = np.array(
+            [
+                np.clip(self.position / self.max_lots, -1, 1),
+                np.clip(upnl / self.initial_equity, -0.5, 0.5),
+                min(self.holding / 100, 1.0),
+                np.clip((self.equity - self.initial_equity) / self.initial_equity, -0.5, 0.5),
+                int(self.position != 0),
+            ],
+            dtype=np.float32,
+        )
         return np.concatenate([mkt, agent])
 
     def action_mask(self) -> np.ndarray:
@@ -186,49 +201,60 @@ class ForexTradingEnv:
 
     def _exec_cost(self, lots: float) -> float:
         cost = abs(lots) * self.commission + abs(lots) * self.slippage_pips * self.pip_size * self.lot_size
-        self.equity -= cost; self.total_costs += cost
+        self.equity -= cost
+        self.total_costs += cost
         return cost
 
     def _set_dynamic_sl(self, direction: int, entry: float, current_atr: float):
         """Dynamic stop-loss: ATR-based, trails after profit, moves to breakeven.
         Uses _initial_entry_price so stops are always anchored to trade open."""
         self._initial_entry_price = entry  # lock at first fill
-        self.stop_loss   = entry - direction * self.atr_sl_mult * current_atr
+        self.stop_loss = entry - direction * self.atr_sl_mult * current_atr
         self.take_profit = entry + direction * self.atr_sl_mult * 2 * current_atr
 
     def _update_trailing_sl(self, p: float, direction: int, entry: float, current_atr: float):
-        """Trail SL after profit exceeds trail_activation_r × ATR.
+        """Trail SL after profit exceeds trail_activation_r x ATR.
         Uses _initial_entry_price so scale-in doesn't reset the trail anchor."""
-        if self.position == 0: return
+        if self.position == 0:
+            return
         init_entry = self._initial_entry_price
         profit_r = direction * (p - init_entry) / (current_atr + 1e-9)
         if profit_r >= self.trail_act_r:
             new_sl = p - direction * self.atr_sl_mult * current_atr
-            if direction > 0: self.stop_loss = max(self.stop_loss, new_sl)
-            else:             self.stop_loss = min(self.stop_loss, new_sl)
+            if direction > 0:
+                self.stop_loss = max(self.stop_loss, new_sl)
+            else:
+                self.stop_loss = min(self.stop_loss, new_sl)
         elif profit_r >= self.be_r:
             # Move to breakeven using initial entry, not averaged entry
-            if direction > 0: self.stop_loss = max(self.stop_loss, init_entry)
-            else:             self.stop_loss = min(self.stop_loss, init_entry)
+            if direction > 0:
+                self.stop_loss = max(self.stop_loss, init_entry)
+            else:
+                self.stop_loss = min(self.stop_loss, init_entry)
 
     def _check_sl_tp(self, p: float, direction: int) -> tuple[bool, float]:
         """Returns (hit, pnl_pips). P&L from avg ``entry_price`` on remaining size."""
         entry = self.entry_price
         if direction > 0:
-            if p <= self.stop_loss:   return True, (self.stop_loss - entry) / self.pip_size
-            if p >= self.take_profit: return True, (self.take_profit - entry) / self.pip_size
+            if p <= self.stop_loss:
+                return True, (self.stop_loss - entry) / self.pip_size
+            if p >= self.take_profit:
+                return True, (self.take_profit - entry) / self.pip_size
         else:
-            if p >= self.stop_loss:   return True, (entry - self.stop_loss) / self.pip_size
-            if p <= self.take_profit: return True, (entry - self.take_profit) / self.pip_size
+            if p >= self.stop_loss:
+                return True, (entry - self.stop_loss) / self.pip_size
+            if p <= self.take_profit:
+                return True, (entry - self.take_profit) / self.pip_size
         return False, 0.0
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
         assert not self.done
-        p   = self.prices[self.idx]
+        p = self.prices[self.idx]
         atr = self.atr[self.idx]
         direction = int(np.sign(self.position)) if self.position != 0 else 0
 
-        realised_pnl = 0.0; cost = 0.0
+        realised_pnl = 0.0
+        cost = 0.0
 
         # ── Check dynamic stop/TP before executing new action ───────────────
         if self.position != 0:
@@ -236,67 +262,112 @@ class ForexTradingEnv:
             hit, pips = self._check_sl_tp(p, direction)
             if hit:
                 pnl_usd = pips * self.pip_size * abs(self.position) * self.lot_size
-                realised_pnl += pnl_usd; self.equity += pnl_usd
-                self.position = 0.0; self.holding = 0
+                realised_pnl += pnl_usd
+                self.equity += pnl_usd
+                self.position = 0.0
+                self.holding = 0
                 self.n_trades += 1
 
-        # Position before the new action (after any SL/TP close above) — used to
+        # Position before the new action (after any SL/TP close above) - used to
         # detect a fresh entry / scale-in / flip for the trade-frequency penalty.
         pos_before = self.position
 
         # ── Execute action ──────────────────────────────────────────────────
         if action == ScalingAction.OPEN_LONG.value:
             if self.position == 0:
-                lots = 1.0; cost = self._exec_cost(lots)
-                self.position = lots; self.entry_price = p
+                lots = 1.0
+                cost = self._exec_cost(lots)
+                self.position = lots
+                self.entry_price = p
                 self._set_dynamic_sl(+1, p, atr)
             elif self.position < 0:
                 # Close short and open long
                 pnl = (self.entry_price - p) * abs(self.position) * self.lot_size
-                realised_pnl += pnl; self.equity += pnl
+                realised_pnl += pnl
+                self.equity += pnl
                 cost = self._exec_cost(abs(self.position) + 1.0)
-                self.position = 1.0; self.entry_price = p; self.holding = 0; self.n_trades += 1
+                self.position = 1.0
+                self.entry_price = p
+                self.holding = 0
+                self.n_trades += 1
                 self._set_dynamic_sl(+1, p, atr)
 
         elif action == ScalingAction.OPEN_SHORT.value:
             if self.position == 0:
-                lots = 1.0; cost = self._exec_cost(lots)
-                self.position = -lots; self.entry_price = p
+                lots = 1.0
+                cost = self._exec_cost(lots)
+                self.position = -lots
+                self.entry_price = p
                 self._set_dynamic_sl(-1, p, atr)
             elif self.position > 0:
                 pnl = (p - self.entry_price) * self.position * self.lot_size
-                realised_pnl += pnl; self.equity += pnl
+                realised_pnl += pnl
+                self.equity += pnl
                 cost = self._exec_cost(abs(self.position) + 1.0)
-                self.position = -1.0; self.entry_price = p; self.holding = 0; self.n_trades += 1
+                self.position = -1.0
+                self.entry_price = p
+                self.holding = 0
+                self.n_trades += 1
                 self._set_dynamic_sl(-1, p, atr)
 
         elif action == ScalingAction.CLOSE_ALL.value and self.position != 0:
-            pnl = (p - self.entry_price) * self.position * self.lot_size if self.position > 0 else (self.entry_price - p) * abs(self.position) * self.lot_size
-            realised_pnl += pnl; self.equity += pnl
+            pnl = (
+                (p - self.entry_price) * self.position * self.lot_size
+                if self.position > 0
+                else (self.entry_price - p) * abs(self.position) * self.lot_size
+            )
+            realised_pnl += pnl
+            self.equity += pnl
             cost = self._exec_cost(abs(self.position))
-            self.position = 0.0; self.holding = 0; self.n_trades += 1
+            self.position = 0.0
+            self.holding = 0
+            self.n_trades += 1
 
-        elif action in [ScalingAction.SCALE_IN_25.value, ScalingAction.SCALE_IN_50.value, ScalingAction.SCALE_IN_100.value] and self.position != 0:
-            frac = {ScalingAction.SCALE_IN_25.value: 0.25, ScalingAction.SCALE_IN_50.value: 0.50, ScalingAction.SCALE_IN_100.value: 1.0}[action]
+        elif (
+            action
+            in [ScalingAction.SCALE_IN_25.value, ScalingAction.SCALE_IN_50.value, ScalingAction.SCALE_IN_100.value]
+            and self.position != 0
+        ):
+            frac = {
+                ScalingAction.SCALE_IN_25.value: 0.25,
+                ScalingAction.SCALE_IN_50.value: 0.50,
+                ScalingAction.SCALE_IN_100.value: 1.0,
+            }[action]
             add = min(frac, self.max_lots - abs(self.position))
             if add > 0:
                 self._update_avg_entry(p, add * direction)
                 cost = self._exec_cost(add)
 
-        elif action in [ScalingAction.SCALE_OUT_25.value, ScalingAction.SCALE_OUT_50.value, ScalingAction.SCALE_OUT_100.value] and self.position != 0:
-            frac = {ScalingAction.SCALE_OUT_25.value: 0.25, ScalingAction.SCALE_OUT_50.value: 0.50, ScalingAction.SCALE_OUT_100.value: 1.0}[action]
+        elif (
+            action
+            in [ScalingAction.SCALE_OUT_25.value, ScalingAction.SCALE_OUT_50.value, ScalingAction.SCALE_OUT_100.value]
+            and self.position != 0
+        ):
+            frac = {
+                ScalingAction.SCALE_OUT_25.value: 0.25,
+                ScalingAction.SCALE_OUT_50.value: 0.50,
+                ScalingAction.SCALE_OUT_100.value: 1.0,
+            }[action]
             sub = min(frac, abs(self.position))
             if sub > 0:
-                pnl = (p - self.entry_price) * sub * self.lot_size if direction > 0 else (self.entry_price - p) * sub * self.lot_size
-                realised_pnl += pnl; self.equity += pnl
+                pnl = (
+                    (p - self.entry_price) * sub * self.lot_size
+                    if direction > 0
+                    else (self.entry_price - p) * sub * self.lot_size
+                )
+                realised_pnl += pnl
+                self.equity += pnl
                 cost = self._exec_cost(sub)
                 self.position -= sub * direction
                 if abs(self.position) < 1e-6:
-                    self.position = 0.0; self.holding = 0; self.n_trades += 1
+                    self.position = 0.0
+                    self.holding = 0
+                    self.n_trades += 1
 
         # HOLD: do nothing
 
-        if self.position != 0: self.holding += 1
+        if self.position != 0:
+            self.holding += 1
         # Mark-to-market equity: include unrealised PnL so holding losses are penalised
         if self.position != 0:
             _direction = int(np.sign(self.position))
@@ -311,9 +382,8 @@ class ForexTradingEnv:
         # magnitude grew or sign changed) incurs a FIXED penalty per event so the
         # agent is discouraged from overtrading. The old `1/n_trades` term was
         # inverted -- it shrank as trades grew, effectively *rewarding* churn.
-        opened_or_flipped = (
-            abs(self.position) > abs(pos_before) + 1e-9
-            or (self.position != 0 and np.sign(self.position) != np.sign(pos_before))
+        opened_or_flipped = abs(self.position) > abs(pos_before) + 1e-9 or (
+            self.position != 0 and np.sign(self.position) != np.sign(pos_before)
         )
 
         # -- Decomposable reward (consistent MTM-based) --
@@ -326,19 +396,19 @@ class ForexTradingEnv:
         self._prev_mtm_equity = mtm_equity
         holding_penalty = w["holding"] * abs(self.position) * min(self.holding / 100, 1.0)
         reward = (
-            w["pnl"]       * mtm_pnl / self.initial_equity
-          - w["drawdown"]  * dd
-          - w["tx_cost"]   * cost / self.initial_equity
-          - w["overtrade"] * (1.0 if opened_or_flipped else 0.0)
-          - holding_penalty
+            w["pnl"] * mtm_pnl / self.initial_equity
+            - w["drawdown"] * dd
+            - w["tx_cost"] * cost / self.initial_equity
+            - w["overtrade"] * (1.0 if opened_or_flipped else 0.0)
+            - holding_penalty
         )
 
         self.idx += 1
         self.done = self.idx >= self.end_idx
 
-        # Force-close at episode end — P&L from avg entry on remaining size;
+        # Force-close at episode end - P&L from avg entry on remaining size;
         # include in episode_pnl so Sharpe sees the terminal close.
-        # NOTE: do NOT add final_pnl to reward — MTM-based reward above already
+        # NOTE: do NOT add final_pnl to reward - MTM-based reward above already
         # captured the full unrealised move step-by-step via mtm_pnl.
         # Adding it again would double-count the terminal bar's P&L and create a
         # perverse incentive for the agent to hold positions until end-of-episode.
@@ -348,7 +418,7 @@ class ForexTradingEnv:
             final_pnl = d * (last_p - self.entry_price) * abs(self.position) * self.lot_size
             self.equity += final_pnl
             self.episode_pnl[-1] = float(self.episode_pnl[-1]) + final_pnl
-            # reward is intentionally NOT adjusted — MTM already accounts for this
+            # reward is intentionally NOT adjusted - MTM already accounts for this
             self.position = 0.0
             self.holding = 0
             self.n_trades += 1
@@ -394,20 +464,23 @@ if TORCH:
         of past observations; policy/critic read the final hidden state. Single
         obs vectors are broadcast to T=1 so the same interface works.
         """
-        def __init__(self, obs_size, n_actions=10, hidden=256,
-                     use_lstm=False, lstm_hidden=128, num_layers=1, dropout=0.0):
+
+        def __init__(
+            self, obs_size, n_actions=10, hidden=256, use_lstm=False, lstm_hidden=128, num_layers=1, dropout=0.0
+        ):
             super().__init__()
             self.use_lstm = use_lstm
             if use_lstm:
-                self.lstm = nn.LSTM(obs_size, lstm_hidden, num_layers=num_layers,
-                                    batch_first=True, dropout=dropout)
+                self.lstm = nn.LSTM(obs_size, lstm_hidden, num_layers=num_layers, batch_first=True, dropout=dropout)
                 self.proj = nn.Sequential(nn.Linear(lstm_hidden, hidden), nn.Tanh())
             else:
                 self.backbone = nn.Sequential(
-                    nn.Linear(obs_size, hidden), nn.Tanh(),
-                    nn.Linear(hidden, hidden),   nn.Tanh(),
+                    nn.Linear(obs_size, hidden),
+                    nn.Tanh(),
+                    nn.Linear(hidden, hidden),
+                    nn.Tanh(),
                 )
-            self.actor  = nn.Linear(hidden, n_actions)
+            self.actor = nn.Linear(hidden, n_actions)
             self.critic = nn.Linear(hidden, 1)
 
         def forward(self, x):
@@ -449,7 +522,7 @@ if TORCH:
                     dist = torch.distributions.Categorical(logits=logits)
                     log_prob = dist.log_prob(action)
                 return action, log_prob, value.squeeze(-1)
-            dist   = torch.distributions.Categorical(logits=logits)
+            dist = torch.distributions.Categorical(logits=logits)
             action = dist.sample()
             return action, dist.log_prob(action), value.squeeze(-1)
 
@@ -463,24 +536,41 @@ if TORCH:
             dist = torch.distributions.Categorical(logits=logits)
             return dist.log_prob(actions), dist.entropy(), value.squeeze(-1)
 
-
     class PPOAgent:
         """
         Proximal Policy Optimisation agent for 10-action forex execution.
         Uses GAE advantage estimation and clip-objective for stable training.
         """
-        def __init__(self, obs_size, n_actions=10, hidden=256,
-                     lr=3e-4, gamma=0.99, lam=0.95, clip=0.2,
-                     entropy_coef=0.01, value_coef=0.5, n_epochs=10, device="cpu",
-                     use_lstm=False, lstm_hidden=128, hist_len=32):
-            self.gamma = gamma; self.lam = lam; self.clip = clip
-            self.ent_c = entropy_coef; self.val_c = value_coef
+
+        def __init__(
+            self,
+            obs_size,
+            n_actions=10,
+            hidden=256,
+            lr=3e-4,
+            gamma=0.99,
+            lam=0.95,
+            clip=0.2,
+            entropy_coef=0.01,
+            value_coef=0.5,
+            n_epochs=10,
+            device="cpu",
+            use_lstm=False,
+            lstm_hidden=128,
+            hist_len=32,
+        ):
+            self.gamma = gamma
+            self.lam = lam
+            self.clip = clip
+            self.ent_c = entropy_coef
+            self.val_c = value_coef
             self.n_epochs = n_epochs
             self.device = torch.device(device)
             self.use_lstm = bool(use_lstm)
             self.hist_len = int(hist_len)
-            self.net = ActorCritic(obs_size, n_actions, hidden,
-                                   use_lstm=self.use_lstm, lstm_hidden=lstm_hidden).to(self.device)
+            self.net = ActorCritic(obs_size, n_actions, hidden, use_lstm=self.use_lstm, lstm_hidden=lstm_hidden).to(
+                self.device
+            )
             self.opt = optim.Adam(self.net.parameters(), lr=lr)
             self.buffer = []
             self._hist = collections.deque(maxlen=self.hist_len)
@@ -497,20 +587,19 @@ if TORCH:
         def _preview_obs_seq(self, obs: np.ndarray) -> np.ndarray:
             """Sequence ending at ``obs`` without mutating history (for bootstrap)."""
             arr = np.asarray(obs, dtype=np.float32).copy()
-            seq = list(self._hist) + [arr]
+            seq = [*list(self._hist), arr]
             if len(seq) < self.hist_len:
                 seq = [seq[0]] * (self.hist_len - len(seq)) + seq
             return np.stack(seq[-self.hist_len :], axis=0)
 
-        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None,
-                          greedy: bool = False):
+        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None, greedy: bool = False):
             """Select an action from the policy.
 
             Parameters
             ----------
             obs    : current observation.
             mask   : optional boolean mask of allowed actions.
-            greedy : when True, returns the argmax-action — used by live
+            greedy : when True, returns the argmax-action - used by live
                      inference / deterministic eval. Default False = stochastic
                      (training exploration).
             """
@@ -527,7 +616,8 @@ if TORCH:
             return action.item(), log_prob.item(), value.item()
 
         def store(self, obs, action, reward, done, log_prob, value, mask=None):
-            if mask is None: mask = np.ones(self.net.actor.out_features, dtype=bool)
+            if mask is None:
+                mask = np.ones(self.net.actor.out_features, dtype=bool)
             if self.use_lstm:
                 self._hist.append(np.asarray(obs, dtype=np.float32).copy())
                 seq = self._make_hist_seq()
@@ -546,30 +636,32 @@ if TORCH:
                          value of the next observation so the advantage of the
                          last step isn't silently bootstrapped to 0 (A-M4).
             """
-            if len(self.buffer) < 64: return {}
-            obs_b, act_b, rew_b, done_b, lp_b, val_b, mask_b = zip(*self.buffer)
+            if len(self.buffer) < 64:
+                return {}
+            obs_b, act_b, rew_b, done_b, lp_b, val_b, mask_b = zip(*self.buffer, strict=False)
             self.buffer.clear()
 
             if self.use_lstm:
                 obs_t = torch.tensor(np.stack(obs_b, axis=0), dtype=torch.float32, device=self.device)
             else:
                 obs_t = torch.tensor(np.array(obs_b), dtype=torch.float32, device=self.device)
-            act_t  = torch.tensor(act_b,            dtype=torch.long,    device=self.device)
-            rew_t  = torch.tensor(rew_b,            dtype=torch.float32, device=self.device)
-            done_t = torch.tensor(done_b,           dtype=torch.float32, device=self.device)
-            old_lp = torch.tensor(lp_b,             dtype=torch.float32, device=self.device)
-            val_t  = torch.tensor(val_b,            dtype=torch.float32, device=self.device)
-            mask_t = torch.tensor(np.array(mask_b), dtype=torch.bool,    device=self.device)
+            act_t = torch.tensor(act_b, dtype=torch.long, device=self.device)
+            rew_t = torch.tensor(rew_b, dtype=torch.float32, device=self.device)
+            done_t = torch.tensor(done_b, dtype=torch.float32, device=self.device)
+            old_lp = torch.tensor(lp_b, dtype=torch.float32, device=self.device)
+            val_t = torch.tensor(val_b, dtype=torch.float32, device=self.device)
+            mask_t = torch.tensor(np.array(mask_b), dtype=torch.bool, device=self.device)
 
             # GAE advantage. The final transition bootstraps with `last_value`
             # (still gated by its done flag) instead of a hardcoded 0, which
             # previously truncated the value target whenever the rollout buffer
             # filled mid-episode (A-M4).
-            adv = torch.zeros_like(rew_t); gae = 0.0
+            adv = torch.zeros_like(rew_t)
+            gae = 0.0
             for t in reversed(range(len(rew_t))):
-                nv  = val_t[t+1] if t < len(rew_t)-1 else float(last_value)
+                nv = val_t[t + 1] if t < len(rew_t) - 1 else float(last_value)
                 delta = rew_t[t] + self.gamma * nv * (1 - done_t[t]) - val_t[t]
-                gae   = delta + self.gamma * self.lam * (1 - done_t[t]) * gae
+                gae = delta + self.gamma * self.lam * (1 - done_t[t]) * gae
                 adv[t] = gae
             returns = adv + val_t
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -577,33 +669,37 @@ if TORCH:
             total_loss = 0.0
             for _ in range(self.n_epochs):
                 lp_new, entropy, val_new = self.net.evaluate(obs_t, act_t, mask=mask_t)
-                ratio  = (lp_new - old_lp).exp()
+                ratio = (lp_new - old_lp).exp()
                 s1 = ratio * adv
                 s2 = ratio.clamp(1 - self.clip, 1 + self.clip) * adv
                 pol_loss = -torch.min(s1, s2).mean()
                 val_loss = F.mse_loss(val_new, returns)
                 loss = pol_loss + self.val_c * val_loss - self.ent_c * entropy.mean()
-                self.opt.zero_grad(); loss.backward()
+                self.opt.zero_grad()
+                loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.opt.step()
                 total_loss += loss.item()
 
             return {"loss": total_loss / self.n_epochs}
 
-
     # ── Deep Q-Network ────────────────────────────────────────────────────
 
     class DQNetwork(nn.Module):
         """Double DQN network."""
+
         def __init__(self, obs_size, n_actions=10, hidden=256):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(obs_size, hidden), nn.ReLU(),
-                nn.Linear(hidden,   hidden), nn.ReLU(),
-                nn.Linear(hidden,   n_actions),
+                nn.Linear(obs_size, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, n_actions),
             )
-        def forward(self, x): return self.net(x)
 
+        def forward(self, x):
+            return self.net(x)
 
     class ReplayBuffer:
         def __init__(self, capacity=1_000_000):
@@ -615,7 +711,7 @@ if TORCH:
             self._sample_calls = 0
             # Fix D: track push count to amortize O(N) weight rebuild cost.
             # Previously, _cached_weights=None on every push forced O(N) rebuild
-            # every sample() call — crushing DQN throughput with a 1M buffer.
+            # every sample() call - crushing DQN throughput with a 1M buffer.
             self._push_count = 0
             self._last_rebuild_push = 0
 
@@ -655,28 +751,46 @@ if TORCH:
             indices = np.random.choice(buf_len, size=min(n, buf_len), p=self._cached_weights, replace=True)
             return [self.buf[i] for i in indices]
 
-        def __len__(self):     return len(self.buf)
-
+        def __len__(self):
+            return len(self.buf)
 
     class DQNAgent:
         """
-        Double DQN agent — faster inference (~2ms) than PPO, ideal for TIP-Search
+        Double DQN agent - faster inference (~2ms) than PPO, ideal for TIP-Search
         fast model. Epsilon-greedy exploration decays over training.
         """
-        def __init__(self, obs_size, n_actions=10, hidden=256,
-                     lr=1e-4, gamma=0.99, eps_start=1.0, eps_end=0.01,
-                     eps_decay=0.995, buf_size=1_000_000, batch=64,
-                     target_update=100, double_dqn=True, device="cpu"):
-            self.n_actions = n_actions; self.gamma = gamma; self.batch = batch
-            self.double = double_dqn; self.target_update = target_update
-            self.eps = eps_start; self.eps_end = eps_end; self.eps_decay = eps_decay
+
+        def __init__(
+            self,
+            obs_size,
+            n_actions=10,
+            hidden=256,
+            lr=1e-4,
+            gamma=0.99,
+            eps_start=1.0,
+            eps_end=0.01,
+            eps_decay=0.995,
+            buf_size=1_000_000,
+            batch=64,
+            target_update=100,
+            double_dqn=True,
+            device="cpu",
+        ):
+            self.n_actions = n_actions
+            self.gamma = gamma
+            self.batch = batch
+            self.double = double_dqn
+            self.target_update = target_update
+            self.eps = eps_start
+            self.eps_end = eps_end
+            self.eps_decay = eps_decay
             self.device = torch.device(device)
             self.policy_net = DQNetwork(obs_size, n_actions, hidden).to(self.device)
             self.target_net = DQNetwork(obs_size, n_actions, hidden).to(self.device)
             self.target_net.load_state_dict(self.policy_net.state_dict())
-            self.opt    = optim.Adam(self.policy_net.parameters(), lr=lr)
-            self.buf    = ReplayBuffer(buf_size)
-            self.steps  = 0
+            self.opt = optim.Adam(self.policy_net.parameters(), lr=lr)
+            self.buf = ReplayBuffer(buf_size)
+            self.steps = 0
 
         def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None) -> int:
             if random.random() < self.eps:
@@ -702,16 +816,17 @@ if TORCH:
             self.eps = max(self.eps_end, self.eps * self.eps_decay)
 
         def update(self) -> dict:
-            if len(self.buf) < self.batch: return {}
+            if len(self.buf) < self.batch:
+                return {}
             batch = self.buf.sample(self.batch)
-            obs_b, act_b, rew_b, nobs_b, done_b = zip(*[t[:5] for t in batch])
+            obs_b, act_b, rew_b, nobs_b, done_b = zip(*[t[:5] for t in batch], strict=False)
             nmsk_b = [t[5] if len(t) > 5 else None for t in batch]
 
-            obs  = torch.tensor(np.array(obs_b),  dtype=torch.float32, device=self.device)
-            acts = torch.tensor(act_b,             dtype=torch.long,    device=self.device)
-            rews = torch.tensor(rew_b,             dtype=torch.float32, device=self.device)
-            nobs = torch.tensor(np.array(nobs_b),  dtype=torch.float32, device=self.device)
-            done = torch.tensor(done_b,             dtype=torch.float32, device=self.device)
+            obs = torch.tensor(np.array(obs_b), dtype=torch.float32, device=self.device)
+            acts = torch.tensor(act_b, dtype=torch.long, device=self.device)
+            rews = torch.tensor(rew_b, dtype=torch.float32, device=self.device)
+            nobs = torch.tensor(np.array(nobs_b), dtype=torch.float32, device=self.device)
+            done = torch.tensor(done_b, dtype=torch.float32, device=self.device)
 
             # TM-013: apply next-state action masks so the target network can
             # never bootstrap from an action that is invalid in that state.
@@ -720,7 +835,8 @@ if TORCH:
                 _ones = np.ones(self.n_actions, dtype=bool)
                 nmsk_t = torch.tensor(
                     np.array([m if m is not None else _ones for m in nmsk_b], dtype=bool),
-                    dtype=torch.bool, device=self.device,
+                    dtype=torch.bool,
+                    device=self.device,
                 )
 
             q_vals = self.policy_net(obs).gather(1, acts.unsqueeze(1)).squeeze(1)
@@ -730,19 +846,22 @@ if TORCH:
                     policy_nq = self.policy_net(nobs)
                     target_nq = self.target_net(nobs)
                     if has_masks:
-                        policy_nq = policy_nq.masked_fill(~nmsk_t, -1e9)
-                        target_nq = target_nq.masked_fill(~nmsk_t, -1e9)
+                        valid_mask = torch.as_tensor(nmsk_t, dtype=torch.bool, device=self.device)
+                        policy_nq = policy_nq.masked_fill(~valid_mask, -1e9)
+                        target_nq = target_nq.masked_fill(~valid_mask, -1e9)
                     best_acts = policy_nq.argmax(1)
                     next_q = target_nq.gather(1, best_acts.unsqueeze(1)).squeeze(1)
                 else:
                     next_q = self.target_net(nobs)
                     if has_masks:
-                        next_q = next_q.masked_fill(~nmsk_t, -1e9)
+                        valid_mask = torch.as_tensor(nmsk_t, dtype=torch.bool, device=self.device)
+                        next_q = next_q.masked_fill(~valid_mask, -1e9)
                     next_q = next_q.max(1)[0]
                 target = rews + self.gamma * next_q * (1 - done)
 
             loss = F.smooth_l1_loss(q_vals, target)
-            self.opt.zero_grad(); loss.backward()
+            self.opt.zero_grad()
+            loss.backward()
             nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
             self.opt.step()
 
@@ -753,23 +872,44 @@ if TORCH:
             return {"loss": loss.item(), "epsilon": self.eps}
 
 else:
-    class PPOAgent:
-        def __init__(self, **kw): pass
-        def select_action(self, obs): return 0
-        def store(self, *a): pass
-        def update(self, last_value: float = 0.0): return {}
 
-    class DQNAgent:
-        def __init__(self, **kw): pass
-        def select_action(self, obs, mask=None): return 0
-        def store(self, *a): pass
-        def decay_epsilon(self): pass
-        def update(self): return {}
+    class _FallbackPPOAgent:
+        def __init__(self, **kw):
+            pass
+
+        def select_action(self, obs):
+            return 0
+
+        def store(self, *a):
+            pass
+
+        def update(self, last_value: float = 0.0):
+            return {}
+
+    class _FallbackDQNAgent:
+        def __init__(self, **kw):
+            pass
+
+        def select_action(self, obs, mask=None):
+            return 0
+
+        def store(self, *a):
+            pass
+
+        def decay_epsilon(self):
+            pass
+
+        def update(self):
+            return {}
+
+    PPOAgent = cast(Any, _FallbackPPOAgent)
+    DQNAgent = cast(Any, _FallbackDQNAgent)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REWARD NORMALISATION
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class RunningRewardNormalizer:
     """Online reward normalisation via Welford's algorithm.
@@ -779,19 +919,19 @@ class RunningRewardNormalizer:
     """
 
     def __init__(self, decay: float = 0.999):
-        self.decay    = decay
-        self.mean     = 0.0
-        self.m2       = 0.0  # sum of squared diffs
-        self.count    = 1e-4
-        self._alpha   = 1.0 - decay
+        self.decay = decay
+        self.mean = 0.0
+        self.m2 = 0.0  # sum of squared diffs
+        self.count = 1e-4
+        self._alpha = 1.0 - decay
 
     def __call__(self, reward: float) -> float:
         self.count = self.decay * self.count + 1.0
-        delta      = reward - self.mean
+        delta = reward - self.mean
         self.mean += delta / self.count
-        delta2     = reward - self.mean
-        self.m2    = self.decay * self.m2 + delta * delta2
-        std        = (self.m2 / self.count) ** 0.5 + 1e-8
+        delta2 = reward - self.mean
+        self.m2 = self.decay * self.m2 + delta * delta2
+        std = (self.m2 / self.count) ** 0.5 + 1e-8
         # BUG-008: subtract mean for proper ~N(0,1) normalization
         return float(np.clip((reward - self.mean) / std, -5.0, 5.0))
 
@@ -801,11 +941,13 @@ class RunningRewardNormalizer:
 
 # ── Sharpe-reward wrapper adapter (bridges rl_advanced.SharpeRewardWrapper) ──
 
+
 class _SharpeRewardAdapter:
     """Wraps SharpeRewardWrapper for use inside train_agent()."""
 
     def __init__(self, window: int = 100, cost_penalty: float = 0.3, dd_penalty: float = 0.5):
         from models.rl_advanced import SharpeRewardWrapper as _SRW
+
         self._w = _SRW(window=window, cost_penalty=cost_penalty, dd_penalty=dd_penalty)
 
     def __call__(self, raw_pnl: float, tx_cost: float, equity: float) -> float:
@@ -821,6 +963,7 @@ class _SharpeRewardAdapter:
 # ─────────────────────────────────────────────────────────────────────────────
 # QUICK TRAINING LOOP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def evaluate_agent(
     agent,
@@ -852,7 +995,7 @@ def evaluate_agent(
 def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int) -> dict | None:
     """
     Diagnostic OPE (Improvement #5): re-estimate episode returns with IPS /
-    doubly-robust estimators. Uses a **uniform** target policy — this does
+    doubly-robust estimators. Uses a **uniform** target policy - this does
     **not** change the agent's training objective; results are logged on
     ``agent.off_policy_estimates`` for post-hoc evaluation only.
     """
@@ -863,8 +1006,9 @@ def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int
 
         if not hasattr(agent, "net") or not hasattr(agent.net, "actor"):
             return None
-        obs_t = _torch.tensor(np.asarray(obs_list, dtype=float), dtype=_torch.float32,
-                              device=getattr(agent, "device", "cpu"))
+        obs_t = _torch.tensor(
+            np.asarray(obs_list, dtype=float), dtype=_torch.float32, device=getattr(agent, "device", "cpu")
+        )
         with _torch.no_grad():
             h = agent.net.backbone(obs_t) if hasattr(agent.net, "backbone") else obs_t
             logits = agent.net.actor(h)
@@ -895,7 +1039,7 @@ def train_agent(
     n_episodes: int = 100,
     n_steps_ppo: int = 2048,
     agent_type: str = "ppo",
-    curriculum = None,
+    curriculum=None,
     reward_normalizer: Any | None = None,
     reward_sharpe: Any | None = None,
     her_buffer: Any | None = None,
@@ -905,10 +1049,10 @@ def train_agent(
 
     ``off_policy_rewards`` (Improvement #5): when enabled, per-episode
     IPS / doubly-robust estimates are logged on ``agent.off_policy_estimates``.
-    This is a **diagnostic OPE metric only** (uniform target policy) — it does
+    This is a **diagnostic OPE metric only** (uniform target policy) - it does
     not alter gradients or checkpoint selection.
 
-    ``her_buffer``: optional ``HERBuffer`` for DQN — stores transitions with
+    ``her_buffer``: optional ``HERBuffer`` for DQN - stores transitions with
     goal/achieved price and injects hindsight samples into the agent replay.
     """
     returns = []
@@ -922,7 +1066,8 @@ def train_agent(
             curriculum.log_phase(ep)
             valid_mask = curriculum.filter_bars(env.atr.reshape(-1, 1), atr_col_idx=0, avg_atr=avg_atr)
             valid_starts = np.where(valid_mask)[0]
-            if len(valid_starts) == 0: valid_starts = None
+            if len(valid_starts) == 0:
+                valid_starts = None
 
         obs = env.reset(valid_starts=valid_starts)
         ep_reward = 0.0
@@ -945,7 +1090,8 @@ def train_agent(
                     _op_act.append(int(action))
                     _op_rew.append(float(reward))
                 agent.store(obs, action, reward, done, log_prob, value, mask=mask)
-                ep_reward += reward; obs = next_obs
+                ep_reward += reward
+                obs = next_obs
                 if len(agent.buffer) >= n_steps_ppo:
                     if done:
                         last_value = 0.0
@@ -976,7 +1122,8 @@ def train_agent(
                     )
                 agent.store(obs, action, reward, next_obs, done, next_mask=env.action_mask())
                 agent.update()
-                ep_reward += reward; obs = next_obs
+                ep_reward += reward
+                obs = next_obs
 
         if her_buffer is not None and agent_type != "ppo":
             her_buffer.end_episode()
@@ -987,10 +1134,10 @@ def train_agent(
                 for tr in batch:
                     if not tr.get("info", {}).get("her"):
                         continue
-                    # Keep full obs (including goal dimensions) — truncating to
+                    # Keep full obs (including goal dimensions) - truncating to
                     # obs_dim strips the goal and injects conflicting Q-targets
                     # for identical states (HER requires a UVFA-style obs+goal input).
-                    o  = np.asarray(tr["obs"],      dtype=np.float32).reshape(-1)
+                    o = np.asarray(tr["obs"], dtype=np.float32).reshape(-1)
                     no = np.asarray(tr["next_obs"], dtype=np.float32).reshape(-1)
                     if o.shape[0] < obs_dim or no.shape[0] < obs_dim:
                         continue
@@ -1011,27 +1158,31 @@ def train_agent(
         returns.append(summary["total_return_pct"])
         if (ep + 1) % 10 == 0:
             avg = np.mean(returns[-10:])
-            print(f"  Ep {ep+1:3d}/{n_episodes} | "
-                  f"Return: {summary['total_return_pct']:+.2f}% | "
-                  f"Avg10: {avg:+.2f}% | Trades: {summary['n_trades']}")
+            print(
+                f"  Ep {ep + 1:3d}/{n_episodes} | "
+                f"Return: {summary['total_return_pct']:+.2f}% | "
+                f"Avg10: {avg:+.2f}% | Trades: {summary['n_trades']}"
+            )
 
     return returns
 
 
 if __name__ == "__main__":
     print("RL Agents smoke test (10-action ScalingAction space)")
-    import sys; sys.path.insert(0, "..")
+    import sys
+
+    sys.path.insert(0, "..")
     from data.data_ingestion import ForexDataPipeline, generate_synthetic_tick_data
     from features.feature_engineering import FeatureEngineer
 
     ticks = generate_synthetic_tick_data(n_rows=200_000)
-    bars  = ForexDataPipeline(bar_freq="5min", session_filter=False, apply_frac_diff=False).run(ticks)
-    fe    = FeatureEngineer()
+    bars = ForexDataPipeline(bar_freq="5min", session_filter=False, apply_frac_diff=False).run(ticks)
+    fe = FeatureEngineer()
     feats = fe.build(bars)
     bars_a = bars.reindex(feats.index).dropna()
 
-    prices  = bars_a["close"].values.astype(np.float32)
-    atr     = feats["atr_6"].values.astype(np.float32)
+    prices = bars_a["close"].values.astype(np.float32)
+    atr = feats["atr_6"].values.astype(np.float32)
     spreads = np.full(len(prices), 0.00005, dtype=np.float32)
     feat_arr = feats.values.astype(np.float32)
 

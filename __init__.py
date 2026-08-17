@@ -1,1 +1,1 @@
-# Forex Scaling Model — Package Init
+# Forex Scaling Model - Package Init

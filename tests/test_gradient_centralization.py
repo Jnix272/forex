@@ -1,4 +1,5 @@
 """Tests for shared Gradient Centralization helper."""
+
 from __future__ import annotations
 
 import torch

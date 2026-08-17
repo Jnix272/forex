@@ -95,7 +95,7 @@ def apply_inference_scaler(scaler: Any, x: np.ndarray) -> np.ndarray:
     """Apply the scaler to ``x`` (returns ``np.float32``), sanitising non-finite values.
 
     The training-time :class:`ZarrStreamDataset` worker applies the same three
-    steps in the same order — see :func:`training.gpu_datasets._decompress_block`:
+    steps in the same order - see :func:`training.gpu_datasets._decompress_block`:
 
     1. novel NaN/Inf cleanup → finite values within ±1e6,
     2. ``scaler.transform`` (when scaler is present),

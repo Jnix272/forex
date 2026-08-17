@@ -2,6 +2,7 @@
 Tests for training utilities: config validation, profile normalization,
 YAML mapping, and model resolution.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,37 +23,66 @@ from training.config_validate import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_args(**overrides) -> argparse.Namespace:
-    defaults = dict(
-        model="haelt", epochs=40, batch_size=212, lr=2.5e-5,
-        patience=7, lr_warmup_epochs=3, seq_len=60, loss="sharpe_huber",
-        pair="EURUSD", pairs=None, checkpoint_dir="checkpoints",
-        data_cache="data/processed", walk_forward_cv=False,
-        walk_forward_folds=5, all_models=False, models="",
-        resume=False, retrain_completed_models=False,
-        pretrain=True, pretrain_epochs=30, pretrain_method="byol",
-        pretrain_ablation="auto", pretrain_ablation_models="",
-        train_ensemble=False, rl_train=False, rl_episodes=500,
-        rl_all_models=False, model_profile=True, strategy_mode="scalping",
-        data_start="2008-01-01", data_end="2025-12-31",
-        quick_mode=False, pair_embed_dim=16, grad_accum_steps=4,
-        training_memory=False, drift_gate=False,
-        teacher_model=None, distill_weight=0, config="config/run.yaml",
-        curriculum=None, dry_tune=True, auto_tune=True,
-    )
+    defaults = {
+        "model": "haelt",
+        "epochs": 40,
+        "batch_size": 212,
+        "lr": 2.5e-5,
+        "patience": 7,
+        "lr_warmup_epochs": 3,
+        "seq_len": 60,
+        "loss": "sharpe_huber",
+        "pair": "EURUSD",
+        "pairs": None,
+        "checkpoint_dir": "checkpoints",
+        "data_cache": "data/processed",
+        "walk_forward_cv": False,
+        "walk_forward_folds": 5,
+        "all_models": False,
+        "models": "",
+        "resume": False,
+        "retrain_completed_models": False,
+        "pretrain": True,
+        "pretrain_epochs": 30,
+        "pretrain_method": "byol",
+        "pretrain_ablation": "auto",
+        "pretrain_ablation_models": "",
+        "train_ensemble": False,
+        "rl_train": False,
+        "rl_episodes": 500,
+        "rl_all_models": False,
+        "model_profile": True,
+        "strategy_mode": "scalping",
+        "data_start": "2008-01-01",
+        "data_end": "2025-12-31",
+        "quick_mode": False,
+        "pair_embed_dim": 16,
+        "grad_accum_steps": 4,
+        "training_memory": False,
+        "drift_gate": False,
+        "teacher_model": None,
+        "distill_weight": 0,
+        "config": "config/run.yaml",
+        "curriculum": None,
+        "dry_tune": True,
+        "auto_tune": True,
+    }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# 1. Config validation — error detection
+# 1. Config validation - error detection
 # ---------------------------------------------------------------------------
+
 
 class TestCollectConfigIssues:
     def test_valid_config_produces_no_errors(self):
         args = _make_args()
         models, skipped = resolve_models_to_train(args)
-        errors, warnings, info = collect_config_issues(args, models, skipped)
+        errors, _warnings, _info = collect_config_issues(args, models, skipped)
         assert len(errors) == 0, f"Unexpected errors: {errors}"
 
     def test_zero_epochs_produces_error(self):
@@ -127,6 +157,7 @@ class TestCollectConfigIssues:
 # 2. Model resolution
 # ---------------------------------------------------------------------------
 
+
 class TestResolveModelsToTrain:
     def test_single_model_default(self):
         args = _make_args(model="haelt", all_models=False)
@@ -154,13 +185,20 @@ class TestResolveModelsToTrain:
 # 3. Runtime estimation
 # ---------------------------------------------------------------------------
 
+
 class TestEstimateRunMinutes:
     def test_returns_expected_keys(self):
         args = _make_args()
         est = estimate_run_minutes(args, ["haelt"])
         expected = {
-            "pretrain_min", "supervised_min", "ablation_min",
-            "post_min", "total_min", "avg_sup_epochs", "folds", "n_models",
+            "pretrain_min",
+            "supervised_min",
+            "ablation_min",
+            "post_min",
+            "total_min",
+            "avg_sup_epochs",
+            "folds",
+            "n_models",
         }
         assert set(est.keys()) == expected
 
@@ -186,6 +224,7 @@ class TestEstimateRunMinutes:
 # ---------------------------------------------------------------------------
 # 4. Pretrain ablation model parsing
 # ---------------------------------------------------------------------------
+
 
 class TestParsePretrainAblationModels:
     def test_none_returns_defaults(self):
@@ -217,6 +256,7 @@ class TestParsePretrainAblationModels:
 # 5. Effective max seq_len
 # ---------------------------------------------------------------------------
 
+
 class TestEffectiveMaxSeqLen:
     def test_no_curriculum_returns_at_least_base(self):
         args = _make_args(seq_len=60, curriculum=None)
@@ -239,10 +279,12 @@ class TestEffectiveMaxSeqLen:
 # 6. Profile normalization
 # ---------------------------------------------------------------------------
 
+
 class TestNormalizeArchitectureProfile:
     @pytest.fixture(autouse=True)
     def _import(self):
         from training.train_gpu import _normalize_architecture_profile
+
         self.normalize = _normalize_architecture_profile
 
     def test_haelt_maps_lstm_hidden(self):
@@ -316,11 +358,13 @@ class TestNormalizeArchitectureProfile:
 # 7. YAML model config files parse and match Python profiles
 # ---------------------------------------------------------------------------
 
+
 class TestYamlModelConfigAlignment:
     @classmethod
     @pytest.fixture(scope="class")
     def yaml_configs(cls):
         import yaml
+
         configs = {}
         for p in Path("config/models").glob("*.yaml"):
             with p.open("r", encoding="utf-8") as f:
@@ -334,9 +378,7 @@ class TestYamlModelConfigAlignment:
             yaml_d = (yaml_configs[name].get("model") or {}).get("dropout")
             py_d = MODELS[name].get("dropout")
             if yaml_d is not None and py_d is not None:
-                assert abs(yaml_d - py_d) < 1e-6, (
-                    f"{name} dropout mismatch: YAML={yaml_d}, Python={py_d}"
-                )
+                assert abs(yaml_d - py_d) < 1e-6, f"{name} dropout mismatch: YAML={yaml_d}, Python={py_d}"
 
     def test_yaml_seq_len_matches_training(self, yaml_configs):
         for name in SUPPORTED_SUPERVISED:
@@ -345,6 +387,4 @@ class TestYamlModelConfigAlignment:
             yaml_seq = (yaml_configs[name].get("training") or {}).get("seq_len")
             py_seq = MODELS[name].get("seq_len")
             if yaml_seq is not None and py_seq is not None:
-                assert yaml_seq == py_seq, (
-                    f"{name} seq_len mismatch: YAML={yaml_seq}, Python={py_seq}"
-                )
+                assert yaml_seq == py_seq, f"{name} seq_len mismatch: YAML={yaml_seq}, Python={py_seq}"

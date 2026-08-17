@@ -169,16 +169,14 @@ def main() -> int:
     end = parse_date(args.end)
     if start < GDELT_DOC_START and args.source in {"gdelt", "free", "both"}:
         print(
-            f"[scraper] GDELT DOC 2.0 starts on {GDELT_DOC_START}; "
-            f"clamping start from {start} to {GDELT_DOC_START}.",
+            f"[scraper] GDELT DOC 2.0 starts on {GDELT_DOC_START}; clamping start from {start} to {GDELT_DOC_START}.",
             flush=True,
         )
         start = GDELT_DOC_START
 
     windows = iter_windows(start, end, args.window_days)
     print(
-        f"[scraper] {len(windows)} window(s), source={args.source}, "
-        f"pairs={','.join(args.pairs)}, out={args.news_out}",
+        f"[scraper] {len(windows)} window(s), source={args.source}, pairs={','.join(args.pairs)}, out={args.news_out}",
         flush=True,
     )
 
@@ -186,8 +184,7 @@ def main() -> int:
     for idx, window in enumerate(windows, start=1):
         cmd = build_download_command(args, window)
         print(
-            f"\n[scraper] window {idx}/{len(windows)}: "
-            f"{window.start} -> {window.end}",
+            f"\n[scraper] window {idx}/{len(windows)}: {window.start} -> {window.end}",
             flush=True,
         )
         if args.dry_run:
@@ -198,8 +195,7 @@ def main() -> int:
         if result.returncode != 0:
             failures += 1
             print(
-                f"[scraper] window failed with exit code {result.returncode}: "
-                f"{window.start} -> {window.end}",
+                f"[scraper] window failed with exit code {result.returncode}: {window.start} -> {window.end}",
                 flush=True,
             )
             if args.stop_on_failure:

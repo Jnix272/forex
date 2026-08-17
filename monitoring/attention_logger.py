@@ -4,6 +4,7 @@ monitoring/attention_logger.py
 Logs attention weights from transformer-based models during validation.
 Writes to logs/attention/<run_name>_ep<epoch>_attn.npz every N epochs.
 """
+
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,7 @@ import torch.nn as nn
 
 
 class AttentionLogger:
-    def __init__(self, run_name: str, log_dir: str = 'logs/attention', every_n_epochs: int = 5):
+    def __init__(self, run_name: str, log_dir: str = "logs/attention", every_n_epochs: int = 5):
         self.run_name = run_name
         self.log_dir = Path(log_dir)
         self.every_n_epochs = every_n_epochs
@@ -32,6 +33,7 @@ class AttentionLogger:
                         if name not in self._attn_weights:
                             self._attn_weights[name] = []
                         self._attn_weights[name].append(attn_weights.detach().cpu().numpy())
+
             return hook
 
         for name, module in model.named_modules():

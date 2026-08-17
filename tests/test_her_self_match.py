@@ -39,6 +39,7 @@ if str(_ROOT) not in sys.path:
 # Source-level checks
 # ---------------------------------------------------------------------------
 
+
 def test_her_future_strategy_uses_t_idx_plus_1():
     path = _ROOT / "models" / "rl_advanced.py"
     if not path.exists():
@@ -68,13 +69,13 @@ def test_her_future_strategy_does_not_use_inclusive_t_idx():
     code = "\n".join(code_lines)
     # The form `random.randint(t_idx, n - 1)` (with t_idx, not t_idx+1)
     # should not appear in the future-strategy branch. Match the exact
-    # pattern: `random.randint(t_idx,` — note the comma without +1.
+    # pattern: `random.randint(t_idx,` - note the comma without +1.
     import re
+
     bad_pattern = re.compile(r"random\.randint\(t_idx\s*,")
     matches = bad_pattern.findall(code)
     assert not matches, (
-        f"HER bug: `random.randint(t_idx, ...)` must not be in code "
-        f"(should use t_idx+1); matches={matches}"
+        f"HER bug: `random.randint(t_idx, ...)` must not be in code (should use t_idx+1); matches={matches}"
     )
 
 
@@ -99,14 +100,13 @@ def test_her_skips_relabel_for_last_transition():
     if not path.exists():
         pytest.skip("models/rl_advanced.py not found")
     src = path.read_text(encoding="utf-8")
-    assert "t_idx + 1 >= n" in src, (
-        "HER fix missing: should skip relabel when t_idx+1 >= n (no future)"
-    )
+    assert "t_idx + 1 >= n" in src, "HER fix missing: should skip relabel when t_idx+1 >= n (no future)"
 
 
 # ---------------------------------------------------------------------------
 # Behavioural tests (require numpy + the HERBuffer class)
 # ---------------------------------------------------------------------------
+
 
 def test_single_transition_episode_produces_no_her_relabels():
     """A 1-transition episode: ``t_idx == n-1 == 0``, t_idx+1=1 >= n=1 → skip.
@@ -130,9 +130,7 @@ def test_single_transition_episode_produces_no_her_relabels():
     her.end_episode()
     # After end_episode: should have 1 original + 0 HER entries for "future" strategy
     # (No future to sample from for the single transition)
-    assert len(her) == 1, (
-        f"Single-transition episode should produce 0 HER relabels, got {len(her)-1}"
-    )
+    assert len(her) == 1, f"Single-transition episode should produce 0 HER relabels, got {len(her) - 1}"
 
 
 def test_multi_transition_episode_has_no_self_match_relabels():
@@ -173,9 +171,7 @@ def test_multi_transition_episode_has_no_self_match_relabels():
     for t in her_items:
         goal = np.asarray(t["goal"])
         achieved = np.asarray(t["achieved"])
-        assert not np.array_equal(goal, achieved), (
-            f"HER self-match found: goal={goal}, achieved={achieved}"
-        )
+        assert not np.array_equal(goal, achieved), f"HER self-match found: goal={goal}, achieved={achieved}"
     # And we should have at LEAST 1 HER entry (else the future strategy is broken)
     assert len(her_items) > 0, "Expected at least some HER relabels for the 5-step episode"
 
@@ -198,15 +194,14 @@ def test_random_strategy_also_avoids_self_match():
     base_obs = np.array([1.0, 2.0], dtype=np.float32)
     for i in range(5):
         achieved = np.array([1.0 + i * 0.01], dtype=np.float32)
-        her.store_transition(base_obs.copy(), i % 3, 0.0, base_obs.copy(),
-                (i == 4), np.array([1.05], dtype=np.float32), achieved, {})
+        her.store_transition(
+            base_obs.copy(), i % 3, 0.0, base_obs.copy(), (i == 4), np.array([1.05], dtype=np.float32), achieved, {}
+        )
     her.end_episode()
     items = list(her._buffer)
     her_items = [t for t in items if t.get("info", {}).get("her")]
     for t in her_items:
-        assert not np.array_equal(t["goal"], t["achieved"]), (
-            "Random strategy HER relabel produced a self-match"
-        )
+        assert not np.array_equal(t["goal"], t["achieved"]), "Random strategy HER relabel produced a self-match"
 
 
 def test_two_step_episode_relabels_exist_and_are_distinct():
@@ -228,18 +223,19 @@ def test_two_step_episode_relabels_exist_and_are_distinct():
     base_obs = np.array([0.0], dtype=np.float32)
     ep0_ach = np.array([1.00], dtype=np.float32)
     ep1_ach = np.array([1.05], dtype=np.float32)
-    her.store_transition(base_obs.copy(), 0, 0.0, base_obs.copy(), False,
-            np.array([1.10], dtype=np.float32), ep0_ach, {})
-    her.store_transition(base_obs.copy(), 1, 0.0, base_obs.copy(), True,
-            np.array([1.10], dtype=np.float32), ep1_ach, {})
+    her.store_transition(
+        base_obs.copy(), 0, 0.0, base_obs.copy(), False, np.array([1.10], dtype=np.float32), ep0_ach, {}
+    )
+    her.store_transition(
+        base_obs.copy(), 1, 0.0, base_obs.copy(), True, np.array([1.10], dtype=np.float32), ep1_ach, {}
+    )
     her.end_episode()
     items = list(her._buffer)
     her_items = [t for t in items if t.get("info", {}).get("her")]
     # 2 originals, the first transition has 4 HER entries (all sampling ep[1]),
     # the last transition is now skipped (no future) → 4 HER total
     assert len(her_items) == 4, (
-        f"Expected 4 HER relabels for 2-step episode (4 from t_idx=0, 0 from "
-        f"last), got {len(her_items)}"
+        f"Expected 4 HER relabels for 2-step episode (4 from t_idx=0, 0 from last), got {len(her_items)}"
     )
     # All HER goals should be ep1_ach (the only allowed future transition)
     for t in her_items:

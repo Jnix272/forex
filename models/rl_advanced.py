@@ -2,10 +2,10 @@
 models/rl_advanced.py
 ======================
 RL enhancements:
-  1. MultiAgentCoordinator — one PPO/DQN agent per pair, shared market state
-  2. CurriculumScheduler   — graduated volatility regimes during training
-  3. SharpeRewardWrapper   — rolling Sharpe as primary reward signal
-  4. HERBuffer            — Hindsight Experience Replay for sparse rewards
+  1. MultiAgentCoordinator - one PPO/DQN agent per pair, shared market state
+  2. CurriculumScheduler   - graduated volatility regimes during training
+  3. SharpeRewardWrapper   - rolling Sharpe as primary reward signal
+  4. HERBuffer            - Hindsight Experience Replay for sparse rewards
 """
 
 import collections
@@ -22,6 +22,7 @@ warnings.filterwarnings("ignore")
 try:
     import torch
     import torch.nn as nn
+
     TORCH = True
 except ImportError:
     TORCH = False
@@ -30,6 +31,7 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. MULTI-AGENT COORDINATOR
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SharedMarketState(nn.Module if TORCH else object):
     """
@@ -76,17 +78,17 @@ class MultiAgentCoordinator:
 
     def __init__(
         self,
-        agents:      dict[str, Any],   # pair -> DQNAgent | PPOAgent
-        pairs:       list[str],
-        max_corr_exposure: float = 1.5, # Max sum of correlated lots
-        global_feat_dim:   int   = 20,
-        context_dim:       int   = 32,
-        device:      str   = "cpu",
+        agents: dict[str, Any],  # pair -> DQNAgent | PPOAgent
+        pairs: list[str],
+        max_corr_exposure: float = 1.5,  # Max sum of correlated lots
+        global_feat_dim: int = 20,
+        context_dim: int = 32,
+        device: str = "cpu",
     ):
-        self.agents   = agents
-        self.pairs    = pairs
+        self.agents = agents
+        self.pairs = pairs
         self.max_corr = max_corr_exposure
-        self.device   = device
+        self.device = device
 
         if TORCH:
             self.global_enc = SharedMarketState(global_feat_dim, context_dim)
@@ -94,7 +96,7 @@ class MultiAgentCoordinator:
 
         # Portfolio state
         self.positions: dict[str, float] = dict.fromkeys(pairs, 0.0)
-        self.equity     = 10_000.0
+        self.equity = 10_000.0
 
     def _corr_exposure(self, pair: str, direction: int) -> float:
         """
@@ -104,7 +106,8 @@ class MultiAgentCoordinator:
         """
         total = abs(self.positions.get(pair, 0.0))
         for (p1, p2), corr in self.PAIR_CORRELATIONS.items():
-            if corr < 0.6: continue
+            if corr < 0.6:
+                continue
             other = p2 if p1 == pair else (p1 if p2 == pair else None)
             if other:
                 other_pos = self.positions.get(other, 0.0)
@@ -125,9 +128,10 @@ class MultiAgentCoordinator:
         context = np.zeros(32)
         if TORCH and global_features is not None:
             with torch.no_grad():
-                gf = torch.tensor(global_features, dtype=torch.float32,
-                                   device=self.device).unsqueeze(0)
-                context = self.global_enc(gf).cpu().numpy().squeeze(0)  # remove batch dim only; .squeeze() collapses scalar
+                gf = torch.tensor(global_features, dtype=torch.float32, device=self.device).unsqueeze(0)
+                context = (
+                    self.global_enc(gf).cpu().numpy().squeeze(0)
+                )  # remove batch dim only; .squeeze() collapses scalar
 
         actions = {}
         for pair, agent in self.agents.items():
@@ -139,7 +143,7 @@ class MultiAgentCoordinator:
             else:
                 raw_action = ScalingAction.HOLD.value
 
-            # Portfolio-level risk gate — map 10-action space to direction.
+            # Portfolio-level risk gate - map 10-action space to direction.
             # Only actions that INCREASE net directional exposure are gated:
             #   OPEN_LONG(1)/OPEN_SHORT(2) open new positions;
             #   SCALE_IN(3-5) add to the current position (direction = sign(pos));
@@ -166,8 +170,8 @@ class MultiAgentCoordinator:
 
     def portfolio_summary(self) -> dict:
         return {
-            "positions":   dict(self.positions),
-            "total_lots":  sum(abs(v) for v in self.positions.values()),
+            "positions": dict(self.positions),
+            "total_lots": sum(abs(v) for v in self.positions.values()),
             "net_direction": np.sign(sum(self.positions.values())),
         }
 
@@ -176,29 +180,30 @@ class MultiAgentCoordinator:
 # 2. CURRICULUM SCHEDULER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class CurriculumScheduler:
     """
     Graduated training regime to help the RL agent learn without getting
     overwhelmed by extreme market conditions early in training.
 
     Curriculum:
-      Phase 1 (0–20%):  Low-vol periods only (ATR < 0.5× avg)
-      Phase 2 (20–50%): Normal vol periods (0.5–1.5× avg ATR)
+      Phase 1 (0–20%):  Low-vol periods only (ATR < 0.5x avg)
+      Phase 2 (20–50%): Normal vol periods (0.5–1.5x avg ATR)
       Phase 3 (50–80%): Include high-vol / news events
       Phase 4 (80–100%): Full data including regime breaks
 
     Returns episode episode_filter function for each phase.
-    """
+    """  # noqa: RUF002
 
     PHASES = [
-        {"name": "low_vol",    "progress": 0.20, "atr_max_mult": 0.7},
+        {"name": "low_vol", "progress": 0.20, "atr_max_mult": 0.7},
         {"name": "normal_vol", "progress": 0.50, "atr_max_mult": 1.5},
-        {"name": "high_vol",   "progress": 0.80, "atr_max_mult": 3.0},
-        {"name": "full",       "progress": 1.00, "atr_max_mult": np.inf},
+        {"name": "high_vol", "progress": 0.80, "atr_max_mult": 3.0},
+        {"name": "full", "progress": 1.00, "atr_max_mult": np.inf},
     ]
 
     def __init__(self, total_episodes: int):
-        self.total   = total_episodes
+        self.total = total_episodes
         self.current = 0
 
     def step(self):
@@ -221,10 +226,10 @@ class CurriculumScheduler:
 
     def filter_bars(
         self,
-        features:    np.ndarray,    # (n_bars, n_features)
-        atr_col_idx: int = 0,       # Index of the ATR column in features
-        avg_atr:     float = 0.0,   # Expected to be in the SAME unit as features[:,atr_col_idx]
-                                    # (raw pips/price, NOT Z-scored). Pass 0.0 to auto-compute.
+        features: np.ndarray,  # (n_bars, n_features)
+        atr_col_idx: int = 0,  # Index of the ATR column in features
+        avg_atr: float = 0.0,  # Expected to be in the SAME unit as features[:,atr_col_idx]
+        # (raw pips/price, NOT Z-scored). Pass 0.0 to auto-compute.
     ) -> np.ndarray:
         """
         Returns boolean mask of bars allowed in current curriculum phase.
@@ -251,14 +256,17 @@ class CurriculumScheduler:
     def log_phase(self, episode: int):
         phase = self.current_phase
         if episode % 50 == 0:
-            print(f"[Curriculum] Ep {episode:4d} | Phase: {phase['name']:12s} | "
-                  f"Progress: {self.progress:.1%} | "
-                  f"Difficulty: {self.get_difficulty_multiplier():.2f}")
+            print(
+                f"[Curriculum] Ep {episode:4d} | Phase: {phase['name']:12s} | "
+                f"Progress: {self.progress:.1%} | "
+                f"Difficulty: {self.get_difficulty_multiplier():.2f}"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. SHARPE REWARD WRAPPER
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SharpeRewardWrapper:
     """
@@ -275,35 +283,35 @@ class SharpeRewardWrapper:
       - Penalizes high-variance strategies automatically
       - Self-normalizing: doesn't require reward scaling
       - Aligns training objective with live performance metric
-    """
+    """  # noqa: RUF002
 
     def __init__(
         self,
-        window:       int   = 100,
-        risk_free:    float = 0.05 / 252,   # Daily risk-free rate
-        annualize:    float = np.sqrt(252),
+        window: int = 100,
+        risk_free: float = 0.05 / 252,  # Daily risk-free rate
+        annualize: float = np.sqrt(252),
         cost_penalty: float = 0.3,
-        dd_penalty:   float = 0.5,
+        dd_penalty: float = 0.5,
     ):
-        self.window      = window
-        self.rf          = risk_free
-        self.ann         = annualize
-        self.cost_pen    = cost_penalty
-        self.dd_pen      = dd_penalty
-        self._returns:   collections.deque = collections.deque(maxlen=window)
-        self._peak_eq    = 1.0
-        self._equity     = 1.0
+        self.window = window
+        self.rf = risk_free
+        self.ann = annualize
+        self.cost_pen = cost_penalty
+        self.dd_pen = dd_penalty
+        self._returns: collections.deque = collections.deque(maxlen=window)
+        self._peak_eq = 1.0
+        self._equity = 1.0
 
     def reset(self):
         self._returns.clear()
         self._peak_eq = 1.0
-        self._equity  = 1.0
+        self._equity = 1.0
 
     def compute(
         self,
-        raw_pnl:  float,
-        tx_cost:  float = 0.0,
-        equity:   float = 1.0,
+        raw_pnl: float,
+        tx_cost: float = 0.0,
+        equity: float = 1.0,
     ) -> float:
         """
         Compute Sharpe-based reward for one step.
@@ -322,13 +330,13 @@ class SharpeRewardWrapper:
             return 0.0
 
         ret_arr = np.array(self._returns)
-        mu      = ret_arr.mean()
-        sigma   = ret_arr.std() + 1e-9
-        sharpe  = (mu - self.rf) / sigma * self.ann
+        mu = ret_arr.mean()
+        sigma = ret_arr.std() + 1e-9
+        sharpe = (mu - self.rf) / sigma * self.ann
 
         # Drawdown penalty
-        dd      = max(0.0, (self._peak_eq - equity) / self._peak_eq)
-        dd_pen  = self.dd_pen * dd
+        dd = max(0.0, (self._peak_eq - equity) / self._peak_eq)
+        dd_pen = self.dd_pen * dd
 
         # Transaction cost penalty (discourages overtrading)
         cost_pen = self.cost_pen * abs(tx_cost)
@@ -345,6 +353,7 @@ class SharpeRewardWrapper:
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. HINDSIGHT EXPERIENCE REPLAY (HER)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class HERBuffer:
     """
@@ -365,41 +374,50 @@ class HERBuffer:
 
     def __init__(
         self,
-        capacity:    int   = 100_000,
-        k:           int   = 4,        # HER relabeling ratio
-        goal_dim:    int   = 1,        # Dimension of goal (target price)
-        strategy:    str   = "future", # "future" | "episode" | "random"
+        capacity: int = 100_000,
+        k: int = 4,  # HER relabeling ratio
+        goal_dim: int = 1,  # Dimension of goal (target price)
+        strategy: str = "future",  # "future" | "episode" | "random"
     ):
         self.capacity = capacity
-        self.k        = k
+        self.k = k
         self.goal_dim = goal_dim
         self.strategy = strategy
 
         # Episode buffer (cleared after each episode)
         self._episode: list[dict] = []
         # Replay buffer (persistent)
-        self._buffer:  collections.deque = collections.deque(maxlen=capacity)
+        self._buffer: collections.deque = collections.deque(maxlen=capacity)
         # Cached list view of the deque for sampling; rebuilt only after the
         # buffer composition changes (end_episode), not on every sample().
         self._cache: list | None = None
 
     def store_transition(
         self,
-        obs:      np.ndarray,
-        action:   int,
-        reward:   float,
+        obs: np.ndarray,
+        action: int,
+        reward: float,
         next_obs: np.ndarray,
-        done:     bool,
-        goal:     np.ndarray,   # Intended target (e.g. entry + ATR × 1.5)
-        achieved: np.ndarray,   # Actually achieved (e.g. exit price)
-        info:     dict = {},
+        done: bool,
+        goal: np.ndarray,  # Intended target (e.g. entry + ATR x 1.5)
+        achieved: np.ndarray,  # Actually achieved (e.g. exit price)
+        info: dict | None = None,
     ):
         """Store one transition in the episode buffer."""
-        self._episode.append({
-            "obs": obs, "action": action, "reward": reward,
-            "next_obs": next_obs, "done": done,
-            "goal": goal, "achieved": achieved, "info": info,
-        })
+        if info is None:
+            info = {}
+        self._episode.append(
+            {
+                "obs": obs,
+                "action": action,
+                "reward": reward,
+                "next_obs": next_obs,
+                "done": done,
+                "goal": goal,
+                "achieved": achieved,
+                "info": info,
+            }
+        )
 
     def _hindsight_reward(self, achieved: np.ndarray, goal: np.ndarray) -> float:
         """
@@ -408,7 +426,7 @@ class HERBuffer:
         For forex: 1.0 if exit price matches relabeled target.
         """
         dist = float(np.linalg.norm(achieved - goal))
-        return 1.0 if dist < 0.0002 else -0.1   # ~2 pip tolerance
+        return 1.0 if dist < 0.0002 else -0.1  # ~2 pip tolerance
 
     def end_episode(self):
         """
@@ -428,7 +446,7 @@ class HERBuffer:
             for _ in range(self.k):
                 # Pick a future achieved state as the hindsight goal.
                 # RA2 fix (2026-08-07, audit finding RA2): the "future" strategy
-                # previously used `random.randint(t_idx, n - 1)` — INCLUSIVE of
+                # previously used `random.randint(t_idx, n - 1)` - INCLUSIVE of
                 # `t_idx` itself. When `t_idx == future_idx` (a 1/n chance per
                 # sample on average, but ALWAYS the case for the final
                 # transition t_idx == n-1 since both endpoints coincide), the
@@ -438,11 +456,11 @@ class HERBuffer:
                 # positive reward for "free" without actually achieving a goal.
                 # Classic HER samples `t_idx+1 .. n-1` precisely to avoid this.
                 # For t_idx == n-1 (last transition), there are no future
-                # states to sample from — we SKIP the HER relabel for that
+                # states to sample from - we SKIP the HER relabel for that
                 # transition rather than polluting the buffer with self-matches.
                 if self.strategy == "future":
                     if t_idx + 1 >= n:
-                        # No future transitions in this episode — skip HER
+                        # No future transitions in this episode - skip HER
                         # relabel for this transition rather than self-match.
                         break
                     future_idx = random.randint(t_idx + 1, n - 1)
@@ -450,7 +468,7 @@ class HERBuffer:
                     # "episode" strategy still samples any of 0..n-1 (the
                     # whole episode, including past + future of t_idx). This
                     # is explicitly HER "episode" mode and is by-design a
-                    # potential self-match source — callers should prefer
+                    # potential self-match source - callers should prefer
                     # "future" mode for sparse-reward DQN.
                     future_idx = random.randint(0, n - 1)
                     # Avoid the self-match: if we accidentally draw t_idx,
@@ -464,7 +482,7 @@ class HERBuffer:
                     if future_idx == t_idx:
                         future_idx = (t_idx + 1) % n  # deterministically skip self
 
-                her_goal     = ep[future_idx]["achieved"]
+                her_goal = ep[future_idx]["achieved"]
 
                 # If the chosen "future achieved" coincides with the current
                 # achieved (e.g. price didn't move between t_idx and future_idx),
@@ -472,19 +490,21 @@ class HERBuffer:
                 if np.array_equal(her_goal, transition["achieved"]):
                     continue
 
-                her_reward   = self._hindsight_reward(transition["achieved"], her_goal)
-                her_done     = future_idx == n - 1
+                her_reward = self._hindsight_reward(transition["achieved"], her_goal)
+                her_done = future_idx == n - 1
 
-                self._buffer.append({
-                    "obs":      np.concatenate([transition["obs"], her_goal]),
-                    "action":   transition["action"],
-                    "reward":   her_reward,
-                    "next_obs": np.concatenate([transition["next_obs"], her_goal]),
-                    "done":     her_done,
-                    "goal":     her_goal,
-                    "achieved": transition["achieved"],
-                    "info":     {"her": True},
-                })
+                self._buffer.append(
+                    {
+                        "obs": np.concatenate([transition["obs"], her_goal]),
+                        "action": transition["action"],
+                        "reward": her_reward,
+                        "next_obs": np.concatenate([transition["next_obs"], her_goal]),
+                        "done": her_done,
+                        "goal": her_goal,
+                        "achieved": transition["achieved"],
+                        "info": {"her": True},
+                    }
+                )
 
         self._episode.clear()
         self._cache = None
@@ -511,7 +531,7 @@ class HERBuffer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("RL Advanced — smoke tests")
+    print("RL Advanced - smoke tests")
     print("=" * 50)
 
     # Curriculum
@@ -523,7 +543,7 @@ if __name__ == "__main__":
 
     # Sharpe reward
     sr = SharpeRewardWrapper(window=20)
-    for i in range(25):
+    for i in range(25):  # noqa: B007
         r = sr.compute(raw_pnl=np.random.normal(0.001, 0.003), tx_cost=0.0001)
     print(f"\n  Sharpe reward (final): {r:.4f}")
     print(f"  Rolling Sharpe: {sr.rolling_sharpe():.3f}")
@@ -532,24 +552,31 @@ if __name__ == "__main__":
     her = HERBuffer(capacity=1000, k=4)
     for i in range(10):
         her.store_transition(
-            obs=np.zeros(10), action=0, reward=-0.5,
-            next_obs=np.zeros(10), done=(i==9),
-            goal=np.array([1.0870]), achieved=np.array([1.0845])
+            obs=np.zeros(10),
+            action=0,
+            reward=-0.5,
+            next_obs=np.zeros(10),
+            done=(i == 9),
+            goal=np.array([1.0870]),
+            achieved=np.array([1.0845]),
         )
     her.end_episode()
     print(f"\n  HER buffer size: {len(her)}")
     print(f"  HER ratio: {her.her_ratio:.1%}")
     batch = her.sample(8)
-    her_count = sum(1 for t in batch if t.get("info",{}).get("her",False))
+    her_count = sum(1 for t in batch if t.get("info", {}).get("her", False))
     print(f"  HER in batch of 8: {her_count} relabeled")
 
     # Multi-agent
     print("\n  Multi-agent coordinator test:")
+
     class DummyAgent:
-        def select_action(self, obs): return 1
+        def select_action(self, obs):
+            return 1
+
     agents = {"EURUSD": DummyAgent(), "GBPUSD": DummyAgent()}
-    coord  = MultiAgentCoordinator(agents, ["EURUSD","GBPUSD"])
-    obs    = {"EURUSD": np.zeros(10), "GBPUSD": np.zeros(10)}
+    coord = MultiAgentCoordinator(agents, ["EURUSD", "GBPUSD"])
+    obs = {"EURUSD": np.zeros(10), "GBPUSD": np.zeros(10)}
     actions = coord.select_actions(obs)
     print(f"  Actions: {actions}")
     print(f"  Portfolio: {coord.portfolio_summary()}")

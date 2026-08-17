@@ -2,6 +2,7 @@
 Tests for evaluation.monte_carlo (Improvement #3):
 block bootstrap, stationary bootstrap, PathMonteCarlo, TradeSequenceMonteCarlo.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -22,6 +23,7 @@ from evaluation.monte_carlo import (
 # ═════════════════════════════════════════════════════════════════════════════
 # Fixtures
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @pytest.fixture
 def returns():
@@ -44,6 +46,7 @@ def trades():
 # ═════════════════════════════════════════════════════════════════════════════
 # Resampling primitives
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_block_bootstrap_indices_shape_and_contiguity():
     idx = block_bootstrap_indices(n=100, block_length=10, n_bootstraps=50, seed=7)
@@ -100,6 +103,7 @@ def test_stationary_bootstrap_validation():
 # Polars-native bootstrap
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_pl_block_bootstrap(pytestconfig):
     pl = pytest.importorskip("polars")
     s = pl.Series("ret", np.arange(50.0))
@@ -113,6 +117,7 @@ def test_pl_block_bootstrap(pytestconfig):
 # ═════════════════════════════════════════════════════════════════════════════
 # summarize_simulation
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_summarize_simulation_bounds(returns):
     sim = PathMonteCarlo(n_simulations=50, seed=1)
@@ -132,6 +137,7 @@ def test_summarize_simulation_empty():
 # ═════════════════════════════════════════════════════════════════════════════
 # PathMonteCarlo
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_path_mc_default_buy_and_hold(pos_trend_returns):
     sim = PathMonteCarlo(n_simulations=100, seed=1)
@@ -153,9 +159,7 @@ def test_path_mc_strategy_shape_mismatch(returns):
 
 
 def test_path_mc_stationary_variant(pos_trend_returns):
-    sim = PathMonteCarlo(
-        n_simulations=50, bootstrap="stationary", block_length=10, seed=2
-    )
+    sim = PathMonteCarlo(n_simulations=50, bootstrap="stationary", block_length=10, seed=2)
     res = sim.run(pos_trend_returns)
     assert res["method"] == "path_stationary_bootstrap"
 
@@ -184,6 +188,7 @@ def test_monte_carlo_backtest_convenience(pos_trend_returns):
 # TradeSequenceMonteCarlo
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_trade_sequence_mc_runs(returns, trades):
     sim = TradeSequenceMonteCarlo(n_simulations=50, seed=1)
     res = sim.run(returns, trades)
@@ -193,9 +198,7 @@ def test_trade_sequence_mc_runs(returns, trades):
 
 
 def test_trade_sequence_mc_stationary(returns, trades):
-    sim = TradeSequenceMonteCarlo(
-        n_simulations=30, bootstrap="stationary", block_length=5, seed=2
-    )
+    sim = TradeSequenceMonteCarlo(n_simulations=30, bootstrap="stationary", block_length=5, seed=2)
     res = sim.run(returns, trades)
     assert res["method"] == "trade_sequence_stationary_bootstrap"
 
@@ -227,15 +230,31 @@ def test_trade_sequence_mc_from_pnls(returns):
 # legacy MonteCarloBacktest result schemas so existing callers keep working.
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_improvements_legacy_run_keys():
     from backtesting.improvements import MonteCarloBacktest
+
     pnls = np.random.default_rng(1).normal(50.0, 80.0, 40)
     mc = MonteCarloBacktest(n_simulations=50, random_seed=7)
     res = mc.run(pnls, annual_factor=252)
-    for key in ["n_trades", "n_simulations", "original_sharpe", "original_max_dd",
-                "sharpe_5th", "sharpe_median", "sharpe_95th", "sharpe_percentile",
-                "max_dd_5th", "max_dd_median", "max_dd_95th", "prob_sharpe_above_1",
-                "prob_sharpe_above_0", "robust", "method", "warning"]:
+    for key in [
+        "n_trades",
+        "n_simulations",
+        "original_sharpe",
+        "original_max_dd",
+        "sharpe_5th",
+        "sharpe_median",
+        "sharpe_95th",
+        "sharpe_percentile",
+        "max_dd_5th",
+        "max_dd_median",
+        "max_dd_95th",
+        "prob_sharpe_above_1",
+        "prob_sharpe_above_0",
+        "robust",
+        "method",
+        "warning",
+    ]:
         assert key in res
     assert res["n_trades"] == 40
     assert res["method"] == "bootstrap_with_replacement"
@@ -243,6 +262,7 @@ def test_improvements_legacy_run_keys():
 
 def test_improvements_legacy_empty_result():
     from backtesting.improvements import MonteCarloBacktest
+
     mc = MonteCarloBacktest(n_simulations=10, random_seed=7)
     res = mc.run(np.array([10.0]))
     assert res["robust"] is False
@@ -263,13 +283,23 @@ def test_improvements_legacy_run_from_backtest():
 
 def test_pipeline_legacy_run_schemas():
     from monitoring.pipeline import MonteCarloBacktest
+
     rets = np.random.default_rng(3).normal(0.0005, 0.005, 200)
     mc = MonteCarloBacktest(n_simulations=40, seed=7)
     for method in ("shuffle", "bootstrap"):
         res = mc.run(rets, method=method)
-        for key in ["method", "n_simulations", "sharpe_mean", "sharpe_ci",
-                    "drawdown_mean", "drawdown_ci", "total_return_mean",
-                    "total_return_ci", "pct_positive_sharpe", "confidence"]:
+        for key in [
+            "method",
+            "n_simulations",
+            "sharpe_mean",
+            "sharpe_ci",
+            "drawdown_mean",
+            "drawdown_ci",
+            "total_return_mean",
+            "total_return_ci",
+            "pct_positive_sharpe",
+            "confidence",
+        ]:
             assert key in res
         assert res["method"] == method
         assert res["n_simulations"] == 40

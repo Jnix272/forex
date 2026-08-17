@@ -19,7 +19,7 @@ class FeatureSchemaEnforcer:
     def generate_hash(self, ordered_features: list[str]) -> str:
         """Generates a strict SHA-256 hash of the feature names."""
         feature_string = ",".join(ordered_features)
-        return hashlib.sha256(feature_string.encode('utf-8')).hexdigest()
+        return hashlib.sha256(feature_string.encode("utf-8")).hexdigest()
 
     def export_schema(self, ordered_features: list[str], filename: str = "production_schema.json"):
         """Exports the exact ordered list of features and its hash."""
@@ -28,7 +28,7 @@ class FeatureSchemaEnforcer:
         schema_data = {
             "schema_hash": schema_hash,
             "feature_count": len(ordered_features),
-            "ordered_features": ordered_features
+            "ordered_features": ordered_features,
         }
 
         self.output_dir.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,15 @@
 """
-drift/data_drift.py — Data drift detection (Improvement #4)
+drift/data_drift.py - Data drift detection (Improvement #4)
 
 Multi-signal drift detection pipeline:
 
-  * Feature distribution drift — KS test / Wasserstein distance + PSI (reusing
+  * Feature distribution drift - KS test / Wasserstein distance + PSI (reusing
     the PSI helper from features.feature_quality_monitor where available).
-  * SHAP-based feature-attribution drift — compare train-time SHAP importances
+  * SHAP-based feature-attribution drift - compare train-time SHAP importances
     vs live importances; flag features whose relative importance shifts.
-  * Concept drift detectors — ADWIN, Page-Hinkley, DDM/EDDM on model error
+  * Concept drift detectors - ADWIN, Page-Hinkley, DDM/EDDM on model error
     with a streaming drift score.
-  * Adversarial validation — train a classifier to distinguish train vs live
+  * Adversarial validation - train a classifier to distinguish train vs live
     samples; AUC above threshold ⇒ drift alert.
 
 Emits structured drift events consumable by monitoring.alerting.
@@ -26,6 +26,7 @@ import numpy as np
 
 try:
     from scipy import stats as _sp_stats
+
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
@@ -39,13 +40,14 @@ def _psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
     """Population Stability Index between two 1-D arrays."""
     try:
         from features.feature_quality_monitor import _safe_psi
-        return float(_safe_psi(np.asarray(expected, dtype=np.float64),
-                               np.asarray(actual, dtype=np.float64), bins))
+
+        return float(_safe_psi(np.asarray(expected, dtype=np.float64), np.asarray(actual, dtype=np.float64), bins))
     except Exception:
         pass
     e = np.asarray(expected, dtype=np.float64)
     a = np.asarray(actual, dtype=np.float64)
-    e = e[np.isfinite(e)]; a = a[np.isfinite(a)]
+    e = e[np.isfinite(e)]
+    a = a[np.isfinite(a)]
     if e.size == 0 or a.size == 0:
         return 0.0
     lo, hi = float(np.quantile(np.concatenate([e, a]), 0.01)), float(np.quantile(np.concatenate([e, a]), 0.99))
@@ -60,7 +62,8 @@ def _psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
 def _wasserstein(a: np.ndarray, b: np.ndarray) -> float:
     if _HAS_SCIPY:
         return float(_sp_stats.wasserstein_distance(np.asarray(a), np.asarray(b)))
-    a = np.sort(np.asarray(a, dtype=np.float64)); b = np.sort(np.asarray(b, dtype=np.float64))
+    a = np.sort(np.asarray(a, dtype=np.float64))
+    b = np.sort(np.asarray(b, dtype=np.float64))
     n = min(a.size, b.size)
     return float(np.mean(np.abs(a[:n] - b[:n]))) if n else 0.0
 
@@ -69,7 +72,8 @@ def _ks(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     if _HAS_SCIPY:
         stat, p = _sp_stats.ks_2samp(np.asarray(a), np.asarray(b))
         return float(stat), float(p)
-    a = np.asarray(a, dtype=np.float64); b = np.asarray(b, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
     all_vals = np.unique(np.concatenate([a, b]))
     if all_vals.size == 0:
         return 0.0, 1.0
@@ -81,6 +85,7 @@ def _ks(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
 # ═════════════════════════════════════════════════════════════════════════════
 # Feature distribution drift
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class FeatureDriftResult:
@@ -115,7 +120,8 @@ def check_feature_distribution_drift(
     for name in reference:
         ref = np.asarray(reference[name], dtype=np.float64)
         lv = np.asarray(live.get(name, np.array([])), dtype=np.float64)
-        ref = ref[np.isfinite(ref)]; lv = lv[np.isfinite(lv)]
+        ref = ref[np.isfinite(ref)]
+        lv = lv[np.isfinite(lv)]
         if ref.size < 5 or lv.size < 5:
             continue
         psi = _psi(ref, lv)
@@ -136,6 +142,7 @@ def check_feature_distribution_drift(
 # ═════════════════════════════════════════════════════════════════════════════
 # SHAP-attribution drift
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class ShapDriftResult:
@@ -187,6 +194,7 @@ def check_shap_attribution_drift(
 # Concept-drift streaming detectors
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class ADWIN:
     """ADWIN (Adaptive Windowing, Bifet & Gavaldà) on streaming errors."""
 
@@ -203,11 +211,12 @@ class ADWIN:
             return False
         self._changed = False
         n = len(self._values)
-        total_mean = float(np.mean(self._values))
+        float(np.mean(self._values))
         eps = math_cutoff(self.delta, n)
         # two-window split test
         for cut in range(max(1, n // 10), n):
-            left = self._values[:cut]; right = self._values[cut:]
+            left = self._values[:cut]
+            right = self._values[cut:]
             if len(left) < 5 or len(right) < 5:
                 continue
             diff = abs(float(np.mean(left)) - float(np.mean(right)))
@@ -310,7 +319,7 @@ class EDDM:
             self._last_error_dist = 0
             # EWMA of error distance
             self._mean_dist += (dist - self._mean_dist) / max(self._n, 1)
-            self._std_dist = math.sqrt(max(self._std_dist ** 2 + (dist - self._mean_dist) ** 2 / max(self._n, 1), 0.0))
+            self._std_dist = math.sqrt(max(self._std_dist**2 + (dist - self._mean_dist) ** 2 / max(self._n, 1), 0.0))
             if self._mean_dist + self._std_dist > self._max_dist:
                 self._max_dist = self._mean_dist + self._std_dist
         if self._n < self.min_instances:
@@ -335,8 +344,13 @@ class StreamingDriftEvent:
     ts: str = field(default_factory=_now_iso)
 
     def to_event(self) -> dict:
-        return {"type": "concept_drift", "detector": self.detector,
-                "state": self.state, "value": round(self.value, 6), "ts": self.ts}
+        return {
+            "type": "concept_drift",
+            "detector": self.detector,
+            "state": self.state,
+            "value": round(self.value, 6),
+            "ts": self.ts,
+        }
 
 
 class ConceptDriftTracker:
@@ -381,7 +395,7 @@ class ConceptDriftTracker:
         for det in (self.adwin, self.pht, self.ddm, self.eddm):
             if det is None:
                 continue
-            if isinstance(det, ADWIN) or isinstance(det, PageHinkley):
+            if isinstance(det, (ADWIN, PageHinkley)):
                 states.append(1.0 if det._changed else 0.0)
             elif isinstance(det, DDM):
                 states.append(1.0 if det.state == "drift" else 0.0)
@@ -397,6 +411,7 @@ class ConceptDriftTracker:
 # Adversarial validation
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def adversarial_validation(
     train: np.ndarray,
     live: np.ndarray,
@@ -411,6 +426,7 @@ def adversarial_validation(
     (exact AUC computed from ranked predictions)."""
     try:
         from sklearn.ensemble import RandomForestClassifier
+
         _HAS_SKLEARN = True
     except Exception:
         _HAS_SKLEARN = False
@@ -422,8 +438,14 @@ def adversarial_validation(
     if live.ndim == 1:
         live = live.reshape(-1, 1)
     if train.shape[0] < 10 or live.shape[0] < 10:
-        return {"auc": 0.5, "drift": False, "n_train": train.shape[0], "n_live": live.shape[0],
-                "method": "insufficient_data", "events": []}
+        return {
+            "auc": 0.5,
+            "drift": False,
+            "n_train": train.shape[0],
+            "n_live": live.shape[0],
+            "method": "insufficient_data",
+            "events": [],
+        }
 
     # align feature dims
     nf = min(train.shape[1], live.shape[1])
@@ -434,6 +456,7 @@ def adversarial_validation(
         clf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=0)
         from sklearn.metrics import roc_auc_score
         from sklearn.model_selection import cross_val_predict
+
         try:
             pred = cross_val_predict(clf, X, y, cv=5, method="predict_proba")[:, 1]
             auc = float(roc_auc_score(y, pred))
@@ -452,12 +475,14 @@ def adversarial_validation(
         "n_live": len(live),
         "method": "random_forest" if _HAS_SKLEARN else "histogram",
         "auc_threshold": auc_threshold,
-        "events": [{
-            "type": "adversarial_drift",
-            "auc": round(auc, 4),
-            "drift": drift,
-            "auc_threshold": auc_threshold,
-        }],
+        "events": [
+            {
+                "type": "adversarial_drift",
+                "auc": round(auc, 4),
+                "drift": drift,
+                "auc_threshold": auc_threshold,
+            }
+        ],
     }
 
 
@@ -466,7 +491,8 @@ def _rank_auc(y: np.ndarray, score: np.ndarray) -> float:
     order = np.argsort(-score, kind="mergesort")
     ranks = np.empty(len(y), dtype=np.float64)
     ranks[order] = np.arange(1, len(y) + 1)
-    n1 = int(y.sum()); n0 = int(len(y) - n1)
+    n1 = int(y.sum())
+    n0 = int(len(y) - n1)
     if n1 == 0 or n0 == 0:
         return 0.5
     u = float(ranks[y == 1].sum()) - n1 * (n1 + 1) / 2.0
@@ -484,6 +510,7 @@ def _histogram_auc(X: np.ndarray, y: np.ndarray, nf: int) -> float:
 # ═════════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def run_data_drift_check(
     reference_features: dict[str, np.ndarray],

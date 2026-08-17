@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PAIRS = [
     "EURUSD",
@@ -73,7 +72,7 @@ def _year_dirs(path: Path, prefix: str = "") -> list[int]:
     for child in _direct_dirs(path):
         name = child.name
         if prefix and name.startswith(prefix):
-            name = name[len(prefix):]
+            name = name[len(prefix) :]
         if name.isdigit():
             years.append(int(name))
     return sorted(set(years))
@@ -122,7 +121,13 @@ def check_source_dirs(findings: list[Finding]) -> None:
     for name in required + optional:
         path = raw / name
         if not path.exists():
-            _add(findings, "sources", "WARN" if name in optional else "FAIL", f"source directory missing: {name}", path=_rel(path))
+            _add(
+                findings,
+                "sources",
+                "WARN" if name in optional else "FAIL",
+                f"source directory missing: {name}",
+                path=_rel(path),
+            )
             continue
         populated = any(path.iterdir())
         _add(
@@ -177,7 +182,14 @@ def check_compact_dukascopy(
     for pair in pairs:
         pair_dir = compact / f"pair={pair}"
         if not pair_dir.exists():
-            _add(findings, "compact_dukascopy", "FAIL", f"{pair}: compact partition missing", pair=pair, path=_rel(pair_dir))
+            _add(
+                findings,
+                "compact_dukascopy",
+                "FAIL",
+                f"{pair}: compact partition missing",
+                pair=pair,
+                path=_rel(pair_dir),
+            )
             continue
         years = _year_dirs(pair_dir, prefix="year=")
         months = 0
@@ -224,7 +236,15 @@ def check_duckdb(findings: list[Finding], deep: bool) -> None:
         con = duckdb.connect(str(db), read_only=True)
         tables = [r[0] for r in con.execute("show tables").fetchall()]
         if "ticks" not in tables:
-            _add(findings, "duckdb", "FAIL", "DuckDB missing ticks table", tables=tables, path=_rel(db), size_mb=_size_mb(db))
+            _add(
+                findings,
+                "duckdb",
+                "FAIL",
+                "DuckDB missing ticks table",
+                tables=tables,
+                path=_rel(db),
+                size_mb=_size_mb(db),
+            )
             return
         schema = con.execute("describe ticks").fetchall()
         cols = [r[0] for r in schema]
@@ -240,8 +260,7 @@ def check_duckdb(findings: list[Finding], deep: bool) -> None:
                     "from ticks group by pair order by pair"
                 ).fetchall()
                 detail["pairs"] = [
-                    {"pair": pair, "rows": int(n), "start": str(start), "end": str(end)}
-                    for pair, n, start, end in rows
+                    {"pair": pair, "rows": int(n), "start": str(start), "end": str(end)} for pair, n, start, end in rows
                 ]
             except Exception as exc:
                 detail["pair_summary_error"] = str(exc)
@@ -319,10 +338,21 @@ def check_auxiliary_sources(findings: list[Finding]) -> None:
     cot = ROOT / "data" / "raw" / "cot" / "cot_financials_cleaned.parquet"
     if cot.exists():
         meta = _parquet_meta(cot)
-        _add(findings, "cot", "OK" if "error" not in meta and meta.get("rows", 0) > 0 else "WARN", "COT parquet metadata", **meta)
+        _add(
+            findings,
+            "cot",
+            "OK" if "error" not in meta and meta.get("rows", 0) > 0 else "WARN",
+            "COT parquet metadata",
+            **meta,
+        )
     else:
         _add(findings, "cot", "WARN", "COT parquet missing", path=_rel(cot))
-    check_csv_head(findings, "eco_calendar", ROOT / "data" / "raw" / "eco_calendar" / "events.csv", ["timestamp_utc", "date", "event"])
+    check_csv_head(
+        findings,
+        "eco_calendar",
+        ROOT / "data" / "raw" / "eco_calendar" / "events.csv",
+        ["timestamp_utc", "date", "event"],
+    )
     cross = ROOT / "data" / "processed" / "cross_asset"
     if cross.exists():
         files = [p for p in cross.iterdir() if p.is_file() and p.suffix.lower() in {".csv", ".parquet"}]
@@ -350,7 +380,9 @@ def _zarray_meta(path: Path) -> dict[str, Any]:
             "shape": data.get("shape"),
             "chunks": data.get("chunks"),
             "dtype": data.get("dtype"),
-            "compressor": data.get("compressor", {}).get("id") if isinstance(data.get("compressor"), dict) else data.get("compressor"),
+            "compressor": data.get("compressor", {}).get("id")
+            if isinstance(data.get("compressor"), dict)
+            else data.get("compressor"),
         }
     except Exception as exc:
         return {"exists": False, "path": _rel(meta_path), "error": str(exc)}
@@ -442,8 +474,7 @@ def check_pipeline_entrypoints(findings: list[Finding]) -> None:
             [sys.executable, str(ROOT / "scripts" / "run_pipeline.py"), "all", "--dry-run"],
             cwd=str(ROOT),
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=20,
         )
         _add(
@@ -474,7 +505,9 @@ def print_report(report: dict[str, Any]) -> None:
     print("=" * 78)
     print("DATASET / PIPELINE CHECK")
     print("=" * 78)
-    print(f"Overall: {summary['status']} | OK={summary['counts'].get('OK', 0)} WARN={summary['counts'].get('WARN', 0)} FAIL={summary['counts'].get('FAIL', 0)}")
+    print(
+        f"Overall: {summary['status']} | OK={summary['counts'].get('OK', 0)} WARN={summary['counts'].get('WARN', 0)} FAIL={summary['counts'].get('FAIL', 0)}"
+    )
     print(f"Report:  {report['output_path']}")
     print("-" * 78)
     for status in ("FAIL", "WARN", "OK"):
@@ -497,7 +530,9 @@ def main() -> int:
     parser.add_argument("--expected-start-year", type=int, default=2008)
     parser.add_argument("--expected-end-year", type=int, default=2025)
     parser.add_argument("--sample-parquet", action="store_true", help="Read one compact parquet footer per pair")
-    parser.add_argument("--deep-duckdb", action="store_true", help="Run grouped pair/date summaries over the DuckDB ticks table")
+    parser.add_argument(
+        "--deep-duckdb", action="store_true", help="Run grouped pair/date summaries over the DuckDB ticks table"
+    )
     parser.add_argument("--output", default="logs/dataset_pipeline_check.json")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()

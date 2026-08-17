@@ -1,7 +1,7 @@
 """
 data/pair_readiness.py
 ======================
-Upgrades the console checks into a structured JSON report that buckets 
+Upgrades the console checks into a structured JSON report that buckets
 dropped bars into specific reasons, failing the build if a pair is unusable.
 """
 
@@ -16,9 +16,21 @@ class PairReadinessGate:
         self.logger = logging.getLogger(__name__)
         self.reports = {}
 
-    def add_pair(self, pair: str, source: str, start: str, end: str, freq: str,
-                 raw_ticks: int, duplicates: int, dropped_buckets: dict,
-                 valid_sequences: int, spreads: dict, atrs: dict, missing_columns: list):
+    def add_pair(
+        self,
+        pair: str,
+        source: str,
+        start: str,
+        end: str,
+        freq: str,
+        raw_ticks: int,
+        duplicates: int,
+        dropped_buckets: dict,
+        valid_sequences: int,
+        spreads: dict,
+        atrs: dict,
+        missing_columns: list,
+    ):
         """Adds a pair to the readiness report, evaluating its pass/fail status."""
 
         status = "pass"
@@ -38,12 +50,12 @@ class PairReadinessGate:
             "metadata": {"source": source, "start": start, "end": end, "freq": freq},
             "raw_ticks": raw_ticks,
             "duplicates": duplicates,
-            "dropped_bars_by_reason": dropped_buckets, # e.g. weekend, holiday, spread, news
+            "dropped_bars_by_reason": dropped_buckets,  # e.g. weekend, holiday, spread, news
             "valid_sequence_count": valid_sequences,
-            "spread_stats": spreads, # median, p95, max
+            "spread_stats": spreads,  # median, p95, max
             "atr_stats": atrs,
             "status": status,
-            "fail_reason": fail_reason
+            "fail_reason": fail_reason,
         }
 
     def execute_gate(self) -> bool:

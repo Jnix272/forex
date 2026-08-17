@@ -85,7 +85,7 @@ class CurriculumController:
         variance = sum((x - mean) ** 2 for x in window) / len(window)
         return {
             "mean": mean,
-            "std": variance ** 0.5,
+            "std": variance**0.5,
             "peak": max(self.sharpe_history),
             "current": self.sharpe_history[-1],
         }
@@ -97,14 +97,14 @@ class CurriculumController:
         return self.config.stages[idx + 1]
 
     def _next_seq_len(self) -> int | None:
-        ordered = sorted(set(int(x) for x in self.config.seq_lens))
+        ordered = sorted({int(x) for x in self.config.seq_lens})
         for seq_len in ordered:
             if seq_len > self.current_seq_len:
                 return seq_len
         return None
 
     def _previous_seq_len(self) -> int | None:
-        ordered = sorted(set(int(x) for x in self.config.seq_lens))
+        ordered = sorted({int(x) for x in self.config.seq_lens})
         prev = [seq_len for seq_len in ordered if seq_len < self.current_seq_len]
         return prev[-1] if prev else None
 

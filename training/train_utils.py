@@ -17,8 +17,9 @@ import numpy as np
 import torch
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MixupBatch — time-series MixUp augmentation
+# MixupBatch - time-series MixUp augmentation
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class MixupBatch:
     """
@@ -60,10 +61,10 @@ class MixupBatch:
         # Random permutation of the batch for pairing
         idx = torch.randperm(bsz, device=xb.device)
 
-        xb_mixed  = lam * xb  + (1 - lam) * xb[idx]
-        yb_mixed  = lam * yb  + (1 - lam) * yb[idx]
+        xb_mixed = lam * xb + (1 - lam) * xb[idx]
+        yb_mixed = lam * yb + (1 - lam) * yb[idx]
 
-        y_cls_mixed  = None
+        y_cls_mixed = None
         y_conf_mixed = None
 
         if y_cls_b is not None:
@@ -97,8 +98,9 @@ class MixupBatch:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VolatilityStratifiedSampler — equal-tier batch sampling across vol regimes
+# VolatilityStratifiedSampler - equal-tier batch sampling across vol regimes
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class VolatilityStratifiedSampler:
     """
@@ -123,7 +125,7 @@ class VolatilityStratifiedSampler:
     -------
     sampler = VolatilityStratifiedSampler(train_idx, diff_array=diff_npy)
     stratified_idx = sampler.sample()
-    """
+    """  # noqa: RUF002
 
     def __init__(
         self,
@@ -132,10 +134,10 @@ class VolatilityStratifiedSampler:
         n_samples: int | None = None,
         seed: int = 42,
     ):
-        self.train_idx  = train_idx
+        self.train_idx = train_idx
         self.diff_array = diff_array
-        self.n_samples  = n_samples or len(train_idx)
-        self.rng        = np.random.default_rng(seed)
+        self.n_samples = n_samples or len(train_idx)
+        self.rng = np.random.default_rng(seed)
 
         if diff_array is not None and len(diff_array) > 0:
             self._tier_indices = self._build_tier_indices()
@@ -161,12 +163,12 @@ class VolatilityStratifiedSampler:
             return shuffled[: self.n_samples]
 
         # Equal split across available tiers
-        n_tiers    = len(self._tier_indices)
-        per_tier   = self.n_samples // n_tiers
-        remainder  = self.n_samples % n_tiers
+        n_tiers = len(self._tier_indices)
+        per_tier = self.n_samples // n_tiers
+        remainder = self.n_samples % n_tiers
 
         parts = []
-        for i, (tier, idx) in enumerate(sorted(self._tier_indices.items())):
+        for i, (_tier, idx) in enumerate(sorted(self._tier_indices.items())):
             k = per_tier + (1 if i < remainder else 0)
             if k <= 0:
                 continue
@@ -179,10 +181,12 @@ class VolatilityStratifiedSampler:
                 need = k - len(chosen)
                 pool = self.train_idx[~np.isin(self.train_idx, chosen)]
                 if len(pool) >= need:
-                    chosen = np.concatenate([
-                        chosen,
-                        self.rng.choice(pool, size=need, replace=False),
-                    ])
+                    chosen = np.concatenate(
+                        [
+                            chosen,
+                            self.rng.choice(pool, size=need, replace=False),
+                        ]
+                    )
                 elif len(pool) > 0:
                     chosen = np.concatenate([chosen, pool])
                 # If still short, leave under-filled rather than replace=True
@@ -208,8 +212,9 @@ class VolatilityStratifiedSampler:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegimeTierTracker — per-difficulty-tier Sharpe for conditional early stopping
+# RegimeTierTracker - per-difficulty-tier Sharpe for conditional early stopping
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class RegimeTierTracker:
     """
@@ -233,8 +238,8 @@ class RegimeTierTracker:
 
     def __init__(self, min_sharpe_per_tier: float = 0.0):
         self.min_sharpe = min_sharpe_per_tier
-        self._history:  list[dict] = []
-        self._current:  dict[int, float] = {}
+        self._history: list[dict] = []
+        self._current: dict[int, float] = {}
 
     def update(self, epoch: int, tier_sharpes: dict[int, float]) -> None:
         """Record per-tier Sharpe for the current epoch."""
@@ -256,7 +261,5 @@ class RegimeTierTracker:
         """Return the epoch where the sum of tier Sharpes was highest."""
         if not self._history:
             return None
-        best = max(self._history, key=lambda r: sum(
-            v for k, v in r.items() if k != "epoch"
-        ))
+        best = max(self._history, key=lambda r: sum(v for k, v in r.items() if k != "epoch"))
         return best["epoch"]

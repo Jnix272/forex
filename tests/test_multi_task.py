@@ -2,6 +2,7 @@
 Tests for multi-task pretraining (Improvement #10):
 Contrastive, masked reconstruction, forecast, VAE, drift, domain adaptation.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -34,13 +35,13 @@ from pretrain.multi_task import (
 # Fixtures
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @pytest.fixture
 def sample_data():
     """Generate synthetic time-series data for testing."""
     rng = np.random.default_rng(0)
     n = 200
     seq_len = 30
-    n_features = 5
     # Create data with some structure (trend + noise)
     t = np.linspace(0, 10, seq_len)
     base = np.sin(t)[:, None] + np.cos(2 * t)[:, None]
@@ -55,7 +56,6 @@ def domain_data():
     n1 = 100
     n2 = 100
     seq_len = 20
-    n_features = 4
     # Domain 0: lower mean
     X1 = rng.normal(0, 0.5, (n1, seq_len, 4))
     # Domain 2: higher mean
@@ -68,6 +68,7 @@ def domain_data():
 # ════════════════════════════════════════════════════════════════════════════
 # Augmentations
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def test_augmenter_basic():
     """Test TimeSeriesAugmenter basic functionality."""
@@ -102,6 +103,7 @@ def test_augmenter_deterministic():
 # Gradient Reversal
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_grad_reverse():
     """Test gradient reversal function."""
     x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
@@ -114,6 +116,7 @@ def test_grad_reverse():
 # ════════════════════════════════════════════════════════════════════════════
 # Task Losses
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def test_nt_xent_loss():
     """Test NT-Xent contrastive loss."""
@@ -159,8 +162,8 @@ def test_masked_reconstruction_loss():
 def test_vae_loss():
     """Test VAE loss."""
     B, T, F = 4, 10, 3
-    recon = torch.randn(B, T, F)
-    target = torch.randn(B, T, F)
+    torch.randn(B, T, F)
+    torch.randn(B, T, F)
     mu = torch.randn(4, 16)
     logvar = torch.randn(4, 16)
 
@@ -202,6 +205,7 @@ def test_domain_adversarial_loss():
 # Domain Adaptation Losses
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_mmd_loss():
     """Test MMD loss."""
     source = torch.randn(10, 8)
@@ -215,7 +219,7 @@ def test_mmd_loss():
 def test_mmd_loss_same_distribution():
     """Test MMD with same distribution (should be near 0)."""
     X = torch.randn(20, 8)
-    idx = torch.randperm(20)
+    torch.randperm(20)
     source = X[:10]
     target = X[10:]
     mmd = MMDLoss(kernel="rbf", gamma=1.0)
@@ -248,6 +252,7 @@ def test_coral_loss_same():
 # Domain Discriminator
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_domain_discriminator():
     """Test DomainDiscriminator forward pass."""
     disc = DomainDiscriminator(128, 3, hidden_dim=64)
@@ -259,6 +264,7 @@ def test_domain_discriminator():
 # ════════════════════════════════════════════════════════════════════════════
 # MultiTaskPretrainer
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_multitask_pretrainer_init():
     """Test MultiTaskPretrainer initialization."""
@@ -303,7 +309,7 @@ def test_multitask_step():
     trainer = MultiTaskPretrainer(config)
 
     x = torch.randn(8, 20, 5)
-    losses = trainer.step(x)
+    trainer.step(x)
 
     assert "contrastive" in trainer.history
     assert "masked_recon" in trainer.history
@@ -330,7 +336,7 @@ def test_multitask_with_domain_adaptation():
 
     x = torch.randn(8, 20, 5)
     dom_labels = torch.randint(0, 2, (8,))
-    losses = trainer.step(x, dom_labels)
+    trainer.step(x, dom_labels)
 
     assert "contrastive" in trainer.history
     assert "domain" in trainer.history
@@ -355,7 +361,7 @@ def test_multitask_pretrain():
         masked_recon_weight=1.0,
     )
 
-    rng = np.random.default_rng(0)
+    np.random.default_rng(0)
     X = np.random.randn(64, 15, 4).astype(np.float32)
 
     trainer = MultiTaskPretrainer(config)
@@ -386,7 +392,7 @@ def test_multitask_with_domain_labels():
         da_weight=0.5,
     )
 
-    rng = np.random.default_rng(0)
+    np.random.default_rng(0)
     X = np.random.randn(64, 15, 4).astype(np.float32)
     domain_labels = np.array([0] * 32 + [1] * 32)
 
@@ -420,7 +426,7 @@ def test_multitask_gradnorm():
 
     X = np.random.randn(64, 15, 4).astype(np.float32)
     trainer = MultiTaskPretrainer(config)
-    history = trainer.pretrain(X, epochs=2, batch_size=16, silent=True)
+    trainer.pretrain(X, epochs=2, batch_size=16, silent=True)
 
     assert "gradnorm_weights" in trainer.history
     assert len(trainer.history["gradnorm_weights"]) == 2
@@ -462,6 +468,7 @@ def test_save_encoder(tmp_path):
 # Factory Functions
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_create_multi_task_pretrainer():
     """Test factory function."""
     X = np.random.randn(50, 20, 5).astype(np.float32)
@@ -490,6 +497,7 @@ def test_pretrain_multi_task():
 # Domain Adaptation
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_adapt_encoder_to_target_dann():
     """Test DANN domain adaptation."""
     encoder = nn.Sequential(
@@ -500,10 +508,7 @@ def test_adapt_encoder_to_target_dann():
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0  # shift
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="dann", epochs=3, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="dann", epochs=3, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
@@ -517,10 +522,7 @@ def test_adapt_encoder_fine_tune():
     source = np.random.randn(30, 10, 4).astype(np.float32)
     target = np.random.randn(30, 10, 4).astype(np.float32)
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="fine_tune", epochs=2, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="fine_tune", epochs=2, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
@@ -528,11 +530,9 @@ def test_adapt_encoder_fine_tune():
 # Integration: Multi-task with domain adaptation + pretraining
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_full_pretraining_pipeline():
     """Test full multi-task pretraining with domain adaptation."""
-    n = 200
-    seq_len = 20
-    n_features = 5
 
     # Source domain
     X_src = np.random.randn(100, 20, 5).astype(np.float32)
@@ -562,8 +562,10 @@ def test_full_pretraining_pipeline():
     )
 
     trainer, history = pretrain_multi_task(
-        X, domain_labels=domain_labels,
-        config=config, silent=True,
+        X,
+        domain_labels=domain_labels,
+        config=config,
+        silent=True,
     )
 
     assert "contrastive" in trainer.history
@@ -587,7 +589,8 @@ def test_run_multi_task_pretrain_helper(tmp_path):
         def __init__(self):
             super().__init__()
             self.backbone = torch.nn.Sequential(
-                torch.nn.Linear(8, 16), torch.nn.ReLU(),
+                torch.nn.Linear(8, 16),
+                torch.nn.ReLU(),
                 torch.nn.Linear(16, 16),
             )
 
@@ -603,7 +606,7 @@ def test_run_multi_task_pretrain_helper(tmp_path):
 
 
 def test_run_multi_task_pretrain_graceful_fallback(tmp_path):
-    """C3 wiring: invalid pretrain input must not raise — helper returns None."""
+    """C3 wiring: invalid pretrain input must not raise - helper returns None."""
     import argparse
 
     import torch
@@ -613,8 +616,12 @@ def test_run_multi_task_pretrain_graceful_fallback(tmp_path):
     model = torch.nn.Linear(4, 4)
     args = argparse.Namespace(pretrain_epochs=1, pretrain_batch=4, seq_len=16)
     out = _run_multi_task_pretrain(
-        model, [[1.0, 2.0, 3.0, 4.0]],  # not a valid ndarray batch
-        str(tmp_path / "x.pt"), 4, args, torch.device("cpu"),
+        model,
+        [[1.0, 2.0, 3.0, 4.0]],  # not a valid ndarray batch
+        str(tmp_path / "x.pt"),
+        4,
+        args,
+        torch.device("cpu"),
     )
     assert out is None
 

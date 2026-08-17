@@ -25,11 +25,22 @@ from models.ensemble import EnsembleMetaLearner
 from training.train_gpu import build_model
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
-PIP_SIZES = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001, "EURGBP": 0.0001, "NZDUSD": 0.0001, "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01}
+PIP_SIZES = {
+    "EURUSD": 0.0001,
+    "GBPUSD": 0.0001,
+    "AUDUSD": 0.0001,
+    "USDCAD": 0.0001,
+    "USDCHF": 0.0001,
+    "EURGBP": 0.0001,
+    "NZDUSD": 0.0001,
+    "USDJPY": 0.01,
+    "EURJPY": 0.01,
+    "GBPJPY": 0.01,
+}
 
 
 def _pair_feature_dims(n_features: int, n_pairs: int = 1, cfg: dict | None = None) -> tuple[int, int]:
-    """Resolve (n_pairs, f_per_pair) from checkpoint config — never hardcode width."""
+    """Resolve (n_pairs, f_per_pair) from checkpoint config - never hardcode width."""
     cfg = cfg or {}
     n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or n_pairs or 1)
     n_pairs = max(1, n_pairs)
@@ -68,6 +79,7 @@ def _write_df(df, path) -> None:
         return
     try:
         import polars as pl
+
         if isinstance(df, pl.DataFrame):
             df.write_csv(str(path))
             return
@@ -91,6 +103,7 @@ def _fmt_metric(value, fmt: str = ".4f", prefix: str = "", suffix: str = "") -> 
 def _send_discord_backtest(fields: dict, force: bool = True) -> None:
     try:
         from monitoring.discord_alerts import DiscordAlerter
+
         DiscordAlerter(verbose=False).send("backtest_result", fields, force=force)
     except Exception as exc:
         log(f"[Discord] backtest alert skipped: {exc}")
@@ -168,7 +181,7 @@ def _bars_per_year_from_freq(bar_freq: str) -> float:
     elif unit in ("", "m", "t", "min", "mins", "minute", "minutes"):
         minutes = n
     else:
-        minutes = n  # unknown unit — assume minutes
+        minutes = n  # unknown unit - assume minutes
     if not minutes or not np.isfinite(minutes) or minutes <= 0:
         return 252.0 * 24.0 * 60.0
     return 252.0 * 24.0 * (60.0 / minutes)
@@ -190,8 +203,11 @@ def parse_args():
     p.add_argument("--bar-freq", default=None, help="Backtest bar frequency, e.g. 1min, 15min, 1h")
     p.add_argument("--model", required=True)
     p.add_argument("--checkpoint", default=None)
-    p.add_argument("--checkpoint-dir", default=None,
-                   help="Directory containing production_best.pt or {model}_best.pt. Defaults to the selected strategy profile.")
+    p.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Directory containing production_best.pt or {model}_best.pt. Defaults to the selected strategy profile.",
+    )
     p.add_argument("--start", default="2025-01-01")
     p.add_argument("--end", default="2025-01-07")
     p.add_argument("--pair", default="EURUSD")
@@ -213,16 +229,26 @@ def parse_args():
     p.add_argument("--walk-forward", action="store_true")
     p.add_argument("--wf-window-days", type=int, default=7)
     p.add_argument("--wf-step-days", type=int, default=7)
-    p.add_argument("--meta-labeling", action="store_true", default=False,
-                   help="Train a meta-labeler (Improvement #6) per walk-forward window and filter signals by P(profitable).")
-    p.add_argument("--meta-prob-threshold", type=float, default=0.55,
-                   help="Meta-labeler probability threshold for taking a trade.")
-    p.add_argument("--meta-min-samples", type=int, default=50,
-                   help="Minimum trade samples required before meta-labeler training.")
-    p.add_argument("--execution-engine", default="legacy", choices=["legacy", "advanced"],
-                   help="Execution model (Improvement #7): legacy = fixed slippage; "
-                        "advanced = latency + adverse-selection overlay that adjusts "
-                        "effective slippage per window.")
+    p.add_argument(
+        "--meta-labeling",
+        action="store_true",
+        default=False,
+        help="Train a meta-labeler (Improvement #6) per walk-forward window and filter signals by P(profitable).",
+    )
+    p.add_argument(
+        "--meta-prob-threshold", type=float, default=0.55, help="Meta-labeler probability threshold for taking a trade."
+    )
+    p.add_argument(
+        "--meta-min-samples", type=int, default=50, help="Minimum trade samples required before meta-labeler training."
+    )
+    p.add_argument(
+        "--execution-engine",
+        default="legacy",
+        choices=["legacy", "advanced"],
+        help="Execution model (Improvement #7): legacy = fixed slippage; "
+        "advanced = latency + adverse-selection overlay that adjusts "
+        "effective slippage per window.",
+    )
     args = p.parse_args()
     prof = strategy_profile(args.strategy_mode)
     if args.bar_freq is None:
@@ -253,13 +279,15 @@ def _resolve_checkpoint(model: str, ckpt: str | None, checkpoint_dir: str | Path
         if key in seen:
             continue
         seen.add(key)
-        candidates.extend([
-            base / "production_best.pt",
-            base / f"{model}_best.pt",
-            base / model / f"{model}_best.pt",
-            base / "normal" / model / f"{model}_best.pt",
-            base / "baseline" / model / f"{model}_best.pt",
-        ])
+        candidates.extend(
+            [
+                base / "production_best.pt",
+                base / f"{model}_best.pt",
+                base / model / f"{model}_best.pt",
+                base / "normal" / model / f"{model}_best.pt",
+                base / "baseline" / model / f"{model}_best.pt",
+            ]
+        )
     for p in candidates:
         if p.exists():
             return p
@@ -278,7 +306,7 @@ def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tens
     outs = []
     if len(x) < seq_len:
         return torch.empty((0, 3), device=x.device)
-    
+
     # Use native unfold for sliding window batching
     windows = x.unfold(0, seq_len, 1).transpose(1, 2)
     for s in range(0, len(windows), max(1, bs)):
@@ -318,14 +346,14 @@ def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls
         dirn[cls == 0] = -1.0
 
         # Convert pip-based risk (BACKTEST.stop_pips / take_pips) into ATR
-        # multiples so the triple-barrier labeler — which multiplies ATR —
+        # multiples so the triple-barrier labeler - which multiplies ATR -
         # matches the backtest's actual stop/take semantics instead of treating
         # pips as ATR multipliers (which produced ~18x/12x unreachable barriers).
         pip_size_lbl = float(PIP_SIZES.get(str(args.pair).upper(), 0.0001))
         stop_pips_lbl = float(getattr(args, "stop_pips", 12.0) or 12.0)
         take_pips_lbl = float(getattr(args, "take_pips", 18.0) or 18.0)
         try:
-            _rng = (base_bars["high"].to_numpy() - base_bars["low"].to_numpy())
+            _rng = base_bars["high"].to_numpy() - base_bars["low"].to_numpy()
             _rng = _rng[np.isfinite(_rng)]
             atr = float(np.median(_rng)) if len(_rng) else 0.0
         except Exception:
@@ -349,7 +377,7 @@ def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls
             return None, None
 
         # Full-length primary direction (predicted rows only), aligned by index
-        pred_idx = X.index[seq_len:seq_len + n_pred]
+        pred_idx = X.index[seq_len : seq_len + n_pred]
         full_dirn = pd.Series(0.0, index=X.index)
         full_dirn.loc[pred_idx] = dirn
         full_labels = labels_df["label"].reindex(X.index).fillna(0.0).to_numpy(dtype=float)
@@ -419,21 +447,22 @@ def _load_ensemble_model(ckpt: Path, n_features: int, seq_len: int, device: torc
     bases = []
     for name in base_names:
         manifest_ckpt = next(
-            (
-                Path(str(b.get("checkpoint")))
-                for b in base_models
-                if str(b.get("name")) == name and b.get("checkpoint")
-            ),
+            (Path(str(b.get("checkpoint"))) for b in base_models if str(b.get("name")) == name and b.get("checkpoint")),
             None,
         )
         if manifest_ckpt is not None and not manifest_ckpt.is_absolute():
             manifest_ckpt = (ckpt.parent / manifest_ckpt).resolve()
-        bck = manifest_ckpt if manifest_ckpt is not None and manifest_ckpt.exists() else _resolve_checkpoint(name, None, ckpt.parent)
+        bck = (
+            manifest_ckpt
+            if manifest_ckpt is not None and manifest_ckpt.exists()
+            else _resolve_checkpoint(name, None, ckpt.parent)
+        )
         if bck is None:
             raise FileNotFoundError(f"Missing base checkpoint for ensemble base '{name}'")
+
         class BCfg:
             def __init__(self):
-                self.model = name
+                self.model = name  # noqa: B023
                 self.hidden_size = 256
                 self.d_model = 256
                 self.nhead = 8
@@ -446,10 +475,13 @@ def _load_ensemble_model(ckpt: Path, n_features: int, seq_len: int, device: torc
                 self.corr_window = 20
                 self.corr_window_long = 60
                 self.momentum_window = 20
-                bcfg = _load_checkpoint_config(bck) if bck else {}
+                bcfg = _load_checkpoint_config(bck) if bck else {}  # noqa: B023
                 self._n_pairs, self._f_per_pair = _pair_feature_dims(
-                    n_features, n_pairs=int(bcfg.get("_n_pairs") or meta.get("_n_pairs") or 1), cfg=bcfg or meta,
+                    n_features,
+                    n_pairs=int(bcfg.get("_n_pairs") or meta.get("_n_pairs") or 1),
+                    cfg=bcfg or meta,
                 )
+
         bm = build_model(name, n_features, BCfg()).to(device)
         bstate = torch.load(bck, map_location=device, weights_only=True)
         bm.load_state_dict(_checkpoint_state_dict(bstate), strict=False)
@@ -477,6 +509,7 @@ def _advanced_execution_overlay(args, base_bars, signals):
 
     try:
         from backtesting.execution import AdverseSelectionModel, LatencyModel
+
         asm = AdverseSelectionModel()
         lat = LatencyModel()
         base = float(args.slippage_pips)
@@ -489,26 +522,28 @@ def _advanced_execution_overlay(args, base_bars, signals):
             closes = np.asarray(base_bars["close"].values, dtype=float)
         n = len(closes)
         for s in signals:
-            # FIX M3: guard index lookup — works for pandas; Polars has no .index.get_indexer
+            # FIX M3: guard index lookup - works for pandas; Polars has no .index.get_indexer
             if hasattr(base_bars, "index") and hasattr(base_bars.index, "get_indexer"):
                 i = base_bars.index.get_indexer([s["timestamp"]])[0]
             else:
                 # Polars fallback: search by value
-                ts_arr = closes  # can't do timestamp search without index; skip toxicity
                 i = -1
             if i < 0 or i >= n:
                 costs.append(base)
                 continue
             lo = max(0, i - 20)
-            window = closes[lo:i + 1]
+            window = closes[lo : i + 1]
             if len(window) >= 3 and np.ptp(window) > 0:
                 vol = float(np.std(np.diff(window) / window[1:]))
             else:
                 vol = 0.001
-            spread = float(np.abs(np.diff(closes[max(0, i - 1):i + 1])).max() or 0.0002)
+            spread = float(np.abs(np.diff(closes[max(0, i - 1) : i + 1])).max() or 0.0002)
             spread = max(spread, 0.0001)
             tox = asm.compute_toxicity_score(
-                queue_position=10, max_queue=1000, spread=spread, volatility=vol,
+                queue_position=10,
+                max_queue=1000,
+                spread=spread,
+                volatility=vol,
             )
             latency_us = lat.sample_md_to_order_latency()
             latency_pips = min(0.5, latency_us / 1e6 * 100.0)
@@ -518,11 +553,19 @@ def _advanced_execution_overlay(args, base_bars, signals):
             "execution_engine": "advanced",
             "baseline_slippage_pips": round(base, 4),
             "mean_effective_slippage_pips": round(mean_eff, 4),
-            "mean_toxicity": round(float(np.mean([
-                asm.compute_toxicity_score(queue_position=10, max_queue=1000,
-                                           spread=0.0002, volatility=0.001)
-                for _ in range(16)
-            ])), 4),
+            "mean_toxicity": round(
+                float(
+                    np.mean(
+                        [
+                            asm.compute_toxicity_score(
+                                queue_position=10, max_queue=1000, spread=0.0002, volatility=0.001
+                            )
+                            for _ in range(16)
+                        ]
+                    )
+                ),
+                4,
+            ),
             "overlay_applied_to_n_signals": len(signals),
         }
         return mean_eff, meta
@@ -536,7 +579,11 @@ def run_backtest():
     run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     out_dir = Path("logs/backtests")
     wf_jsonl = out_dir / f"{args.model}_{run_id}_walkforward.jsonl"
-    windows = [(args.start, args.end)] if not args.walk_forward else _build_windows(args.start, args.end, args.wf_window_days, args.wf_step_days)
+    windows = (
+        [(args.start, args.end)]
+        if not args.walk_forward
+        else _build_windows(args.start, args.end, args.wf_window_days, args.wf_step_days)
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt = _resolve_checkpoint(args.model, args.checkpoint, args.checkpoint_dir)
@@ -548,20 +595,14 @@ def run_backtest():
     manifest_schema = ensemble_manifest.get("schema", {}) if isinstance(ensemble_manifest, dict) else {}
     n_pairs_arg = max(1, int(args.n_pairs))
     default_width = int(ckpt_cfg.get("n_features") or 0)
-    n_features = int(
-        ckpt_cfg.get("n_features")
-        or (default_width if default_width > 0 else 0)
-        or 0
-    )
+    n_features = int(ckpt_cfg.get("n_features") or (default_width if default_width > 0 else 0) or 0)
     if args.model.lower() == "ensemble":
         n_features = int(manifest_schema.get("n_features", n_features) or n_features)
     seq_len = int(ckpt_cfg.get("seq_len", args.seq_len))
     if args.model.lower() == "ensemble":
         seq_len = int(manifest_schema.get("seq_len", seq_len))
     if n_features <= 0:
-        raise ValueError(
-            f"Checkpoint {ckpt} missing n_features — cannot pad/truncate to a hardcoded width."
-        )
+        raise ValueError(f"Checkpoint {ckpt} missing n_features - cannot pad/truncate to a hardcoded width.")
     n_pairs, f_per_pair = _pair_feature_dims(n_features, n_pairs=n_pairs_arg, cfg=ckpt_cfg)
 
     class Cfg:
@@ -590,7 +631,9 @@ def run_backtest():
         model.load_state_dict(_checkpoint_state_dict(state), strict=False)
         model.eval()
 
-    fe = FeatureEngineer(atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20]))
+    fe = FeatureEngineer(
+        atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20])
+    )
     afb = AdvancedFeatureBuilder()
     sent = SentimentPipeline(prefer_backend="finbert", use_cache=True)
     pipeline = ForexDataPipeline(bar_freq=args.bar_freq)
@@ -600,16 +643,18 @@ def run_backtest():
     cached_features = {}
     pair_list = DEFAULT_PAIRS[:n_pairs] if n_pairs > 1 else [args.pair]
     if len(pair_list) > 1:
-        log("WARNING: multi-pair backtests execute signals on the FIRST pair's "
-            "prices and apply --pair's pip size to every pair — results for "
-            "other pairs are not price-accurate. Prefer per-pair runs.")
-    
+        log(
+            "WARNING: multi-pair backtests execute signals on the FIRST pair's "
+            "prices and apply --pair's pip size to every pair - results for "
+            "other pairs are not price-accurate. Prefer per-pair runs."
+        )
+
     for p in pair_list:
         try:
             ticks = load_or_generate(source=args.source, pair=p, start=args.start, end=args.end, n_rows=2000000)
             bars_raw = pipeline.run(ticks)
             if bars_raw is not None and len(bars_raw) > seq_len:
-                # FIX M2: convert to pandas BEFORE feature building — FeatureEngineer expects pandas
+                # FIX M2: convert to pandas BEFORE feature building - FeatureEngineer expects pandas
                 bars_pd = _to_pandas_bars(bars_raw)
                 cached_bars[p] = bars_pd
                 f_base = fe.build(bars_pd)
@@ -657,9 +702,8 @@ def run_backtest():
             probs = torch.softmax(logits, dim=-1).numpy()
         cls, conf = probs.argmax(axis=1), probs.max(axis=1)
         meta_ok = None
-        meta_labeler = None
         if args.meta_labeling and len(cls) >= 30:
-            meta_ok, meta_labeler = _build_meta_labeler_mask(args, base_bars, X, cls, seq_len)
+            meta_ok, _meta_labeler = _build_meta_labeler_mask(args, base_bars, X, cls, seq_len)
         if len(conf):
             log(
                 f"[Signals] confidence min/median/max = "
@@ -670,8 +714,8 @@ def run_backtest():
         pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
         stop_pips = float(args.stop_pips)
         take_pips = float(args.take_pips)
-        last_signal_i = -10**9
-        
+        last_signal_i = -(10**9)
+
         # Pre-extract arrays for speed
         regime_vals = X["regime_label"].values if "regime_label" in X.columns else None
         close_vals = base_bars["close"].values
@@ -712,6 +756,7 @@ def run_backtest():
                 # Fractional Kelly Sizing
                 try:
                     from config.settings import SIZING
+
                     kelly_frac = SIZING.get("kelly_fraction", 0.25)
                 except ImportError:
                     kelly_frac = 0.25
@@ -727,31 +772,37 @@ def run_backtest():
                 # Ensure minimum lot size
                 dynamic_lots = max(0.01, dynamic_lots)
 
-                signals.append({
-                    "timestamp": ts_vals[i],
-                    "action": act,
-                    "lots": dynamic_lots,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "confidence": win_prob,
-                })
+                signals.append(
+                    {
+                        "timestamp": ts_vals[i],
+                        "action": act,
+                        "lots": dynamic_lots,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "confidence": win_prob,
+                    }
+                )
         if not signals:
-            log(f"[Signals] No trades generated for {ws} -> {we}; lower --min-confidence or inspect class probabilities.")
-            _send_discord_backtest({
-                "Model": args.model,
-                "Pair": args.pair,
-                "Window": f"{ws} -> {we}",
-                "Checkpoint": ckpt.name,
-                "Source": args.source,
-                "Seq Len": str(seq_len),
-                "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
-                "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
-                "Take Pips": _fmt_metric(args.take_pips, ".1f"),
-                "Min Gap Bars": str(args.min_gap_bars),
-                "Trades": "0",
-                "Status": "No trades generated",
-                "Action": "Lower --min-confidence or inspect class probabilities",
-            })
+            log(
+                f"[Signals] No trades generated for {ws} -> {we}; lower --min-confidence or inspect class probabilities."
+            )
+            _send_discord_backtest(
+                {
+                    "Model": args.model,
+                    "Pair": args.pair,
+                    "Window": f"{ws} -> {we}",
+                    "Checkpoint": ckpt.name,
+                    "Source": args.source,
+                    "Seq Len": str(seq_len),
+                    "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
+                    "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
+                    "Take Pips": _fmt_metric(args.take_pips, ".1f"),
+                    "Min Gap Bars": str(args.min_gap_bars),
+                    "Trades": "0",
+                    "Status": "No trades generated",
+                    "Action": "Lower --min-confidence or inspect class probabilities",
+                }
+            )
             continue
 
         sig_df = pd.DataFrame(signals).set_index("timestamp")
@@ -771,59 +822,113 @@ def run_backtest():
         bt.run()
         metrics = bt.performance_metrics()
         norm_metrics = _normalize_backtest_metrics(metrics)
-        mc = MonteCarloBacktest(n_simulations=args.mc_sims, initial_equity=args.equity).run_from_backtest(bt) if args.mc_sims > 0 and len(bt.trades) >= 5 else None
+        mc = (
+            MonteCarloBacktest(n_simulations=args.mc_sims, initial_equity=args.equity).run_from_backtest(bt)
+            if args.mc_sims > 0 and len(bt.trades) >= 5
+            else None
+        )
 
-        rec = {"ts": datetime.now(UTC).isoformat(), "run_id": run_id, "component": "backtest", "event_type": "walkforward_window", "model": args.model, "window_index": idx, "window_start": ws, "window_end": we, "n_trades": norm_metrics["n_trades"], "sharpe": norm_metrics["sharpe"], "win_rate": norm_metrics["win_rate"], "max_drawdown": norm_metrics["max_drawdown"], "net_pnl": norm_metrics["net_pnl"]}
+        rec = {
+            "ts": datetime.now(UTC).isoformat(),
+            "run_id": run_id,
+            "component": "backtest",
+            "event_type": "walkforward_window",
+            "model": args.model,
+            "window_index": idx,
+            "window_start": ws,
+            "window_end": we,
+            "n_trades": norm_metrics["n_trades"],
+            "sharpe": norm_metrics["sharpe"],
+            "win_rate": norm_metrics["win_rate"],
+            "max_drawdown": norm_metrics["max_drawdown"],
+            "net_pnl": norm_metrics["net_pnl"],
+        }
         _append_jsonl(wf_jsonl, rec)
         wf_rows.append(rec)
-        _send_discord_backtest({
-            "Model": args.model,
-            "Pair": args.pair,
-            "Window": f"{ws} -> {we}",
-            "Checkpoint": ckpt.name,
-            "Source": args.source,
-            "Seq Len": str(seq_len),
-            "N Pairs": str(args.n_pairs),
-            "Multitask": str(bool(args.multitask)),
-            "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
-            "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
-            "Take Pips": _fmt_metric(args.take_pips, ".1f"),
-            "Min Gap Bars": str(args.min_gap_bars),
-            "Lots": _fmt_metric(args.lots, ".2f"),
-            "Equity": _fmt_metric(args.equity, ",.2f", prefix="$"),
-            "Trades": _fmt_metric(norm_metrics["n_trades"], ".0f"),
-            "Sharpe": _fmt_metric(norm_metrics["sharpe"], ".4f"),
-            "Win Rate": _fmt_metric(norm_metrics["win_rate"], ".2%"),
-            "Max Drawdown": _fmt_metric(norm_metrics["max_drawdown"], ".2%"),
-            "Net PnL": _fmt_metric(norm_metrics["net_pnl"], ",.2f", prefix="$"),
-            "Return": _fmt_metric(norm_metrics["total_return_pct"], ".2f", suffix="%"),
-            "Metric Error": norm_metrics["error"] or "none",
-            "MC Sims": str(args.mc_sims),
-        })
+        _send_discord_backtest(
+            {
+                "Model": args.model,
+                "Pair": args.pair,
+                "Window": f"{ws} -> {we}",
+                "Checkpoint": ckpt.name,
+                "Source": args.source,
+                "Seq Len": str(seq_len),
+                "N Pairs": str(args.n_pairs),
+                "Multitask": str(bool(args.multitask)),
+                "Min Confidence": _fmt_metric(args.min_confidence, ".2f"),
+                "Stop Pips": _fmt_metric(args.stop_pips, ".1f"),
+                "Take Pips": _fmt_metric(args.take_pips, ".1f"),
+                "Min Gap Bars": str(args.min_gap_bars),
+                "Lots": _fmt_metric(args.lots, ".2f"),
+                "Equity": _fmt_metric(args.equity, ",.2f", prefix="$"),
+                "Trades": _fmt_metric(norm_metrics["n_trades"], ".0f"),
+                "Sharpe": _fmt_metric(norm_metrics["sharpe"], ".4f"),
+                "Win Rate": _fmt_metric(norm_metrics["win_rate"], ".2%"),
+                "Max Drawdown": _fmt_metric(norm_metrics["max_drawdown"], ".2%"),
+                "Net PnL": _fmt_metric(norm_metrics["net_pnl"], ",.2f", prefix="$"),
+                "Return": _fmt_metric(norm_metrics["total_return_pct"], ".2f", suffix="%"),
+                "Metric Error": norm_metrics["error"] or "none",
+                "MC Sims": str(args.mc_sims),
+            }
+        )
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir.mkdir(parents=True, exist_ok=True)
-        # FIX M1: use _write_df() — bt output is now pl.DataFrame (Polars migration)
+        # FIX M1: use _write_df() - bt output is now pl.DataFrame (Polars migration)
         _write_df(bt.get_trade_log(), out_dir / f"{args.model}_{stamp}_trades.csv")
         _write_df(bt.results_df, out_dir / f"{args.model}_{stamp}_equity.csv")
-        (out_dir / f"{args.model}_{stamp}_summary.json").write_text(json.dumps({"model": args.model, "checkpoint": str(ckpt), "start": ws, "end": we, "metrics": metrics, "monte_carlo": mc, "execution": exec_meta}, indent=2, default=str), encoding="utf-8")
+        (out_dir / f"{args.model}_{stamp}_summary.json").write_text(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "checkpoint": str(ckpt),
+                    "start": ws,
+                    "end": we,
+                    "metrics": metrics,
+                    "monte_carlo": mc,
+                    "execution": exec_meta,
+                },
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
 
     if wf_rows:
         wf_df = pd.DataFrame(wf_rows)
         wf_df.to_csv(out_dir / f"{args.model}_{run_id}_walkforward.csv", index=False)
-        medians = {"sharpe": float(wf_df["sharpe"].median()), "win_rate": float(wf_df["win_rate"].median()), "max_drawdown": float(wf_df["max_drawdown"].median()), "net_pnl": float(wf_df["net_pnl"].median())}
-        (out_dir / f"{args.model}_{run_id}_walkforward_summary.json").write_text(json.dumps({"model": args.model, "run_id": run_id, "windows": len(wf_rows), "period": {"start": args.start, "end": args.end}, "medians": medians}, indent=2), encoding="utf-8")
-        _send_discord_backtest({
-            "Model": args.model,
-            "Run ID": run_id,
-            "Period": f"{args.start} -> {args.end}",
-            "Windows": str(len(wf_rows)),
-            "Median Sharpe": _fmt_metric(medians["sharpe"], ".4f"),
-            "Median Win Rate": _fmt_metric(medians["win_rate"], ".2%"),
-            "Median Max DD": _fmt_metric(medians["max_drawdown"], ".2%"),
-            "Median Net PnL": _fmt_metric(medians["net_pnl"], ",.2f", prefix="$"),
-            "Output": str(out_dir),
-        })
+        medians = {
+            "sharpe": float(wf_df["sharpe"].median()),
+            "win_rate": float(wf_df["win_rate"].median()),
+            "max_drawdown": float(wf_df["max_drawdown"].median()),
+            "net_pnl": float(wf_df["net_pnl"].median()),
+        }
+        (out_dir / f"{args.model}_{run_id}_walkforward_summary.json").write_text(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "run_id": run_id,
+                    "windows": len(wf_rows),
+                    "period": {"start": args.start, "end": args.end},
+                    "medians": medians,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _send_discord_backtest(
+            {
+                "Model": args.model,
+                "Run ID": run_id,
+                "Period": f"{args.start} -> {args.end}",
+                "Windows": str(len(wf_rows)),
+                "Median Sharpe": _fmt_metric(medians["sharpe"], ".4f"),
+                "Median Win Rate": _fmt_metric(medians["win_rate"], ".2%"),
+                "Median Max DD": _fmt_metric(medians["max_drawdown"], ".2%"),
+                "Median Net PnL": _fmt_metric(medians["net_pnl"], ",.2f", prefix="$"),
+                "Output": str(out_dir),
+            }
+        )
 
 
 def run_execution_backtest(
@@ -858,8 +963,9 @@ def run_execution_backtest(
         min_confidence = float(BACKTEST.get("min_confidence", 0.45))
 
     model.eval()
-    fe = FeatureEngineer(atr_window=FEATURES.get("atr_window", 14),
-                         lag_windows=FEATURES.get("lag_windows", [5, 10, 20]))
+    fe = FeatureEngineer(
+        atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20])
+    )
     afb = AdvancedFeatureBuilder()
     pipeline = ForexDataPipeline(bar_freq=bar_freq)
 
@@ -879,8 +985,7 @@ def run_execution_backtest(
     per_pair = []
     for p in pair_list:
         try:
-            ticks = load_or_generate(source=data_source, pair=p, start=start_date,
-                                     end=end_date, n_rows=100_000)
+            ticks = load_or_generate(source=data_source, pair=p, start=start_date, end=end_date, n_rows=100_000)
         except Exception as exc:
             log(f"[Gate] {p}: data load failed ({exc}); skipping pair")
             continue
@@ -902,8 +1007,11 @@ def run_execution_backtest(
 
     X = pd.concat(per_pair, axis=1)
     try:
-        X["finbert_sentiment"] = float(SentimentPipeline(prefer_backend="finbert", use_cache=True)
-                                       .score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
+        X["finbert_sentiment"] = float(
+            SentimentPipeline(prefer_backend="finbert", use_cache=True).score_headlines(
+                get_latest_headlines(limit=12) or ["Market update"]
+            )
+        )
     except Exception:
         X["finbert_sentiment"] = 0.0
     if X.shape[1] != n_features:
@@ -924,8 +1032,7 @@ def run_execution_backtest(
     if len(X) <= seq_len:
         return _empty("not enough feature rows for seq_len")
 
-    x_t = torch.tensor(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0),
-                       dtype=torch.float32, device=device)
+    x_t = torch.tensor(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
     with torch.no_grad():
         logits = _batched_logits(model, x_t, seq_len, inference_batch_size)
         probs = torch.softmax(logits, dim=-1).cpu().numpy()
@@ -935,8 +1042,8 @@ def run_execution_backtest(
     pip_size = PIP_SIZES.get(str(pair_list[0]).upper(), 0.0001)
 
     signals = []
-    last_signal_i = -10**9
-    
+    last_signal_i = -(10**9)
+
     close_vals = base_bars["close"].values
     ts_vals = base_bars.index
 
@@ -965,6 +1072,7 @@ def run_execution_backtest(
 
         try:
             from config.settings import SIZING
+
             kelly_frac = float(SIZING.get("kelly_fraction", 0.25))
         except ImportError:
             kelly_frac = 0.25
@@ -974,14 +1082,16 @@ def run_execution_backtest(
         kelly_k = win_prob - ((1.0 - win_prob) / reward_to_risk) if reward_to_risk > 0 else 0.0
         dynamic_lots = max(0.01, lots * max(0.0, kelly_k * kelly_frac))
 
-        signals.append({
-            "timestamp": ts_vals[i],
-            "action": act,
-            "lots": dynamic_lots,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "confidence": win_prob,
-        })
+        signals.append(
+            {
+                "timestamp": ts_vals[i],
+                "action": act,
+                "lots": dynamic_lots,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "confidence": win_prob,
+            }
+        )
 
     if not signals:
         return _empty("no trades generated at min_confidence")
@@ -999,12 +1109,14 @@ def run_execution_backtest(
     )
     bt.run()
     metrics = _normalize_backtest_metrics(bt.performance_metrics())
-    metrics.update({
-        "profit_factor": float(bt.performance_metrics().get("profit_factor", 0.0) or 0.0),
-        "signals_df": bt.get_trade_log(),
-        "equity_curve": [float(v) for v in bt.equity_curve] or [float(equity)],
-        "confidence_scores": [float(s["confidence"]) for s in signals],
-    })
+    metrics.update(
+        {
+            "profit_factor": float(bt.performance_metrics().get("profit_factor", 0.0) or 0.0),
+            "signals_df": bt.get_trade_log(),
+            "equity_curve": [float(v) for v in bt.equity_curve] or [float(equity)],
+            "confidence_scores": [float(s["confidence"]) for s in signals],
+        }
+    )
     return metrics
 
 

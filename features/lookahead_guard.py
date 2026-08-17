@@ -17,12 +17,14 @@ logger = logging.getLogger(__name__)
 
 class LookaheadViolation(ValueError):
     """Raised when a feature is structurally proven to contain future information."""
+
     pass
 
 
 @dataclass
 class LookaheadReport:
     """Detailed report from lookahead analysis."""
+
     violations: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     passed: list = field(default_factory=list)
@@ -173,15 +175,14 @@ def assert_no_lookahead(
     Raises:
         LookaheadViolation if a definitive future-data access is detected.
     """
-    n_rows, n_features = features.shape
+    n_rows, _n_features = features.shape
     report = LookaheadReport()
 
     # Check 1: timestamp monotonicity
     ts = np.asarray(timestamps, dtype=np.int64) if timestamps.dtype != np.int64 else timestamps
     if not np.all(ts[1:] >= ts[:-1]):
         raise LookaheadViolation(
-            "Timestamps are not monotonically sorted. "
-            "Data must be sorted chronologically before feature verification."
+            "Timestamps are not monotonically sorted. Data must be sorted chronologically before feature verification."
         )
 
     # Check 2: NaN clustering at tail (sign of shift(-n))
@@ -208,8 +209,8 @@ def assert_no_lookahead(
             }
             report.violations.append(violation)
             raise LookaheadViolation(
-                f"Feature '{name}' has {tail_nan_ratio*100:.0f}% NaN in tail rows "
-                f"but only {body_nan_ratio*100:.1f}% in body. "
+                f"Feature '{name}' has {tail_nan_ratio * 100:.0f}% NaN in tail rows "
+                f"but only {body_nan_ratio * 100:.1f}% in body. "
                 f"This is consistent with shift(-n) look-ahead bias."
             )
 
@@ -258,41 +259,46 @@ def assert_no_lookahead(
             if rolling_check and abs(corr) > 0.5:
                 anomalies = _rolling_correlation_check(col, fwd)
                 if anomalies:
-                    report.warnings.append({
-                        "feature": name,
-                        "check": "rolling_correlation",
-                        "global_corr": round(float(corr), 4),
-                        "anomalous_windows": len(anomalies),
-                        "max_window_corr": max(abs(a["corr"]) for a in anomalies),
-                    })
+                    report.warnings.append(
+                        {
+                            "feature": name,
+                            "check": "rolling_correlation",
+                            "global_corr": round(float(corr), 4),
+                            "anomalous_windows": len(anomalies),
+                            "max_window_corr": max(abs(a["corr"]) for a in anomalies),
+                        }
+                    )
 
             # Check 5: Permutation z-score
             if permutation_check and abs(corr) > 0.3:
                 z_score = _information_ratio_check(col, fwd)
                 if z_score > permutation_z_threshold:
-                    report.warnings.append({
-                        "feature": name,
-                        "check": "permutation_z",
-                        "z_score": round(z_score, 2),
-                        "threshold": permutation_z_threshold,
-                        "corr": round(float(corr), 4),
-                        "severity": "high" if z_score > permutation_z_threshold * 2 else "moderate",
-                    })
+                    report.warnings.append(
+                        {
+                            "feature": name,
+                            "check": "permutation_z",
+                            "z_score": round(z_score, 2),
+                            "threshold": permutation_z_threshold,
+                            "corr": round(float(corr), 4),
+                            "severity": "high" if z_score > permutation_z_threshold * 2 else "moderate",
+                        }
+                    )
 
             if abs(corr) > 0.7:
-                report.warnings.append({
-                    "feature": name,
-                    "check": "global_correlation",
-                    "corr_with_fwd": round(float(corr), 4),
-                    "severity": "suspicious",
-                })
+                report.warnings.append(
+                    {
+                        "feature": name,
+                        "check": "global_correlation",
+                        "corr_with_fwd": round(float(corr), 4),
+                        "severity": "suspicious",
+                    }
+                )
             else:
                 report.passed.append(name)
 
     if report.warnings:
         logger.warning(
-            f"[LookaheadGuard] {len(report.warnings)} features flagged: "
-            f"{[w['feature'] for w in report.warnings[:5]]}"
+            f"[LookaheadGuard] {len(report.warnings)} features flagged: {[w['feature'] for w in report.warnings[:5]]}"
         )
 
     return report
@@ -434,13 +440,15 @@ class ContinuousLookaheadMonitor:
                 z = (abs(corr) - abs(hist_mean)) / hist_std
 
                 if z > self.alert_threshold_z and abs(corr) > 0.7:
-                    alerts.append({
-                        "feature": name,
-                        "bar": self._total_bars,
-                        "current_corr": round(float(corr), 4),
-                        "historical_mean_corr": round(float(hist_mean), 4),
-                        "z_score": round(float(z), 2),
-                    })
+                    alerts.append(
+                        {
+                            "feature": name,
+                            "bar": self._total_bars,
+                            "current_corr": round(float(corr), 4),
+                            "historical_mean_corr": round(float(hist_mean), 4),
+                            "z_score": round(float(z), 2),
+                        }
+                    )
                     self._last_alert_bar[name] = self._total_bars
 
         return alerts

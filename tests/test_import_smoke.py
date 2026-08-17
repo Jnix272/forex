@@ -56,10 +56,7 @@ def _make_import_test(module_name: str):
         except ModuleNotFoundError as exc:
             missing_root = (exc.name or "").split(".", maxsplit=1)[0]
             if missing_root and missing_root not in PROJECT_ROOTS:
-                self.skipTest(
-                    f"optional/runtime dependency missing while importing "
-                    f"{module_name}: {exc.name}"
-                )
+                self.skipTest(f"optional/runtime dependency missing while importing {module_name}: {exc.name}")
             raise
         self.assertIsNotNone(module)
 

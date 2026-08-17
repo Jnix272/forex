@@ -1,12 +1,12 @@
 """
-pretrain/contrastive.py  — Self-supervised pre-training
+pretrain/contrastive.py  - Self-supervised pre-training
   BYOLTrainer, TSCLTrainer, RegimeAwareTSCLTrainer, MaskedReconstructionTrainer
   Extended objectives: pretrain/extended_trainers.py (VAE, cluster, forecast, drift)
-sentiment/dual_stream.py — FinBERT offline + SLM online
-latency/tip_search.py    — TIP-Search latency manager
-monitoring/drift.py      — Model drift detection
-validation/purged_cv.py  — Purged K-Fold + Embargoing
-retraining/rolling.py    — Walk-forward rolling retraining
+sentiment/dual_stream.py - FinBERT offline + SLM online
+latency/tip_search.py    - TIP-Search latency manager
+monitoring/drift.py      - Model drift detection
+validation/purged_cv.py  - Purged K-Fold + Embargoing
+retraining/rolling.py    - Walk-forward rolling retraining
 
 Compatibility utilities remain here so existing imports keep working.
 Move them behind this public surface if this module is physically split later.
@@ -21,23 +21,31 @@ import pandas as pd
 
 try:
     from tqdm import tqdm as _tqdm
-    def _pbar(it, **kw): return _tqdm(it, **kw)
+
+    def _pbar(it, **kw):
+        return _tqdm(it, **kw)
 except ImportError:
-    def _pbar(it, **kw): return it
+
+    def _pbar(it, **kw):
+        return it
+
 
 from config.settings import PATHS
 
 try:
     import torch
     import torch.nn as nn
-    from training.ema import ExponentialMovingAverage
     import torch.nn.functional as F
+
+    from training.ema import ExponentialMovingAverage  # noqa: F401
+
     TORCH = True
 except ImportError:
     TORCH = False
 
 try:
     from scipy import stats
+
     SCIPY = True
 except ImportError:
     SCIPY = False
@@ -56,14 +64,17 @@ __all__ = [
     "lunif",
 ]
 
+
 class RepresentationCollapseError(Exception):
     """Raised when embeddings collapse to a single point during pretraining."""
+
     pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. CONTRASTIVE PRE-TRAINING (TSCL)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TimeSeriesAugmenter:
     """
@@ -72,31 +83,35 @@ class TimeSeriesAugmenter:
     windows from different market regimes should be 'dissimilar'.
 
     Key design choices for financial time-series:
-    - Feature dropout is the MOST impactful augmentation — it forces the encoder
+    - Feature dropout is the MOST impactful augmentation - it forces the encoder
       to learn redundant representations across the 2240 feature channels (the
       time-series equivalent of random crop in vision).
     - Temporal crop preserves all features but shortens the window, forcing
       invariance to exact sequence length.
     - Jitter/scale are weak augmentations that preserve structure but add noise.
-    - Permute is EXCLUDED — shuffling time destroys rolling-window features
+    - Permute is EXCLUDED - shuffling time destroys rolling-window features
       (MACD, RSI, ATR, momentum), making views maximally dissimilar.
     """
-    def __init__(self, jitter_std=0.02, scale_range=(0.8, 1.2),
-                 feature_drop_p=0.3, crop_ratio=(0.7, 1.0), seed=None,
-                 channel_chunk: int | None = None):
+
+    def __init__(
+        self,
+        jitter_std=0.02,
+        scale_range=(0.8, 1.2),
+        feature_drop_p=0.3,
+        crop_ratio=(0.7, 1.0),
+        seed=None,
+        channel_chunk: int | None = None,
+    ):
         self.jitter_std = jitter_std
         self.scale_range = scale_range
-        self.feature_drop_p = feature_drop_p   # fraction of features zeroed out
-        self.crop_ratio = crop_ratio           # min/max fraction of timesteps kept
+        self.feature_drop_p = feature_drop_p  # fraction of features zeroed out
+        self.crop_ratio = crop_ratio  # min/max fraction of timesteps kept
         self.channel_chunk = int(channel_chunk) if channel_chunk else None
         # A-M3: a persistent, optionally-seeded RNG so augmentations are
         # reproducible when a global seed is set (previously every call created
         # a fresh unseeded default_rng(), defeating determinism).
         self._rng = np.random.default_rng(seed)
-        self.stats = {
-            "jitter": 0, "scale": 0, "crop": 0,
-            "shuffle": 0, "feat_drop": 0, "total": 0
-        }
+        self.stats = {"jitter": 0, "scale": 0, "crop": 0, "shuffle": 0, "feat_drop": 0, "total": 0}
 
     def augment_batch(self, X: np.ndarray, progress: float = 1.0, regime: np.ndarray | None = None) -> np.ndarray:
         """Vectorized augmentation: applies curriculum-scaled augmentations.
@@ -146,7 +161,7 @@ class TimeSeriesAugmenter:
             # Curriculum scaling
             s_range = (s_max - s_min) * (0.5 + 0.5 * progress)
             mid = (s_max + s_min) / 2
-            s = rng.uniform(mid - s_range/2, mid + s_range/2, size=(int(m_scale.sum()), 1, 1)).astype(X.dtype)
+            s = rng.uniform(mid - s_range / 2, mid + s_range / 2, size=(int(m_scale.sum()), 1, 1)).astype(X.dtype)
             out[m_scale] *= s
             self.stats["scale"] += int(m_scale.sum())
 
@@ -157,13 +172,11 @@ class TimeSeriesAugmenter:
             c_min, c_max = self.crop_ratio
             # Curriculum cropping
             c_min_curr = c_max - (c_max - c_min) * progress
-            crop_lens = rng.integers(
-                int(T * c_min_curr), T + 1, size=n_crop
-            )
+            crop_lens = rng.integers(int(T * c_min_curr), T + 1, size=n_crop)
             for j, idx in enumerate(np.where(m_crop)[0]):
                 cl = crop_lens[j]
                 start = rng.integers(0, max(1, T - cl + 1))
-                cropped = out[idx, start:start + cl, :].copy()
+                cropped = out[idx, start : start + cl, :].copy()
                 out[idx] = 0.0  # zero-pad
                 out[idx, :cl, :] = cropped
             self.stats["crop"] += n_crop
@@ -180,8 +193,8 @@ class TimeSeriesAugmenter:
                 n_chunks = F // chunk
                 if n_chunks > 1:
                     i1, i2 = rng.choice(n_chunks, size=2, replace=False)
-                    s1, e1 = i1*chunk, (i1+1)*chunk
-                    s2, e2 = i2*chunk, (i2+1)*chunk
+                    s1, e1 = i1 * chunk, (i1 + 1) * chunk
+                    s2, e2 = i2 * chunk, (i2 + 1) * chunk
                     tmp = out[:, :, s1:e1].copy()
                     out[:, :, s1:e1] = out[:, :, s2:e2]
                     out[:, :, s2:e2] = tmp
@@ -192,6 +205,7 @@ class TimeSeriesAugmenter:
 
 
 if TORCH:
+
     def lalign(x, y, alpha=2):
         """Alignment: expected squared distance between positive pairs."""
         # Enforce float32 for metric stability
@@ -202,7 +216,8 @@ if TORCH:
         """Uniformity: logarithm of expected Gaussian potential kernel."""
         # Enforce float32 for metric stability
         x = x.float()
-        if len(x) < 2: return torch.tensor(0.0, device=x.device)
+        if len(x) < 2:
+            return torch.tensor(0.0, device=x.device)
         # Manual pdist implementation for maximum stability
         # (x*x).sum(dim=1) -> (B, 1)
         r = torch.mm(x, x.T)
@@ -234,6 +249,7 @@ if TORCH:
                 nn.ReLU(),
                 nn.Linear(hidden_dim, proj_dim),
             )
+
         def forward(self, x):
             # TSCL is extremely sensitive to NaNs/Infs under AMP (esp. when upstream
             # features have occasional extreme magnitudes). Keep projection in fp32,
@@ -259,10 +275,20 @@ if TORCH:
         NT-Xent (Normalized Temperature-scaled Cross Entropy) loss is used
         with a learnable temperature parameter.
         """
-        def __init__(self, encoder: nn.Module, d_model=128, proj_dim=128,
-                     temperature=0.5, lr=1e-4, device="cpu", seed=None,
-                     aug: Optional["TimeSeriesAugmenter"] = None):
+
+        def __init__(
+            self,
+            encoder: nn.Module,
+            d_model=128,
+            proj_dim=128,
+            temperature=0.5,
+            lr=1e-4,
+            device="cpu",
+            seed=None,
+            aug: Optional["TimeSeriesAugmenter"] = None,
+        ):
             import copy
+
             # A-M5: deep-copy so stripping the prediction head does not mutate the
             # caller's shared backbone in place (it still carries the supervised
             # head that the supervised stage reuses). The trained copy is what
@@ -271,23 +297,21 @@ if TORCH:
             if hasattr(encoder, "head"):
                 encoder.head = nn.Identity()
             self.encoder = encoder.to(device)
-            self.proj    = ProjectionHead(d_model, proj_dim).to(device)
-            # Learnable temperature — auto-tunes during training
-            self.log_temp = nn.Parameter(
-                torch.tensor(float(temperature)).log().to(device)
-            )
-            self.aug     = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
-            self.device  = torch.device(device)
-            self.opt     = torch.optim.AdamW(
-                list(encoder.parameters()) + list(self.proj.parameters())
-                + [self.log_temp],
-                lr=lr, weight_decay=1e-4,
+            self.proj = ProjectionHead(d_model, proj_dim).to(device)
+            # Learnable temperature - auto-tunes during training
+            self.log_temp = nn.Parameter(torch.tensor(float(temperature)).log().to(device))
+            self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
+            self.device = torch.device(device)
+            self.opt = torch.optim.AdamW(
+                list(encoder.parameters()) + list(self.proj.parameters()) + [self.log_temp],
+                lr=lr,
+                weight_decay=1e-4,
             )
             # Force FP32: BF16 overflows with 2240-feature inputs causing collapse
-            self._use_amp    = False
-            self._amp_dtype  = torch.float32
+            self._use_amp = False
+            self._amp_dtype = torch.float32
             self._use_scaler = False
-            self._scaler     = torch.amp.GradScaler(enabled=False)
+            self._scaler = torch.amp.GradScaler(enabled=False)
             self._total_epochs = 0  # track across multiple calls
 
         @property
@@ -301,13 +325,13 @@ if TORCH:
                 raise ValueError(f"Batch sizes must match (z1: {z1.shape[0]}, z2: {z2.shape[0]})")
             B = z1.shape[0]
             # Similarity/logits in fp32 for stability under AMP.
-            z  = torch.cat([z1, z2], dim=0).float()    # (2B, D)
-            z  = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+            z = torch.cat([z1, z2], dim=0).float()  # (2B, D)
+            z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             sim = torch.mm(z, z.T) / self.temp.float()  # (2B, 2B)
-            mask = torch.eye(2*B, device=self.device).bool()
+            mask = torch.eye(2 * B, device=self.device).bool()
             neg_inf = torch.finfo(sim.dtype).min
             sim.masked_fill_(mask, neg_inf)
-            labels = torch.cat([torch.arange(B, 2*B), torch.arange(0, B)]).to(self.device)
+            labels = torch.cat([torch.arange(B, 2 * B), torch.arange(0, B)]).to(self.device)
             return F.cross_entropy(sim, labels)
 
         def _encode_project(self, t):
@@ -324,7 +348,7 @@ if TORCH:
 
             Keeps the gradient graph alive (unlike torch.no_grad) so
             contrastive loss can push/pull all branches, but avoids
-            storing LSTM intermediate activations in VRAM — they are
+            storing LSTM intermediate activations in VRAM - they are
             recomputed during backward.  Peak VRAM ≈ 1 forward pass
             instead of 3.
             """
@@ -367,7 +391,7 @@ if TORCH:
 
                     # Calculate metrics outside autocast and in float32 for stability
                     align = lalign(z1, z2).item()
-                    unif  = lunif(z1).item()
+                    unif = lunif(z1).item()
 
                     # Collapse if variance across samples is near zero
                     std = z1.std(dim=0).mean().item()
@@ -375,9 +399,9 @@ if TORCH:
                     if not np.isfinite(align) or not np.isfinite(unif):
                         # Diagnostics for NaN metrics
                         if torch.isnan(z1).any():
-                             print("[Monitor] ⚠ z1 contains NaNs")
+                            print("[Monitor] ⚠ z1 contains NaNs")
                         if torch.isnan(z2).any():
-                             print("[Monitor] ⚠ z2 contains NaNs")
+                            print("[Monitor] ⚠ z2 contains NaNs")
                         align, unif = 0.0, 0.0
                 except Exception as e:
                     print(f"[Monitor] Metric error: {e}")
@@ -386,13 +410,15 @@ if TORCH:
             self.encoder.train()
             collapsed = std < 0.01
             if collapsed:
-                print(f"\n[Pretrain] ⚠ COLLAPSE DETECTED (epoch {epoch+1}): "
-                      f"embedding std={std:.6f} | align={align:.4f} | unif={unif:.4f}")
+                print(
+                    f"\n[Pretrain] ⚠ COLLAPSE DETECTED (epoch {epoch + 1}): "
+                    f"embedding std={std:.6f} | align={align:.4f} | unif={unif:.4f}"
+                )
             return collapsed, align, unif
 
         def pretrain(
             self,
-            X: np.ndarray,           # (N, seq_len, n_features)
+            X: np.ndarray,  # (N, seq_len, n_features)
             epochs: int = 50,
             batch_size: int = 256,
             checkpoint_path: str | None = None,
@@ -403,16 +429,16 @@ if TORCH:
             N = len(X)
             X_ref_fixed = X[: min(128, N)]
             history = {"loss": [], "align": [], "unif": []}
-            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else (
-                "FP16" if self._use_amp else "FP32"
+            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
+            print(
+                f"[TSCL] Pre-training {epochs} epochs | {N:,} windows | "
+                f"batch={batch_size} | {amp_str} | temp={self.temp.item():.3f}"
             )
-            print(f"[TSCL] Pre-training {epochs} epochs | {N:,} windows | "
-                  f"batch={batch_size} | {amp_str} | temp={self.temp.item():.3f}")
 
             warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]['lr']
+            base_lr = self.opt.param_groups[0]["lr"]
 
-            best_metric = float('inf')
+            best_metric = float("inf")
             patience_counter = 0
 
             epoch_bar = _pbar(range(epochs), desc="TSCL Pretrain", unit="ep", leave=True)
@@ -427,17 +453,18 @@ if TORCH:
                     progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
                     lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
                 for pg in self.opt.param_groups:
-                    pg['lr'] = base_lr * lr_scale
+                    pg["lr"] = base_lr * lr_scale
 
-                epoch_loss = 0.0; n_batches = 0
+                epoch_loss = 0.0
+                n_batches = 0
                 batches = list(range(0, N, batch_size))
                 np.random.shuffle(batches)
 
-                batch_bar = _pbar(batches, desc=f"  Ep {epoch+1:3d}/{epochs}",
-                                  unit="batch", leave=False)
+                batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
                 for start in batch_bar:
-                    X_batch = X[start:start + batch_size]
-                    if len(X_batch) < 4: continue
+                    X_batch = X[start : start + batch_size]
+                    if len(X_batch) < 4:
+                        continue
 
                     cur_progress = epoch / max(1, epochs)
                     v1 = self.aug.augment_batch(X_batch, progress=cur_progress)
@@ -451,7 +478,8 @@ if TORCH:
                         loss = self.nt_xent_loss(z1, z2)
 
                     del t1, t2, z1, z2
-                    if not torch.isfinite(loss): continue
+                    if not torch.isfinite(loss):
+                        continue
 
                     self.opt.zero_grad(set_to_none=True)
                     self._scaler.scale(loss).backward()
@@ -465,7 +493,8 @@ if TORCH:
                     self._scaler.step(self.opt)
                     self._scaler.update()
 
-                    epoch_loss += loss.item(); n_batches += 1
+                    epoch_loss += loss.item()
+                    n_batches += 1
                     if hasattr(batch_bar, "set_postfix"):
                         batch_bar.set_postfix(loss=f"{loss.item():.3f}")
 
@@ -496,14 +525,13 @@ if TORCH:
                     patience_counter += 1
 
                 if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
+                    print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
                     break
 
             print(f"[TSCL] Augment Stats: {self.aug.stats}")
             Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.encoder.state_dict(), checkpoint_path)
             return history
-
 
     class RegimeAwareTSCLTrainer(TSCLTrainer):
         """
@@ -527,15 +555,19 @@ if TORCH:
         def __init__(
             self,
             encoder,
-            regime_labels:        np.ndarray,   # (N,) int8: 1, 0, -1
-            d_model=128, proj_dim=128,
-            temperature=0.5, lr=1e-4, device="cpu",
-            hard_negative_weight: float = 1.0, seed=None,
+            regime_labels: np.ndarray,  # (N,) int8: 1, 0, -1
+            d_model=128,
+            proj_dim=128,
+            temperature=0.5,
+            lr=1e-4,
+            device="cpu",
+            hard_negative_weight: float = 1.0,
+            seed=None,
             aug: Optional["TimeSeriesAugmenter"] = None,
         ):
             super().__init__(encoder, d_model, proj_dim, temperature, lr, device, seed=seed, aug=aug)
-            self.regime_labels    = np.asarray(regime_labels, dtype=np.int8)
-            self.hard_neg_weight  = hard_negative_weight
+            self.regime_labels = np.asarray(regime_labels, dtype=np.int8)
+            self.hard_neg_weight = hard_negative_weight
 
             # Pre-build per-regime index lists for O(1) sampling
             self._regime_idx: dict = {}
@@ -544,19 +576,16 @@ if TORCH:
 
         def _same_regime(self, anchor_i: int) -> int:
             """Sample a single index sharing the same regime as anchor_i."""
-            r    = int(self.regime_labels[anchor_i])
+            r = int(self.regime_labels[anchor_i])
             pool = self._regime_idx.get(r, np.array([anchor_i]))
             return int(np.random.choice(pool))
 
         def _diff_regime(self, anchor_i: int) -> int:
             """Sample a single index from a DIFFERENT regime (hard negative)."""
-            r         = int(self.regime_labels[anchor_i])
-            candidates = [
-                idx for rk, idxs in self._regime_idx.items()
-                if rk != r for idx in idxs
-            ]
+            r = int(self.regime_labels[anchor_i])
+            candidates = [idx for rk, idxs in self._regime_idx.items() if rk != r for idx in idxs]
             if not candidates:
-                return anchor_i   # Fallback if only one regime present
+                return anchor_i  # Fallback if only one regime present
             return int(np.random.choice(candidates))
 
         def _regime_loss(
@@ -575,21 +604,23 @@ if TORCH:
             """
             B = z_a.shape[0]
             # Standard SimCLR loss on (anchor, positive) pairs
-            z_std = torch.cat([z_a, z_p], dim=0)               # (2B, D)
-            sim   = torch.mm(z_std, z_std.T) / self.temp        # (2B, 2B)
-            eye   = torch.eye(2 * B, device=self.device).bool()
+            z_std = torch.cat([z_a, z_p], dim=0)  # (2B, D)
+            sim = torch.mm(z_std, z_std.T) / self.temp  # (2B, 2B)
+            eye = torch.eye(2 * B, device=self.device).bool()
             neg_inf = torch.finfo(sim.dtype).min
             sim.masked_fill_(eye, neg_inf)
-            labels = torch.cat([
-                torch.arange(B, 2 * B, device=self.device),
-                torch.arange(0, B,     device=self.device),
-            ])
+            labels = torch.cat(
+                [
+                    torch.arange(B, 2 * B, device=self.device),
+                    torch.arange(0, B, device=self.device),
+                ]
+            )
             loss_std = F.cross_entropy(sim, labels)
 
             # Hard-negative margin loss: operate on raw cosine similarities (NOT
             # temperature-scaled), so the 0.2 margin has consistent geometric meaning
             # regardless of the learnable temperature value.
-            sim_ap_raw = (z_a * z_p).sum(-1)  # (B,) — raw cosine similarity
+            sim_ap_raw = (z_a * z_p).sum(-1)  # (B,) - raw cosine similarity
             sim_an_raw = (z_a * z_n).sum(-1)  # (B,)
             # Hinge: push anchor-negative similarity 0.2 below anchor-positive
             margin_loss = F.relu(sim_an_raw - sim_ap_raw + 0.2).mean()
@@ -598,11 +629,11 @@ if TORCH:
 
         def pretrain(
             self,
-            X:                np.ndarray,   # (N, seq_len, n_features)
-            epochs:           int = 50,
-            batch_size:       int = 256,
-            checkpoint_path:  str | None = None,
-            patience:         int = 5,
+            X: np.ndarray,  # (N, seq_len, n_features)
+            epochs: int = 50,
+            batch_size: int = 256,
+            checkpoint_path: str | None = None,
+            patience: int = 5,
         ) -> dict:
             """
             Regime-aware pre-training loop.
@@ -631,23 +662,23 @@ if TORCH:
                 self._regime_idx[int(r)] = np.where(reg == r)[0]
 
             n_regimes = len(self._regime_idx)
-            print(f"[RegimeTSCL] Pre-training {epochs} epochs | {N:,} windows | "
-                  f"{n_regimes} regimes: "
-                  f"{ {int(r): len(idx) for r, idx in self._regime_idx.items()} }")
-
-            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else (
-                "FP16" if self._use_amp else "FP32"
+            print(
+                f"[RegimeTSCL] Pre-training {epochs} epochs | {N:,} windows | "
+                f"{n_regimes} regimes: "
+                f"{ {int(r): len(idx) for r, idx in self._regime_idx.items()} }"
             )
+
+            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
             print(f"  batch={batch_size} | {amp_str} | temp={self.temp.item():.3f} (learnable)")
 
             # Pre-build vectorised regime pools for fast sampling
-            _regime_pool = {r: idx for r, idx in self._regime_idx.items()}
+            _regime_pool = dict(self._regime_idx.items())
 
             # LR warmup: linear ramp over first 3 epochs
             warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]['lr']
+            base_lr = self.opt.param_groups[0]["lr"]
 
-            best_metric = float('inf')
+            best_metric = float("inf")
             patience_counter = 0
 
             history = {"loss": [], "align": [], "unif": []}
@@ -663,18 +694,18 @@ if TORCH:
                     progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
                     lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
                 for pg in self.opt.param_groups:
-                    pg['lr'] = base_lr * lr_scale
+                    pg["lr"] = base_lr * lr_scale
 
                 idx_perm = np.random.permutation(N)
-                ep_loss  = 0.0
-                n_b      = 0
+                ep_loss = 0.0
+                n_b = 0
 
                 batches = list(range(0, N, batch_size))
-                batch_bar = _pbar(batches, desc=f"  Ep {epoch+1:3d}/{epochs}",
-                                  unit="batch", leave=False)
+                batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
                 for start in batch_bar:
-                    batch_idx = idx_perm[start: start + batch_size]
-                    if len(batch_idx) < 4: continue
+                    batch_idx = idx_perm[start : start + batch_size]
+                    if len(batch_idx) < 4:
+                        continue
 
                     cur_progress = epoch / max(1, epochs)
                     reg_batch = reg[batch_idx]
@@ -688,7 +719,8 @@ if TORCH:
                             for r, pool in _regime_pool.items():
                                 m = batch_reg == r
                                 cnt = int(m.sum())
-                                if cnt == 0: continue
+                                if cnt == 0:
+                                    continue
                                 pos_i[m] = np.random.choice(pool, cnt)
                                 others = np.concatenate([p for rk, p in _regime_pool.items() if rk != r])
                                 if len(others) > 0:
@@ -697,8 +729,12 @@ if TORCH:
                                     neg_i[m] = pos_i[m]
 
                             cur_progress = epoch / max(1, epochs)
-                            v_p = self.aug.augment_batch(X[pos_i], progress=cur_progress, regime=self.regime_labels[pos_i])
-                            v_n = self.aug.augment_batch(X[neg_i], progress=cur_progress, regime=self.regime_labels[neg_i])
+                            v_p = self.aug.augment_batch(
+                                X[pos_i], progress=cur_progress, regime=self.regime_labels[pos_i]
+                            )
+                            v_n = self.aug.augment_batch(
+                                X[neg_i], progress=cur_progress, regime=self.regime_labels[neg_i]
+                            )
 
                             t_p = torch.as_tensor(v_p, dtype=torch.float32, device=self.device)
                             z_p = self._encode_project_ckpt(t_p)
@@ -726,7 +762,8 @@ if TORCH:
                             loss = self.nt_xent_loss(z1, z2)
                             del z1, z2
 
-                    if not torch.isfinite(loss): continue
+                    if not torch.isfinite(loss):
+                        continue
 
                     self.opt.zero_grad(set_to_none=True)
                     self._scaler.scale(loss).backward()
@@ -769,7 +806,7 @@ if TORCH:
                     patience_counter += 1
 
                 if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
+                    print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
                     break
 
             print(f"[RegimeTSCL] Augment Stats: {self.aug.stats}")
@@ -777,7 +814,6 @@ if TORCH:
             torch.save(self.encoder.state_dict(), checkpoint_path)
             print(f"[RegimeTSCL] Encoder saved → {checkpoint_path}")
             return history
-
 
     class BYOLTrainer:
         """
@@ -794,16 +830,24 @@ if TORCH:
           Target : EMA copy of (encoder + projector), always eval, no gradient
 
         EMA update after every step:
-          target_θ ← decay × target_θ + (1 − decay) × online_θ
-        """
+          target_θ ← decay x target_θ + (1 − decay) x online_θ
+        """  # noqa: RUF002
 
-        def __init__(self, encoder: nn.Module, d_model: int = 128,
-                     proj_dim: int = 256, pred_dim: int = 128,
-                     ema_decay: float = 0.996, lr: float = 1e-4,
-                     device: str = "cpu", seed=None,
-                     aug: Optional["TimeSeriesAugmenter"] = None):
+        def __init__(
+            self,
+            encoder: nn.Module,
+            d_model: int = 128,
+            proj_dim: int = 256,
+            pred_dim: int = 128,
+            ema_decay: float = 0.996,
+            lr: float = 1e-4,
+            device: str = "cpu",
+            seed=None,
+            aug: Optional["TimeSeriesAugmenter"] = None,
+        ):
             import copy
-            self.device    = torch.device(device)
+
+            self.device = torch.device(device)
             self.ema_decay = ema_decay
 
             # Online network
@@ -812,34 +856,32 @@ if TORCH:
             encoder = copy.deepcopy(encoder)
             if hasattr(encoder, "head"):
                 encoder.head = nn.Identity()
-            self.encoder   = encoder.to(self.device)
+            self.encoder = encoder.to(self.device)
             self.projector = self._make_mlp(d_model, proj_dim, proj_dim).to(self.device)
             self.predictor = self._make_mlp(proj_dim, pred_dim, proj_dim).to(self.device)
 
-            # Target network — EMA copy, no gradient, always eval
-            self.target_encoder   = copy.deepcopy(self.encoder)
+            # Target network - EMA copy, no gradient, always eval
+            self.target_encoder = copy.deepcopy(self.encoder)
             self.target_projector = copy.deepcopy(self.projector)
-            for p in (list(self.target_encoder.parameters()) +
-                      list(self.target_projector.parameters())):
+            for p in list(self.target_encoder.parameters()) + list(self.target_projector.parameters()):
                 p.requires_grad_(False)
             self.target_encoder.eval()
             self.target_projector.eval()
 
             self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
 
-            # Optimiser — online params only
+            # Optimiser - online params only
             self.opt = torch.optim.AdamW(
-                list(self.encoder.parameters()) +
-                list(self.projector.parameters()) +
-                list(self.predictor.parameters()),
-                lr=lr, weight_decay=1e-4,
+                list(self.encoder.parameters()) + list(self.projector.parameters()) + list(self.predictor.parameters()),
+                lr=lr,
+                weight_decay=1e-4,
             )
 
             # Force FP32: BF16 overflows with 2240-feature inputs causing collapse
-            self._use_amp    = False
-            self._amp_dtype  = torch.float32
+            self._use_amp = False
+            self._amp_dtype = torch.float32
             self._use_scaler = False
-            self._scaler     = torch.amp.GradScaler(enabled=False)
+            self._scaler = torch.amp.GradScaler(enabled=False)
             self._total_epochs = 0
 
         @staticmethod
@@ -856,15 +898,13 @@ if TORCH:
         @torch.no_grad()
         def _ema_update(self):
             d = self.ema_decay
-            for o, t in zip(self.encoder.parameters(),
-                            self.target_encoder.parameters()):
+            for o, t in zip(self.encoder.parameters(), self.target_encoder.parameters(), strict=False):
                 t.data.mul_(d).add_(o.data, alpha=1.0 - d)
-            for o, t in zip(self.projector.parameters(),
-                            self.target_projector.parameters()):
+            for o, t in zip(self.projector.parameters(), self.target_projector.parameters(), strict=False):
                 t.data.mul_(d).add_(o.data, alpha=1.0 - d)
 
         def _online_fwd(self, x: torch.Tensor) -> torch.Tensor:
-            """Online path — retains gradients. Returns predictor output."""
+            """Online path - retains gradients. Returns predictor output."""
             # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
 
@@ -881,7 +921,7 @@ if TORCH:
 
         @torch.no_grad()
         def _target_fwd(self, x: torch.Tensor) -> torch.Tensor:
-            """Target path — no gradient, fp32, L2-normalised output."""
+            """Target path - no gradient, fp32, L2-normalised output."""
             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
             h = self.target_encoder(x)
             if h.ndim == 3:
@@ -936,32 +976,34 @@ if TORCH:
 
         def pretrain(
             self,
-            X:               np.ndarray,
-            epochs:          int = 50,
-            batch_size:      int = 256,
+            X: np.ndarray,
+            epochs: int = 50,
+            batch_size: int = 256,
             checkpoint_path: str | None = None,
-            silent:          bool = False,  # suppress prints/bars (for multi-block calls)
-            patience:        int = 5,
+            silent: bool = False,  # suppress prints/bars (for multi-block calls)
+            patience: int = 5,
         ) -> dict:
             if checkpoint_path is None:
                 checkpoint_path = PATHS["file_contrastive_encoder"]
             N = len(X)
             X_ref_fixed = X[: min(128, N)]
             history = {"loss": [], "embed_std": [], "align": [], "unif": []}
-            amp_str = ("BF16" if self._amp_dtype == torch.bfloat16
-                       else ("FP16" if self._use_amp else "FP32"))
+            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
             if not silent:
-                print(f"[BYOL] Pre-training {epochs} ep | {N:,} windows | "
-                      f"batch={batch_size} | {amp_str} | ema_decay={self.ema_decay}")
+                print(
+                    f"[BYOL] Pre-training {epochs} ep | {N:,} windows | "
+                    f"batch={batch_size} | {amp_str} | ema_decay={self.ema_decay}"
+                )
 
             warmup_epochs = min(3, epochs)
             base_lr = self.opt.param_groups[0]["lr"]
 
-            best_metric = float('inf')
+            best_metric = float("inf")
             patience_counter = 0
 
-            epoch_bar = (_pbar(range(epochs), desc="BYOL Pretrain", unit="ep", leave=True)
-                         if not silent else range(epochs))
+            epoch_bar = (
+                _pbar(range(epochs), desc="BYOL Pretrain", unit="ep", leave=True) if not silent else range(epochs)
+            )
             for epoch in epoch_bar:
                 self._total_epochs += 1
 
@@ -979,13 +1021,19 @@ if TORCH:
                 self.predictor.train()
 
                 epoch_loss = 0.0
-                n_batches  = 0
-                idx_perm   = np.random.permutation(N)
+                n_batches = 0
+                idx_perm = np.random.permutation(N)
 
-                batch_bar = (_pbar(
-                    range(0, N, batch_size),
-                    desc=f"  Ep {epoch+1:3d}/{epochs}", unit="batch", leave=False,
-                ) if not silent else range(0, N, batch_size))
+                batch_bar = (
+                    _pbar(
+                        range(0, N, batch_size),
+                        desc=f"  Ep {epoch + 1:3d}/{epochs}",
+                        unit="batch",
+                        leave=False,
+                    )
+                    if not silent
+                    else range(0, N, batch_size)
+                )
                 for start in batch_bar:
                     batch_idx = idx_perm[start : start + batch_size]
                     if len(batch_idx) < 4:
@@ -999,8 +1047,7 @@ if TORCH:
                     t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
 
                     # Online forward (with gradient)
-                    with torch.amp.autocast("cuda", enabled=self._use_amp,
-                                            dtype=self._amp_dtype):
+                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                         p1 = self._online_fwd(t1)
                         p2 = self._online_fwd(t2)
 
@@ -1020,9 +1067,9 @@ if TORCH:
                     self._scaler.scale(loss).backward()
                     self._scaler.unscale_(self.opt)
                     gnorm = nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters()) +
-                        list(self.projector.parameters()) +
-                        list(self.predictor.parameters()),
+                        list(self.encoder.parameters())
+                        + list(self.projector.parameters())
+                        + list(self.predictor.parameters()),
                         1.0,
                     )
                     if not torch.isfinite(gnorm):
@@ -1033,7 +1080,7 @@ if TORCH:
                     self._ema_update()
 
                     epoch_loss += loss.item()
-                    n_batches  += 1
+                    n_batches += 1
                     if hasattr(batch_bar, "set_postfix"):
                         batch_bar.set_postfix(loss=f"{loss.item():.3f}")
 
@@ -1046,11 +1093,13 @@ if TORCH:
                 if not silent:
                     if hasattr(epoch_bar, "set_postfix"):
                         epoch_bar.set_postfix(loss=f"{avg:.3f}", std=f"{diag['embed_std']:.4f}")
-                    print(f"[BYOL] Ep {self._total_epochs:3d} | loss={avg:.4f}"
-                          f" | std={diag['embed_std']:.4f}"
-                          f" | align={diag['align']:.3f}"
-                          f" | unif={diag['unif']:.3f}"
-                          f"  (1.0=random  <0.5=learning  <0.2=great)")
+                    print(
+                        f"[BYOL] Ep {self._total_epochs:3d} | loss={avg:.4f}"
+                        f" | std={diag['embed_std']:.4f}"
+                        f" | align={diag['align']:.3f}"
+                        f" | unif={diag['unif']:.3f}"
+                        f"  (1.0=random  <0.5=learning  <0.2=great)"
+                    )
 
                 # Early stopping tracks alignment alone; the uniformity scale
                 # dominates align + unif and masked poorly-aligned pairs.
@@ -1063,7 +1112,7 @@ if TORCH:
 
                 if patience_counter >= patience:
                     if not silent:
-                        print(f"Early stopping at epoch {epoch+1} (metric={metric:.4f})")
+                        print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
                     break
 
             if not silent:
@@ -1072,10 +1121,9 @@ if TORCH:
                 print(f"[BYOL] Encoder saved → {checkpoint_path}")
             return history
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. DUAL-STREAM SENTIMENT  (FinBERT offline + SLM online)
-# ══════════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════════
+    # 2. DUAL-STREAM SENTIMENT  (FinBERT offline + SLM online)
+    # ══════════════════════════════════════════════════════════════════════════════
 
     class MaskedReconstructionTrainer:
         """
@@ -1098,6 +1146,7 @@ if TORCH:
             seed=None,
         ):
             import copy
+
             self.device = torch.device(device)
             self.seq_len = int(seq_len)
             self.n_features = int(n_features)
@@ -1194,8 +1243,11 @@ if TORCH:
 
             warmup_epochs = min(3, epochs)
             base_lr = self.opt.param_groups[0]["lr"]
-            epoch_bar = (_pbar(range(epochs), desc="MaskedRecon Pretrain", unit="ep", leave=True)
-                         if not silent else range(epochs))
+            epoch_bar = (
+                _pbar(range(epochs), desc="MaskedRecon Pretrain", unit="ep", leave=True)
+                if not silent
+                else range(epochs)
+            )
             for epoch in epoch_bar:
                 self._total_epochs += 1
 
@@ -1213,12 +1265,18 @@ if TORCH:
                 idx_perm = np.random.permutation(N)
                 epoch_loss = 0.0
                 n_batches = 0
-                batch_bar = (_pbar(
-                    range(0, N, batch_size),
-                    desc=f"  Ep {epoch+1:3d}/{epochs}", unit="batch", leave=False,
-                ) if not silent else range(0, N, batch_size))
+                batch_bar = (
+                    _pbar(
+                        range(0, N, batch_size),
+                        desc=f"  Ep {epoch + 1:3d}/{epochs}",
+                        unit="batch",
+                        leave=False,
+                    )
+                    if not silent
+                    else range(0, N, batch_size)
+                )
                 for start in batch_bar:
-                    batch_idx = idx_perm[start:start + batch_size]
+                    batch_idx = idx_perm[start : start + batch_size]
                     if len(batch_idx) < 4:
                         continue
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
@@ -1283,37 +1341,37 @@ class DualStreamSentiment:
 
     Latency solution: FinBERT embeddings are pre-computed offline for
     historical data. Online inference uses a small SLM (Mistral-7B) running
-    on GPU with cached embeddings — adds <5ms via the cross-attention fusion.
+    on GPU with cached embeddings - adds <5ms via the cross-attention fusion.
     """
 
     def __init__(
         self,
-        embedding_dim:   int   = 768,
-        proj_dim:        int   = 8,
-        decay_lambda:    float = 0.1,
-        update_sec:      int   = 60,
+        embedding_dim: int = 768,
+        proj_dim: int = 8,
+        decay_lambda: float = 0.1,
+        update_sec: int = 60,
         sentiment_threshold: float = 0.3,
-        prefer_backend:  str | None = None,
-        use_cache:       bool  = True,
+        prefer_backend: str | None = None,
+        use_cache: bool = True,
     ):
-        self.emb_dim    = embedding_dim
-        self.proj_dim   = proj_dim
-        self.decay_lam  = decay_lambda
+        self.emb_dim = embedding_dim
+        self.proj_dim = proj_dim
+        self.decay_lam = decay_lambda
         self.update_sec = update_sec
-        self.threshold  = sentiment_threshold
+        self.threshold = sentiment_threshold
         # Accepted for live-engine / SentimentPipeline parity; bias path is
         # hash-embedding based and does not load a transformer backend.
         self.prefer_backend = prefer_backend
         self.use_cache = bool(use_cache)
 
-        # Random projection (deterministic — same weights every run)
+        # Random projection (deterministic - same weights every run)
         rng = np.random.default_rng(0)
         self._proj = rng.standard_normal((embedding_dim, proj_dim)).astype(np.float32)
         self._proj /= np.linalg.norm(self._proj, axis=0, keepdims=True) + 1e-9
 
         # Live state
         self._current_bias: float = 0.0
-        self._last_update:  float = 0.0
+        self._last_update: float = 0.0
         self._embedding_cache: dict[str, np.ndarray] = {}
 
     def compute_offline_embedding(self, text: str) -> np.ndarray:
@@ -1364,7 +1422,7 @@ class DualStreamSentiment:
         weights = np.exp(-self.decay_lam * np.arange(len(sentiments))[::-1])
         weights /= weights.sum()
         self._current_bias = float(np.dot(weights, sentiments))
-        self._last_update  = time.time()
+        self._last_update = time.time()
         return self._current_bias
 
     def get_bias(self) -> float:
@@ -1378,9 +1436,12 @@ class DualStreamSentiment:
           bias > +threshold: suppress SELL signals
           bias < -threshold: suppress BUY signals
         """
-        if bias is None: bias = self.get_bias()
-        if bias > self.threshold  and raw_signal == 2: return 1  # Suppress SELL → HOLD
-        if bias < -self.threshold and raw_signal == 0: return 1  # Suppress BUY  → HOLD
+        if bias is None:
+            bias = self.get_bias()
+        if bias > self.threshold and raw_signal == 2:
+            return 1  # Suppress SELL → HOLD
+        if bias < -self.threshold and raw_signal == 0:
+            return 1  # Suppress BUY  → HOLD
         return raw_signal
 
     def build_sentiment_series(
@@ -1399,10 +1460,13 @@ class DualStreamSentiment:
 
         # Forward-fill with exponential decay
         result = pd.Series(0.0, index=index, dtype=float)
-        last_ts = None; last_v = 0.0
+        last_ts = None
+        last_v = 0.0
         for ts in index:
             if ts in raw.index and raw[ts] != 0:
-                last_ts = ts; last_v = raw[ts]; result[ts] = last_v
+                last_ts = ts
+                last_v = raw[ts]
+                result[ts] = last_v
             elif last_ts is not None:
                 dt = (ts - last_ts).total_seconds()
                 result[ts] = last_v * np.exp(-self.decay_lam * dt)
@@ -1412,6 +1476,7 @@ class DualStreamSentiment:
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. TIP-SEARCH LATENCY MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TIPSearchManager:
     """
@@ -1423,7 +1488,7 @@ class TIPSearchManager:
 
     Switching logic:
       - Normal market: use SLOW model (accuracy priority)
-      - Volatility spike (ATR > 2× avg): switch to FAST model
+      - Volatility spike (ATR > 2x avg): switch to FAST model
         (must get order in before spread widens)
 
     This ensures the system NEVER misses its execution window, even during
@@ -1432,33 +1497,34 @@ class TIPSearchManager:
 
     def __init__(
         self,
-        fast_agent,           # DQNAgent (or any .select_action(obs) → int)
-        slow_agent,           # PPOAgent / any supervised model
+        fast_agent,  # DQNAgent (or any .select_action(obs) → int)
+        slow_agent,  # PPOAgent / any supervised model
         fast_latency_ms: float = 2.0,
         slow_latency_ms: float = 5.0,
-        switch_mult:     float = 2.0,
-        atr_lookback:    int   = 60,
-        max_latency_ms:  float = 10.0,
+        switch_mult: float = 2.0,
+        atr_lookback: int = 60,
+        max_latency_ms: float = 10.0,
     ):
         self.fast = fast_agent
         self.slow = slow_agent
-        self.fast_ms  = fast_latency_ms
-        self.slow_ms  = slow_latency_ms
+        self.fast_ms = fast_latency_ms
+        self.slow_ms = slow_latency_ms
         self.switch_m = switch_mult
-        self.lb       = atr_lookback
-        self.max_ms   = max_latency_ms
+        self.lb = atr_lookback
+        self.max_ms = max_latency_ms
 
         self._atr_history: list[float] = []
         self.stats = {"fast_used": 0, "slow_used": 0, "total": 0}
 
     def _is_vol_spike(self, current_atr: float) -> bool:
-        if len(self._atr_history) < self.lb: return False
-        avg_atr = np.mean(self._atr_history[-self.lb:])
+        if len(self._atr_history) < self.lb:
+            return False
+        avg_atr = np.mean(self._atr_history[-self.lb :])
         return current_atr > self.switch_m * avg_atr
 
     def select_action(
         self,
-        obs:         np.ndarray,
+        obs: np.ndarray,
         current_atr: float = 0.0,
     ) -> tuple[int, str, float]:
         """
@@ -1491,8 +1557,8 @@ class TIPSearchManager:
     def report(self) -> dict:
         t = max(self.stats["total"], 1)
         return {
-            "fast_pct":  self.stats["fast_used"] / t * 100,
-            "slow_pct":  self.stats["slow_used"] / t * 100,
+            "fast_pct": self.stats["fast_used"] / t * 100,
+            "slow_pct": self.stats["slow_used"] / t * 100,
             "total_calls": t,
         }
 
@@ -1500,6 +1566,7 @@ class TIPSearchManager:
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. MODEL DRIFT DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class DriftDetector:
     """
@@ -1516,17 +1583,17 @@ class DriftDetector:
 
     def __init__(
         self,
-        psi_threshold:   float = 0.2,
-        ks_pvalue:       float = 0.05,
-        sharpe_drop:     float = 0.5,
-        window:          int   = 1000,
-        bars_per_year:   float = 252 * 24 * 60,  # 1-min bars default
+        psi_threshold: float = 0.2,
+        ks_pvalue: float = 0.05,
+        sharpe_drop: float = 0.5,
+        window: int = 1000,
+        bars_per_year: float = 252 * 24 * 60,  # 1-min bars default
     ):
-        self.psi_thresh  = psi_threshold
-        self.ks_p        = ks_pvalue
-        self.sd_thresh   = sharpe_drop
-        self.window      = window
-        self.ann_factor  = np.sqrt(bars_per_year)
+        self.psi_thresh = psi_threshold
+        self.ks_p = ks_pvalue
+        self.sd_thresh = sharpe_drop
+        self.window = window
+        self.ann_factor = np.sqrt(bars_per_year)
         self._train_dist: np.ndarray | None = None
         self._baseline_sharpe: float = 0.0
 
@@ -1535,14 +1602,10 @@ class DriftDetector:
         self._train_dist = X_train.copy()
         if len(baseline_returns) > 1:
             std = baseline_returns.std(ddof=1)
-            self._baseline_sharpe = (
-                baseline_returns.mean() / (std + 1e-9) * self.ann_factor
-            ) if std > 1e-12 else 0.0
-        print(f"[Drift] Baseline fitted | Sharpe: {self._baseline_sharpe:.3f} | "
-              f"Train dist: {X_train.shape}")
+            self._baseline_sharpe = (baseline_returns.mean() / (std + 1e-9) * self.ann_factor) if std > 1e-12 else 0.0
+        print(f"[Drift] Baseline fitted | Sharpe: {self._baseline_sharpe:.3f} | Train dist: {X_train.shape}")
 
-    def compute_psi(self, expected: np.ndarray, actual: np.ndarray,
-                    bins: int = 10) -> float:
+    def compute_psi(self, expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
         """
         Population Stability Index.
           PSI < 0.1  : no significant shift
@@ -1551,14 +1614,15 @@ class DriftDetector:
         """
         eps = 1e-6
         exp_hist, edges = np.histogram(expected, bins=bins, density=True)
-        act_hist, _     = np.histogram(actual, bins=edges, density=True)
-        exp_hist += eps; act_hist += eps
+        act_hist, _ = np.histogram(actual, bins=edges, density=True)
+        exp_hist += eps
+        act_hist += eps
         return float(np.sum((act_hist - exp_hist) * np.log(act_hist / exp_hist)))
 
     def check(
         self,
-        X_live:         np.ndarray,
-        live_returns:   np.ndarray,
+        X_live: np.ndarray,
+        live_returns: np.ndarray,
     ) -> dict:
         """
         Run all drift checks. Returns a dict with drift flags and scores.
@@ -1579,7 +1643,7 @@ class DriftDetector:
         psi_vals = []
         for f in range(n_feats):
             train_f = self._train_dist[:, f]
-            live_f  = X_live[-min(len(X_live), self.window):, f]
+            live_f = X_live[-min(len(X_live), self.window) :, f]
             psi_vals.append(self.compute_psi(train_f, live_f))
         result["psi_max"] = float(np.max(psi_vals))
 
@@ -1587,20 +1651,15 @@ class DriftDetector:
         if SCIPY and len(X_live) >= 30:
             ks_pvals = []
             for f in range(min(5, n_feats)):
-                _, p = stats.ks_2samp(
-                    self._train_dist[:, f],
-                    X_live[-self.window:, f]
-                )
+                _, p = stats.ks_2samp(self._train_dist[:, f], X_live[-self.window :, f])
                 ks_pvals.append(p)
             result["ks_min_pvalue"] = float(np.min(ks_pvals))
 
         # Sharpe drop
         if len(live_returns) > 30:
-            window_rets = live_returns[-self.window:]
+            window_rets = live_returns[-self.window :]
             std = window_rets.std(ddof=1) if len(window_rets) > 1 else 0.0
-            live_sharpe = (
-                window_rets.mean() / (std + 1e-9) * self.ann_factor
-            ) if std > 1e-12 else 0.0
+            live_sharpe = (window_rets.mean() / (std + 1e-9) * self.ann_factor) if std > 1e-12 else 0.0
             drop = self._baseline_sharpe - live_sharpe
             result["sharpe_drop"] = float(drop)
             if drop > self.sd_thresh:
@@ -1624,7 +1683,7 @@ class DriftDetector:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Contrastive Pre-training — Smoke Tests")
+    print("Contrastive Pre-training - Smoke Tests")
     print("=" * 60)
 
     # 1. Augmentation (batch API)

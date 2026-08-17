@@ -1,4 +1,5 @@
 """Tests for torch.compile RNN eager-skip helpers."""
+
 from __future__ import annotations
 
 import torch
@@ -40,6 +41,7 @@ def test_maybe_torch_compile_respects_disabled_flag_on_cpu():
 
 def test_maybe_torch_compile_honours_explicit_false(monkeypatch):
     m = nn.Linear(2, 2)
+
     # Force CUDA path checks without needing a GPU: patch device type via fake
     class _Dev:
         type = "cuda"

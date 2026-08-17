@@ -1,19 +1,19 @@
 """
 tests/test_model_behavior.py
 ============================
-Behavioral verification tests — checks that models work *as intended*, not
+Behavioral verification tests - checks that models work *as intended*, not
 just that they produce the right tensor shape.
 
 Tests are organised into groups:
-  1. TestModelRobustness       — NaN safety, B=1 edge case, large / zero inputs
-  2. TestMambaScalper          — SSM-specific behaviour: causal ordering, no OOM
+  1. TestModelRobustness       - NaN safety, B=1 edge case, large / zero inputs
+  2. TestMambaScalper          - SSM-specific behaviour: causal ordering, no OOM
                                   on long sequences, state propagation
-  3. TestAllModelsGradients    — finite gradients, reasonable init output scale
-  4. TestMultiPairWrapperBehavior — correlation range, backbone sizing, regime attn,
+  3. TestAllModelsGradients    - finite gradients, reasonable init output scale
+  4. TestMultiPairWrapperBehavior - correlation range, backbone sizing, regime attn,
                                     alignment confidence, missing-pair gating
-  5. TestDiversityLossBehavior — role-conditioned penalty, scalar + differentiable
-  6. TestFeatureStabilityMonitor — EMA drift, mask values, frozen-feature reset
-  7. TestBuildModelIntegration — build_model produces correct wrapper widths
+  5. TestDiversityLossBehavior - role-conditioned penalty, scalar + differentiable
+  6. TestFeatureStabilityMonitor - EMA drift, mask values, frozen-feature reset
+  7. TestBuildModelIntegration - build_model produces correct wrapper widths
 
 Run with:
     pytest tests/test_model_behavior.py -v
@@ -43,7 +43,7 @@ from models.architectures import (
 
 # ── shared fixtures ───────────────────────────────────────────────────────────
 
-B, T, F = 4, 60, 32   # standard batch / seq_len / features
+B, T, F = 4, 60, 32  # standard batch / seq_len / features
 
 
 @pytest.fixture(scope="module")
@@ -59,21 +59,21 @@ def _all_finite(t: torch.Tensor) -> bool:
 def _mpw_backbone_input(P: int, F: int, E: int) -> int:
     """Width that backbone must be built with when MultiPairWrapper is used."""
     n_cross = P * (P - 1) // 2
-    n_inter = 3 * n_cross + P + 2   # RelMom + ShortCorr + LongCorr + VolShare + Disp + Conf
+    n_inter = 3 * n_cross + P + 2  # RelMom + ShortCorr + LongCorr + VolShare + Disp + Conf
     return P * (F + E) + n_inter
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. ROBUSTNESS — NaN safety, edge cases
+# 1. ROBUSTNESS - NaN safety, edge cases
 # ─────────────────────────────────────────────────────────────────────────────
 
 _ALL_MODELS_PARAMS = [
-    (TFTScalper,          {"input_size": F}),
+    (TFTScalper, {"input_size": F}),
     (iTransformerScalper, {"input_size": F, "seq_len": T}),
-    (HAELTHybrid,         {"input_size": F, "seq_len": T}),
-    (MambaScalper,        {"input_size": F}),
-    (EXPERTEncoder,       {"input_size": F}),
-    (GNNFromSequence,     {"input_size": F, "hidden": 32, "num_layers": 2, "dropout": 0.0}),
+    (HAELTHybrid, {"input_size": F, "seq_len": T}),
+    (MambaScalper, {"input_size": F}),
+    (EXPERTEncoder, {"input_size": F}),
+    (GNNFromSequence, {"input_size": F, "hidden": 32, "num_layers": 2, "dropout": 0.0}),
 ]
 _ALL_MODEL_IDS = ["tft", "itransformer", "haelt", "mamba", "expert", "gnn"]
 
@@ -91,7 +91,7 @@ class TestModelRobustness:
 
     @pytest.mark.parametrize("cls,kw", _ALL_MODELS_PARAMS, ids=_ALL_MODEL_IDS)
     def test_batch_size_one(self, cls, kw):
-        """B=1 triggered a squeeze(-1) collapse bug in MultiTaskHead — verify fixed."""
+        """B=1 triggered a squeeze(-1) collapse bug in MultiTaskHead - verify fixed."""
         model = cls(**kw)
         model.eval()
         with torch.no_grad():
@@ -139,22 +139,20 @@ class TestModelRobustness:
         with torch.no_grad():
             o1 = model(x)
             o2 = model(x)
-        assert torch.allclose(o1, o2, atol=0.0), (
-            f"{cls.__name__} is non-deterministic in eval() mode"
-        )
+        assert torch.allclose(o1, o2, atol=0.0), f"{cls.__name__} is non-deterministic in eval() mode"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. MAMBA-SPECIFIC BEHAVIOUR
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestMambaScalper:
-    """MambaScalper uses causal Conv1d + gating — correctness depends on
+    """MambaScalper uses causal Conv1d + gating - correctness depends on
     left-to-right (causal) processing and local temporal pattern capture."""
 
     def _make_model(self, **kw) -> MambaScalper:
-        defaults = dict(input_size=F, d_model=32, d_conv=4,
-                        expand=2, num_layers=2, dropout=0.0)
+        defaults = {"input_size": F, "d_model": 32, "d_conv": 4, "expand": 2, "num_layers": 2, "dropout": 0.0}
         defaults.update(kw)
         return MambaScalper(**defaults).eval()
 
@@ -182,7 +180,7 @@ class TestMambaScalper:
         out = m(torch.randn(1, T, F))
         assert out.shape == (1, 3), f"B=1 classification: expected (1,3) got {out.shape}"
 
-    # ── causal ordering — SSM must respect time ───────────────────────────────
+    # ── causal ordering - SSM must respect time ───────────────────────────────
 
     def test_sequence_order_matters(self):
         """Shuffling the time axis must change the output.
@@ -194,10 +192,10 @@ class TestMambaScalper:
         perm = torch.randperm(T)
         x_shuffled = x[:, perm, :]
         with torch.no_grad():
-            o_orig    = m(x)
+            o_orig = m(x)
             o_shuffled = m(x_shuffled)
         assert not torch.allclose(o_orig, o_shuffled, atol=1e-4), (
-            "MambaScalper ignores sequence order — SSM state is not being used"
+            "MambaScalper ignores sequence order - SSM state is not being used"
         )
 
     def test_final_timestep_differs_from_first(self):
@@ -207,12 +205,12 @@ class TestMambaScalper:
         m = self._make_model()
         x = torch.randn(1, T, F)
         with torch.no_grad():
-            o_full     = m(x)                    # uses all T timesteps
-            o_short    = m(x[:, :-1, :])         # one fewer context bar
+            o_full = m(x)  # uses all T timesteps
+            o_short = m(x[:, :-1, :])  # one fewer context bar
         # They should NOT be identical (state would differ)
         # We allow the model to output a slightly different value
         assert not torch.allclose(o_full, o_short, atol=1e-5), (
-            "Output unchanged when context is shortened — state carry-forward may be broken"
+            "Output unchanged when context is shortened - state carry-forward may be broken"
         )
 
     # ── long-sequence handling (O(L) complexity) ─────────────────────────────
@@ -248,14 +246,8 @@ class TestMambaScalper:
         x = torch.randn(B, T, F)
         out = m(x)
         out.sum().backward()
-        total_norm = sum(
-            p.grad.norm().item() ** 2
-            for p in m.parameters()
-            if p.grad is not None
-        ) ** 0.5
-        assert total_norm < 200, (
-            f"Gradient norm at init is {total_norm:.1f} — possible exploding gradient"
-        )
+        total_norm = sum(p.grad.norm().item() ** 2 for p in m.parameters() if p.grad is not None) ** 0.5
+        assert total_norm < 200, f"Gradient norm at init is {total_norm:.1f} - possible exploding gradient"
 
     # ── loss decreases on a trivial task ─────────────────────────────────────
 
@@ -267,7 +259,7 @@ class TestMambaScalper:
 
         # Task: output sign of the last feature of the last bar
         X = torch.randn(32, 20, 4)
-        y = X[:, -1, -1].sign()   # deterministic label
+        y = X[:, -1, -1].sign()  # deterministic label
 
         losses = []
         for _ in range(20):
@@ -278,17 +270,15 @@ class TestMambaScalper:
             opt.step()
             losses.append(loss.item())
 
-        assert losses[-1] < losses[0], (
-            f"Loss did not decrease: {losses[0]:.4f} → {losses[-1]:.4f}"
-        )
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.4f} → {losses[-1]:.4f}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. GRADIENT HEALTH — all architectures
+# 3. GRADIENT HEALTH - all architectures
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestAllModelsGradients:
-
     @pytest.mark.parametrize("cls,kw", _ALL_MODELS_PARAMS, ids=_ALL_MODEL_IDS)
     def test_gradients_finite(self, cls, kw):
         model = cls(**kw)
@@ -296,9 +286,7 @@ class TestAllModelsGradients:
         model(x).sum().backward()
         for name, p in model.named_parameters():
             if p.grad is not None:
-                assert _all_finite(p.grad), (
-                    f"{cls.__name__}.{name}: NaN/Inf gradient at init"
-                )
+                assert _all_finite(p.grad), f"{cls.__name__}.{name}: NaN/Inf gradient at init"
 
     @pytest.mark.parametrize("cls,kw", _ALL_MODELS_PARAMS, ids=_ALL_MODEL_IDS)
     def test_output_scale_reasonable_at_init(self, cls, kw):
@@ -309,9 +297,7 @@ class TestAllModelsGradients:
         with torch.no_grad():
             out = model(torch.randn(16, T, F))
         mean_abs = out.abs().mean().item()
-        assert mean_abs < 10.0, (
-            f"{cls.__name__} output |mean| = {mean_abs:.2f} at init — suspiciously large"
-        )
+        assert mean_abs < 10.0, f"{cls.__name__} output |mean| = {mean_abs:.2f} at init - suspiciously large"
 
     @pytest.mark.parametrize("cls,kw", _ALL_MODELS_PARAMS, ids=_ALL_MODEL_IDS)
     def test_at_least_one_parameter_gets_gradient(self, cls, kw):
@@ -325,21 +311,31 @@ class TestAllModelsGradients:
 # 4. MULTI-PAIR WRAPPER BEHAVIOUR
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestMultiPairWrapperBehavior:
     """Verifies the cross-pair feature pipeline produces meaningful values
     and that the wrapper's backbone sees the correct input width."""
 
-    def _make_wrapper(self, P=2, Fp=16, E=8, T=60, num_classes=1,
-                      corr_window=10, corr_window_long=20, momentum_window=10):
+    def _make_wrapper(
+        self, P=2, Fp=16, E=8, T=60, num_classes=1, corr_window=10, corr_window_long=20, momentum_window=10
+    ):
         bi = _mpw_backbone_input(P, Fp, E)
         backbone = HAELTHybrid(
-            input_size=bi, seq_len=T,
-            lstm_hidden=32, d_model=32, nhead=2, n_layers=1,
+            input_size=bi,
+            seq_len=T,
+            lstm_hidden=32,
+            d_model=32,
+            nhead=2,
+            n_layers=1,
             num_classes=num_classes,
         )
         return MultiPairWrapper(
-            backbone, n_pairs=P, f_per_pair=Fp, embed_dim=E,
-            corr_window=corr_window, corr_window_long=corr_window_long,
+            backbone,
+            n_pairs=P,
+            f_per_pair=Fp,
+            embed_dim=E,
+            corr_window=corr_window,
+            corr_window_long=corr_window_long,
             momentum_window=momentum_window,
         )
 
@@ -348,7 +344,7 @@ class TestMultiPairWrapperBehavior:
     def test_backbone_receives_correct_input_width(self):
         """The backbone's first Linear must match what wrapper actually feeds it.
         Before the fix, backbone was built with n_pairs*(F+E) but received
-        n_pairs*(F+E) + n_interaction — a silent dimension mismatch.
+        n_pairs*(F+E) + n_interaction - a silent dimension mismatch.
         """
         P, Fp, E = 3, 16, 8
         wrapper = self._make_wrapper(P=P, Fp=Fp, E=E)
@@ -364,7 +360,7 @@ class TestMultiPairWrapperBehavior:
         for P in [2, 3, 4]:
             n_cross = P * (P - 1) // 2
             expected = 3 * n_cross + P + 2
-            actual   = _mpw_backbone_input(P, 16, 8) - P * (16 + 8)
+            actual = _mpw_backbone_input(P, 16, 8) - P * (16 + 8)
             assert actual == expected, f"P={P}: expected n_inter={expected}, got {actual}"
 
     # ── rolling correlation correctness ──────────────────────────────────────
@@ -383,9 +379,9 @@ class TestMultiPairWrapperBehavior:
         short = cross[..., n_cross : 2 * n_cross]
         long_ = cross[..., 2 * n_cross : 3 * n_cross]
         assert short.min().item() >= -1.0 - 1e-5, "Short corr below -1"
-        assert short.max().item() <=  1.0 + 1e-5, "Short corr above +1"
+        assert short.max().item() <= 1.0 + 1e-5, "Short corr above +1"
         assert long_.min().item() >= -1.0 - 1e-5, "Long corr below -1"
-        assert long_.max().item() <=  1.0 + 1e-5, "Long corr above +1"
+        assert long_.max().item() <= 1.0 + 1e-5, "Long corr above +1"
 
     def test_short_and_long_corr_differ_for_trending_series(self):
         """On a trending series, short-window corr should differ from long-window corr
@@ -393,8 +389,7 @@ class TestMultiPairWrapperBehavior:
         """
         P, Fp = 2, 8
         # Build a wrapper with noticeably different short vs long windows
-        wrapper = self._make_wrapper(P=P, Fp=Fp, E=0,
-                                     corr_window=5, corr_window_long=40)
+        wrapper = self._make_wrapper(P=P, Fp=Fp, E=0, corr_window=5, corr_window_long=40)
         wrapper.eval()
         # Trending + diverging pair features
         t = torch.linspace(0, 4 * math.pi, 60)
@@ -404,11 +399,11 @@ class TestMultiPairWrapperBehavior:
         with torch.no_grad():
             cross = wrapper._cross_pair_features(x)
         # n_cross = 1 for P=2
-        short_last = cross[0, -1, 1].item()   # short corr at last bar
-        long_last  = cross[0, -1, 2].item()   # long corr at last bar
+        short_last = cross[0, -1, 1].item()  # short corr at last bar
+        long_last = cross[0, -1, 2].item()  # long corr at last bar
         assert abs(short_last - long_last) > 1e-3, (
             f"Short ({short_last:.4f}) == long ({long_last:.4f}) corr on trending series "
-            "— the two lookbacks are not being applied independently"
+            "- the two lookbacks are not being applied independently"
         )
 
     def test_vol_share_sums_to_one(self):
@@ -422,13 +417,11 @@ class TestMultiPairWrapperBehavior:
         n_cross = P * (P - 1) // 2
         # vol_share lives at positions [3*n_cross : 3*n_cross + P]
         vol_share = cross[0, :, 3 * n_cross : 3 * n_cross + P]
-        row_sums  = vol_share.sum(dim=-1)
-        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4), (
-            "Vol shares do not sum to 1"
-        )
+        row_sums = vol_share.sum(dim=-1)
+        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4), "Vol shares do not sum to 1"
 
     def test_alignment_confidence_range(self):
-        """Alignment confidence must be in [0, 1] — it's a fraction of pairs present."""
+        """Alignment confidence must be in [0, 1] - it's a fraction of pairs present."""
         P, Fp = 4, 8
         wrapper = self._make_wrapper(P=P, Fp=Fp, E=0)
         wrapper.eval()
@@ -447,15 +440,13 @@ class TestMultiPairWrapperBehavior:
         wrapper.eval()
         xp_full = torch.randn(1, 30, P, Fp).abs() + 0.1
         xp_miss = xp_full.clone()
-        xp_miss[:, :, 0, :] = 0.0   # zero out pair 0 → only 2 of 3 pairs present
+        xp_miss[:, :, 0, :] = 0.0  # zero out pair 0 → only 2 of 3 pairs present
         with torch.no_grad():
             cross_full = wrapper._cross_pair_features(xp_full)
             cross_miss = wrapper._cross_pair_features(xp_miss)
         conf_full = cross_full[0, :, -1].mean().item()
         conf_miss = cross_miss[0, :, -1].mean().item()
-        assert conf_miss < conf_full, (
-            f"Conf with missing pair ({conf_miss:.3f}) ≥ full conf ({conf_full:.3f})"
-        )
+        assert conf_miss < conf_full, f"Conf with missing pair ({conf_miss:.3f}) ≥ full conf ({conf_full:.3f})"
 
     # ── regime attention ──────────────────────────────────────────────────────
 
@@ -467,16 +458,16 @@ class TestMultiPairWrapperBehavior:
         x = torch.randn(2, 60, P * Fp)
         # Intercept pair_weights inside forward by running with hooks
         captured = {}
+
         def _hook(module, inp, out):
             captured["pair_weights"] = torch.softmax(out, dim=-1).detach()
+
         wrapper.regime_attn[-1].register_forward_hook(_hook)
         with torch.no_grad():
             wrapper(x)
-        pw = captured["pair_weights"]   # (B, P)
+        pw = captured["pair_weights"]  # (B, P)
         sums = pw.sum(dim=-1)
-        assert torch.allclose(sums, torch.ones(2), atol=1e-5), (
-            f"Regime attention weights do not sum to 1: {sums}"
-        )
+        assert torch.allclose(sums, torch.ones(2), atol=1e-5), f"Regime attention weights do not sum to 1: {sums}"
 
     def test_gradient_reaches_pair_embeddings(self):
         """Backward must push gradient all the way back to the static pair embeddings."""
@@ -484,17 +475,15 @@ class TestMultiPairWrapperBehavior:
         wrapper = self._make_wrapper(P=P, Fp=Fp, E=E)
         wrapper(torch.randn(2, 60, P * Fp)).sum().backward()
         g = wrapper.pair_embeds.weight.grad
-        assert g is not None and g.abs().sum().item() > 0, (
-            "No gradient reached pair_embeds.weight"
-        )
+        assert g is not None and g.abs().sum().item() > 0, "No gradient reached pair_embeds.weight"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. DIVERSITY LOSS BEHAVIOUR
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestDiversityLossBehavior:
 
+class TestDiversityLossBehavior:
     def _preds(self, B: int, n: int, identical: bool = False):
         if identical:
             base = torch.randn(B, 1)
@@ -506,9 +495,7 @@ class TestDiversityLossBehavior:
         div = DiversityLoss(weight=0.1)
         preds = self._preds(64, 4, identical=True)
         loss = div(preds)
-        assert loss.item() > 0.08, (
-            f"Identical preds should yield penalty ≈ 0.1, got {loss.item():.4f}"
-        )
+        assert loss.item() > 0.08, f"Identical preds should yield penalty ≈ 0.1, got {loss.item():.4f}"
 
     def test_orthogonal_preds_low_penalty(self):
         """Uncorrelated outputs → penalty ≈ 0."""
@@ -517,12 +504,10 @@ class TestDiversityLossBehavior:
         mat, _ = torch.linalg.qr(torch.randn(128, 4))
         preds = [mat[:, i] for i in range(4)]
         loss = div(preds)
-        assert loss.item() < 0.02, (
-            f"Orthogonal preds should yield near-zero penalty, got {loss.item():.4f}"
-        )
+        assert loss.item() < 0.02, f"Orthogonal preds should yield near-zero penalty, got {loss.item():.4f}"
 
     def test_single_model_returns_zero(self):
-        """With only one model there are no pairs — penalty must be exactly 0."""
+        """With only one model there are no pairs - penalty must be exactly 0."""
         div = DiversityLoss(weight=0.1)
         loss = div([torch.randn(32)])
         assert loss.item() == pytest.approx(0.0), "Single-model penalty should be 0"
@@ -541,22 +526,19 @@ class TestDiversityLossBehavior:
     def test_same_role_penalty_higher_than_cross_role(self):
         """Models with the same role should incur a larger diversity penalty."""
         torch.manual_seed(5)
-        preds = [torch.randn(32)] * 2   # identical outputs for clarity
+        preds = [torch.randn(32)] * 2  # identical outputs for clarity
         # Same role
-        div_same  = DiversityLoss(weight=1.0, same_role_mult=3.0,
-                                   roles=["fast_reaction", "fast_reaction"])
+        div_same = DiversityLoss(weight=1.0, same_role_mult=3.0, roles=["fast_reaction", "fast_reaction"])
         # Cross role
-        div_cross = DiversityLoss(weight=1.0, same_role_mult=3.0,
-                                   roles=["fast_reaction", "context"])
-        loss_same  = div_same(preds).item()
+        div_cross = DiversityLoss(weight=1.0, same_role_mult=3.0, roles=["fast_reaction", "context"])
+        loss_same = div_same(preds).item()
         loss_cross = div_cross(preds).item()
-        assert loss_same > loss_cross, (
-            f"Same-role penalty ({loss_same:.4f}) ≤ cross-role penalty ({loss_cross:.4f})"
-        )
+        assert loss_same > loss_cross, f"Same-role penalty ({loss_same:.4f}) ≤ cross-role penalty ({loss_cross:.4f})"
 
     def test_model_roles_cover_all_architectures(self):
         """Every registered architecture must appear in MODEL_ROLES."""
         from models.architectures import MODEL_REGISTRY
+
         for name in MODEL_REGISTRY:
             assert name in MODEL_ROLES, f"'{name}' missing from MODEL_ROLES"
 
@@ -578,18 +560,25 @@ _skip_no_train_gpu = pytest.mark.skipif(
 
 @_skip_no_train_gpu
 class TestFeatureStabilityMonitor:
-    """FeatureStabilityMonitor is defined inside train_gpu — import it at test time."""
+    """FeatureStabilityMonitor is defined inside train_gpu - import it at test time."""
 
     @pytest.fixture(autouse=True)
     def _import(self):
         from training.train_gpu import FeatureStabilityMonitor
+
         self.Monitor = FeatureStabilityMonitor
 
     def _monitor(self, n=8, **kw):
         # Build defaults then overlay caller overrides so there are no duplicate kwargs
-        cfg = dict(ema_alpha=0.9, soft_threshold=2.0, hard_threshold=4.0,
-                   freeze_after=2, damping_factor=0.5,
-                   warmup_epochs=1, min_active_pct=0.25)
+        cfg = {
+            "ema_alpha": 0.9,
+            "soft_threshold": 2.0,
+            "hard_threshold": 4.0,
+            "freeze_after": 2,
+            "damping_factor": 0.5,
+            "warmup_epochs": 1,
+            "min_active_pct": 0.25,
+        }
         cfg.update(kw)
         return self.Monitor(n_features=n, **cfg)
 
@@ -610,30 +599,26 @@ class TestFeatureStabilityMonitor:
         assert (mask == 1.0).all(), "Stable features should stay fully active"
 
     def test_drifted_feature_gets_soft_mask(self):
-        """A feature that shifts by > soft_threshold σ should be masked to 0.5."""
+        """A feature that shifts by > soft_threshold σ should be masked to 0.5."""  # noqa: RUF002
         n = 4
-        mon = self._monitor(n=n, soft_threshold=1.0, hard_threshold=5.0,
-                             freeze_after=10, warmup_epochs=0)
+        mon = self._monitor(n=n, soft_threshold=1.0, hard_threshold=5.0, freeze_after=10, warmup_epochs=0)
         rng = np.random.default_rng(1)
         # Warmup with zero-mean data
         base = rng.standard_normal((32, n)).astype(np.float32)
         for _ in range(3):
             mon.update(base)
-        # Feature 0 suddenly shifts by +20 — way above soft threshold
+        # Feature 0 suddenly shifts by +20 - way above soft threshold
         drifted = base.copy()
         drifted[:, 0] += 20.0
         mon.update(drifted)
         mask = mon.get_mask()
         # Feature 0 should now be 0.5 (soft) or 0.0 (hard)
-        assert mask[0].item() < 1.0, (
-            f"Drifted feature 0 still fully active (mask={mask[0].item():.2f})"
-        )
+        assert mask[0].item() < 1.0, f"Drifted feature 0 still fully active (mask={mask[0].item():.2f})"
 
     def test_frozen_feature_gets_zero_mask(self):
         """After freeze_after consecutive high-shift epochs, mask should be 0.0."""
         n = 4
-        mon = self._monitor(n=n, soft_threshold=0.5, hard_threshold=1.0,
-                             freeze_after=2, warmup_epochs=0)
+        mon = self._monitor(n=n, soft_threshold=0.5, hard_threshold=1.0, freeze_after=2, warmup_epochs=0)
         rng = np.random.default_rng(2)
         base = rng.standard_normal((32, n)).astype(np.float32)
         for _ in range(2):
@@ -651,26 +636,25 @@ class TestFeatureStabilityMonitor:
     def test_reset_frozen_restores_ones(self):
         """reset_frozen() must unfreeze all features → mask becomes all-ones again."""
         n = 4
-        mon = self._monitor(n=n, soft_threshold=0.5, hard_threshold=1.0,
-                             freeze_after=2, warmup_epochs=0)
+        mon = self._monitor(n=n, soft_threshold=0.5, hard_threshold=1.0, freeze_after=2, warmup_epochs=0)
         base = np.random.default_rng(3).standard_normal((32, n)).astype(np.float32)
         for _ in range(2):
             mon.update(base)
-        drifted = base.copy(); drifted[:, 2] += 50.0
+        drifted = base.copy()
+        drifted[:, 2] += 50.0
         for _ in range(3):
             mon.update(drifted)
         assert mon.get_mask()[2].item() == pytest.approx(0.0, abs=1e-5), "Setup failed"
         mon.reset_frozen()
         mask_after = mon.get_mask()
-        assert torch.allclose(mask_after, torch.ones(n)), (
-            f"After reset_frozen, mask is not all-ones: {mask_after}"
-        )
+        assert torch.allclose(mask_after, torch.ones(n)), f"After reset_frozen, mask is not all-ones: {mask_after}"
 
     def test_min_active_pct_preserves_minimum(self):
         """Even if all features drift, at least min_active_pct must stay active."""
         n = 8
-        mon = self._monitor(n=n, soft_threshold=0.5, hard_threshold=1.0,
-                             freeze_after=2, warmup_epochs=0, min_active_pct=0.5)
+        mon = self._monitor(
+            n=n, soft_threshold=0.5, hard_threshold=1.0, freeze_after=2, warmup_epochs=0, min_active_pct=0.5
+        )
         base = np.random.default_rng(4).standard_normal((32, n)).astype(np.float32)
         for _ in range(2):
             mon.update(base)
@@ -680,16 +664,14 @@ class TestFeatureStabilityMonitor:
             mon.update(drifted)
         mask = mon.get_mask()
         active_frac = (mask > 0).float().mean().item()
-        assert active_frac >= 0.5 - 1e-5, (
-            f"Only {active_frac:.1%} features active, expected ≥ 50% (min_active_pct)"
-        )
+        assert active_frac >= 0.5 - 1e-5, f"Only {active_frac:.1%} features active, expected ≥ 50% (min_active_pct)"
 
     def test_report_returns_expected_keys(self):
         mon = self._monitor()
         rep = mon.report()
         # Actual keys use the feat_ prefix (feat_frozen, feat_active, feat_max_shift, …)
         for key in ("feat_frozen", "feat_active", "feat_max_shift"):
-            assert key in rep, f"Key '{key}' missing from monitor report — got: {list(rep)}"
+            assert key in rep, f"Key '{key}' missing from monitor report - got: {list(rep)}"
 
     def test_mask_device_matches_requested(self):
         """get_mask(device=...) must return a tensor on the specified device."""
@@ -702,14 +684,17 @@ class TestFeatureStabilityMonitor:
 # 7. BUILD_MODEL INTEGRATION
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @_skip_no_train_gpu
 class TestBuildModelIntegration:
     """training.train_gpu.build_model must wire MultiPairWrapper with the correct
     backbone width and pass the right correlation windows through."""
 
-    def _args(self, model_name, n_pairs, f_per_pair, embed_dim,
-              corr_window=10, corr_window_long=20, momentum_window=10):
+    def _args(
+        self, model_name, n_pairs, f_per_pair, embed_dim, corr_window=10, corr_window_long=20, momentum_window=10
+    ):
         import argparse
+
         # These mirror the args that train_gpu.build_model reads
         a = argparse.Namespace(
             loss="cross_entropy",
@@ -729,14 +714,18 @@ class TestBuildModelIntegration:
         )
         return a
 
-    @pytest.mark.parametrize("model_name,P,Fp,E", [
-        ("mamba",  2, 16, 8),
-        ("haelt",  3, 12, 8),
-        ("expert", 2, 20, 0),   # embed_dim=0 → no wrapper
-    ])
+    @pytest.mark.parametrize(
+        "model_name,P,Fp,E",
+        [
+            ("mamba", 2, 16, 8),
+            ("haelt", 3, 12, 8),
+            ("expert", 2, 20, 0),  # embed_dim=0 → no wrapper
+        ],
+    )
     def test_build_model_no_shape_error(self, model_name, P, Fp, E):
         """train_gpu.build_model must produce a model that accepts (B, T, P*Fp) input."""
         from training.train_gpu import build_model
+
         n_features = P * Fp
         args = self._args(model_name, P, Fp, E)
         model = build_model(model_name, n_features, args)
@@ -750,24 +739,23 @@ class TestBuildModelIntegration:
     def test_wrapper_applied_when_embed_dim_gt_zero(self):
         """embed_dim>0 with n_pairs>1 must produce a MultiPairWrapper instance."""
         from training.train_gpu import build_model
+
         args = self._args("mamba", n_pairs=2, f_per_pair=16, embed_dim=8)
         model = build_model("mamba", 32, args)
-        assert isinstance(model, MultiPairWrapper), (
-            f"Expected MultiPairWrapper, got {type(model).__name__}"
-        )
+        assert isinstance(model, MultiPairWrapper), f"Expected MultiPairWrapper, got {type(model).__name__}"
 
     def test_no_wrapper_when_embed_dim_zero(self):
         """embed_dim=0 must skip MultiPairWrapper even with multiple pairs."""
         from training.train_gpu import build_model
+
         args = self._args("mamba", n_pairs=2, f_per_pair=16, embed_dim=0)
         model = build_model("mamba", 32, args)
-        assert not isinstance(model, MultiPairWrapper), (
-            "MultiPairWrapper should not be added when embed_dim=0"
-        )
+        assert not isinstance(model, MultiPairWrapper), "MultiPairWrapper should not be added when embed_dim=0"
 
     def test_multi_pair_wrapper_forward_after_build_model(self):
         """End-to-end: build_model → MultiPairWrapper → backbone forward must work."""
         from training.train_gpu import build_model
+
         P, Fp, E = 3, 12, 8
         args = self._args("mamba", n_pairs=P, f_per_pair=Fp, embed_dim=E)
         model = build_model("mamba", P * Fp, args)
@@ -777,5 +765,5 @@ class TestBuildModelIntegration:
             out = model(x)
         # build_model may return (B,) scalar or (B, C) logits depending on n_classes
         assert out.shape[0] == 4, f"Batch dim wrong: {out.shape}"
-        assert out.ndim in (1, 2),  f"Expected 1-D or 2-D output, got {out.shape}"
+        assert out.ndim in (1, 2), f"Expected 1-D or 2-D output, got {out.shape}"
         assert _all_finite(out)

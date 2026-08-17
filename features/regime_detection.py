@@ -5,13 +5,13 @@ True market-regime detection replacing the legacy volatility-tercile
 "hmm" in ``feature_engineering_pl.py``.
 
 Provides:
-  - ``RegimeHMM``        — a real Hidden Markov Model (hmmlearn) over a
+  - ``RegimeHMM``        - a real Hidden Markov Model (hmmlearn) over a
                            feature matrix (returns, volatility, spread, ...).
                            Emits smoothed state probabilities per bar.
-  - ``hurst_rs``         — Hurst exponent via Rescaled Range (R/S) analysis.
-  - ``hurst_dfa``        — Hurst exponent via Detrended Fluctuation Analysis.
-  - ``fractal_dimension``— Higuchi-style fractal dimension of a price series.
-  - ``detect_regimes``   — end-to-end: fit HMM, emit state probs, and join
+  - ``hurst_rs``         - Hurst exponent via Rescaled Range (R/S) analysis.
+  - ``hurst_dfa``        - Hurst exponent via Detrended Fluctuation Analysis.
+  - ``fractal_dimension``- Higuchi-style fractal dimension of a price series.
+  - ``detect_regimes``   - end-to-end: fit HMM, emit state probs, and join
                            with Hurst/fractal regime labels into one frame.
 
 The volatility-tercile column names ``vol_regime_state_N_prob`` are produced
@@ -23,12 +23,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 try:
     from numba import njit
+
     _NUMBA_OK = True
 except ImportError:  # pragma: no cover - optional / version-skew fallback
     _NUMBA_OK = False
@@ -42,30 +43,33 @@ except ImportError:  # pragma: no cover - optional / version-skew fallback
 
         return _wrap
 
+
 if TYPE_CHECKING:
     import polars as pl
 
 try:
     from hmmlearn.hmm import GaussianHMM
+
     _HMMLEARN_OK = True
 except Exception:  # pragma: no cover - optional dependency
     _HMMLEARN_OK = False
 
 
 def _rolling_mean_causal(src: np.ndarray, dst: np.ndarray, window: int) -> None:
-    """Causal rolling mean via cumulative sum — O(n) vs O(n×window) loop."""
+    """Causal rolling mean via cumulative sum - O(n) vs O(nxwindow) loop."""
     n = len(src)
     if window <= 0 or n <= window:
         return
     # cumsum[0] = 0, cumsum[k] = sum(src[:k]) for k >= 1
     cumsum = np.concatenate([[0.0], np.cumsum(src)])
     # dst[i] = (cumsum[i] - cumsum[i-window]) / window  for i >= window
-    dst[window:] = (cumsum[window:n] - cumsum[0:n - window]) / window
+    dst[window:] = (cumsum[window:n] - cumsum[0 : n - window]) / window
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # Hurst exponents
 # ════════════════════════════════════════════════════════════════════════════
+
 
 @njit(cache=True)
 def _hurst_rs_numba(x: np.ndarray) -> float:
@@ -89,14 +93,14 @@ def _hurst_rs_numba(x: np.ndarray) -> float:
 
     rs_vals = np.empty(len(lags), dtype=np.float64)
     valid = 0
-    for li, lag in enumerate(lags):
+    for _li, lag in enumerate(lags):
         n_chunks = n // lag
         if n_chunks < 2:
             continue
         rs_sum = 0.0
         rs_count = 0
         for c in range(n_chunks):
-            chunk = x[c * lag:(c + 1) * lag]
+            chunk = x[c * lag : (c + 1) * lag]
             m = chunk.mean()
             std = chunk.std()
             if std < 1e-12:
@@ -113,7 +117,7 @@ def _hurst_rs_numba(x: np.ndarray) -> float:
     log_lags = np.log(lags[:valid])
     log_rs = np.log(rs_vals[:valid])
     # Manual linear regression (np.polyfit not supported in Numba)
-    n_pts = len(log_lags)
+    len(log_lags)
     x_mean = log_lags.mean()
     y_mean = log_rs.mean()
     num = ((log_lags - x_mean) * (log_rs - y_mean)).sum()
@@ -129,7 +133,7 @@ def _hurst_rs_numba(x: np.ndarray) -> float:
     return float(result)
 
 
-def hurst_rs(x: Sequence[float], max_lag: int | None = None) -> float:
+def hurst_rs(x: Sequence[float] | np.ndarray, max_lag: int | None = None) -> float:
     """
     Hurst exponent via Rescaled Range (R/S) analysis.
 
@@ -145,7 +149,7 @@ def hurst_rs(x: Sequence[float], max_lag: int | None = None) -> float:
     return _hurst_rs_numba(x_arr)
 
 
-def hurst_dfa(x: Sequence[float], min_box: int = 4) -> float:
+def hurst_dfa(x: Sequence[float] | np.ndarray, min_box: int = 4) -> float:
     """
     Hurst exponent via Detrended Fluctuation Analysis (DFA).
 
@@ -166,8 +170,7 @@ def _hurst_dfa_numba(x: np.ndarray, min_box: int) -> float:
         return 0.5
 
     y = np.cumsum(x - x.mean())
-    raw_sizes = np.logspace(
-        np.log10(float(min_box)), np.log10(n // 4), 20)
+    raw_sizes = np.logspace(np.log10(float(min_box)), np.log10(n // 4), 20)
     box_sizes = np.unique(np.round(raw_sizes).astype(np.int64))
     filtered = np.empty(len(box_sizes), dtype=np.int64)
     fcount = 0
@@ -185,7 +188,7 @@ def _hurst_dfa_numba(x: np.ndarray, min_box: int) -> float:
         sq_err = 0.0
         n_pts = 0
         for i in range(n_box):
-            seg = y[i * box:(i + 1) * box]
+            seg = y[i * box : (i + 1) * box]
             t = np.arange(box, dtype=np.float64)
             # Manual linear regression for speed
             t_mean = t.mean()
@@ -198,7 +201,7 @@ def _hurst_dfa_numba(x: np.ndarray, min_box: int) -> float:
                 slope = numerator / denominator
             intercept = seg_mean - slope * t_mean
             resid = seg - (slope * t + intercept)
-            sq_err += np.sum(resid ** 2)
+            sq_err += np.sum(resid**2)
             n_pts += box
         fluct[bi] = np.sqrt(sq_err / n_pts) if n_pts > 0 else np.nan
 
@@ -225,7 +228,7 @@ def _hurst_dfa_numba(x: np.ndarray, min_box: int) -> float:
     return float(result)
 
 
-def fractal_dimension(x: Sequence[float], k_max: int | None = None) -> float:
+def fractal_dimension(x: Sequence[float] | np.ndarray, k_max: int | None = None) -> float:
     """
     Fractal dimension of a time series via the Higuchi method.
 
@@ -269,7 +272,7 @@ def _fractal_dimension_numba(x: np.ndarray, k_max: int) -> float:
     filt_l = lengths[mask]
     log_k = np.log(filt_k)
     log_l = np.log(filt_l)
-    n_pts2 = len(log_k)
+    len(log_k)
     x_mean = log_k.mean()
     y_mean = log_l.mean()
     num = ((log_k - x_mean) * (log_l - y_mean)).sum()
@@ -289,6 +292,7 @@ def _fractal_dimension_numba(x: np.ndarray, k_max: int) -> float:
 # Hidden Markov Model regime classifier
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class RegimeHMM:
     """
@@ -304,6 +308,7 @@ class RegimeHMM:
       - ``transition_``      (n_states, n_states) transition matrix
       - ``n_states``         number of fitted states
     """
+
     n_states: int = 3
     n_iter: int = 200
     covariance_type: str = "full"
@@ -312,12 +317,12 @@ class RegimeHMM:
 
     def __post_init__(self):
         if not _HMMLEARN_OK:
-            raise ImportError(
-                "RegimeHMM requires 'hmmlearn'. Install with: uv pip install hmmlearn")
-        self._model = None
+            raise ImportError("RegimeHMM requires 'hmmlearn'. Install with: uv pip install hmmlearn")
+        self._model: GaussianHMM | None = None
         self._mean: np.ndarray | None = None
         self._std: np.ndarray | None = None
         self._cols: list[str] = []
+        self._features: np.ndarray = np.empty((0, 0), dtype=float)
 
     def fit(self, features: np.ndarray) -> RegimeHMM:
         X = np.asarray(features, dtype=float)
@@ -343,30 +348,31 @@ class RegimeHMM:
 
     @property
     def state_probs(self) -> np.ndarray:
-        if self._model is None:
+        model = self._model
+        mean = self._mean
+        std = self._std
+        if model is None or mean is None or std is None:
             raise RuntimeError("RegimeHMM.fit() must be called first")
-        Z = (np.nan_to_num(np.asarray(self._features)) - self._mean) / self._std
-        
+
+        Z = (np.nan_to_num(np.asarray(self._features, dtype=float), nan=0.0, posinf=0.0, neginf=0.0) - mean) / std
+
         # BUG-004: predict_proba uses Forward-Backward (smoothing) which leaks future data.
         # We must use only the forward pass for causal probabilities.
-        if hasattr(self._model, "_compute_log_likelihood"):
-            framelogprob = self._model._compute_log_likelihood(Z)
-        else:
-            framelogprob = self._model._compute_log_likelihood(Z) # Fallback?
-            
+        framelogprob = model._compute_log_likelihood(Z)
+
         from scipy.special import logsumexp
-        
-        if hasattr(self._model, "_do_forward_pass"):
-            logprob, fwdlattice = self._model._do_forward_pass(framelogprob)
+
+        model_any: Any = model
+        if hasattr(model_any, "_do_forward_pass"):
+            logprob, fwdlattice = model_any._do_forward_pass(framelogprob)  # noqa: RUF059
         else:
             from hmmlearn._hmmc import forward_log
-            logprob, fwdlattice = forward_log(
-                self._model.startprob_, self._model.transmat_, framelogprob)
+
+            _logprob, fwdlattice = forward_log(model.startprob_, model.transmat_, framelogprob)
 
         # fwdlattice is log P(O_{1:t}, S_t). We want P(S_t | O_{1:t})
         causal_probs = np.exp(fwdlattice - logsumexp(fwdlattice, axis=1, keepdims=True))
         return causal_probs
-
 
     @property
     def transition_(self) -> np.ndarray:
@@ -394,6 +400,7 @@ def fit_regime_hmm(
 # ════════════════════════════════════════════════════════════════════════════
 # Standalone Polars-friendly regime probs (same output names as legacy)
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def _causal_hmm_decode(
     feat: np.ndarray,
@@ -426,40 +433,51 @@ def _causal_hmm_decode(
         model = RegimeHMM(n_states=n_states, random_state=random_state)
         model.set_features(feat[:min_fit])
         model.fit(feat[:min_fit])
-        
+
         # Extract frozen parameters from fitted model
+        hmm_model = model._model
+        if hmm_model is None or model._mean is None or model._std is None:
+            raise RuntimeError("RegimeHMM fit failed to populate model parameters")
+
+        covars_obj = getattr(hmm_model, "covars_", None)
+        if covars_obj is None:
+            raise RuntimeError("RegimeHMM fit failed to populate covariance parameters")
+
         transmat = model.transition_.copy()
-        startprob = model._model.startprob_.copy()
-        means = model._model.means_.copy()
-        covars = model._model.covars_.copy()
+        startprob = np.asarray(hmm_model.startprob_).copy()
+        means = np.asarray(hmm_model.means_).copy()
+        covars = np.asarray(covars_obj).copy()
         mean_scaler = model._mean
         std_scaler = model._std
-        
+
         # Manually decode full series with frozen parameters (no refit)
         # Standardize full features with warm-up mean/std
         Z_full = (np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0) - mean_scaler) / std_scaler
-        
+
         # Compute log-likelihood for each state at each timestep
         from scipy.stats import multivariate_normal
+
         n = len(feat)
         framelogprob = np.zeros((n, n_states))
         for i in range(n_states):
             framelogprob[:, i] = multivariate_normal.logpdf(Z_full, mean=means[i], cov=covars[i])
-        
+
         # Forward algorithm with frozen parameters
         from scipy.special import logsumexp
+
         logprob = np.zeros((n, n_states))
         logprob[0] = np.log(startprob) + framelogprob[0]
         for t in range(1, n):
             # log P(S_t | O_{1:t}) = logsumexp(log P(S_{t-1} | O_{1:t-1}) + log A_{S_{t-1}, S_t}) + log P(O_t | S_t)
-            logprob[t] = logsumexp(logprob[t-1, :, np.newaxis] + np.log(transmat.T + 1e-12), axis=0) + framelogprob[t]
-        
+            logprob[t] = logsumexp(logprob[t - 1, :, np.newaxis] + np.log(transmat.T + 1e-12), axis=0) + framelogprob[t]
+
         # Normalize to get causal probabilities
-        causal_probs = np.exp(logprob - logsumexp(logprob, axis=1, keepdims=True))
-        
+        log_norm = np.asarray(logsumexp(logprob, axis=1, keepdims=True), dtype=float)
+        causal_probs = np.exp(logprob - log_norm)
+
         # Get states (argmax)
         raw_s = np.argmax(causal_probs, axis=1)
-        
+
         # 1-bar lag: feature at t uses posterior known at t-1
         probs[1:] = causal_probs[:-1]
         states[1:] = raw_s[:-1]
@@ -467,9 +485,9 @@ def _causal_hmm_decode(
         states[0] = 0
     except Exception as exc:
         import logging
+
         logging.getLogger(__name__).warning(
-            "HMM regime fit/decode failed (%s); emitting explicit uniform "
-            "fallback probs (not a fitted regime).",
+            "HMM regime fit/decode failed (%s); emitting explicit uniform fallback probs (not a fitted regime).",
             exc,
         )
         probs[:] = 1.0 / max(1, n_states)
@@ -512,7 +530,7 @@ def vol_regime_probs_polars(
 def vol_regime_quantile_probs(n_states: int = 3, window: int = 60) -> list:
     """
     Legacy volatility-tercile regime probs (equivalent to the old
-    ``hmm_regime_probs`` in ``feature_engineering_pl.py``) — kept so callers
+    ``hmm_regime_probs`` in ``feature_engineering_pl.py``) - kept so callers
     without hmmlearn can fall back to the previous quantile-bucket behaviour.
 
     Returns Polars expressions that emit ``vol_regime_state_N_prob`` columns.
@@ -551,7 +569,7 @@ def detect_regimes_polars(
       - ``regime_class``              0 low-vol, 1 normal, 2 high-vol (HMM)
 
     ``step`` > 1 evaluates the (expensive) rolling Hurst / fractal estimators
-    every ``step`` bars and forward-fills in between — a standard trade-off for
+    every ``step`` bars and forward-fills in between - a standard trade-off for
     slow estimators that keeps output length identical.
 
     Missing lookback values are forward-filled with the neutral baseline
@@ -570,7 +588,9 @@ def detect_regimes_polars(
     feat = np.column_stack([ret, vol])
 
     probs, states = _causal_hmm_decode(
-        feat, n_states=n_states, min_fit=max(window * 2, 120),
+        feat,
+        n_states=n_states,
+        min_fit=max(window * 2, 120),
     )
 
     hurst_rs_arr = np.full(n, 0.5)
@@ -578,23 +598,24 @@ def detect_regimes_polars(
     fractal_arr = np.full(n, 1.5)
     step = max(1, int(step))
     for i in range(hurst_window, n, step):
-        w = close[i - hurst_window:i]
-        hurst_rs_arr[i:i + step] = hurst_rs(w)
-        hurst_dfa_arr[i:i + step] = hurst_dfa(w)
+        w = close[i - hurst_window : i]
+        hurst_rs_arr[i : i + step] = hurst_rs(w)
+        hurst_dfa_arr[i : i + step] = hurst_dfa(w)
     for i in range(fractal_window, n, step):
-        fractal_arr[i:i + step] = fractal_dimension(close[i - fractal_window:i])
+        fractal_arr[i : i + step] = fractal_dimension(close[i - fractal_window : i])
 
-    trend_label = np.where(hurst_dfa_arr > 0.55, 1.0,
-                           np.where(hurst_dfa_arr < 0.45, -1.0, 0.0))
+    trend_label = np.where(hurst_dfa_arr > 0.55, 1.0, np.where(hurst_dfa_arr < 0.45, -1.0, 0.0))
 
     out = {f"vol_regime_state_{s}_prob": probs[:, s] for s in range(n_states)}
-    out.update({
-        "hurst_rs": hurst_rs_arr,
-        "hurst_dfa": hurst_dfa_arr,
-        "fractal_dim": fractal_arr,
-        "regime_label": trend_label,
-        "regime_class": states.astype(np.int32),
-    })
+    out.update(
+        {
+            "hurst_rs": hurst_rs_arr,
+            "hurst_dfa": hurst_dfa_arr,
+            "fractal_dim": fractal_arr,
+            "regime_label": trend_label,
+            "regime_class": states.astype(np.int32),
+        }
+    )
     return pl.DataFrame(out)
 
 

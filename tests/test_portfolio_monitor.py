@@ -2,6 +2,7 @@
 Tests for risk.portfolio_monitor (Improvement #16): aggregate exposure,
 net currency exposure, correlation-aware exposure, liquidity tiering.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -32,6 +33,7 @@ def returns():
 # ═════════════════════════════════════════════════════════════════════════════
 # Exposure aggregation
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_aggregate_exposure_total_lots(positions):
     mon = PortfolioMonitor()
@@ -69,6 +71,7 @@ def test_aggregate_empty():
 # Liquidity tiering
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_liquidity_exposure_tiers(positions):
     mon = PortfolioMonitor()
     liq = mon.liquidity_exposure(positions)
@@ -90,6 +93,7 @@ def test_liquidity_exposure_illiquid():
 # Correlation-aware exposure
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_correlation_exposure_high_corr(positions, returns):
     mon = PortfolioMonitor(corr_threshold=0.60)
     corr = mon.correlation_exposure(positions, returns)
@@ -105,8 +109,10 @@ def test_correlation_exposure_low_corr():
         "EURUSD": rng.normal(0.0, 0.001, 300),
         "AUDUSD": rng.normal(0.0, 0.001, 300),
     }
-    positions = {"EURUSD": {"lots": 1.0, "entry_price": 1.1, "direction": "long"},
-                 "AUDUSD": {"lots": 1.0, "entry_price": 0.66, "direction": "long"}}
+    positions = {
+        "EURUSD": {"lots": 1.0, "entry_price": 1.1, "direction": "long"},
+        "AUDUSD": {"lots": 1.0, "entry_price": 0.66, "direction": "long"},
+    }
     corr = mon.correlation_exposure(positions, returns)
     assert corr["n_high_corr_edges"] == 0
     assert corr["high_corr_clusters"] == []
@@ -123,6 +129,7 @@ def test_correlation_exposure_insufficient_data(positions):
 # ═════════════════════════════════════════════════════════════════════════════
 # One-call report
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_report_combines_sections(positions, returns):
     mon = PortfolioMonitor()

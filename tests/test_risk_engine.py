@@ -2,6 +2,7 @@
 Tests for risk.risk_engine (Improvement #16): pre-trade checks, post-trade
 monitoring, VaR/CVaR, circuit breakers, and audit log.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -18,6 +19,7 @@ def engine():
 # ═════════════════════════════════════════════════════════════════════════════
 # Pre-trade checks
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_check_order_allowed(engine):
     d = engine.check_order(pair="EURUSD", lots=0.5, price=1.10, position_size_pct=0.01)
@@ -68,6 +70,7 @@ def test_order_frequency_cap(engine):
 # ═════════════════════════════════════════════════════════════════════════════
 # Post-trade monitoring + circuit breakers
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_consecutive_losses_trigger(engine):
     engine._returns.setdefault("EURUSD", __import__("collections").deque())
@@ -129,6 +132,7 @@ def test_resume_clears_state(engine):
 # VaR / CVaR / exposure
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_historical_var(engine):
     rng = np.random.default_rng(0)
     for _ in range(300):
@@ -172,6 +176,7 @@ def test_gap_flag(engine):
 # ═════════════════════════════════════════════════════════════════════════════
 # Audit log
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_audit_log_records_decisions(engine):
     engine.check_order(pair="EURUSD", lots=0.5, price=1.10, position_size_pct=0.01)

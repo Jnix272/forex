@@ -103,8 +103,10 @@ def validate_data_feature_readiness(
     manifest_hash = manifest.get("schema_hash")
     schema_hash = schema.get("schema_hash")
     expected_hash = cfg.expected_schema_hash or manifest_hash or schema_hash
-    gates["schema_hash_ok"] = bool(expected_hash) and schema_hash == expected_hash and (
-        computed_hash is None or computed_hash == expected_hash
+    gates["schema_hash_ok"] = (
+        bool(expected_hash)
+        and schema_hash == expected_hash
+        and (computed_hash is None or computed_hash == expected_hash)
     )
     if not gates["schema_hash_ok"]:
         reasons.append(
@@ -115,9 +117,8 @@ def validate_data_feature_readiness(
     feature_count = schema.get("feature_count", len(ordered_features) if ordered_features else None)
     manifest_feature_count = manifest.get("feature_count")
     gates["feature_count_ok"] = (
-        (cfg.expected_feature_count is None or feature_count == cfg.expected_feature_count)
-        and (manifest_feature_count is None or feature_count == manifest_feature_count)
-    )
+        cfg.expected_feature_count is None or feature_count == cfg.expected_feature_count
+    ) and (manifest_feature_count is None or feature_count == manifest_feature_count)
     if not gates["feature_count_ok"]:
         reasons.append(
             "feature_schema.json: feature count mismatch "
@@ -132,7 +133,9 @@ def validate_data_feature_readiness(
     label_share = _max_numeric_leaf(quality.get("label_class_balance", {}))
     gates["label_balance_ok"] = label_share <= cfg.max_label_class_share
     if not gates["label_balance_ok"]:
-        reasons.append(f"data_quality_report.json: label class share {label_share:.6g} > {cfg.max_label_class_share:.6g}")
+        reasons.append(
+            f"data_quality_report.json: label class share {label_share:.6g} > {cfg.max_label_class_share:.6g}"
+        )
 
     missing_bars = _max_numeric_leaf(quality.get("missing_bars_by_pair", {}))
     gates["missing_bars_ok"] = missing_bars <= cfg.max_missing_bars_per_pair

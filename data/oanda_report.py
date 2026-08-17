@@ -7,6 +7,7 @@ MIN_PASS_SNAPSHOTS = 60
 MAX_PASS_CADENCE_MINUTES = 10.0
 MAX_WARN_CADENCE_MINUTES = 60.0
 
+
 def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_sentiment_report.json"):
     dir_path = Path(sidecar_dir)
     if not dir_path.exists():
@@ -26,11 +27,8 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
             pairs[pair].append(f)
 
     report = {
-        "summary": {
-            "total_pairs_covered": len(pairs),
-            "generated_at": pd.Timestamp.utcnow().isoformat()
-        },
-        "pairs": {}
+        "summary": {"total_pairs_covered": len(pairs), "generated_at": pd.Timestamp.utcnow().isoformat()},
+        "pairs": {},
     }
 
     for pair, file_list in pairs.items():
@@ -93,7 +91,7 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
             "missing_minutes": int(missing_minutes),
             "stale_snapshot_count": int(stale_count),
             "mock_snapshot_count": int(mock_count),
-            "null_rates": {k: float(v) for k, v in null_rates.items()}
+            "null_rates": {k: float(v) for k, v in null_rates.items()},
         }
 
     with open(output_json, "w") as f:
@@ -101,7 +99,10 @@ def generate_report(sidecar_dir="data/oanda_sentiment", output_json="data/oanda_
 
     print(f"Generated report at {output_json}")
     for p, stats in report["pairs"].items():
-        print(f"  [{p}] Status: {stats['status']} | Snapshots: {stats['total_snapshots']} | Mock: {stats['mock_snapshot_count']}")
+        print(
+            f"  [{p}] Status: {stats['status']} | Snapshots: {stats['total_snapshots']} | Mock: {stats['mock_snapshot_count']}"
+        )
+
 
 if __name__ == "__main__":
     generate_report()

@@ -4,13 +4,14 @@ Regression tests for the production backtesting engine.
 Covers the audit findings:
   1. SL/TP values survive when a strategy supplies them only on signal rows.
   2. Missing / zero-valued stop_loss / take_profit columns are treated as
-     "not configured" — no instance of the catastrophic partial-TP at a
+     "not configured" - no instance of the catastrophic partial-TP at a
      negative price and no phantom stop-outs.
   3. performance_metrics falls back to equity-curve stats (no RuntimeError)
      when Trade records are unavailable (the Numba path).
   4. run() is idempotent.
   5. Python and Numba execution paths agree on the same data.
 """
+
 from __future__ import annotations
 
 import sys
@@ -24,7 +25,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backtesting.backtest import ForexScalingBacktest, ScalingAction, _NUMBA_OK
+from backtesting.backtest import _NUMBA_OK, ForexScalingBacktest, ScalingAction
 
 
 def _make_bars(n: int = 2000, seed: int = 0) -> pd.DataFrame:
@@ -110,7 +111,9 @@ def test_performance_metrics_falls_back_without_trade_records():
 
 def test_run_is_idempotent():
     bars = _make_bars()
-    bt = ForexScalingBacktest(bars=bars, signals=_base_signals(bars.index), initial_equity=10_000, execution_delay_bars=0)
+    bt = ForexScalingBacktest(
+        bars=bars, signals=_base_signals(bars.index), initial_equity=10_000, execution_delay_bars=0
+    )
     bt.run()
     first_equity, first_trades = bt.equity, len(bt.trades)
     bt.run()

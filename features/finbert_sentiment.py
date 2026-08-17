@@ -41,14 +41,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import pickle
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import logging
-import time
 
 import numpy as np
 import pandas as pd
@@ -59,25 +59,28 @@ _log = logging.getLogger(__name__)
 
 # ── Cache paths ────────────────────────────────────────────────────────────────
 # Canonical location.  The stale root-level cache is merged in on first load.
-CACHE_DIR = Path(os.getenv(
-    "SENTIMENT_CACHE_DIR",
-    str(Path(__file__).resolve().parent.parent / "data" / "embeddings"),
-))
+CACHE_DIR = Path(
+    os.getenv(
+        "SENTIMENT_CACHE_DIR",
+        str(Path(__file__).resolve().parent.parent / "data" / "embeddings"),
+    )
+)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_FILE = CACHE_DIR / "sentiment_cache.pkl"
 
-# Stale root-level cache (written by older code versions) — merged on startup.
+# Stale root-level cache (written by older code versions) - merged on startup.
 _STALE_CACHE_FILE = Path(__file__).resolve().parent.parent / "sentiment_cache.pkl"
 
 # ── Backend config ─────────────────────────────────────────────────────────────
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
 
 FINBERT_MODEL = "ProsusAI/finbert"
-LABEL_MAP     = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
+LABEL_MAP = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
+
 
 def _load_cache() -> dict:
     """
@@ -92,11 +95,24 @@ def _load_cache() -> dict:
         try:
             with open(CACHE_FILE, "rb") as f:
                 cache = pickle.load(f)
-            log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=len(cache),
-                          status="ok", t0=_t0, note=f"size_mb={CACHE_FILE.stat().st_size/1e6:.1f}")
+            log_data_load(
+                "finbert_cache_load",
+                str(CACHE_FILE),
+                n_rows=len(cache),
+                status="ok",
+                t0=_t0,
+                note=f"size_mb={CACHE_FILE.stat().st_size / 1e6:.1f}",
+            )
         except Exception as _e:
-            log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0,
-                          status="corrupt", t0=_t0, exc=_e, note="cache will be re-scored live")
+            log_data_load(
+                "finbert_cache_load",
+                str(CACHE_FILE),
+                n_rows=0,
+                status="corrupt",
+                t0=_t0,
+                exc=_e,
+                note="cache will be re-scored live",
+            )
             cache = {}
     else:
         log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0, status="skip_missing")
@@ -111,17 +127,19 @@ def _load_cache() -> dict:
             merged = len(cache) - before
             if merged:
                 print(
-                    f"[Sentiment] Merged {merged} entries from stale cache "
-                    f"{_STALE_CACHE_FILE}",
+                    f"[Sentiment] Merged {merged} entries from stale cache {_STALE_CACHE_FILE}",
                     flush=True,
                 )
             _STALE_CACHE_FILE.unlink(missing_ok=True)
-            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE),
-                          n_rows=merged, status="ok",
-                          note=f"into {len(cache)} total entries")
+            log_data_load(
+                "finbert_cache_stale_merge",
+                str(_STALE_CACHE_FILE),
+                n_rows=merged,
+                status="ok",
+                note=f"into {len(cache)} total entries",
+            )
         except Exception as _e:
-            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE),
-                          n_rows=0, status="error", exc=_e)
+            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE), n_rows=0, status="error", exc=_e)
 
     return cache
 
@@ -134,11 +152,16 @@ def _save_cache(cache: dict) -> None:
         with open(tmp, "wb") as f:
             pickle.dump(cache, f)
         os.replace(tmp, CACHE_FILE)
-        log_data_load("finbert_cache_save", str(CACHE_FILE), n_rows=len(cache),
-                      status="ok", t0=_t0, note=f"size_mb={CACHE_FILE.stat().st_size/1e6:.1f}")
+        log_data_load(
+            "finbert_cache_save",
+            str(CACHE_FILE),
+            n_rows=len(cache),
+            status="ok",
+            t0=_t0,
+            note=f"size_mb={CACHE_FILE.stat().st_size / 1e6:.1f}",
+        )
     except Exception as _e:
-        log_data_load("finbert_cache_save", str(CACHE_FILE), n_rows=len(cache),
-                      status="error", t0=_t0, exc=_e)
+        log_data_load("finbert_cache_save", str(CACHE_FILE), n_rows=len(cache), status="error", t0=_t0, exc=_e)
 
 
 def _cache_key(text: str) -> str:
@@ -189,6 +212,7 @@ def _ollama_reachable(timeout: float = 5.0) -> bool:
     """Quick check: is the Ollama server up at all? Uses /api/tags (no inference)."""
     import urllib.error
     import urllib.request
+
     try:
         with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=timeout) as r:
             return r.status == 200
@@ -209,13 +233,15 @@ def _score_ollama(
     import urllib.request
 
     prompt = _OLLAMA_PROMPT_TMPL.format(headline=text[:400])
-    payload = json.dumps({
-        "model":   model,
-        "prompt":  prompt,
-        "stream":  False,
-        "format":  "json",
-        "options": {"temperature": 0.0, "num_predict": 32},
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.0, "num_predict": 32},
+        }
+    ).encode()
 
     try:
         req = urllib.request.Request(
@@ -229,7 +255,7 @@ def _score_ollama(
         raw = str(data.get("response", "")).strip()
         return _parse_ollama_float(raw)
     except (urllib.error.URLError, ConnectionRefusedError, OSError):
-        return None   # Ollama not running
+        return None  # Ollama not running
     except Exception:
         return None
 
@@ -242,8 +268,9 @@ _finbert_pipeline = None
 def _get_finbert():
     global _finbert_pipeline
     if _finbert_pipeline is None:
-        from transformers import pipeline
         import torch
+        from transformers import pipeline
+
         device = 0 if torch.cuda.is_available() else -1
         _finbert_pipeline = pipeline(
             "text-classification",
@@ -251,17 +278,17 @@ def _get_finbert():
             truncation=True,
             max_length=512,
             device=device,
-            torch_dtype=torch.float16
+            torch_dtype=torch.float16,
         )
     return _finbert_pipeline
 
 
 def _score_finbert(text: str) -> float | None:
     try:
-        pipe   = _get_finbert()
+        pipe = _get_finbert()
         result = pipe(text[:512])[0]
-        label  = result["label"].lower()
-        score  = result["score"]   # confidence in [0, 1]
+        label = result["label"].lower()
+        score = result["score"]  # confidence in [0, 1]
         return LABEL_MAP.get(label, 0.0) * score
     except Exception:
         return None
@@ -277,25 +304,56 @@ def _get_vader():
     if _vader_analyzer is None:
         try:
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
             _vader_analyzer = SentimentIntensityAnalyzer()
         except ImportError:
             # Simple lexicon fallback when vaderSentiment is not installed.
             class _Simple:
                 BULLISH = {
-                    "rise", "rises", "gain", "gains", "up", "rally", "bullish",
-                    "strong", "beat", "beats", "surges", "high", "positive",
-                    "growth", "hawkish", "recovery", "better", "outperform",
+                    "rise",
+                    "rises",
+                    "gain",
+                    "gains",
+                    "up",
+                    "rally",
+                    "bullish",
+                    "strong",
+                    "beat",
+                    "beats",
+                    "surges",
+                    "high",
+                    "positive",
+                    "growth",
+                    "hawkish",
+                    "recovery",
+                    "better",
+                    "outperform",
                 }
                 BEARISH = {
-                    "fall", "falls", "drop", "drops", "down", "decline", "bearish",
-                    "weak", "miss", "misses", "tumbles", "low", "negative",
-                    "recession", "crisis", "dovish", "worse", "underperform",
+                    "fall",
+                    "falls",
+                    "drop",
+                    "drops",
+                    "down",
+                    "decline",
+                    "bearish",
+                    "weak",
+                    "miss",
+                    "misses",
+                    "tumbles",
+                    "low",
+                    "negative",
+                    "recession",
+                    "crisis",
+                    "dovish",
+                    "worse",
+                    "underperform",
                 }
 
                 def polarity_scores(self, text):
                     words = set(text.lower().split())
-                    bull  = len(words & self.BULLISH)
-                    bear  = len(words & self.BEARISH)
+                    bull = len(words & self.BULLISH)
+                    bear = len(words & self.BEARISH)
                     total = bull + bear
                     compound = (bull - bear) / total if total else 0.0
                     return {"compound": float(np.clip(compound, -1, 1))}
@@ -309,6 +367,7 @@ def _score_vader(text: str) -> float:
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
+
 
 class SentimentPipeline:
     """
@@ -332,20 +391,20 @@ class SentimentPipeline:
 
     def __init__(
         self,
-        prefer_backend:  str | None = None,
-        ollama_model:    str           = OLLAMA_MODEL,
-        use_cache:       bool          = True,
-        max_workers:     int           = 4,
-        cache_save_every: int          = 50,
+        prefer_backend: str | None = None,
+        ollama_model: str = OLLAMA_MODEL,
+        use_cache: bool = True,
+        max_workers: int = 4,
+        cache_save_every: int = 50,
     ):
-        self._prefer          = prefer_backend
-        self._ollama_model    = ollama_model
-        self._use_cache       = use_cache
-        self._max_workers     = max(1, int(max_workers))
+        self._prefer = prefer_backend
+        self._ollama_model = ollama_model
+        self._use_cache = use_cache
+        self._max_workers = max(1, int(max_workers))
         self._cache_save_every = max(1, int(cache_save_every))
-        self._cache: dict     = _load_cache() if use_cache else {}
-        self._cache_lock      = threading.Lock()
-        self._new_entries     = 0       # entries added since last save
+        self._cache: dict = _load_cache() if use_cache else {}
+        self._cache_lock = threading.Lock()
+        self._new_entries = 0  # entries added since last save
         self._backend: str | None = None
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -378,7 +437,7 @@ class SentimentPipeline:
 
         # Separate cache hits from misses
         results: dict[int, float] = {}
-        misses:  list[tuple[int, str]] = []   # (original_index, text)
+        misses: list[tuple[int, str]] = []  # (original_index, text)
 
         for i, text in enumerate(texts):
             key = _cache_key(text)
@@ -394,10 +453,7 @@ class SentimentPipeline:
             if backend == "ollama" and self._max_workers > 1:
                 # Parallel Ollama requests
                 with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-                    future_map = {
-                        pool.submit(self._score_with_backend, text, backend): idx
-                        for idx, text in misses
-                    }
+                    future_map = {pool.submit(self._score_with_backend, text, backend): idx for idx, text in misses}
                     for future in as_completed(future_map):
                         idx = future_map[future]
                         try:
@@ -411,21 +467,21 @@ class SentimentPipeline:
                     pipe = _get_finbert()
                     short_texts = [t[:512] for t in texts_to_score]
                     batch_res = pipe(short_texts, batch_size=256, truncation=True)
-                    
+
                     with self._cache_lock:
-                        for (idx, text), res in zip(misses, batch_res):
+                        for (idx, text), res in zip(misses, batch_res, strict=False):
                             label = res["label"].lower()
                             score = res["score"]
                             final_score = LABEL_MAP.get(label, 0.0) * score
                             results[idx] = final_score
-                            
+
                             if self._use_cache:
                                 key = _cache_key(text)
                                 if key not in self._cache:
                                     self._cache[key] = final_score
                                     self._new_entries += 1
                 except Exception:
-                    for idx, text in misses:
+                    for idx, text in misses:  # noqa: B007
                         results[idx] = 0.0
             else:
                 # Sequential (VADER / single-worker Ollama)
@@ -444,8 +500,8 @@ class SentimentPipeline:
         """
         if not headlines:
             return 0.0
-        scores  = np.array(self.score_headlines_batch(headlines), dtype=np.float32)
-        weights = np.abs(scores) + 0.01   # stronger signals count more
+        scores = np.array(self.score_headlines_batch(headlines), dtype=np.float32)
+        weights = np.abs(scores) + 0.01  # stronger signals count more
         return float(np.clip(np.average(scores, weights=weights), -1.0, 1.0))
 
     def prefetch_headlines(self, headlines: list[str], batch_size: int = 512) -> int:
@@ -459,33 +515,33 @@ class SentimentPipeline:
         if not misses:
             return 0
         print(
-            f"[Sentiment] Prefetch: {len(misses):,} uncached of "
-            f"{len(unique):,} unique headlines",
+            f"[Sentiment] Prefetch: {len(misses):,} uncached of {len(unique):,} unique headlines",
             flush=True,
         )
         scored = 0
         backend = self._detect_backend()
-        
+
         if backend == "finbert":
             pipe = _get_finbert()
-            
+
             def data_gen():
                 for t in misses:
                     yield t[:512]
-                    
+
+            texts_for_model = list(data_gen())
             print("[Sentiment] Accelerated GPU FinBERT Inference started...", flush=True)
-            results = pipe(data_gen(), batch_size=batch_size, truncation=True)
-            
-            for (text, res) in zip(misses, results):
+            results = pipe(texts_for_model, batch_size=batch_size, truncation=True)
+
+            for text, res in zip(misses, results, strict=False):
                 label = res["label"].lower()
                 score = res["score"]
                 final_score = LABEL_MAP.get(label, 0.0) * score
-                
+
                 with self._cache_lock:
                     key = _cache_key(text)
                     self._cache[key] = final_score
                     self._new_entries += 1
-                
+
                 scored += 1
                 if scored % (batch_size * 10) == 0:
                     print(f"  [Sentiment] prefetch {scored:,}/{len(misses):,}", flush=True)
@@ -526,8 +582,7 @@ class SentimentPipeline:
                 print("[Sentiment] Ollama not reachable -- skipping.", flush=True)
             else:
                 print(
-                    f"[Sentiment] Ollama reachable. Probing {self._ollama_model} "
-                    "(may take up to 60s on cold start)...",
+                    f"[Sentiment] Ollama reachable. Probing {self._ollama_model} (may take up to 60s on cold start)...",
                     flush=True,
                 )
                 probe = _score_ollama(
@@ -563,13 +618,13 @@ class SentimentPipeline:
 
     def _score_with_backend(self, text: str, backend: str) -> float:
         """Score a single headline using the specified backend; update cache."""
-        key   = _cache_key(text)
+        key = _cache_key(text)
         score: float | None = None
 
         if backend == "ollama":
             score = _score_ollama(text, model=self._ollama_model)
             if score is None:
-                # Ollama temporarily failed — fall through
+                # Ollama temporarily failed - fall through
                 score = _score_vader(text)
         elif backend == "finbert":
             score = _score_finbert(text)
@@ -601,8 +656,8 @@ class SentimentPipeline:
         self,
         headlines_df,
         bars,
-        text_col:     str   = "headline",
-        time_col:     str   = "timestamp_utc",
+        text_col: str = "headline",
+        time_col: str = "timestamp_utc",
         decay_lambda: float = 0.1,
     ):
         """
@@ -630,11 +685,12 @@ class SentimentPipeline:
             res = pd.Series(0.0, index=bars.index, name="sentiment")
             if is_pl:
                 import polars as pl
+
                 return pl.Series("sentiment", res.values)
             return res
 
         raw_times = pd.to_datetime(headlines_df[time_col], utc=True, errors="coerce")
-        texts  = headlines_df[text_col].astype(str).tolist()
+        texts = headlines_df[text_col].astype(str).tolist()
         scores_list = self.score_headlines_batch(texts)
         scored = pd.Series(scores_list, index=raw_times, dtype=float)
         scored = scored[scored.index.notna()].sort_index()
@@ -650,20 +706,19 @@ class SentimentPipeline:
             else:
                 bar_index_utc = bar_index.tz_convert("UTC")
 
-            event_ns = scored.index.asi8.astype(np.int64)
-            bar_ns = bar_index_utc.asi8.astype(np.int64)
+            event_ns = pd.DatetimeIndex(pd.to_datetime(scored.index, utc=True)).to_numpy(dtype="datetime64[ns]").view("int64")
+            bar_ns = pd.DatetimeIndex(pd.to_datetime(bar_index_utc, utc=True)).to_numpy(dtype="datetime64[ns]").view("int64")
             last_idx = np.searchsorted(event_ns, bar_ns, side="right") - 1
 
             values = np.zeros(len(bar_ns), dtype=float)
             valid = last_idx >= 0
             if valid.any():
                 elapsed = (bar_ns[valid] - event_ns[last_idx[valid]]) / 1e9
-                values[valid] = scored.to_numpy(dtype=float)[last_idx[valid]] * np.exp(
-                    -float(decay_lambda) * elapsed
-                )
+                values[valid] = scored.to_numpy(dtype=float)[last_idx[valid]] * np.exp(-float(decay_lambda) * elapsed)
             res = pd.Series(np.clip(values, -1.0, 1.0), index=bars.index, name="sentiment")
         if is_pl:
             import polars as pl
+
             return pl.Series("sentiment", res.values)
         return res
 
@@ -683,7 +738,7 @@ if __name__ == "__main__":
     ]
 
     scores = pipe.score_headlines_batch(test_headlines)
-    for h, s in zip(test_headlines, scores):
+    for h, s in zip(test_headlines, scores, strict=False):
         print(f"  [{pipe.active_backend():10s}] {s:+.3f}  {h[:60]}")
 
     print(f"\n  Active backend: {pipe.active_backend()}")

@@ -1,17 +1,17 @@
 """Supervised training loop extracted from ``training.train_gpu``.
 
 See ``docs/CONTINUE.md``."""
+
 from __future__ import annotations
 
 import gc
-import json
 import math
 import os
 import time
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -19,32 +19,11 @@ import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
-try:
-    from monitoring.train_logger import TrainingLogger as _TrainingLogger
-except Exception:
-    _TrainingLogger = None
-
-try:
-    from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
-    TENSORBOARD = True
-except ImportError:
-    TENSORBOARD = False
-
-try:
-    from tqdm.auto import tqdm as _pbar
-except ImportError:
-    def _pbar(it=None, **kw): return it
-
 from config.settings import (
-    CURRICULUM as SETTINGS_CURRICULUM,
-)
-from config.settings import (
+    LABELING,
     PATHS,
-    PRETRAIN,
-    TRAINING,
 )
 from models.architectures import (
-    MODEL_ROLES,
     AsymmetricDirectionalLoss,
     DiversityLoss,
     HuberLoss,
@@ -52,141 +31,150 @@ from models.architectures import (
     OverconfidencePenalty,
     TemperatureScaler,
 )
+from monitoring.rich_display import (
+    _RichDisplay,
+)
+from monitoring.sidecar import (
+    Sidecar,
+)
+from training.cache_integrity import (
+    _on_disk_sequence_count,
+    _promotion_holdout_n,
+)
+from training.core import (
+    _GPU_CFG,
+    _TRAIN_LOGGER,
+    _TRAIN_LOGGER_AVAILABLE,
+    WANDB,
+    _crop_to_seq_len,
+    _log_error,
+    _log_info,
+    _log_nan,
+    _log_oom,
+    _log_warn,
+    _safe_wandb_log,
+    _safe_wandb_summary_update,
+)
+from training.cv_splits import (
+    _embargo_bars,
+    _embargo_split,
+    _purge_bars,
+    _three_way_split,
+    _validation_method,
+)
+from training.dataset_builder import _safe_save_json
+from training.direction_control import (
+    _balanced_direction_indices,
+    _class_prior_tensor,
+    _class_weights_tensor,
+    _direction_class_index,
+    _direction_preflight,
+    _direction_probe,
+    _direction_recall_from_confusion,
+    _gradients_are_finite,
+    _init_multitask_direction_bias,
+    _is_uninitialized_parameter,
+    _load_diff_array,
+    _load_feature_schema,
+    _recover_nonfinite_training_state,
+    _write_class_balance_failure,
+)
+from training.ewc import (
+    ElasticWeightConsolidation,
+    apply_ewc_loss,
+)
+from training.feature_ablation import (
+    _build_feature_ablation_mask,
+    _feature_ablation_config,
+)
+from training.gpu_cli import (
+    _apply_model_profile,
+    _model_build_args,
+    _slug_part,
+)
 from training.gpu_datasets import (
     ZarrStreamDataset,
+    wrap_loader_prefetch,
 )
-from training.gpu_device import build_adamw, maybe_torch_compile
-from training.ewc import ElasticWeightConsolidation, apply_ewc_loss
-from training.synaptic_intelligence import (
-    SynapticIntelligence,
-    apply_si_loss,
+from training.gpu_device import (
+    _thermal_check,
+    maybe_torch_compile,
 )
-from training.model_factory import get_model_training_profile
 from training.gpu_losses import (
     DirectionalHuberLoss,
     SharpeProxyLoss,
     _match_target_shape,
 )
-
-_HOST = None
-_BOUND = False
-_OWNED_GLOBALS = frozenset({
-    "_TRAIN_LOGGER",
-    "_OVERCONF_PENALTY",
-})
-_HOST_DEPS = (
-    '_log_error',
-    '_log_warn',
-    '_log_info',
-    '_log_oom',
-    '_log_nan',
-    '_crop_to_seq_len',
-    '_thermal_check',
-    '_direction_class_index',
-    '_direction_recall_from_confusion',
-    '_gradients_are_finite',
-    '_recover_nonfinite_training_state',
-    '_class_prior_tensor',
-    '_class_prior_array',
-    '_class_weights_tensor',
-    '_sharpe_ann_factor',
-    '_strict_load_report',
-    '_core_model',
-    '_apply_model_profile',
-    '_balanced_direction_indices',
-    '_direction_preflight',
-    '_direction_probe',
-    '_embargo_bars',
-    '_embargo_split',
-    '_purge_bars',
-    '_three_way_split',
-    '_validation_method',
-    '_promotion_holdout_n',
-    '_load_diff_array',
-    '_load_feature_schema',
-    '_init_multitask_direction_bias',
-    '_is_uninitialized_parameter',
-    '_write_class_balance_failure',
-    '_slug_part',
-    '_safe_save',
-    '_safe_save_json',
-    '_safe_wandb_log',
-    '_safe_wandb_summary_update',
-    '_update_pretrain_report',
-    '_feature_ablation_config',
-    '_build_feature_ablation_mask',
-    '_model_build_args',
-    '_on_disk_sequence_count',
-    'build_model',
-    'DirectionalHuberLoss',
-    'SharpeProxyLoss',
-    '_match_target_shape',
-    'ZarrStreamDataset',
-    '_ThreadPrefetchLoader',
-    'wrap_loader_prefetch',
-    'MemmapSequenceDataset',
-    'HuberLoss',
-    'AsymmetricDirectionalLoss',
-    'MultiTaskLoss',
-    'OverconfidencePenalty',
-    'TemperatureScaler',
-    'DiversityLoss',
-    'PATHS',
-    'LABELING',
-    '_TRAIN_LOGGER',
-    '_TRAIN_LOGGER_AVAILABLE',
-    'Sidecar',
-    'ElasticWeightConsolidation',
-    'apply_ewc_loss',
-    'SynapticIntelligence',
-    'apply_si_loss',
-    'PrioritizedDataLoader',
-    'run_preflight_sanity_checks',
-    'CurriculumController',
-    'create_curriculum_manager',
-    'WANDB',
-    'OPTUNA',
-    'RICH_DISPLAY',
-    '_RichDisplay',
-    '_GPU_CFG',
-    'maybe_torch_compile',
+from training.memory_management import (
+    PrioritizedDataLoader,
+)
+from training.model_factory import (
+    _core_model,
+    _strict_load_report,
+    build_model,
+)
+from training.post_train import (
+    _safe_save,
+)
+from training.pretrain_runner import (
+    _update_pretrain_report,
+)
+from training.synaptic_intelligence import (
+    SynapticIntelligence,
+    apply_si_loss,
 )
 
+try:
+    from monitoring.train_logger import TrainingLogger as _TrainingLogger
+except ImportError:
+    _TrainingLogger = None
 
-def bind_host(host_mod) -> None:
-    """Copy still-monolith helpers into this module's globals (cycle-safe)."""
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if name in _OWNED_GLOBALS:
-            continue
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    # Pull owned singletons from host only when local is still unset
-    for name in _OWNED_GLOBALS:
-        if g.get(name) is None and hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
+try:
+    from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
 
+    TENSORBOARD = True
+except ImportError:
+    TENSORBOARD = False
 
-def _sync_owned_to_host(*names: str) -> None:
-    if _HOST is None:
-        return
-    g = globals()
-    for name in names:
-        setattr(_HOST, name, g.get(name))
+try:
+    from tqdm.auto import tqdm as _pbar  # type: ignore
+except ImportError:
+
+    def _pbar(it=None, **kw):
+        return it
 
 
-def _ensure_bound() -> None:
-    """Refresh host bindings without re-importing if train_gpu is mid-init."""
-    import sys
-    tg = sys.modules.get("training.train_gpu")
-    if tg is None:
-        import training.train_gpu as tg
-    bind_host(tg)
-
-
+from config.settings import (
+    CURRICULUM as SETTINGS_CURRICULUM,
+)
+from config.settings import (
+    PATHS,  # noqa: F811
+    PRETRAIN,
+    TRAINING,
+)
+from models.architectures import (
+    MODEL_ROLES,
+    AsymmetricDirectionalLoss,  # noqa: F811
+    DiversityLoss,  # noqa: F811
+    HuberLoss,  # noqa: F811
+    MultiTaskLoss,  # noqa: F811
+    OverconfidencePenalty,  # noqa: F811
+    TemperatureScaler,  # noqa: F811
+)
+from training.ewc import ElasticWeightConsolidation, apply_ewc_loss  # noqa: F811
+from training.gpu_datasets import (
+    ZarrStreamDataset,  # noqa: F811
+)
+from training.gpu_device import build_adamw, maybe_torch_compile  # noqa: F811
+from training.gpu_losses import (
+    DirectionalHuberLoss,  # noqa: F811
+    SharpeProxyLoss,  # noqa: F811
+    _match_target_shape,  # noqa: F811
+)
+from training.synaptic_intelligence import (
+    SynapticIntelligence,  # noqa: F811
+    apply_si_loss,  # noqa: F811
+)
 
 _OVERCONF_PENALTY: OverconfidencePenalty | None = None  # D: set in supervised_train
 
@@ -224,6 +212,7 @@ _OVERCONF_PENALTY: OverconfidencePenalty | None = None  # D: set in supervised_t
 # Once the distribution stabilises, the feature is automatically re-enabled.
 # -----------------------------------------------------------------------------
 
+
 class FeatureStabilityMonitor:
     """
     A: Training-time feature stability monitor.
@@ -247,35 +236,35 @@ class FeatureStabilityMonitor:
 
     def __init__(
         self,
-        n_features:     int,
-        ema_alpha:      float = 0.90,
+        n_features: int,
+        ema_alpha: float = 0.90,
         soft_threshold: float = 2.0,
         hard_threshold: float = 4.0,
-        freeze_after:   int   = 3,
+        freeze_after: int = 3,
         damping_factor: float = 0.50,
-        warmup_epochs:  int   = 3,
+        warmup_epochs: int = 3,
         min_active_pct: float = 0.50,
     ):
-        self.n          = n_features
-        self.alpha      = ema_alpha
-        self.soft_t     = soft_threshold
-        self.hard_t     = hard_threshold
-        self.freeze_af  = freeze_after
-        self.damp       = damping_factor
-        self.warmup     = warmup_epochs
+        self.n = n_features
+        self.alpha = ema_alpha
+        self.soft_t = soft_threshold
+        self.hard_t = hard_threshold
+        self.freeze_af = freeze_after
+        self.damp = damping_factor
+        self.warmup = warmup_epochs
         self.min_active = min_active_pct
 
-        self._ema_mean  = np.zeros(n_features, dtype=np.float64)
-        self._ema_std   = np.ones(n_features,  dtype=np.float64)
+        self._ema_mean = np.zeros(n_features, dtype=np.float64)
+        self._ema_std = np.ones(n_features, dtype=np.float64)
         self._initialized = False
 
         # Per-feature counters
-        self._soft_streak = np.zeros(n_features, dtype=np.int32)   # epochs above soft_t
-        self._frozen      = np.zeros(n_features, dtype=bool)       # permanently frozen
+        self._soft_streak = np.zeros(n_features, dtype=np.int32)  # epochs above soft_t
+        self._frozen = np.zeros(n_features, dtype=bool)  # permanently frozen
 
         # Per-epoch stats (for logging)
         self._last_shift_score = np.zeros(n_features, dtype=np.float64)
-        self._epoch            = 0
+        self._epoch = 0
 
     def update(self, xb: np.ndarray) -> None:
         """
@@ -285,39 +274,39 @@ class FeatureStabilityMonitor:
             xb: float32 array of shape (B, seq_len, n_features) or (B, n_features).
         """
         if xb.ndim == 3:
-            flat = xb.reshape(-1, xb.shape[-1])   # (B*T, F)
+            flat = xb.reshape(-1, xb.shape[-1])  # (B*T, F)
         else:
             flat = xb
 
         batch_mean = flat.mean(axis=0).astype(np.float64)  # (F,)
-        batch_std  = flat.std(axis=0).astype(np.float64)   # (F,)
-        batch_std  = np.maximum(batch_std, 1e-8)
+        batch_std = flat.std(axis=0).astype(np.float64)  # (F,)
+        batch_std = np.maximum(batch_std, 1e-8)
 
         if not self._initialized:
-            self._ema_mean  = batch_mean.copy()
-            self._ema_std   = batch_std.copy()
+            self._ema_mean = batch_mean.copy()
+            self._ema_std = batch_std.copy()
             self._initialized = True
             return
 
         # Shift scores before EMA update (compare new batch vs current EMA)
         mean_shift = np.abs(batch_mean - self._ema_mean) / (self._ema_std + 1e-8)
-        std_shift  = np.abs(batch_std  - self._ema_std)  / (self._ema_std + 1e-8)
+        std_shift = np.abs(batch_std - self._ema_std) / (self._ema_std + 1e-8)
         shift_score = np.maximum(mean_shift, std_shift)
         self._last_shift_score = shift_score
 
         # Update EMA
         self._ema_mean = self.alpha * self._ema_mean + (1 - self.alpha) * batch_mean
-        self._ema_std  = self.alpha * self._ema_std  + (1 - self.alpha) * batch_std
+        self._ema_std = self.alpha * self._ema_std + (1 - self.alpha) * batch_std
 
         self._epoch += 1
         if self._epoch <= self.warmup:
-            return   # don't penalise during warm-up
+            return  # don't penalise during warm-up
 
         # Update instability streaks and frozen flags
         above_soft = shift_score > self.soft_t
         above_hard = shift_score > self.hard_t
-        self._soft_streak[above_soft]  += 1
-        self._soft_streak[~above_soft]  = 0
+        self._soft_streak[above_soft] += 1
+        self._soft_streak[~above_soft] = 0
 
         # Freeze: hard threshold OR soft streak exceeded
         newly_frozen = above_hard | (self._soft_streak >= self.freeze_af)
@@ -343,7 +332,7 @@ class FeatureStabilityMonitor:
         """
         mask = np.ones(self.n, dtype=np.float32)
         noisy = (self._last_shift_score > self.soft_t) & (~self._frozen)
-        mask[noisy]       = self.damp
+        mask[noisy] = self.damp
         mask[self._frozen] = 0.0
         t = torch.from_numpy(mask)
         return t.to(device) if device is not None else t
@@ -351,14 +340,14 @@ class FeatureStabilityMonitor:
     def report(self) -> dict:
         """Return a summary dict for logging."""
         n_frozen = int(self._frozen.sum())
-        n_noisy  = int(((self._last_shift_score > self.soft_t) & ~self._frozen).sum())
+        n_noisy = int(((self._last_shift_score > self.soft_t) & ~self._frozen).sum())
         top5_idx = np.argsort(self._last_shift_score)[::-1][:5].tolist()
         return {
-            "feat_frozen":       n_frozen,
-            "feat_noisy":        n_noisy,
-            "feat_active":       self.n - n_frozen,
-            "feat_max_shift":    float(self._last_shift_score.max()),
-            "feat_mean_shift":   float(self._last_shift_score.mean()),
+            "feat_frozen": n_frozen,
+            "feat_noisy": n_noisy,
+            "feat_active": self.n - n_frozen,
+            "feat_max_shift": float(self._last_shift_score.max()),
+            "feat_mean_shift": float(self._last_shift_score.mean()),
             "feat_top5_unstable": top5_idx,
         }
 
@@ -375,25 +364,24 @@ class FeatureStabilityMonitor:
     def get_state(self) -> dict:
         """Return serializable state for checkpoint saving."""
         return {
-            "ema_mean":    self._ema_mean.tolist(),
-            "ema_std":     self._ema_std.tolist(),
+            "ema_mean": self._ema_mean.tolist(),
+            "ema_std": self._ema_std.tolist(),
             "soft_streak": self._soft_streak.tolist(),
-            "frozen":      self._frozen.tolist(),
-            "last_shift":  self._last_shift_score.tolist(),
+            "frozen": self._frozen.tolist(),
+            "last_shift": self._last_shift_score.tolist(),
             "initialized": self._initialized,
-            "epoch":       self._epoch,
+            "epoch": self._epoch,
         }
 
     def load_state(self, state: dict) -> None:
         """Restore state from a checkpoint dict (backward-compatible)."""
-        self._ema_mean         = np.array(state["ema_mean"],    dtype=np.float64)
-        self._ema_std          = np.array(state["ema_std"],     dtype=np.float64)
-        self._soft_streak      = np.array(state["soft_streak"], dtype=np.int32)
-        self._frozen           = np.array(state["frozen"],      dtype=bool)
-        self._last_shift_score = np.array(state.get("last_shift",
-                                           [0.0] * self.n),    dtype=np.float64)
-        self._initialized      = bool(state["initialized"])
-        self._epoch            = int(state["epoch"])
+        self._ema_mean = np.array(state["ema_mean"], dtype=np.float64)
+        self._ema_std = np.array(state["ema_std"], dtype=np.float64)
+        self._soft_streak = np.array(state["soft_streak"], dtype=np.int32)
+        self._frozen = np.array(state["frozen"], dtype=bool)
+        self._last_shift_score = np.array(state.get("last_shift", [0.0] * self.n), dtype=np.float64)
+        self._initialized = bool(state["initialized"])
+        self._epoch = int(state["epoch"])
 
 
 # -----------------------------------------------------------------------------
@@ -420,19 +408,20 @@ class FeatureStabilityMonitor:
 # penalty to ensure they specialise rather than duplicate.
 # -----------------------------------------------------------------------------
 
+
 def run_diversity_finetune(
     checkpoint_dir: str,
-    model_names:    list,
-    cache_path:     str,
-    n_features:     int,
+    model_names: list,
+    cache_path: str,
+    n_features: int,
     args,
-    device:         torch.device,
-    epochs:         int  = 3,
-    lr:             float = 1e-5,
-    div_weight:     float = 0.10,
+    device: torch.device,
+    epochs: int = 3,
+    lr: float = 1e-5,
+    div_weight: float = 0.10,
     same_role_mult: float = 2.0,
-    batch_size:     int  = 512,
-    max_batches:    int  = 200,
+    batch_size: int = 512,
+    max_batches: int = 200,
 ) -> None:
     """
     C: Joint diversity fine-tuning across all trained models.
@@ -456,14 +445,13 @@ def run_diversity_finetune(
         batch_size     : Batch size for joint forward pass.
         max_batches    : Max batches per epoch (limits GPU time).
     """
-    _ensure_bound()
     ckpt_dir = Path(checkpoint_dir)
     classification = getattr(args, "loss", "cross_entropy") in ("cross_entropy", "multi_task", "asymmetric_directional")
 
     # -- Load checkpoints ------------------------------------------------------
-    loaded_models  = {}
-    loaded_roles   = []
-    loaded_names   = []
+    loaded_models = {}
+    loaded_roles = []
+    loaded_names = []
     loaded_seq_lens = []
     for name in model_names:
         # Support both per-model subfolder layout (<base>/<model>/<model>_best.pt)
@@ -476,7 +464,7 @@ def run_diversity_finetune(
             continue
         try:
             model_args = _model_build_args(args, name)
-            m = build_model(name, n_features, model_args).to(device)
+            m = build_model(name, n_features, model_args).to(device)  # type: ignore
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             state = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
 
@@ -521,7 +509,7 @@ def run_diversity_finetune(
         weight=div_weight,
         same_role_mult=same_role_mult,
         roles=loaded_roles,
-    ).to(device)
+    ).to(device)  # type: ignore
 
     # -- Data loader (val split ΓÇö fine-tune on held-out data only) ------------
     n_samples = int(_on_disk_sequence_count(cache_path) or 0)
@@ -529,17 +517,16 @@ def run_diversity_finetune(
         print("  [DivFT] Could not determine dataset size ΓÇö skipping.")
         return
     val_start = int(n_samples * 0.80)
-    val_idx   = np.arange(val_start, n_samples)
-    ds        = ZarrStreamDataset(cache_path, val_idx, shuffle_chunks=True)
-    loader    = DataLoader(ds, batch_size=batch_size, shuffle=False,
-                           num_workers=0, drop_last=True)
+    val_idx = np.arange(val_start, n_samples)
+    ds = ZarrStreamDataset(cache_path, val_idx, shuffle_chunks=True)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=True)
 
     model_list = list(loaded_models.values())
 
     for ep in range(epochs):
         ep_task_loss = 0.0
-        ep_div_loss  = 0.0
-        n_batches    = 0
+        ep_div_loss = 0.0
+        n_batches = 0
 
         for bi, batch in enumerate(loader):
             if bi >= max_batches:
@@ -561,13 +548,13 @@ def run_diversity_finetune(
             # Forward all models on the same batch
             outputs = []
             task_loss = torch.tensor(0.0, device=device)
-            for m, m_seq_len in zip(model_list, loaded_seq_lens):
+            for m, m_seq_len in zip(model_list, loaded_seq_lens, strict=False):
                 xb_m = _crop_to_seq_len(xb, m_seq_len)
                 out = m(xb_m)
                 outputs.append(out)
                 # Per-model task loss
                 if isinstance(out, tuple):
-                    logits, ret_hat, conf = out
+                    logits, _ret_hat, _conf = out
                     task_loss = task_loss + crit(logits, y_cls_idx)
                 elif classification:
                     task_loss = task_loss + crit(out, y_cls_idx)
@@ -580,7 +567,7 @@ def run_diversity_finetune(
             for out in outputs:
                 if isinstance(out, tuple):
                     # regression head for diversity comparison
-                    scalar_outs.append(out[1].reshape(-1))   # return_hat
+                    scalar_outs.append(out[1].reshape(-1))  # return_hat
                 elif out.ndim == 2 and out.shape[-1] > 1:
                     # classification logits -> use argmax-weighted scalar
                     scalar_outs.append(out.softmax(-1)[:, -1] - out.softmax(-1)[:, 0])
@@ -595,12 +582,12 @@ def run_diversity_finetune(
             opt.step()
 
             ep_task_loss += task_loss.item()
-            ep_div_loss  += diversity.item()
-            n_batches    += 1
+            ep_div_loss += diversity.item()
+            n_batches += 1
 
         avg_t = ep_task_loss / max(n_batches, 1)
-        avg_d = ep_div_loss  / max(n_batches, 1)
-        print(f"  [DivFT] Epoch {ep+1}/{epochs} | task={avg_t:.5f}  diversity={avg_d:.5f}")
+        avg_d = ep_div_loss / max(n_batches, 1)
+        print(f"  [DivFT] Epoch {ep + 1}/{epochs} | task={avg_t:.5f}  diversity={avg_d:.5f}")
 
     # -- Save updated checkpoints ---------------------------------------------
     for name, m in loaded_models.items():
@@ -615,7 +602,10 @@ def run_diversity_finetune(
 
 
 def _compute_loss(
-    model_out, crit, yb, classification: bool,
+    model_out,
+    crit,
+    yb,
+    classification: bool,
     y_cls: torch.Tensor | None = None,
     y_conf: torch.Tensor | None = None,
     multitask: bool = False,
@@ -625,33 +615,35 @@ def _compute_loss(
     Unified loss for single-head and MultiTaskWrapper outputs.
 
     ``direction_only=True`` (direction warmup / probe) always uses class-index
-    CE against the direction head — never MultiTaskLoss's full (dir+ret+conf)
+    CE against the direction head - never MultiTaskLoss's full (dir+ret+conf)
     signature, even when ``multitask=True``.
     """
     if isinstance(model_out, tuple):
         logits, ret_hat, conf = model_out
         y_cls_idx = _direction_class_index(
-            yb, y_cls, classification=classification or direction_only,
+            yb,
+            y_cls,
+            classification=classification or direction_only,
         )
         if direction_only:
             # Warmup/probe: CE on direction logits only.
             # MultiTaskLoss.forward expects (logits, ret, conf, y_cls, y_cont, ...);
             # calling it with 2 args would TypeError or mis-bind.
             if isinstance(crit, MultiTaskLoss):
-                # MultiTaskLoss.ce uses reduction="none" — mean for a scalar loss.
-                return crit.ce(logits, y_cls_idx.reshape(-1).clamp(0, 2)).mean()
+                # MultiTaskLoss.ce uses reduction="none" - mean for a scalar loss.
+                return cast(Any, crit).ce(logits, y_cls_idx.reshape(-1).clamp(0, 2)).mean()
             try:
-                return crit(logits, y_cls_idx)
+                return cast(Any, crit)(logits, y_cls_idx)
             except TypeError:
                 # Fallback: treat as multitask-shaped criterion
                 y_cont = _match_target_shape(ret_hat, yb)
-                return crit(logits, ret_hat, conf, y_cls_idx, y_cont, None)
+                return cast(Any, crit)(logits, ret_hat, conf, y_cls_idx, y_cont, None)
 
         if multitask or isinstance(crit, MultiTaskLoss):
             y_cont = _match_target_shape(ret_hat, yb)
-            return crit(logits, ret_hat, conf, y_cls_idx, y_cont, y_conf)
+            return cast(Any, crit)(logits, ret_hat, conf, y_cls_idx, y_cont, y_conf)
 
-        # Tuple output but non-multitask criterion (rare) — direction CE
+        # Tuple output but non-multitask criterion (rare) - direction CE
         if classification:
             return crit(logits, y_cls_idx)
         y_cont = _match_target_shape(ret_hat, yb)
@@ -679,21 +671,33 @@ def _unpack_batch(batch, device):
     n = len(batch) if isinstance(batch, (tuple, list)) else 1
     if n >= 5:
         xb, yb, y_cls, y_conf, sample_idx = batch[0], batch[1], batch[2], batch[3], batch[4]
-        return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True),
-                y_cls.to(device, non_blocking=True), y_conf.to(device, non_blocking=True),
-                sample_idx.to(device, non_blocking=True))
+        return (
+            xb.to(device, non_blocking=True),
+            yb.to(device, non_blocking=True),
+            y_cls.to(device, non_blocking=True),
+            y_conf.to(device, non_blocking=True),
+            sample_idx.to(device, non_blocking=True),
+        )
     if n == 4:
         xb, yb, y_cls, y_conf = batch[0], batch[1], batch[2], batch[3]
-        return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True),
-                y_cls.to(device, non_blocking=True), y_conf.to(device, non_blocking=True),
-                None)
+        return (
+            xb.to(device, non_blocking=True),
+            yb.to(device, non_blocking=True),
+            y_cls.to(device, non_blocking=True),
+            y_conf.to(device, non_blocking=True),
+            None,
+        )
     if n == 3:
         xb, yb, sample_idx = batch[0], batch[1], batch[2]
-        return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True),
-                None, None, sample_idx.to(device, non_blocking=True))
+        return (
+            xb.to(device, non_blocking=True),
+            yb.to(device, non_blocking=True),
+            None,
+            None,
+            sample_idx.to(device, non_blocking=True),
+        )
     xb, yb = batch[0], batch[1]
-    return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True),
-            None, None, None)
+    return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True), None, None, None)
 
 
 _SANITIZE_STATS: dict[str, int] = {
@@ -716,7 +720,7 @@ def _sanitize_batch_tensors(
 
     Returns ``(xb, yb, y_cls, y_conf, keep_mask)``. ``keep_mask`` is a bool
     vector over the batch dim. Features may be clamped (counted + WARN);
-    targets are **never** replaced with 0 — bad rows are flagged for the
+    targets are **never** replaced with 0 - bad rows are flagged for the
     caller to drop (or raise when ``skip_bad_targets=False``).
     """
     global _SANITIZE_STATS
@@ -739,7 +743,7 @@ def _sanitize_batch_tensors(
                 pass
     xb = torch.nan_to_num(xb_f, nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
 
-    # Targets: detect non-finite rows — never nan_to_num → 0.
+    # Targets: detect non-finite rows - never nan_to_num → 0.
     yb_f = yb.float()
     bsz = int(yb_f.shape[0])
     keep = torch.isfinite(yb_f).reshape(bsz, -1).all(dim=-1)
@@ -760,7 +764,7 @@ def _sanitize_batch_tensors(
         if not skip_bad_targets:
             raise ValueError(
                 f"[Sanitize] {n_bad}/{bsz} non-finite target rows (fail-closed; "
-                f"not zeroed — fix data or set skip_bad_targets=True to drop)"
+                f"not zeroed - fix data or set skip_bad_targets=True to drop)"
             )
         n_drop_batches = _SANITIZE_STATS["batches_with_target_drops"]
         if n_drop_batches <= 3 or n_drop_batches % 50 == 0:
@@ -843,7 +847,7 @@ def _maybe_warn_grad_norm(model, batch_idx: int) -> None:
     for p in model.parameters():
         if p.grad is not None:
             total_norm += p.grad.detach().data.norm(2).item() ** 2
-    total_norm = total_norm ** 0.5
+    total_norm = total_norm**0.5
     if total_norm > 50.0:
         print(f"[Stability] WARNING: High grad norm ({total_norm:.2f}) at batch {batch_idx}")
 
@@ -932,11 +936,26 @@ def _apply_curriculum_weights(loss, pred, yb, crit, classification, batch_idx_t,
 
 
 def _build_train_loss(
-    model, xb, yb, y_cls_b, y_conf_b, crit, classification, multitask, direction_only,
-    teacher_model, distill_weight, ewc_module, ewc_lambda,
-    si_module, si_lambda,
-    loader, batch_idx_t,
-    online_miner, accum_steps, sample_weight_lookup=None,
+    model,
+    xb,
+    yb,
+    y_cls_b,
+    y_conf_b,
+    crit,
+    classification,
+    multitask,
+    direction_only,
+    teacher_model,
+    distill_weight,
+    ewc_module,
+    ewc_lambda,
+    si_module,
+    si_lambda,
+    loader,
+    batch_idx_t,
+    online_miner,
+    accum_steps,
+    sample_weight_lookup=None,
 ):
     """Shared forward + loss assembly used by both AMP and non-AMP paths.
 
@@ -948,13 +967,24 @@ def _build_train_loss(
     """
     pred = model(xb)
     loss = _compute_loss(
-        pred, crit, yb, classification,
-        y_cls=y_cls_b, y_conf=y_conf_b, multitask=multitask,
+        pred,
+        crit,
+        yb,
+        classification,
+        y_cls=y_cls_b,
+        y_conf=y_conf_b,
+        multitask=multitask,
         direction_only=direction_only,
     )
     if sample_weight_lookup is not None and batch_idx_t is not None:
         loss = _apply_curriculum_weights(
-            loss, pred, yb, crit, classification, batch_idx_t, sample_weight_lookup,
+            loss,
+            pred,
+            yb,
+            crit,
+            classification,
+            batch_idx_t,
+            sample_weight_lookup,
         )
     _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classification, multitask)
     if hasattr(loader, "update_priorities") and batch_idx_t is not None:
@@ -971,14 +1001,21 @@ def _build_train_loss(
 
 
 def _optimizer_step(
-    model, opt, scaler_amp, use_fp16_scaler, do_step, grad_clip, scheduler, batch_idx,
+    model,
+    opt,
+    scaler_amp,
+    use_fp16_scaler,
+    do_step,
+    grad_clip,
+    scheduler,
+    batch_idx,
     *,
     nan_skips: int,
     epoch: int,
     pbar,
     si_module=None,
 ) -> tuple[bool, int]:
-    """Backward is assumed done. Returns (stepped_ok, updated_nan_skips). """
+    """Backward is assumed done. Returns (stepped_ok, updated_nan_skips)."""
     if not do_step:
         return True, nan_skips
     if use_fp16_scaler:
@@ -1038,7 +1075,11 @@ def _prepare_train_batch(
     if seq_len is not None and xb.shape[1] > seq_len:
         xb = xb[:, -seq_len:, :]
     xb, yb, y_cls_b, y_conf_b, keep = _sanitize_batch_tensors(
-        xb, yb, y_cls_b, y_conf_b, skip_bad_targets=True,
+        xb,
+        yb,
+        y_cls_b,
+        y_conf_b,
+        skip_bad_targets=True,
     )
     if keep is not None and not bool(keep.all()):
         if not bool(keep.any()):
@@ -1119,10 +1160,26 @@ def _train_batch(
     amp_ctx = autocast("cuda", dtype=amp_dtype) if amp_on else nullcontext()
     with amp_ctx:
         _, loss = _build_train_loss(
-            model, xb, yb, y_cls_b, y_conf_b, crit, classification,
-            multitask, direction_only, teacher_model, distill_weight,
-            ewc_module, ewc_lambda, si_module, si_lambda, loader, batch_idx_t, online_miner,
-            accum_steps, sample_weight_lookup=sample_weight_lookup,
+            model,
+            xb,
+            yb,
+            y_cls_b,
+            y_conf_b,
+            crit,
+            classification,
+            multitask,
+            direction_only,
+            teacher_model,
+            distill_weight,
+            ewc_module,
+            ewc_lambda,
+            si_module,
+            si_lambda,
+            loader,
+            batch_idx_t,
+            online_miner,
+            accum_steps,
+            sample_weight_lookup=sample_weight_lookup,
         )
 
     if not torch.isfinite(loss):
@@ -1144,9 +1201,17 @@ def _train_batch(
         loss.backward()
 
     ok, nan_skips = _optimizer_step(
-        model, opt, scaler_amp, scale, do_step,
-        grad_clip, scheduler, batch_idx,
-        nan_skips=nan_skips, epoch=epoch, pbar=pbar,
+        model,
+        opt,
+        scaler_amp,
+        scale,
+        do_step,
+        grad_clip,
+        scheduler,
+        batch_idx,
+        nan_skips=nan_skips,
+        epoch=epoch,
+        pbar=pbar,
         si_module=si_module,
     )
     if not ok:
@@ -1156,8 +1221,16 @@ def _train_batch(
 
 
 def train_epoch(
-    model, loader, opt, crit, scaler_amp, device, use_amp, classification: bool,
-    grad_clip: float = 1.0, pbar=None,
+    model,
+    loader,
+    opt,
+    crit,
+    scaler_amp,
+    device,
+    use_amp,
+    classification: bool,
+    grad_clip: float = 1.0,
+    pbar=None,
     amp_dtype: torch.dtype = torch.float32,
     thermal_limit: int = 83,
     feature_mask: torch.Tensor | None = None,
@@ -1179,7 +1252,6 @@ def train_epoch(
     sample_weight_lookup=None,
 ):
     """One training epoch via shared ``_prepare_train_batch`` / ``_train_batch``."""
-    _ensure_bound()
     model.train()
     total = 0.0
     n = 0
@@ -1201,7 +1273,8 @@ def train_epoch(
 
         try:
             prepared = _prepare_train_batch(
-                batch, device,
+                batch,
+                device,
                 seq_len=seq_len,
                 feature_mask=_mask,
                 adversarial_gen=adversarial_gen,
@@ -1220,7 +1293,12 @@ def train_epoch(
             xb, yb, y_cls_b, y_conf_b, batch_idx_t = prepared
 
             status, loss_val, nan_skips = _train_batch(
-                model, xb, yb, y_cls_b, y_conf_b, batch_idx_t,
+                model,
+                xb,
+                yb,
+                y_cls_b,
+                y_conf_b,
+                batch_idx_t,
                 crit=crit,
                 classification=classification,
                 multitask=multitask,
@@ -1272,8 +1350,10 @@ def train_epoch(
                 pbar.set_postfix(loss="OOM-skip")
             _log_oom(batch_idx, 0, oom_skips)
             if oom_skips <= 3 or oom_skips % 10 == 0:
-                print(f"[Train] CUDA OOM batch {batch_idx}, skipped ({oom_skips} total). "
-                      "Reduce --batch-size or --grad-accum-steps.")
+                print(
+                    f"[Train] CUDA OOM batch {batch_idx}, skipped ({oom_skips} total). "
+                    "Reduce --batch-size or --grad-accum-steps."
+                )
             continue
         except Exception as e:
             _log_error(f"[Train] Unexpected error at batch {batch_idx}", e)
@@ -1298,7 +1378,6 @@ def build_criterion(
     MultiTaskLoss is selected when --multitask is passed and combines:
       w_dir*CE(direction) + w_ret*Huber(return_hat) + w_conf*BCE(confidence)
     """
-    _ensure_bound()
     multitask = getattr(args, "multitask", False)
     d = float(TRAINING.get("huber_delta", 1.0))
 
@@ -1307,45 +1386,45 @@ def build_criterion(
         cp = None
         if cache_path is not None and train_idx is not None:
             cw = _class_weights_tensor(
-                cache_path, train_idx, device, use_direction_sidecar=True,
+                cache_path,
+                train_idx,
+                device,
+                use_direction_sidecar=True,
             )
             cp = _class_prior_tensor(
-                cache_path, train_idx, device, use_direction_sidecar=True,
+                cache_path,
+                train_idx,
+                device,
+                use_direction_sidecar=True,
             )
         loss_str = getattr(args, "loss", "huber").lower()
         w_sharpe = float(getattr(args, "sharpe_weight", 0.0)) if loss_str == "sharpe_huber" else 0.0
+        from training.train_gpu import _sharpe_ann_factor
         sharpe_ann = _sharpe_ann_factor(args) if w_sharpe > 0 else 1.0
-        return MultiTaskLoss(
+        return MultiTaskLoss(  # type: ignore
             class_weights=cw,
             w_dir=1.0,
-            w_ret=float(getattr(args, "mt_w_ret",  0.5)),
+            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
             w_conf=float(getattr(args, "mt_w_conf", 0.3)),
             huber_delta=d,
             class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
-
             entropy_weight=float(getattr(args, "mt_entropy_weight", 0.0)),
-
             direction_weight_floor=float(getattr(args, "mt_direction_weight_floor", 0.0)),
-
             focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
             class_prior=cp,
             w_sharpe=w_sharpe,
             sharpe_ann=sharpe_ann,
-            label_smoothing=float(
-                getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))
-            ),
-
-        ).to(device)
+            label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
+        ).to(device)  # type: ignore
 
     if args.loss == "cross_entropy":
         if cache_path is None or train_idx is None:
             raise ValueError("cross_entropy requires cache_path and train_idx")
         w = _class_weights_tensor(
-
-            cache_path, train_idx, device,
-
+            cache_path,
+            train_idx,
+            device,
             use_direction_sidecar=(getattr(args, "label_method", "") == "rl_reward"),
-
         )
 
         return nn.CrossEntropyLoss(
@@ -1354,20 +1433,17 @@ def build_criterion(
         )
     if args.loss == "asymmetric":
         sw = float(TRAINING.get("asymmetric_sign_weight", 2.0))
-        return AsymmetricDirectionalLoss(delta=d, sign_weight=sw).to(device)
+        return AsymmetricDirectionalLoss(delta=d, sign_weight=sw).to(device)  # type: ignore
     if args.loss == "directional_huber":
         return DirectionalHuberLoss(
             delta=d,
             direction_weight=float(getattr(args, "direction_weight", 0.5)),
-        ).to(device)
+        ).to(device)  # type: ignore
     if args.loss == "sharpe_huber":
+        from training.train_gpu import _sharpe_ann_factor
         ann = _sharpe_ann_factor(args)
-        return SharpeProxyLoss(
-            delta=d,
-            sharpe_weight=float(getattr(args, "sharpe_weight", 0.2)),
-            ann=ann
-        ).to(device)
-    return HuberLoss(delta=d).to(device)
+        return SharpeProxyLoss(delta=d, sharpe_weight=float(getattr(args, "sharpe_weight", 0.2)), ann=ann).to(device)  # type: ignore
+    return HuberLoss(delta=d).to(device)  # type: ignore
 
 
 def _validation_class_diag(
@@ -1400,21 +1476,81 @@ def _validation_class_diag(
 
 
 @torch.no_grad()
-def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
-                   amp: bool = False, amp_dtype: torch.dtype = torch.float32,
-                   seq_len: int | None = None, multitask: bool = False,
-                   feature_mask: torch.Tensor | None = None,
-                   sharpe_ann_factor: float | None = None,
-                   direction_only: bool = False,
-                   rl_mode: bool = False):
+def _non_overlapping_sharpe(
+    r: torch.Tensor,
+    lookahead_bars: int,
+    *,
+    exclude_flat: bool = True,
+) -> float:
+    """Compute Sharpe on the non-overlapping subset of per-sample returns.
+
+    The validation return stream ``r`` is the product of
+    ``sign(prediction) * forward_return`` for every sample in the
+    validation set. Adjacent samples overlap by ``seq_len - 1`` bars in
+    features and ``lookahead_bars - 1`` bars in labels, so their
+    returns are strongly autocorrelated. Computing mean/std on the
+    full stream treats overlapping samples as independent trades and
+    under-estimates variance, which over-inflates Sharpe.
+
+    The correct fix is to take every ``lookahead_bars``-th sample
+    (i.e. one return per "trade"), giving a stream of approximately
+    independent per-trade returns. We also drop flat predictions
+    (``|d| == 0``) since they correspond to non-trades.
+
+    Returns
+    -------
+    float
+        Per-trade Sharpe.  Returns 0.0 if there are too few trades
+        to compute a meaningful statistic.
+    """
+    n = int(r.numel())
+    if n == 0:
+        return 0.0
+    # Stride = lookahead_bars (with seq_len-stride=1 windows, every
+    # ``lookahead_bars``-th sample is the start of a fresh non-overlapping
+    # forward window).
+    stride = max(1, int(lookahead_bars))
+    sub = r[::stride]
+    if exclude_flat:
+        sub = sub[sub.abs() > 0.0]
+    n_sub = int(sub.numel())
+    if n_sub < 2:
+        return 0.0
+    # Use sample variance (n-1) - textbook Sharpe denominator.
+    mean = sub.mean()
+    # unbiased=False is the population std, but Sharpe in academic
+    # literature uses sample std (n-1). Use float ops for safety.
+    std = sub.std(unbiased=True)
+    if std.item() <= 0.0 or not torch.isfinite(std):
+        return 0.0
+    return float((mean / std).item())
+
+
+def validate_epoch(
+    model,
+    loader,
+    crit,
+    device,
+    classification: bool,
+    pbar=None,
+    amp: bool = False,
+    amp_dtype: torch.dtype = torch.float32,
+    seq_len: int | None = None,
+    multitask: bool = False,
+    feature_mask: torch.Tensor | None = None,
+    sharpe_ann_factor: float | None = None,
+    direction_only: bool = False,
+    rl_mode: bool = False,
+    lookahead_bars: int = 1,
+    sharpe_non_overlapping: bool = True,
+    return_per_trade_sharpe: bool = True,
+):
     """Run one validation epoch in eager FP32 by default.
 
-    Autocast is off unless ``amp=True`` is passed explicitly — validation is
+    Autocast is off unless ``amp=True`` is passed explicitly - validation is
     usually not compute-bound, and AMP adds cast overhead while hurting
     Sharpe / CE numeric stability.
     """
-
-    _ensure_bound()
     model.eval()
     total = torch.zeros(1, device=device)
     correct = torch.zeros(1, device=device)
@@ -1434,6 +1570,11 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
 
     heartbeat_interval = 50
     _mask = feature_mask.to(device) if feature_mask is not None else None
+    # Per-sample return stream, kept for the de-overlapped per-trade
+    # Sharpe.  We accumulate on CPU to avoid GPU memory pressure when
+    # the validation set is large.  ``_per_trade_returns`` is the
+    # concatenation of every per-sample ``r = sign(pred) * yb``.
+    _per_trade_returns_parts: list[torch.Tensor] = []
 
     def _accumulate_class_diag(logits: torch.Tensor, y_cls_idx: torch.Tensor) -> torch.Tensor:
         """Update class diagnostics; return pred_cls."""
@@ -1446,7 +1587,7 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
         probs = torch.softmax(logits.float(), dim=-1)
         t_flat = y_cls_idx.reshape(-1).clamp(0, 2)
         p_flat = pred_cls.reshape(-1).clamp(0, 2)
-        for _t, _p in zip(t_flat, p_flat):
+        for _t, _p in zip(t_flat, p_flat, strict=False):
             confusion[int(_t), int(_p)] += 1
         for _cls in range(3):
             _mask_cls = t_flat == _cls
@@ -1463,7 +1604,11 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
                 if seq_len is not None and xb.shape[1] > seq_len:
                     xb = xb[:, -seq_len:, :]
                 xb, yb, y_cls_b, y_conf_b, keep = _sanitize_batch_tensors(
-                    xb, yb, y_cls_b, y_conf_b, skip_bad_targets=True,
+                    xb,
+                    yb,
+                    y_cls_b,
+                    y_conf_b,
+                    skip_bad_targets=True,
                 )
                 if keep is not None and not bool(keep.all()):
                     if not bool(keep.any()):
@@ -1496,18 +1641,26 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
                 with amp_ctx:
                     pred = model(xb)
                     y_cls_idx = _direction_class_index(
-                        yb, y_cls_b, classification=classification,
+                        yb,
+                        y_cls_b,
+                        classification=classification,
                     )
 
                     if isinstance(pred, tuple):
-                        logits, ret_hat, conf = pred
+                        logits, ret_hat, _conf = pred
                         loss = _compute_loss(
-                            pred, crit, yb, classification,
-                            y_cls=y_cls_b, y_conf=y_conf_b, multitask=multitask,
+                            pred,
+                            crit,
+                            yb,
+                            classification,
+                            y_cls=y_cls_b,
+                            y_conf=y_conf_b,
+                            multitask=multitask,
                             direction_only=direction_only,
                         )
-                        if not (torch.isfinite(loss) and torch.isfinite(logits).all()
-                                and torch.isfinite(ret_hat).all()):
+                        if not (
+                            torch.isfinite(loss) and torch.isfinite(logits).all() and torch.isfinite(ret_hat).all()
+                        ):
                             nan_skips += 1
                             if pbar is not None:
                                 pbar.update(1)
@@ -1542,15 +1695,21 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
                         d = torch.sign(pred)
 
                 yb_for_returns = _match_target_shape(d, yb.float())
-                if rl_mode or y_cls_b is not None:
-                    if y_cls_b is not None:
-                        side = _match_target_shape(d, y_cls_b.float()).sign()
-                        yb_for_returns = yb_for_returns.abs() * side
+                if (rl_mode or y_cls_b is not None) and y_cls_b is not None:
+                    side = _match_target_shape(d, y_cls_b.float()).sign()
+                    yb_for_returns = yb_for_returns.abs() * side
                 r = (d * yb_for_returns).flatten()
                 if r.numel() > 0:
                     r_sum += r.sum()
                     r_sq_sum += (r * r).sum()
                     n_ret += int(r.numel())
+                    # Keep the per-sample returns for the de-overlapped
+                    # per-trade Sharpe at the end of the epoch.  We
+                    # only retain non-zero (i.e. traded) returns to
+                    # bound memory; the de-overlap helper can also
+                    # re-filter if needed.
+                    if sharpe_non_overlapping and return_per_trade_sharpe:
+                        _per_trade_returns_parts.append(r.detach().to("cpu", non_blocking=True))
 
                 valid_batches += 1
                 if pbar is not None:
@@ -1576,8 +1735,9 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
     if nan_skips:
         print(f"[Val] NaN summary: skipped {nan_skips} batch(es) this epoch.")
 
-    ann = float(sharpe_ann_factor if sharpe_ann_factor is not None
-                else TRAINING.get("sharpe_annualization_factor", 1.0))
+    ann = float(
+        sharpe_ann_factor if sharpe_ann_factor is not None else TRAINING.get("sharpe_annualization_factor", 1.0)
+    )
     val_loss = total.item() / max(valid_batches, 1)
     dir_acc = correct.item() / max(n_acc, 1)
 
@@ -1587,21 +1747,63 @@ def validate_epoch(model, loader, crit, device, classification: bool, pbar=None,
             f"(valid_batches={valid_batches}, n_ret={n_ret}). Returning Sharpe=0."
         )
         _diag = _validation_class_diag(
-            pred_counts, true_counts, confusion, logits_sum, probs_sum, diag_true_counts,
+            pred_counts,
+            true_counts,
+            confusion,
+            logits_sum,
+            probs_sum,
+            diag_true_counts,
         )
         validate_epoch.last_class_counts = {"pred": _diag["pred"], "true": _diag["true"]}
         validate_epoch.last_class_diag = _diag
         return val_loss, dir_acc, 0.0
 
+    # ── Sharpe computation ─────────────────────────────────────────────
+    # Two flavors, both annualised by ``ann``:
+    #
+    #   * ``sharpe_per_trade``: de-overlapped, sample-variance
+    #     (textbook Sharpe).  This is the primary metric for model
+    #     selection and the promotion gate.
+    #
+    #   * ``sharpe_per_sample``: legacy metric, kept for backward
+    #     compatibility with old dashboards. Computed on the full
+    #     stream (which over-counts overlapping samples).
+    #
+    # We keep both so model selection and dashboards don't diverge in
+    # one step; callers can choose which to log.
+    # Concatenate the per-sample return stream we collected in the
+    # validation loop.  When the loop was skipped (n_ret == 0) this
+    # list is empty and we fall back to the legacy path.
+    if _per_trade_returns_parts:
+        try:
+            _per_trade_returns = torch.cat(_per_trade_returns_parts, dim=0)
+        except Exception:
+            _per_trade_returns = torch.zeros(0)
+    else:
+        _per_trade_returns = torch.zeros(0)
     r_mean = r_sum / n_ret
-    r_var = torch.clamp(r_sq_sum / n_ret - r_mean ** 2, min=0.0)
-    sharpe = (r_mean / (r_var.sqrt() + 1e-8)).item() * ann
+    r_var = torch.clamp(r_sq_sum / n_ret - r_mean**2, min=0.0)
+    sharpe_per_sample = (r_mean / (r_var.sqrt() + 1e-8)).item() * ann
+    if sharpe_non_overlapping and return_per_trade_sharpe and _per_trade_returns.numel() >= 2:
+        per_trade = _non_overlapping_sharpe(
+            _per_trade_returns,
+            lookahead_bars=max(1, int(lookahead_bars)),
+        )
+        sharpe = per_trade * ann
+    else:
+        sharpe = sharpe_per_sample
     _diag = _validation_class_diag(
-        pred_counts, true_counts, confusion, logits_sum, probs_sum, diag_true_counts,
+        pred_counts,
+        true_counts,
+        confusion,
+        logits_sum,
+        probs_sum,
+        diag_true_counts,
     )
     validate_epoch.last_class_counts = {"pred": _diag["pred"], "true": _diag["true"]}
     validate_epoch.last_class_diag = _diag
     return val_loss, dir_acc, sharpe
+
 
 def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
     """A-C1: load the contrastive-pretrained encoder into the supervised model's
@@ -1615,21 +1817,22 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
     if getattr(args, "disable_pretrain_load", False):
         return False
 
-    method     = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
+    method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
     use_regime = getattr(args, "pretrain_regime", False) and method == "tscl"
-    ckpt_dir   = Path(args.checkpoint_dir)
+    ckpt_dir = Path(args.checkpoint_dir)
     candidates = []
     if use_regime:
         candidates.append(ckpt_dir / "contrastive_encoder_regime.pt")
-    candidates += [ckpt_dir / "contrastive_encoder.pt",
-                   ckpt_dir / "contrastive_encoder_regime.pt"]
+    candidates += [ckpt_dir / "contrastive_encoder.pt", ckpt_dir / "contrastive_encoder_regime.pt"]
     ckpt_path = next((p for p in candidates if p.exists()), None)
     if ckpt_path is None:
-        print(f"[PretrainΓåÆSup] No contrastive encoder checkpoint in {ckpt_dir} ΓÇö "
-              "skipping transfer (was pretraining run?).")
+        print(
+            f"[PretrainΓåÆSup] No contrastive encoder checkpoint in {ckpt_dir} ΓÇö "
+            "skipping transfer (was pretraining run?)."
+        )
         return False
     encoder = model.backbone if hasattr(model, "backbone") else model
-    target  = encoder.module if hasattr(encoder, "module") else encoder
+    target = _core_model(encoder)
     try:
         state = torch.load(ckpt_path, map_location=device, weights_only=True)
     except Exception:
@@ -1639,16 +1842,19 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
     # The head is expected to be missing ΓåÆ allow up to ~40% missing for wide heads.
     load_report = _strict_load_report(target, state, f"PretrainΓåÆ{args.model}", min_frac_loaded=0.6)
     try:
-        _update_pretrain_report(args, {
-            "loaded_into_supervised_training": True,
-            "supervised_transfer": {
-                "checkpoint_path": str(ckpt_path),
-                "frac_loaded": float(load_report.get("frac_loaded", 0.0)),
-                "missing_count": len(load_report.get("missing", [])),
-                "unexpected_count": len(load_report.get("unexpected", [])),
-                "shape_mismatch_count": len(load_report.get("shape_mismatch", [])),
+        _update_pretrain_report(
+            args,
+            {
+                "loaded_into_supervised_training": True,
+                "supervised_transfer": {
+                    "checkpoint_path": str(ckpt_path),
+                    "frac_loaded": float(load_report.get("frac_loaded", 0.0)),
+                    "missing_count": len(load_report.get("missing", [])),
+                    "unexpected_count": len(load_report.get("unexpected", [])),
+                    "shape_mismatch_count": len(load_report.get("shape_mismatch", [])),
+                },
             },
-        })
+        )
     except Exception:
         pass
     print(f"[PretrainΓåÆSup] Loaded contrastive encoder from {ckpt_path.name} into backbone.")
@@ -1671,19 +1877,17 @@ def _warm_start_from_checkpoint(model: nn.Module, args, device, model_name: str)
     if explicit:
         candidates.append(Path(explicit))
     candidates += [
-        base.parent / "production_best.pt",   # checkpoints/<run>/production_best.pt
+        base.parent / "production_best.pt",  # checkpoints/<run>/production_best.pt
         base / "production_best.pt",
         base / f"{model_name}_best.pt",
         base / model_name / f"{model_name}_best.pt",
     ]
     ckpt_path = next((p for p in candidates if p and p.exists()), None)
     if ckpt_path is None:
-        print(f"[WarmStart] No prior checkpoint found for {model_name} "
-              f"(looked in {base}); training from scratch.")
+        print(f"[WarmStart] No prior checkpoint found for {model_name} (looked in {base}); training from scratch.")
         return False
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
-    state = ck.get("model_state", ck.get("model_state_dict", ck.get("state_dict", ck))) \
-        if isinstance(ck, dict) else ck
+    state = ck.get("model_state", ck.get("model_state_dict", ck.get("state_dict", ck))) if isinstance(ck, dict) else ck
     core = _core_model(model)
     _strict_load_report(core, state, f"WarmStart:{model_name}", min_frac_loaded=0.6)
     print(f"[WarmStart] Continuing training from {ckpt_path}")
@@ -1693,24 +1897,24 @@ def _warm_start_from_checkpoint(model: nn.Module, args, device, model_name: str)
 def supervised_train(
     model_name: str,
     cache_path: str,
-    n_samples:  int,
+    n_samples: int,
     n_features: int,
     args,
-    device:     torch.device,
-    n_gpus:     int,
+    device: torch.device,
+    n_gpus: int,
     run: Any = None,
-    train_idx:  np.ndarray | None = None,
-    val_idx:    np.ndarray | None = None,
-    fold_id:    int | None = None,
-    amp_dtype:  torch.dtype = torch.float32,
+    train_idx: np.ndarray | None = None,
+    val_idx: np.ndarray | None = None,
+    fold_id: int | None = None,
+    amp_dtype: torch.dtype = torch.float32,
 ):
-    _ensure_bound()
 
     # ── Lightning training path (opt-in via --training-framework lightning) ──
     _train_framework = str(getattr(args, "training_framework", "custom") or "custom").lower()
     if _train_framework == "lightning":
         try:
-            from training.lightning_trainer import run_lightning_training, is_lightning_available
+            from training.lightning_trainer import is_lightning_available, run_lightning_training
+
             if is_lightning_available():
                 print(f"\n[Training] Using PyTorch Lightning framework for {model_name.upper()}")
                 history, metrics = run_lightning_training(
@@ -1736,9 +1940,11 @@ def supervised_train(
         print("[Composer] Mosaic Composer framework is not fully implemented/installed, falling back to custom loop.")
     elif _train_framework != "custom":
         print(f"[Training] Unknown framework '{_train_framework}', falling back to custom loop.")
-        
+
     global _TRAIN_LOGGER
-    _artifact_run_name = str(getattr(args, "run_name_slug", "") or _slug_part(getattr(args, "run_name", "pipeline-run"), max_len=140))
+    _artifact_run_name = str(
+        getattr(args, "run_name_slug", "") or _slug_part(getattr(args, "run_name", "pipeline-run"), max_len=140)
+    )
     sidecar = None  # always defined; reused logger path skips Sidecar creation
 
     if _TRAIN_LOGGER_AVAILABLE:
@@ -1747,62 +1953,66 @@ def supervised_train(
             if _sidecar_cfg.get("enabled", False):
                 try:
                     sidecar = Sidecar(
-                        log_dir    = PATHS.get("logs", "logs"),
-                        run_name   = _artifact_run_name,
-                        model_name = model_name,
-                        enabled    = True,
-                        mode       = str(_sidecar_cfg.get("mode", "process")),
-                        max_queue_size = int(_sidecar_cfg.get("max_queue_size", 10000)),
-                        flush_interval_s = float(_sidecar_cfg.get("flush_interval_s", 2.0)),
-                        retention_days   = int(_sidecar_cfg.get("retention_days", 30)),
-                        enable_discord   = bool(_sidecar_cfg.get("enable_discord", False)),
+                        log_dir=PATHS.get("logs", "logs"),
+                        run_name=_artifact_run_name,
+                        model_name=model_name,
+                        enabled=True,
+                        mode=str(_sidecar_cfg.get("mode", "process")),
+                        max_queue_size=int(_sidecar_cfg.get("max_queue_size", 10000)),
+                        flush_interval_s=float(_sidecar_cfg.get("flush_interval_s", 2.0)),
+                        retention_days=int(_sidecar_cfg.get("retention_days", 30)),
+                        enable_discord=bool(_sidecar_cfg.get("enable_discord", False)),
                     )
                     sidecar.start()
                 except Exception as e:
                     print(f"[Sidecar] Failed to start: {e}")
                     sidecar = None
 
-            _TRAIN_LOGGER = _TrainingLogger(
-                log_dir    = PATHS.get("logs", "logs"),
-                run_name   = f"{_artifact_run_name}_{datetime.now().strftime('%m%d_%H%M')}",
-                model_name = model_name,
-                sidecar    = sidecar,
-            )
-            _TRAIN_LOGGER.setup()
-            _sync_owned_to_host("_TRAIN_LOGGER")
+            import training.core
+            if _TrainingLogger is not None:
+                from typing import Any, cast
+                logger_cls = cast(Any, _TrainingLogger)
+                _TRAIN_LOGGER = logger_cls(
+                    log_dir=PATHS.get("logs", "logs"),
+                    run_name=f"{_artifact_run_name}_{datetime.now().strftime('%m%d_%H%M')}",
+                    model_name=model_name,
+                    sidecar=sidecar,
+                )
+                training.core._TRAIN_LOGGER = _TRAIN_LOGGER
+                _TRAIN_LOGGER.setup()
         else:
-            _TRAIN_LOGGER.model_name = model_name
+            if _TRAIN_LOGGER is not None:
+                _TRAIN_LOGGER.model_name = model_name
+                import training.core
+                training.core._TRAIN_LOGGER = _TRAIN_LOGGER
             # Prefer the logger's existing sidecar on subsequent folds
             sidecar = getattr(_TRAIN_LOGGER, "sidecar", None)
-            _sync_owned_to_host("_TRAIN_LOGGER")
 
-    _log_dir  = PATHS.get("logs", "logs")
+    _log_dir = PATHS.get("logs", "logs")
     _run_name = (
         f"{_slug_part(model_name, max_len=80)}"
-
         f"{'_fold' + str(fold_id) if fold_id is not None else ''}"
         f"_{datetime.now().strftime('%m%d_%H%M')}"
     )
-
 
     # -- TensorBoard writer ----------------------------------------------------
     _tb_writer = None
     if TENSORBOARD and not getattr(args, "no_tensorboard", False):
         _tb_dir = str(Path(_log_dir) / "tensorboard" / _run_name)
         _tb_writer = _SummaryWriter(log_dir=_tb_dir)
-        print(f"[TensorBoard] Logging -> {_tb_dir}  "
-              f"(tensorboard --logdir {_tb_dir} --port 6006)")
+        print(f"[TensorBoard] Logging -> {_tb_dir}  (tensorboard --logdir {_tb_dir} --port 6006)")
 
     # -- Rich live display -----------------------------------------------------
     _stop_on_sharpe_local = getattr(args, "early_stop_metric", "sharpe") == "sharpe"
     _rich_display = None
+    from training.train_gpu import RICH_DISPLAY
     if RICH_DISPLAY and not getattr(args, "no_rich", False):
         _rich_display = _RichDisplay(
-            model_name       = model_name,
-            total_epochs     = args.epochs,
-            patience         = args.patience,
-            metric_name      = "val_sharpe" if _stop_on_sharpe_local else "val_loss",
-            higher_is_better = _stop_on_sharpe_local,
+            model_name=model_name,
+            total_epochs=args.epochs,
+            patience=args.patience,
+            metric_name="val_sharpe" if _stop_on_sharpe_local else "val_loss",
+            higher_is_better=_stop_on_sharpe_local,
         )
 
     if getattr(args, "model_profile", True) and not getattr(args, "_profile_applied", False):
@@ -1813,26 +2023,29 @@ def supervised_train(
     multitask = bool(getattr(args, "multitask", False))
     fold_suffix = f"_fold{fold_id}" if fold_id is not None else ""
 
-    print(f"\n{'-'*60}")
-    print(f"  Training: {model_name.upper()} | {n_samples:,} samples | "
-          f"batch={args.batch_size} | AMP={args.amp} | loss={args.loss}")
-    print(f"{'-'*60}")
+    print(f"\n{'-' * 60}")
+    print(
+        f"  Training: {model_name.upper()} | {n_samples:,} samples | "
+        f"batch={args.batch_size} | AMP={args.amp} | loss={args.loss}"
+    )
+    print(f"{'-' * 60}")
 
     if hasattr(args, "_training_features_report"):
         report = args._training_features_report
         print("\n  [Training-Features Report]")
         for k, v in report.items():
-            print(f"    {k:20s}: {str(v['mode']):<6s} (source: {v['source']})")
+            print(f"    {k:20s}: {v['mode']!s:<6s} (source: {v['source']})")
         print()
-        
+
         try:
             import json
             from pathlib import Path as _Path
+
             if getattr(args, "checkpoint_dir", None):
                 rep_path = _Path(args.checkpoint_dir) / "training_features_report.json"
                 with open(rep_path, "w") as f:
                     json.dump(report, f, indent=2)
-            if run is not None:
+            if run is not None:  # noqa: SIM102
                 # Safely update run config if W&B is active
                 if hasattr(run, "config"):
                     run.config.update({"features_report": report}, allow_val_change=True)
@@ -1862,22 +2075,71 @@ def supervised_train(
             train_idx, val_idx, tune_idx = _three_way_split(
                 _split_n, args.val_split, _tune_split, _embargo, _purge, _method
             )
-            print(f"[Split] Three-way split: embargo={_embargo} purge={_purge} method={_method} "
-                  f"tune_split={_tune_split} "
-                  f"{f'| holdout tail = {_holdout_n:,} bars' if _holdout_n else ''}")
+            print(
+                f"[Split] Three-way split: embargo={_embargo} purge={_purge} method={_method} "
+                f"tune_split={_tune_split} "
+                f"{f'| holdout tail = {_holdout_n:,} bars' if _holdout_n else ''}"
+            )
         else:
             train_idx, val_idx = _embargo_split(_split_n, args.val_split, _embargo, _purge, _method)
-            print(f"[Split] Single split with embargo={_embargo} purge={_purge} method={_method} "
-                  f"{f'| holdout tail = {_holdout_n:,} bars' if _holdout_n else ''}")
-    print(f"[Split] Train: {len(train_idx):,} | Val: {len(val_idx):,}"
-          f"{f' | Tune: {len(tune_idx):,}' if tune_idx is not None else ''}"
-          f"{fold_suffix if fold_id is not None else ''}")
+            print(
+                f"[Split] Single split with embargo={_embargo} purge={_purge} method={_method} "
+                f"{f'| holdout tail = {_holdout_n:,} bars' if _holdout_n else ''}"
+            )
+    print(
+        f"[Split] Train: {len(train_idx):,} | Val: {len(val_idx):,}"
+        f"{f' | Tune: {len(tune_idx):,}' if tune_idx is not None else ''}"
+        f"{fold_suffix if fold_id is not None else ''}"
+    )
     if len(train_idx) == 0 or len(val_idx) == 0:
         raise RuntimeError(
             f"[Split] Empty train/val after holdout/embargo "
             f"(n_samples={n_samples}, train={len(train_idx)}, val={len(val_idx)}). "
             f"Increase --n-ticks / use real data, or reduce seq_len/embargo for quick runs."
         )
+
+    # ── Fold isolation check ──────────────────────────────────────────────
+    # Verifies val samples are strictly after train + embargo gap at the index
+    # level. The cache stores sequences in chronological order so the global
+    # row index *is* the temporal position; this guards against index-space
+    # leakage that the embargo split logic might have missed (e.g. tiny caches
+    # where embargo got shrunk, or walk-forward CV edge cases). Soft-fail by
+    # default so quick runs are not blocked; raise when --strict-fold-isolation.
+    if getattr(args, "enable_fold_isolation_check", True):
+        try:
+            from features.lookahead_guard import (
+                LookaheadViolation,
+                assert_fold_isolation,
+            )
+
+            train_ts = np.asarray(train_idx, dtype=np.int64)
+            val_ts = np.asarray(val_idx, dtype=np.int64)
+            _iso_emb = int(_embargo) if "_embargo" in locals() else 0
+            assert_fold_isolation(train_ts, val_ts, embargo_bars=_iso_emb)
+            print(
+                f"[FoldIsolation] OK: val_min={int(val_ts.min())} > "
+                f"train_max={int(train_ts.max())} (embargo={_iso_emb})."
+            )
+            if tune_idx is not None and len(tune_idx) > 0:
+                tune_ts = np.asarray(tune_idx, dtype=np.int64)
+                # tune_eval is the most-recent segment; it must be after val.
+                if len(val_ts) > 0 and tune_ts.min() <= val_ts.max():
+                    _violation = (
+                        f"Fold isolation violated: tune_min_ts={int(tune_ts.min())} "
+                        f"<= val_max_ts={int(val_ts.max())}. "
+                        f"Auto-tune evaluation data overlaps with early-stopping val set."
+                    )
+                    if getattr(args, "strict_fold_isolation", False):
+                        raise LookaheadViolation(_violation)
+                    print(f"[FoldIsolation] WARN (tune/val overlap): {_violation}")
+        except LookaheadViolation as _iso_exc:
+            _strict = bool(getattr(args, "strict_fold_isolation", False))
+            _ignore = bool(getattr(args, "ignore_preflight", False)) or bool(getattr(args, "quick_mode", False))
+            if _strict and not _ignore:
+                raise
+            print(f"[FoldIsolation] WARN (continuing): {_iso_exc}")
+        except Exception as _iso_err:
+            print(f"[FoldIsolation] check skipped ({_iso_err})")
 
     # SYS-002: store tune_idx on args for post-training evaluation
     args._tune_eval_idx = tune_idx
@@ -1897,17 +2159,17 @@ def supervised_train(
                 raise
 
     train_ds = ZarrStreamDataset(
-        cache_path, train_idx, shuffle_chunks=True,
-
+        cache_path,
+        train_idx,
+        shuffle_chunks=True,
         multitask_targets=use_direction_targets,
         return_indices=True,
-
     )
-    val_ds   = ZarrStreamDataset(
-        cache_path, np.sort(val_idx), shuffle_chunks=False,
-
+    val_ds = ZarrStreamDataset(
+        cache_path,
+        np.sort(val_idx),
+        shuffle_chunks=False,
         multitask_targets=use_direction_targets,
-
     )
 
     # Windows DataLoader workers use spawned processes plus shared file mappings.
@@ -1924,7 +2186,7 @@ def supervised_train(
     # B: On Windows, persistent_workers=True can sometimes cause I/O hangs
     # when combined with certain storage backends or external drives.
     # Default to False on Windows for stability.
-    use_persistent = (nw > 0 and os.name != "nt")
+    use_persistent = nw > 0 and os.name != "nt"
     if getattr(args, "persistent_workers", None) is not None:
         use_persistent = bool(args.persistent_workers) and nw > 0
 
@@ -1935,48 +2197,71 @@ def supervised_train(
     if getattr(args, "val_prefetch_factor", None) is not None and val_nw_safe > 0:
         val_pf = max(1, int(args.val_prefetch_factor))
 
-    default_pin = (os.name != "nt")
+    default_pin = os.name != "nt"
     pin_mem = default_pin if getattr(args, "pin_memory", None) is None else bool(args.pin_memory)
 
     if getattr(args, "enable_per", False):
-        train_dl = PrioritizedDataLoader(train_ds, batch_size=args.batch_size,
-                                         num_workers=nw, pin_memory=pin_mem,
-                                         persistent_workers=use_persistent, prefetch_factor=pf)
+        train_dl = PrioritizedDataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            num_workers=nw,
+            pin_memory=pin_mem,
+            persistent_workers=use_persistent,
+            prefetch_factor=pf,
+        )
     else:
-        train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False,
-                              num_workers=nw, pin_memory=pin_mem, persistent_workers=use_persistent,
-                              prefetch_factor=pf)
+        train_dl = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=nw,
+            pin_memory=pin_mem,
+            persistent_workers=use_persistent,
+            prefetch_factor=pf,
+        )
 
-    _bn_train_dl = train_dl   # full-distribution loader for SWA BN update (never filtered)
+    _bn_train_dl = train_dl  # full-distribution loader for SWA BN update (never filtered)
     # On Windows, DataLoader worker processes crash unexpectedly during validation
     # after many training epochs (memory pressure kills subprocesses silently).
     # num_workers=0 runs loading in the main process ΓÇö safe, and fast enough for val
     # since there's no backward pass.
-    val_dl   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                          num_workers=val_nw_safe, pin_memory=pin_mem,
-                          persistent_workers=(use_persistent and val_nw_safe > 0),
-                          prefetch_factor=None if val_nw_safe == 0 else val_pf)
+    val_dl = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=val_nw_safe,
+        pin_memory=pin_mem,
+        persistent_workers=(use_persistent and val_nw_safe > 0),
+        prefetch_factor=None if val_nw_safe == 0 else val_pf,
+    )
 
     # Always overlap CPU Zarr decompress / H2D with GPU compute via a
     # background-thread prefetch queue (helps even when num_workers > 0).
     train_dl = wrap_loader_prefetch(train_dl, args)
     val_dl = wrap_loader_prefetch(val_dl, args)
-    print(f"[Loader] {len(train_dl)} train batches | {len(val_dl)} val batches | "
-          f"{nw} workers | prefetch={pf if pf is not None else 0} | "
-          f"thread_prefetch={int(getattr(args, 'thread_prefetch_batches', 8) or 8)} | "
-          f"val_workers={val_nw_safe} val_prefetch={val_pf if val_pf is not None else 0} "
-          f"pin_mem={pin_mem} persistent={use_persistent}")
+    print(
+        f"[Loader] {len(train_dl)} train batches | {len(val_dl)} val batches | "
+        f"{nw} workers | prefetch={pf if pf is not None else 0} | "
+        f"thread_prefetch={int(getattr(args, 'thread_prefetch_batches', 8) or 8)} | "
+        f"val_workers={val_nw_safe} val_prefetch={val_pf if val_pf is not None else 0} "
+        f"pin_mem={pin_mem} persistent={use_persistent}"
+    )
 
-    model = build_model(model_name, n_features, args).to(device)
+    model = build_model(model_name, n_features, args).to(device)  # type: ignore
     if multitask:
         try:
             _fold_prior = _class_prior_tensor(
-                cache_path, train_idx, device, use_direction_sidecar=True,
+                cache_path,
+                train_idx,
+                device,
+                use_direction_sidecar=True,
             )
             _init_multitask_direction_bias(model, _fold_prior)
             _p = [float(x) for x in _fold_prior.detach().cpu().tolist()]
-            print(f"[ClassPrior] Fold train S/H/B prior={_p[0]:.3f}/{_p[1]:.3f}/{_p[2]:.3f} "
-                  "(direction head bias initialized)")
+            print(
+                f"[ClassPrior] Fold train S/H/B prior={_p[0]:.3f}/{_p[1]:.3f}/{_p[2]:.3f} "
+                "(direction head bias initialized)"
+            )
         except Exception as _prior_exc:
             print(f"[ClassPrior] WARN: prior init skipped ({_prior_exc})")
     # A-C1: transfer contrastive-pretrained encoder weights into the backbone.
@@ -1984,12 +2269,15 @@ def supervised_train(
         try:
             _loaded_pretrain = _load_pretrained_encoder(model, args, device)
             if not _loaded_pretrain:
-                _update_pretrain_report(args, {
-                    "loaded_into_supervised_training": False,
-                    "supervised_transfer": {
-                        "status": "skipped_no_checkpoint",
+                _update_pretrain_report(
+                    args,
+                    {
+                        "loaded_into_supervised_training": False,
+                        "supervised_transfer": {
+                            "status": "skipped_no_checkpoint",
+                        },
                     },
-                })
+                )
         except Exception as _pe:
             # Fail loudly: a silent no-op here means pretraining was wasted.
             raise RuntimeError(f"[PretrainΓåÆSup] encoder transfer failed: {_pe}") from _pe
@@ -2004,11 +2292,16 @@ def supervised_train(
         print(f"\n[Distillation] Loading teacher model: {args.teacher_model}...")
         try:
             from inference.pytorch_inference import load_pytorch_model
-            _t_ckpt = Path(args.teacher_ckpt) if getattr(args, "teacher_ckpt", None) else Path(args.checkpoint_dir) / args.teacher_model / f"{args.teacher_model}_best.pt"
+
+            _t_ckpt = (
+                Path(args.teacher_ckpt)
+                if getattr(args, "teacher_ckpt", None)
+                else Path(args.checkpoint_dir) / args.teacher_model / f"{args.teacher_model}_best.pt"
+            )
             if not _t_ckpt.is_absolute():
                 _t_ckpt = Path.cwd() / _t_ckpt
             if not _t_ckpt.exists():
-                _t_ckpt = Path(args.checkpoint_dir) / "production_best.pt" # Fallback
+                _t_ckpt = Path(args.checkpoint_dir) / "production_best.pt"  # Fallback
             if not _t_ckpt.exists():
                 raise FileNotFoundError(f"Teacher checkpoint not found: {_t_ckpt}")
 
@@ -2017,7 +2310,7 @@ def supervised_train(
                 model_name=args.teacher_model,
                 seq_len=getattr(args, "lookahead_bars", 60),
                 n_features=n_features,
-                device=device
+                device=device,
             )
             teacher_model.eval()
             for param in teacher_model.parameters():
@@ -2030,37 +2323,40 @@ def supervised_train(
             teacher_model = None
 
     if n_gpus > 1:
-        model = nn.DataParallel(model); print(f"[Model] DataParallel ├ù {n_gpus} GPUs")
+        model = nn.DataParallel(model)
+        print(f"[Model] DataParallel ├ù {n_gpus} GPUs")
 
-    # -- torch.compile (PyTorch >= 2.0) — ~20-30 % extra throughput on Ada ----
+    # -- torch.compile (PyTorch >= 2.0) - ~20-30 % extra throughput on Ada ----
     # Enabled by default (GPU.torch_compile=True). LSTM/GRU/RNN cells stay
     # eager via torch.compiler.disable so the rest of the graph can use
     # inductor (incl. reduce-overhead); requires Triton (Linux).
     model = maybe_torch_compile(model, device, _GPU_CFG if isinstance(_GPU_CFG, dict) else None)
 
     crit = build_criterion(
-        args, device,
+        args,
+        device,
         cache_path=cache_path if (classification or multitask) else None,
         train_idx=train_idx if (classification or multitask) else None,
     )
-    direction_crit = nn.CrossEntropyLoss().to(device)
+    direction_crit = nn.CrossEntropyLoss().to(device)  # type: ignore
     # D: OverconfidencePenalty ΓÇö active for regression modes only
     global _OVERCONF_PENALTY
     if not classification and getattr(args, "overconf_penalty", True):
         _oc_w = float(getattr(args, "overconf_weight", 0.3))
         _oc_t = float(getattr(args, "overconf_threshold", 0.6))
-        _OVERCONF_PENALTY = OverconfidencePenalty(conf_threshold=_oc_t, weight=_oc_w).to(device)
+        _OVERCONF_PENALTY = OverconfidencePenalty(conf_threshold=_oc_t, weight=_oc_w).to(device)  # type: ignore
     else:
         _OVERCONF_PENALTY = None
-    _sync_owned_to_host("_OVERCONF_PENALTY")
     opt = build_adamw(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Gradient accumulation: effective batch = batch_size ├ù accum_steps
     _accum = max(1, int(getattr(args, "grad_accum_steps", 1)))
     # OneCycleLR must be stepped once per OPTIMIZER UPDATE (not per batch).
     # steps_per_epoch = ceil(batches / accum_steps) so the total cycle length
     # equals epochs ├ù optimizer-updates-per-epoch.
-    _eff_steps = max(1, -(-len(train_dl) // _accum))   # ceiling div
-    _sched_kind = str(getattr(args, "lr_schedule", "warmup_cosine")).strip().lower()  # Fix Item 4: default to warmup_cosine
+    _eff_steps = max(1, -(-len(train_dl) // _accum))  # ceiling div
+    _sched_kind = (
+        str(getattr(args, "lr_schedule", "warmup_cosine")).strip().lower()
+    )  # Fix Item 4: default to warmup_cosine
     _total_steps = max(1, args.epochs * _eff_steps)
     if _sched_kind == "warmup_cosine":
         _warmup_ep = max(0, int(getattr(args, "lr_warmup_epochs", 3)))
@@ -2079,8 +2375,10 @@ def supervised_train(
             return _min_ratio + (1.0 - _min_ratio) * cosine
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_warmup_cosine)
-        print(f"[Scheduler] WarmupCosine | warmup_steps={_warmup_steps} "
-              f"| min_ratio={_min_ratio:.3f} | total={_total_steps:,}")
+        print(
+            f"[Scheduler] WarmupCosine | warmup_steps={_warmup_steps} "
+            f"| min_ratio={_min_ratio:.3f} | total={_total_steps:,}"
+        )
     else:
         max_lr = float(getattr(args, "onecycle_max_lr_mult", 10.0)) * args.lr
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -2090,13 +2388,13 @@ def supervised_train(
             pct_start=float(getattr(args, "onecycle_pct_start", 0.1)),
             anneal_strategy="cos",
         )
-        print(f"[Scheduler] OneCycleLR | max_lr={max_lr:.2e} | "
-              f"steps/ep={_eff_steps} (accum={_accum}) | total={_total_steps:,}")
+        print(
+            f"[Scheduler] OneCycleLR | max_lr={max_lr:.2e} | "
+            f"steps/ep={_eff_steps} (accum={_accum}) | total={_total_steps:,}"
+        )
     # GradScaler is only useful for FP16 (prevents underflow).
     # BF16 covers the same exponent range as FP32 -> scaling would be a no-op.
-    _fp16_scaler_needed = (
-        args.amp and device.type == "cuda" and amp_dtype == torch.float16
-    )
+    _fp16_scaler_needed = args.amp and device.type == "cuda" and amp_dtype == torch.float16
     amp_sc = GradScaler(enabled=_fp16_scaler_needed)
     dtype_name = {torch.bfloat16: "BF16", torch.float16: "FP16", torch.float32: "FP32"}.get(amp_dtype, "?")
     print(f"[AMP] dtype={dtype_name} | GradScaler={'ON' if _fp16_scaler_needed else 'OFF (BF16/FP32)'}")
@@ -2112,6 +2410,7 @@ def supervised_train(
     if _use_online_miner and (classification or multitask) and _miner_allowed:
         try:
             from training.hard_example_miner import OnlineHardExampleMiner
+
             _online_miner = OnlineHardExampleMiner(
                 n_samples=len(train_idx),
                 window_size=5,
@@ -2128,18 +2427,19 @@ def supervised_train(
     # -- SWA (Stochastic Weight Averaging) -------------------------------------
     # Averages model weights over the last (1 - swa_start_frac) fraction of training.
     # Typically gives +2-5% generalization improvement with zero extra VRAM cost.
-    _swa_enabled    = bool(getattr(args, "swa_enabled", TRAINING.get("swa_enabled", False)))
+    _swa_enabled = bool(getattr(args, "swa_enabled", TRAINING.get("swa_enabled", False)))
     _swa_start_frac = float(getattr(args, "swa_start_frac", TRAINING.get("swa_start_frac", 0.75)))
     _swa_start_frac = min(max(_swa_start_frac, 0.0), 1.0)
-    _swa_start_ep   = max(1, int(args.epochs * _swa_start_frac))
-    _swa_lr         = float(getattr(args, "swa_lr", TRAINING.get("swa_lr", 1e-5)))
-    _swa_model      = None
-    _swa_scheduler  = None
-    _swa_started    = False
+    _swa_start_ep = max(1, int(args.epochs * _swa_start_frac))
+    _swa_lr = float(getattr(args, "swa_lr", TRAINING.get("swa_lr", 1e-5)))
+    _swa_model = None
+    _swa_scheduler = None
+    _swa_started = False
     if _swa_enabled:
         try:
             from torch.optim.swa_utils import SWALR, AveragedModel
             from torch.optim.swa_utils import update_bn as _swa_update_bn
+
             # Defer instantiation until the training loop to ensure lazy modules are fully initialized
             print(f"[SWA] Enabled | start_ep={_swa_start_ep} | swa_lr={_swa_lr:.2e}")
         except Exception as _swa_e:
@@ -2163,14 +2463,15 @@ def supervised_train(
         except Exception as _sdpa_e:
             print(f"[SDPA] Could not configure SDPA backends: {_sdpa_e}")
             _log_warn(f"[SDPA] SDPA backend config failed: {_sdpa_e}")
-    elif device.type == "cuda" and not args.amp:
+    elif device.type == "cuda" and not args.amp:  # noqa: SIM102
         # FP32 path: enable math SDP (still uses SDPA dispatch, just no Tensor Cores)
         if hasattr(torch.backends.cuda, "enable_math_sdp"):
             torch.backends.cuda.enable_math_sdp(True)
 
-    ckpt_dir  = Path(args.checkpoint_dir); ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = Path(args.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / f"{model_name}{fold_suffix}_best.pt"
-    cfg_path  = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
+    cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
 
     stop_on_sharpe = args.early_stop_metric == "sharpe"
 
@@ -2178,9 +2479,9 @@ def supervised_train(
     start_ep = 0
     last_path = ckpt_dir / f"{model_name}{fold_suffix}_last.pt"
     # Temporary holders for auxiliary resume state applied after their init blocks
-    _resume_chunk_history: list | None  = None
-    _resume_chunk_streak:  int | None   = None
-    _resume_feat_state:    dict | None  = None
+    _resume_chunk_history: list | None = None
+    _resume_chunk_streak: int | None = None
+    _resume_feat_state: dict | None = None
 
     if args.resume and last_path.exists():
         ck = torch.load(last_path, map_location=device)
@@ -2190,7 +2491,9 @@ def supervised_train(
             opt.load_state_dict(ck["opt_state"])
         except RuntimeError as e:
             if "size mismatch" in str(e):
-                print(f"\n[Resume Error] Feature dimension mismatch detected! The dataset has changed since this model was last trained. Disabling resume and starting fresh...\n  Details: {e}")
+                print(
+                    f"\n[Resume Error] Feature dimension mismatch detected! The dataset has changed since this model was last trained. Disabling resume and starting fresh...\n  Details: {e}"
+                )
                 args.resume = False
                 ck = {}  # Clear checkpoint dict so the below .get() calls return defaults
             else:
@@ -2208,17 +2511,15 @@ def supervised_train(
         best_val_loss = float(ck.get("best_val_loss", float("inf")))
         best_sharpe = float(ck.get("best_sharpe", float("-inf")))
         no_improve = int(ck.get("no_improve", 0))
-        improved = False   # Initialize to avoid UnboundLocalError
-        history = ck.get("history", {"train_loss":[], "val_loss":[], "dir_acc":[], "val_sharpe":[], "lr":[]})
+        improved = False  # Initialize to avoid UnboundLocalError
+        history = ck.get("history", {"train_loss": [], "val_loss": [], "dir_acc": [], "val_sharpe": [], "lr": []})
         for _hist_key in ("seq_len", "difficulty_stage", "curriculum_stalls"):
-
             history.setdefault(_hist_key, [])
 
         # Restore auxiliary state (new keys; fall back gracefully for old checkpoints)
-        _resume_chunk_history = list(ck.get("chunk_sharpe_history",
-                                             history.get("val_sharpe", [])))
-        _resume_chunk_streak  = int(ck.get("chunk_worse_streak", 0))
-        _resume_feat_state    = ck.get("feat_stability_state")
+        _resume_chunk_history = list(ck.get("chunk_sharpe_history", history.get("val_sharpe", [])))
+        _resume_chunk_streak = int(ck.get("chunk_worse_streak", 0))
+        _resume_feat_state = ck.get("feat_stability_state")
         print(f"[Resume] Loaded exact state from {last_path} (epoch {start_ep})")
     elif args.resume and best_path.exists() and fold_id is None:
         core = _core_model(model)
@@ -2228,7 +2529,9 @@ def supervised_train(
             print(f"[Resume] Loaded weights from {best_path}")
         except RuntimeError as e:
             if "size mismatch" in str(e):
-                print(f"\n[Resume Error] Feature dimension mismatch detected! The dataset has changed since this model was last trained. Disabling resume and starting fresh...\n  Details: {e}")
+                print(
+                    f"\n[Resume Error] Feature dimension mismatch detected! The dataset has changed since this model was last trained. Disabling resume and starting fresh...\n  Details: {e}"
+                )
                 args.resume = False
             else:
                 raise e
@@ -2237,17 +2540,27 @@ def supervised_train(
         best_val_loss = float("inf")
         best_sharpe = float("-inf")
         no_improve = 0
-        improved = False   # Initialize to avoid UnboundLocalError
-        history  = {
-            "train_loss": [], "val_loss": [], "dir_acc": [], "val_sharpe": [], "lr": [],
+        improved = False  # Initialize to avoid UnboundLocalError
+        history = {
+            "train_loss": [],
+            "val_loss": [],
+            "dir_acc": [],
+            "val_sharpe": [],
+            "lr": [],
         }
 
     if use_direction_targets and start_ep == 0:
         _direction_probe(
-            model, cache_path, train_idx, val_idx, args, device,
-            model_name=model_name, n_features=n_features, amp_dtype=amp_dtype,
+            model,
+            cache_path,
+            train_idx,
+            val_idx,
+            args,
+            device,
+            model_name=model_name,
+            n_features=n_features,
+            amp_dtype=amp_dtype,
         )
-
 
     # -- A3: Variable-length sequence curriculum -------------------------------
     _CURR = getattr(args, "curriculum", None)
@@ -2266,6 +2579,7 @@ def supervised_train(
             format_audit_warnings,
         )
         from config.feature_mask import FEATURE_MASK as _FM_AUDIT
+
         _schema_for_audit = None
         try:
             _schema_for_audit = _load_feature_schema(cache_path, n_features)
@@ -2285,14 +2599,14 @@ def supervised_train(
             _CURR,
             yaml_path=str(getattr(args, "config", "config/run.yaml") or "config/run.yaml"),
         )
-        for _err in (_drift.get("errors") or []):
+        for _err in _drift.get("errors") or []:
             _log_warn(f"[CurriculumDrift] {_err}")
         for _line in format_audit_warnings(_drift, prefix="[CurriculumDrift]"):
             _log_warn(_line)
         _mkt = audit_required_market_columns(feature_mask=_FM_AUDIT)
         for _line in format_audit_warnings(_mkt, prefix="[MarketSchema]"):
             _log_warn(_line)
-        for _err in (_mkt.get("errors") or []):
+        for _err in _mkt.get("errors") or []:
             _log_warn(f"[MarketSchema] {_err}")
     except Exception as _audit_exc:
         _log_warn(f"[CurriculumAudit] skipped ({_audit_exc})")
@@ -2321,7 +2635,7 @@ def supervised_train(
                 if any(k in name for k in ("head", "norm", "out_proj")):
                     param.requires_grad_(True)
                 else:
-                    param.requires_grad_(ep >= 0)   # always requires_grad; gradient zeroed via scheduler
+                    param.requires_grad_(ep >= 0)  # always requires_grad; gradient zeroed via scheduler
             return
         # After earliest_unfreeze: all parameters are trainable
         for param in core.parameters():
@@ -2333,129 +2647,116 @@ def supervised_train(
     _diff_arr = _load_diff_array(cache_path, n_samples)
     _feature_schema = _load_feature_schema(cache_path, n_features)
     if _feature_schema is None:
-        _log_warn("[Curriculum] Ordered feature schema sidecar missing; feature-group mask will use FEATURE_MASK only if lengths match.")
+        _log_warn(
+            "[Curriculum] Ordered feature schema sidecar missing; feature-group mask will use FEATURE_MASK only if lengths match."
+        )
     _schema_for_masks = _feature_schema or list(getattr(args, "_feat_names", []) or [])
 
     _feature_ablation_cfg = _feature_ablation_config(args)
 
     _feature_ablation_mask_np, _feature_ablation_report = _build_feature_ablation_mask(
-
         _schema_for_masks,
-
         _feat_groups,
-
         _feature_ablation_cfg,
-
         n_features,
-
     )
 
     _feature_ablation_mask = (
-
-        torch.from_numpy(_feature_ablation_mask_np).to(device)
-
-        if _feature_ablation_mask_np is not None
-
-        else None
-
+        torch.from_numpy(_feature_ablation_mask_np).to(device)  # type: ignore if _feature_ablation_mask_np is not None else None
     )
 
     if _feature_ablation_report.get("enabled"):
-
         _log_info(
-
-            f"[FeatureAblation] {model_name}: { _feature_ablation_report.get('name') } "
-
+            f"[FeatureAblation] {model_name}: {_feature_ablation_report.get('name')} "
             f"masked={_feature_ablation_report.get('masked_count')}/{n_features}"
-
         )
 
     try:
-
         _fa_dir = Path(args.checkpoint_dir) / model_name
 
         _fa_dir.mkdir(parents=True, exist_ok=True)
 
-        _feature_ablation_report.update({
-
-            "model_name": model_name,
-
-            "schema_available": bool(_schema_for_masks),
-
-            "written_at": datetime.now(UTC).isoformat(),
-
-        })
+        _feature_ablation_report.update(
+            {
+                "model_name": model_name,
+                "schema_available": bool(_schema_for_masks),
+                "written_at": datetime.now(UTC).isoformat(),
+            }
+        )
 
         _safe_save_json(_feature_ablation_report, _fa_dir / f"{model_name}_feature_ablation_report.json")
 
     except Exception as _fa_e:
-
         _log_warn(f"[FeatureAblation] Report write failed: {_fa_e}")
-
-
-    
 
     # -- A: Feature stability monitor -----------------------------------------
     _feat_stability = FeatureStabilityMonitor(
-        n_features     = n_features,
-        ema_alpha      = 0.90,
-        soft_threshold = 2.0,    # sigma shift -> noisy (dampen to 0.5├ù)
-        hard_threshold = 4.0,    # sigma shift -> immediately freeze
-        freeze_after   = 3,      # consecutive soft epochs -> freeze
-        damping_factor = 0.50,
-        warmup_epochs  = 3,      # don't penalise in first 3 epochs (EMA cold start)
-        min_active_pct = 0.50,   # always keep >=50% of features active
+        n_features=n_features,
+        ema_alpha=0.90,
+        soft_threshold=2.0,  # sigma shift -> noisy (dampen to 0.5├ù)
+        hard_threshold=4.0,  # sigma shift -> immediately freeze
+        freeze_after=3,  # consecutive soft epochs -> freeze
+        damping_factor=0.50,
+        warmup_epochs=3,  # don't penalise in first 3 epochs (EMA cold start)
+        min_active_pct=0.50,  # always keep >=50% of features active
     )
     if _resume_feat_state is not None:
         try:
             _feat_stability.load_state(_resume_feat_state)
-            print(f"[Resume] Restored FeatureStabilityMonitor state "
-                  f"(epoch={_feat_stability._epoch}, "
-                  f"frozen={int(_feat_stability._frozen.sum())})")
+            print(
+                f"[Resume] Restored FeatureStabilityMonitor state "
+                f"(epoch={_feat_stability._epoch}, "
+                f"frozen={int(_feat_stability._frozen.sum())})"
+            )
         except Exception as _fst_e:
             print(f"[Resume] FeatureStabilityMonitor state restore failed (cold-start): {_fst_e}")
-    _feat_mask: torch.Tensor | None = None   # updated each epoch; None = all active
+    _feat_mask: torch.Tensor | None = None  # updated each epoch; None = all active
 
     # -- A2: Chunk early stopping state ---------------------------------------
     _chunk_sharpe_history: list = []
     _chunk_worse_streak: int = 0
     if _resume_chunk_history is not None:
         _chunk_sharpe_history = _resume_chunk_history
-        _chunk_worse_streak   = _resume_chunk_streak or 0
+        _chunk_worse_streak = _resume_chunk_streak or 0
 
     # Rich display replaces the plain print table; plain fallback when unavailable
     if _rich_display is not None:
         _rich_display.__enter__()
     else:
-        print(f"\n{'Ep':>5} {'Train':>11} {'Val':>11} {'DirAcc':>8} {'vSharpe':>9} "
-              f"{'LR':>10} {'Time':>7} {'GPU MB':>8}")
+        print(
+            f"\n{'Ep':>5} {'Train':>11} {'Val':>11} {'DirAcc':>8} {'vSharpe':>9} {'LR':>10} {'Time':>7} {'GPU MB':>8}"
+        )
         print("-" * 72)
 
     # -- Crash checkpoint helper -----------------------------------------------
     def _save_crash_ckpt(failed_ep: int, exc: Exception) -> None:
         """Save a crash checkpoint so the error can be inspected and training resumed."""
         import traceback as _tb
+
         crash_path = ckpt_dir / f"{model_name}{fold_suffix}_crash.pt"
         try:
             _core = _core_model(model)
-            _safe_save({
-                "epoch":                failed_ep,
-                "model_state":          _core.state_dict(),
-                "opt_state":            opt.state_dict(),
-                "scheduler_state":      scheduler.state_dict(),
-                "scaler_state":         amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
-                "best_val_loss":        best_val_loss,
-                "best_sharpe":          best_sharpe,
-                "no_improve":           no_improve,
-                "history":              history,
-                "fold_id":              fold_id,
-                "chunk_sharpe_history": _chunk_sharpe_history,
-                "chunk_worse_streak":   _chunk_worse_streak,
-                "feat_stability_state": _feat_stability.get_state(),
-                "error_msg":            str(exc),
-                "error_type":           type(exc).__name__,
-                "error_traceback":      _tb.format_exc(),
-            }, crash_path)
+            _safe_save(
+                {
+                    "epoch": failed_ep,
+                    "model_state": _core.state_dict(),
+                    "opt_state": opt.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
+                    "best_val_loss": best_val_loss,
+                    "best_sharpe": best_sharpe,
+                    "no_improve": no_improve,
+                    "history": history,
+                    "fold_id": fold_id,
+                    "chunk_sharpe_history": _chunk_sharpe_history,
+                    "chunk_worse_streak": _chunk_worse_streak,
+                    "feat_stability_state": _feat_stability.get_state(),
+                    "error_msg": str(exc),
+                    "error_type": type(exc).__name__,
+                    "error_traceback": _tb.format_exc(),
+                },
+                crash_path,
+            )
             print(f"\n[Train] Crash checkpoint saved ΓåÆ {crash_path}")
             print("[Train] Resume from last clean epoch with: --resume")
             if _rich_display is not None:
@@ -2468,9 +2769,12 @@ def supervised_train(
     _active_diff_stage = 0
     _seq_frozen = False
     _last_logged_seq_len = -1
-    
-    epoch_bar = _pbar(range(start_ep, args.epochs), desc=f"Train {model_name.upper()}", unit="ep") if _rich_display is None else range(start_ep, args.epochs)
 
+    epoch_bar = (
+        _pbar(range(start_ep, args.epochs), desc=f"Train {model_name.upper()}", unit="ep")
+        if _rich_display is None
+        else range(start_ep, args.epochs)
+    )
 
     # -- Advanced Training Mechanics: EWC & Adversarial --
     _ewc = None
@@ -2478,6 +2782,7 @@ def supervised_train(
         # We only compute EWC if we are resuming from a previous trained state
         try:
             print("[EWC] Computing Fisher Information Matrix (max 1000 samples)...")
+
             def _ewc_loss_fn(outputs, labels):
                 # Mirror the active criterion when possible
                 if multitask or classification:
@@ -2491,8 +2796,12 @@ def supervised_train(
                     return nn.functional.cross_entropy(outputs, y)
                 pred = outputs[0] if isinstance(outputs, tuple) else outputs
                 return nn.functional.mse_loss(pred.reshape(-1), labels.reshape(-1).float()[: pred.numel()])
+
             _ewc = ElasticWeightConsolidation(
-                model, train_ds, device, max_samples=1000,
+                model,
+                train_ds,
+                device,
+                max_samples=1000,
                 loss_fn=_ewc_loss_fn,
                 classification=bool(multitask or classification),
             )
@@ -2532,12 +2841,13 @@ def supervised_train(
 
     if getattr(args, "enable_adversarial", False) and _adv_allowed:
         try:
-            from training.adversarial_generator import create_adversarial_attack
             from pretrain.hard_example_mining import PretrainHardExampleMiner
+            from training.adversarial_generator import create_adversarial_attack
+
             _adv_method = str(getattr(args, "adversarial_method", "pgd") or "pgd").lower()
             if model_name == "gnn" and _adv_method == "pgd":
                 _adv_method = "graph_pgd"
-            
+
             # Load feature vulnerability scores from pretraining (Task 2)
             _feature_eps_multipliers = None
             try:
@@ -2547,7 +2857,7 @@ def supervised_train(
                     print(f"[Adversarial] Loaded feature vulnerability scores ({len(_vuln)} dims)")
             except Exception as _vuln_e:
                 print(f"[Adversarial] Could not load vulnerability scores: {_vuln_e}")
-            
+
             _adversarial = create_adversarial_attack(
                 method=_adv_method,
                 eps=float(getattr(args, "adversarial_eps", 0.3)),
@@ -2560,16 +2870,19 @@ def supervised_train(
                 feature_eps_multipliers=_feature_eps_multipliers,
             )
             _adversarial.train()
-            print(f"[Adversarial] Initialized method={_adv_method} "
-                  f"(eps={getattr(args, 'adversarial_eps', 0.3)}, "
-                  f"prob={getattr(args, 'adversarial_prob', 0.01)}, "
-                  f"n_features_named={len(_adv_feature_names)}).")
+            print(
+                f"[Adversarial] Initialized method={_adv_method} "
+                f"(eps={getattr(args, 'adversarial_eps', 0.3)}, "
+                f"prob={getattr(args, 'adversarial_prob', 0.01)}, "
+                f"n_features_named={len(_adv_feature_names)})."
+            )
         except Exception as e:
             _adversarial = None
             print(f"[Adversarial] Failed to initialize (continuing without adversarial): {e}")
 
-    # Overfitting controller — flags from evaluate_epoch are applied each epoch
+    # Overfitting controller - flags from evaluate_epoch are applied each epoch
     from training.training_controller import TrainingController
+
     _train_ctrl = TrainingController(report_dir=str(ckpt_dir))
     _train_ctrl.set_recipe(str(model_name))
     _ctrl_stop_early = False
@@ -2590,14 +2903,16 @@ def supervised_train(
                 _cm_diff = np.asarray(_diff_arr[train_idx], dtype=float)
             if bool(getattr(args, "curriculum_callback", False)):
                 from training.curriculum_callbacks import create_curriculum_callback
-                _cb_kw = dict(
-                    n_levels=int(getattr(args, "curriculum_n_levels", 10) or 10),
-                    start_level=int(getattr(args, "curriculum_start_level", 1) or 1),
-                    advance_rate=float(getattr(args, "curriculum_advance_rate", 0.1)),
-                    max_level=int(getattr(args, "curriculum_freeze_patience", 1) or 1) + int(getattr(args, "curriculum_n_levels", 9) or 9),
-                    total_epochs=max(1, int(args.epochs)),
-                    use_loss_weighting=bool(getattr(args, "use_loss_weighting", False)),
-                )
+
+                _cb_kw = {
+                    "n_levels": int(getattr(args, "curriculum_n_levels", 10) or 10),
+                    "start_level": int(getattr(args, "curriculum_start_level", 1) or 1),
+                    "advance_rate": float(getattr(args, "curriculum_advance_rate", 0.1)),
+                    "max_level": int(getattr(args, "curriculum_freeze_patience", 1) or 1)
+                    + int(getattr(args, "curriculum_n_levels", 9) or 9),
+                    "total_epochs": max(1, int(args.epochs)),
+                    "use_loss_weighting": bool(getattr(args, "use_loss_weighting", False)),
+                }
                 _curriculum_provider = create_curriculum_callback(
                     "custom",
                     difficulty_scores=_cm_diff,
@@ -2608,6 +2923,7 @@ def supervised_train(
                 print(f"[CurriculumCallback] Enabled (mode={_cm_mode}, factory=create_curriculum_callback)")
             else:
                 from training.curriculum import create_curriculum_manager
+
                 _curriculum_mgr = create_curriculum_manager(
                     mode=_cm_mode,
                     n_samples=_cm_n,
@@ -2628,8 +2944,7 @@ def supervised_train(
                     freeze_patience=int(getattr(args, "curriculum_freeze_patience", 1)),
                 )
                 _curriculum_mgr = _CurriculumProvider(_curriculum_mgr)
-                print(f"[CurriculumManager] Enabled (mode={_cm_mode}) "
-                      f"over {_cm_n:,} train samples")
+                print(f"[CurriculumManager] Enabled (mode={_cm_mode}) over {_cm_n:,} train samples")
         except Exception as _cm_exc:
             _curriculum_mgr = None
             print(f"[CurriculumManager] Disabled ({_cm_exc})")
@@ -2639,10 +2954,12 @@ def supervised_train(
     _miner_allowed = True
     if _miner_models:
         _miner_allowed = model_name.lower() in [m.strip().lower() for m in _miner_models.split(",")]
-    _miner_feedback_enabled = (bool(getattr(args, "curriculum_miner_feedback", False))
-                               and _miner_allowed
-                               and _online_miner is not None
-                               and _curriculum_mgr is not None)
+    _miner_feedback_enabled = (
+        bool(getattr(args, "curriculum_miner_feedback", False))
+        and _miner_allowed
+        and _online_miner is not None
+        and _curriculum_mgr is not None
+    )
 
     # Self-paced / loss weighting model gating
     _sp_models = str(getattr(args, "self_paced_models", "") or "").strip()
@@ -2657,23 +2974,27 @@ def supervised_train(
 
     for ep in epoch_bar:
         if _TRAIN_LOGGER is not None:
-            _TRAIN_LOGGER.on_epoch_start(ep, total_epochs=args.epochs,
-                                         seq_len=_seq_len_for_epoch(ep))
+            _TRAIN_LOGGER.on_epoch_start(ep, total_epochs=args.epochs, seq_len=_seq_len_for_epoch(ep))
         curr_seq_len = _seq_len_for_epoch(ep)
         _active_seq_len = curr_seq_len
 
         if _last_logged_seq_len != curr_seq_len:
-
-            _log_info(f"[Curriculum] Epoch {ep+1}: active seq_len={curr_seq_len}")
+            _log_info(f"[Curriculum] Epoch {ep + 1}: active seq_len={curr_seq_len}")
             try:
                 from data.dataset_manifest import DatasetManifest
+
                 _dm2 = DatasetManifest(str(Path(cache_path).parent))
-                _unfrozen = [g for g, v in _feat_groups.items()
-                             if not v.get("always_on", True)
-                             and ep >= v.get("epoch_unfreeze", 999)]
+                _unfrozen = [
+                    g
+                    for g, v in _feat_groups.items()
+                    if not v.get("always_on", True) and ep >= v.get("epoch_unfreeze", 999)
+                ]
                 _dm2.log_curriculum_stage(
-                    ep + 1, "seq_len_advance", curr_seq_len,
-                    _unfrozen, int(_active_diff_stage),
+                    ep + 1,
+                    "seq_len_advance",
+                    curr_seq_len,
+                    _unfrozen,
+                    int(_active_diff_stage),
                 )
             except Exception:
                 pass
@@ -2686,9 +3007,8 @@ def supervised_train(
         # -- Feature Stability Monitor -----------------------------------------
         epoch_si_lambda = float(getattr(args, "si_lambda", 1.0))
         try:
-            _stab_pool  = locals().get("ep_train_idx", train_idx)
-            _sample_idx = np.random.choice(_stab_pool,
-                                           size=min(512, len(_stab_pool)), replace=False)
+            _stab_pool = locals().get("ep_train_idx", train_idx)
+            _sample_idx = np.random.choice(_stab_pool, size=min(512, len(_stab_pool)), replace=False)
             _samp_ds = ZarrStreamDataset(cache_path, _sample_idx, shuffle_chunks=False)
             _samp_dl = DataLoader(_samp_ds, batch_size=512, shuffle=False, num_workers=0)
             _samp_xb, _ = next(iter(_samp_dl))
@@ -2698,30 +3018,34 @@ def supervised_train(
 
             # Dynamic SI scaling based on regime drift / volatility
             _max_shift = float(_stab_report["feat_max_shift"])
-            _dyn_w = 1.0 / (1.0 + (_max_shift ** 2))
+            _dyn_w = 1.0 / (1.0 + (_max_shift**2))
             epoch_si_lambda = epoch_si_lambda * _dyn_w
 
             if _stab_report["feat_frozen"] > 0 or _stab_report["feat_noisy"] > 0:
                 _log_info(
-                    f"[FeatStab] Ep {ep+1}: frozen={_stab_report['feat_frozen']} "
+                    f"[FeatStab] Ep {ep + 1}: frozen={_stab_report['feat_frozen']} "
                     f"noisy={_stab_report['feat_noisy']} "
                     f"active={_stab_report['feat_active']}/{n_features} "
                     f"max_shift={_max_shift:.2f}sigma (si_lambda={epoch_si_lambda:.2f})"
                 )
-            _safe_wandb_log(run, {
-                "feat/frozen": _stab_report["feat_frozen"],
-                "feat/noisy": _stab_report["feat_noisy"],
-                "feat/max_shift": _max_shift,
-                "feat/si_dynamic_lambda": epoch_si_lambda,
-                "epoch": ep,
-            })
+            _safe_wandb_log(
+                run,
+                {
+                    "feat/frozen": _stab_report["feat_frozen"],
+                    "feat/noisy": _stab_report["feat_noisy"],
+                    "feat/max_shift": _max_shift,
+                    "feat/si_dynamic_lambda": epoch_si_lambda,
+                    "epoch": ep,
+                },
+            )
         except Exception as _stab_exc:
             _log_warn(f"[FeatStab] Monitor update failed (skipped): {_stab_exc}")
-            _feat_mask = None   # fall back to no masking
+            _feat_mask = None  # fall back to no masking
 
         # -- Feature Curriculum Mask -------------------------------------------
         try:
             from config.feature_mask import FEATURE_MASK
+
             _schema = _feature_schema or [k for k, v in FEATURE_MASK.items() if v]
             if len(_schema) == n_features:
                 _curr_mask = torch.ones(n_features, device=device)
@@ -2745,13 +3069,15 @@ def supervised_train(
                         f"(silently skipped when freezing); e.g. {', '.join(_missing_sample)}"
                     )
                 if _zeroed_cnt > 0:
-                    _log_info(f"[Curriculum] Epoch {ep+1}: Zeroed out {_zeroed_cnt} features by schema")
+                    _log_info(f"[Curriculum] Epoch {ep + 1}: Zeroed out {_zeroed_cnt} features by schema")
                     if _feat_mask is None:
                         _feat_mask = _curr_mask
                     else:
                         _feat_mask = _feat_mask * _curr_mask
             else:
-                _log_warn(f"[Curriculum] Feature schema length {len(_schema)} does not match n_features={n_features}; skipping feature-group mask.")
+                _log_warn(
+                    f"[Curriculum] Feature schema length {len(_schema)} does not match n_features={n_features}; skipping feature-group mask."
+                )
         except Exception as _curr_exc:
             _log_warn(f"[Curriculum] Mask generation failed: {_curr_exc}")
 
@@ -2763,7 +3089,8 @@ def supervised_train(
             # Apply mask to ep_train_idx by intersecting with allowed indices
             _allowed = np.where(_cm_mask)[0]
             ep_train_idx = np.intersect1d(ep_train_idx, _allowed)
-            if len(ep_train_idx) < 50: ep_train_idx = train_idx
+            if len(ep_train_idx) < 50:
+                ep_train_idx = train_idx
         # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
         if _curriculum_mgr is not None:
             try:
@@ -2790,44 +3117,51 @@ def supervised_train(
                     if len(_ep_cm_idx) >= 50:
                         ep_train_idx = _ep_cm_idx
                         _log_info(
-                            f"[CurriculumManager] Epoch {ep+1}: included "
+                            f"[CurriculumManager] Epoch {ep + 1}: included "
                             f"{len(ep_train_idx):,}/{len(_cm_mask):,} samples "
                             f"({float(_cm_mask.mean()):.0%})"
                         )
-                history.setdefault("curriculum_manager_state", []).append({
-                    "epoch": ep,
-                    "mode": getattr(args, "curriculum_manager_mode", "combined"),
-                    "inclusion_rate": float(_cm_mask.mean()) if len(_cm_mask) else 1.0,
-                    "weights_mean": float(np.asarray(_cm_info.get("weights", np.ones(1))).mean()),
-                })
+                history.setdefault("curriculum_manager_state", []).append(
+                    {
+                        "epoch": ep,
+                        "mode": getattr(args, "curriculum_manager_mode", "combined"),
+                        "inclusion_rate": float(_cm_mask.mean()) if len(_cm_mask) else 1.0,
+                        "weights_mean": float(np.asarray(_cm_info.get("weights", np.ones(1))).mean()),
+                    }
+                )
                 # Adversarial + Curriculum Coordination: scale eps with difficulty level
                 if _adversarial is not None and bool(getattr(args, "adversarial_eps_curriculum_scale", False)):
                     _diff_level = _cm_info.get("difficulty_level", 1)
-                    _n_levels = getattr(_curriculum_mgr.config.difficulty, "max_level", 10) if _curriculum_mgr.config.difficulty else 10
+                    _n_levels = (
+                        getattr(_curriculum_mgr.config.difficulty, "max_level", 10)
+                        if _curriculum_mgr.config.difficulty
+                        else 10
+                    )
                     _level_ratio = _diff_level / max(1, _n_levels)
                     _base_eps = float(getattr(args, "adversarial_eps", 0.3))
                     _scaled_eps = _base_eps * _level_ratio
                     _adversarial.set_eps(_scaled_eps)
                     if hasattr(_adversarial, "set_warmup_step"):
                         _adversarial.set_warmup_step(ep)
-                    _log_info(f"[Adversarial+Curriculum] Epoch {ep+1}: eps scaled to {_scaled_eps:.4f} (level {_diff_level}/{_n_levels})")
-            
+                    _log_info(
+                        f"[Adversarial+Curriculum] Epoch {ep + 1}: eps scaled to {_scaled_eps:.4f} (level {_diff_level}/{_n_levels})"
+                    )
+
             except Exception as _cm_exc:
-                _log_warn(f"[CurriculumManager] Epoch {ep+1} update failed: {_cm_exc}")
+                _log_warn(f"[CurriculumManager] Epoch {ep + 1} update failed: {_cm_exc}")
         _cm_wl = None
         if _curriculum_mgr is not None:
             try:
                 _cm_wl = np.ones(n_samples, dtype=np.float64)
                 _cm_wl[train_idx] = np.asarray(
-                    _curriculum_mgr.get_sample_weights(), dtype=np.float64,
+                    _curriculum_mgr.get_sample_weights(),
+                    dtype=np.float64,
                 )
             except Exception as _cm_wl_exc:
                 _log_warn(f"[CurriculumManager] Sample-weight lookup failed: {_cm_wl_exc}")
                 _cm_wl = None
         _direction_warmup_active = bool(
-            use_direction_targets
-            and multitask
-            and ep < max(0, int(getattr(args, "direction_warmup_epochs", 2)))
+            use_direction_targets and multitask and ep < max(0, int(getattr(args, "direction_warmup_epochs", 2)))
         )
         if _direction_warmup_active:
             ep_train_idx = _balanced_direction_indices(
@@ -2837,8 +3171,7 @@ def supervised_train(
                 seed=int(getattr(args, "seed", 1337)) + ep,
             )
             _log_info(
-                f"[DirectionWarmup] Epoch {ep+1}: balanced direction-only batches "
-                f"({len(ep_train_idx):,} samples)"
+                f"[DirectionWarmup] Epoch {ep + 1}: balanced direction-only batches ({len(ep_train_idx):,} samples)"
             )
 
         epoch_train_dl = train_dl
@@ -2854,24 +3187,30 @@ def supervised_train(
 
         if len(ep_train_idx) != len(train_idx) or _direction_warmup_active:
             if len(ep_train_idx) != len(train_idx) and not _direction_warmup_active:
-                _log_info(f"[Curriculum] Epoch {ep+1}: training on "
-                          f"({len(ep_train_idx):,}/{len(train_idx):,} samples)")
+                _log_info(
+                    f"[Curriculum] Epoch {ep + 1}: training on ({len(ep_train_idx):,}/{len(train_idx):,} samples)"
+                )
             _ep_ds = ZarrStreamDataset(
-                cache_path, ep_train_idx, shuffle_chunks=True,
+                cache_path,
+                ep_train_idx,
+                shuffle_chunks=True,
                 multitask_targets=use_direction_targets,
                 return_indices=True,
             )
             epoch_train_dl = DataLoader(
-                _ep_ds, batch_size=args.batch_size, shuffle=False,
-                num_workers=nw, pin_memory=pin_mem,
+                _ep_ds,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=nw,
+                pin_memory=pin_mem,
                 persistent_workers=(use_persistent and nw > 0),
                 prefetch_factor=pf if nw > 0 else None,
             )
             epoch_train_dl = wrap_loader_prefetch(epoch_train_dl, args)
 
         # Batch-level progress bars
-        train_pbar = _pbar(total=len(epoch_train_dl), desc=f"  Ep {ep+1:3d} [Tr]", unit="batch", leave=False)
-        val_pbar   = _pbar(total=len(val_dl),   desc=f"  Ep {ep+1:3d} [Va]", unit="batch", leave=False)
+        train_pbar = _pbar(total=len(epoch_train_dl), desc=f"  Ep {ep + 1:3d} [Tr]", unit="batch", leave=False)
+        val_pbar = _pbar(total=len(val_dl), desc=f"  Ep {ep + 1:3d} [Va]", unit="batch", leave=False)
 
         t0 = time.time()
         _thermal_lim = int(_GPU_CFG.get("thermal_limit_celsius", 83))
@@ -2883,10 +3222,16 @@ def supervised_train(
 
         try:
             tl = train_epoch(
-                model, epoch_train_dl, opt,
+                model,
+                epoch_train_dl,
+                opt,
                 direction_crit if _direction_warmup_active else crit,
-                amp_sc, device, args.amp, classification,
-                grad_clip=args.grad_clip, pbar=train_pbar,
+                amp_sc,
+                device,
+                args.amp,
+                classification,
+                grad_clip=args.grad_clip,
+                pbar=train_pbar,
                 amp_dtype=amp_dtype,
                 thermal_limit=_thermal_lim,
                 feature_mask=_feat_mask,
@@ -2908,7 +3253,7 @@ def supervised_train(
                 sample_weight_lookup=_cm_wl,
             )
         except Exception as _epoch_exc:
-            _log_error(f"[Train] Epoch {ep+1} failed for {model_name}", _epoch_exc)
+            _log_error(f"[Train] Epoch {ep + 1} failed for {model_name}", _epoch_exc)
             if _TRAIN_LOGGER is not None:
                 _TRAIN_LOGGER.on_epoch_failure(ep, _epoch_exc)
             _save_crash_ckpt(ep, _epoch_exc)
@@ -2923,18 +3268,29 @@ def supervised_train(
         gc.collect()
 
         try:
+            from training.train_gpu import _sharpe_ann_factor
             vl, da, v_sh = validate_epoch(
-                model, val_dl, crit, device, classification, pbar=val_pbar,
-                amp=False, amp_dtype=torch.float32,
-                seq_len=curr_seq_len, multitask=multitask,
+                model,
+                val_dl,
+                crit,
+                device,
+                classification,
+                pbar=val_pbar,
+                amp=False,
+                amp_dtype=torch.float32,
+                seq_len=curr_seq_len,
+                multitask=multitask,
                 feature_mask=_feat_mask,
                 sharpe_ann_factor=_sharpe_ann_factor(args),
+                lookahead_bars=int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30)),
+                sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
+                return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
             )
             _class_counts = getattr(validate_epoch, "last_class_counts", {"pred": [0, 0, 0], "true": [0, 0, 0]})
 
         except Exception as _val_exc:
             val_pbar.close()
-            _log_error(f"[Train] Epoch {ep+1} validation failed for {model_name}", _val_exc)
+            _log_error(f"[Train] Epoch {ep + 1} validation failed for {model_name}", _val_exc)
             _save_crash_ckpt(ep, _val_exc)
             raise
         val_pbar.close()
@@ -2954,7 +3310,7 @@ def supervised_train(
             _seq_frozen = True
         if _ctrl_applied.get("stop_early"):
             _ctrl_stop_early = True
-            print(f"[TrainingController] Early-stop flag set at epoch {ep+1}")
+            print(f"[TrainingController] Early-stop flag set at epoch {ep + 1}")
 
         # ── Online miner: end epoch (update forgetting tracker) ──────────
         if _online_miner is not None:
@@ -2971,14 +3327,15 @@ def supervised_train(
             if not _swa_started:
                 try:
                     from torch.optim.swa_utils import SWALR, AveragedModel
-                    _swa_model = AveragedModel(_core_model(model)).to(device)
-                    _swa_scheduler = SWALR(opt, swa_lr=_swa_lr,
-                                           anneal_epochs=max(1, int(args.epochs * 0.05)),
-                                           anneal_strategy="cos")
+
+                    _swa_model = AveragedModel(_core_model(model)).to(device)  # type: ignore
+                    _swa_scheduler = SWALR(
+                        opt, swa_lr=_swa_lr, anneal_epochs=max(1, int(args.epochs * 0.05)), anneal_strategy="cos"
+                    )
                     _swa_started = True
-                    print(f"\n[SWA] Weight averaging started at epoch {ep+1}")
+                    print(f"\n[SWA] Weight averaging started at epoch {ep + 1}")
                 except Exception as _e:
-                    print(f"\n[SWA] Failed to initialize at epoch {ep+1}: {_e}")
+                    print(f"\n[SWA] Failed to initialize at epoch {ep + 1}: {_e}")
                     _swa_enabled = False
 
             if _swa_enabled:
@@ -2987,22 +3344,21 @@ def supervised_train(
 
         lr = opt.param_groups[0]["lr"]
         el = time.time() - t0
-        gm = torch.cuda.max_memory_allocated(device) // 1_000_000 if device.type=="cuda" else 0
-        torch.cuda.reset_peak_memory_stats(device) if device.type=="cuda" else None
+        gm = torch.cuda.max_memory_allocated(device) // 1_000_000 if device.type == "cuda" else 0
+        torch.cuda.reset_peak_memory_stats(device) if device.type == "cuda" else None
 
-        history["train_loss"].append(tl); history["val_loss"].append(vl)
-        history["dir_acc"].append(da);    history["lr"].append(lr)
+        history["train_loss"].append(tl)
+        history["val_loss"].append(vl)
+        history["dir_acc"].append(da)
+        history["lr"].append(lr)
         history["val_sharpe"].append(v_sh)
-        history.setdefault("val_pred_counts", []).append(
-            [int(x) for x in _class_counts.get("pred", [0, 0, 0])]
-        )
-        history.setdefault("val_true_counts", []).append(
-            [int(x) for x in _class_counts.get("true", [0, 0, 0])]
-        )
+        history.setdefault("val_pred_counts", []).append([int(x) for x in _class_counts.get("pred", [0, 0, 0])])
+        history.setdefault("val_true_counts", []).append([int(x) for x in _class_counts.get("true", [0, 0, 0])])
 
         # GPU temp for display
         try:
             import pynvml as _pnvml
+
             _pnvml.nvmlInit()
             _h = _pnvml.nvmlDeviceGetHandleByIndex(0)
             _gpu_temp = int(_pnvml.nvmlDeviceGetTemperature(_h, _pnvml.NVML_TEMPERATURE_GPU))
@@ -3010,16 +3366,18 @@ def supervised_train(
             _gpu_temp = -1
 
         _ep_metrics = {
-            "train_loss": tl, "val_loss": vl, "dir_acc": da,
-            "val_sharpe": v_sh, "lr": lr, "gpu_mb": gm,
+            "train_loss": tl,
+            "val_loss": vl,
+            "dir_acc": da,
+            "val_sharpe": v_sh,
+            "lr": lr,
+            "gpu_mb": gm,
             "val_pred_counts": _class_counts.get("pred", [0, 0, 0]),
-
             "val_true_counts": _class_counts.get("true", [0, 0, 0]),
-
             "gpu_temp_c": _gpu_temp,
-            "oom_skips":  getattr(_TRAIN_LOGGER, "_ep_oom_count", 0) if _TRAIN_LOGGER else 0,
-            "nan_skips":  getattr(_TRAIN_LOGGER, "_ep_nan_count", 0) if _TRAIN_LOGGER else 0,
-            "elapsed_s":  el,
+            "oom_skips": getattr(_TRAIN_LOGGER, "_ep_oom_count", 0) if _TRAIN_LOGGER else 0,
+            "nan_skips": getattr(_TRAIN_LOGGER, "_ep_nan_count", 0) if _TRAIN_LOGGER else 0,
+            "elapsed_s": el,
         }
 
         if _TRAIN_LOGGER is not None:
@@ -3027,10 +3385,16 @@ def supervised_train(
 
         _gate_ep = start_ep + max(0, int(getattr(args, "direction_warmup_epochs", 2))) - 1
         if multitask and ep == max(start_ep, _gate_ep):
-            _class_diag = getattr(validate_epoch, "last_class_diag", {
-                "pred": _class_counts.get("pred", [0, 0, 0]),
-                "true": _class_counts.get("true", [0, 0, 0]),
-            })
+            _class_diag = getattr(
+                validate_epoch,
+                "last_class_diag",
+                {
+                    "pred": _class_counts.get("pred", [0, 0, 0]),
+                    "true": _class_counts.get("true", [0, 0, 0]),
+                },
+            )
+            from training.direction_control import _direction_gate_failed
+
             _failed, _reason = _direction_gate_failed(_class_diag, args)
             if _failed:
                 _diag_path = _write_class_balance_failure(_run_name, model_name, ep, _class_diag, _reason)
@@ -3049,26 +3413,27 @@ def supervised_train(
 
         try:
             from infrastructure.ollama_helper import ollama
+
             ollama.monitor_training(ep + 1, float(tl), float(vl), _ep_metrics)
         except Exception as _oe:
             pass
 
         # -- TensorBoard -------------------------------------------------------
         if _tb_writer is not None:
-            _tb_writer.add_scalar("Loss/train",       tl,   ep)
-            _tb_writer.add_scalar("Loss/val",         vl,   ep)
-            _tb_writer.add_scalar("Metrics/dir_acc",  da,   ep)
-            _tb_writer.add_scalar("Metrics/sharpe",     v_sh, ep)
-            _tb_writer.add_scalar("ValPred/sell",     _class_counts.get("pred", [0, 0, 0])[0], ep)
+            _tb_writer.add_scalar("Loss/train", tl, ep)
+            _tb_writer.add_scalar("Loss/val", vl, ep)
+            _tb_writer.add_scalar("Metrics/dir_acc", da, ep)
+            _tb_writer.add_scalar("Metrics/sharpe", v_sh, ep)
+            _tb_writer.add_scalar("ValPred/sell", _class_counts.get("pred", [0, 0, 0])[0], ep)
 
-            _tb_writer.add_scalar("ValPred/hold",     _class_counts.get("pred", [0, 0, 0])[1], ep)
+            _tb_writer.add_scalar("ValPred/hold", _class_counts.get("pred", [0, 0, 0])[1], ep)
 
-            _tb_writer.add_scalar("ValPred/buy",      _class_counts.get("pred", [0, 0, 0])[2], ep)
+            _tb_writer.add_scalar("ValPred/buy", _class_counts.get("pred", [0, 0, 0])[2], ep)
 
-            _tb_writer.add_scalar("Train/lr",         lr,   ep)
-            _tb_writer.add_scalar("GPU/mem_mb",       gm,   ep)
+            _tb_writer.add_scalar("Train/lr", lr, ep)
+            _tb_writer.add_scalar("GPU/mem_mb", gm, ep)
             if _gpu_temp > 0:
-                _tb_writer.add_scalar("GPU/temp_c",   _gpu_temp, ep)
+                _tb_writer.add_scalar("GPU/temp_c", _gpu_temp, ep)
             if fold_id is not None:
                 _tb_writer.add_scalar(f"Fold{fold_id}/val_sharpe", v_sh, ep)
 
@@ -3076,15 +3441,25 @@ def supervised_train(
         if WANDB and run:
             _pred_counts = _class_counts.get("pred", [0, 0, 0])
             _true_counts = _class_counts.get("true", [0, 0, 0])
-            _safe_wandb_log(run, {
-                "train/loss": tl, "val/loss": vl, "val/dir_acc": da,
-                "val/sharpe_proxy": v_sh, "train/lr": lr, "gpu_mb": gm, "epoch": ep,
-                "val_pred/sell": _pred_counts[0], "val_pred/hold": _pred_counts[1],
-                "val_pred/buy": _pred_counts[2],
-                "val_true/sell": _true_counts[0], "val_true/hold": _true_counts[1],
-                "val_true/buy": _true_counts[2],
-                **({"fold": fold_id} if fold_id is not None else {}),
-            })
+            _safe_wandb_log(
+                run,
+                {
+                    "train/loss": tl,
+                    "val/loss": vl,
+                    "val/dir_acc": da,
+                    "val/sharpe_proxy": v_sh,
+                    "train/lr": lr,
+                    "gpu_mb": gm,
+                    "epoch": ep,
+                    "val_pred/sell": _pred_counts[0],
+                    "val_pred/hold": _pred_counts[1],
+                    "val_pred/buy": _pred_counts[2],
+                    "val_true/sell": _true_counts[0],
+                    "val_true/hold": _true_counts[1],
+                    "val_true/buy": _true_counts[2],
+                    **({"fold": fold_id} if fold_id is not None else {}),
+                },
+            )
 
         # -- Early stopping / is best? (Moved up to fix UnboundLocalError) ------
         min_delta = float(getattr(args, "early_stop_min_delta", 0.0))
@@ -3105,11 +3480,9 @@ def supervised_train(
 
         # -- Rich display or plain print ---------------------------------------
         if _rich_display is not None:
-            _rich_display.end_epoch(ep, _ep_metrics,
-                                    is_best=improved, no_improve=no_improve)
+            _rich_display.end_epoch(ep, _ep_metrics, is_best=improved, no_improve=no_improve)
         else:
-            print(f"{ep+1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} "
-                  f"{lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
+            print(f"{ep + 1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} {lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
 
         if improved:
             core = _core_model(model)
@@ -3119,69 +3492,92 @@ def supervised_train(
                 "seq_len": int(curr_seq_len),
                 "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
                 "timestamp": datetime.now(UTC).isoformat(),
-                "fold_id": fold_id
+                "fold_id": fold_id,
             }
             _safe_save(core.state_dict(), best_path, metadata=ckpt_meta)
             with open(cfg_path, "w", encoding="utf-8") as _cfg_fp:
-                json.dump({
-                    "model": model_name, "n_features": n_features,
-                    "seq_len": args.seq_len, "d_model": args.d_model,
-                    "nhead": args.nhead, "hidden_size": args.hidden_size,
-                    "num_layers": args.num_layers, "dropout": args.dropout,
-                    "best_val_loss": vl, "best_val_sharpe_proxy": v_sh,
-                    "best_metric": float(v_sh if stop_on_sharpe else vl),
-                    "best_metric_name": "val_sharpe" if stop_on_sharpe else "val_loss",
-                    "best_train_loss": tl,
-                    "train_val_loss_gap": float(vl - tl),
-                    "early_stop_metric": args.early_stop_metric,
-                    "epoch": ep, "n_samples": n_samples, "loss": args.loss,
-                    "fold_id": fold_id,
-                }, _cfg_fp, indent=2)
-            _safe_wandb_summary_update(run, {
-                "best_val_loss": vl, "best_val_sharpe_proxy": v_sh, "best_epoch": ep,
-            })
+                json.dump(
+                    {
+                        "model": model_name,
+                        "n_features": n_features,
+                        "seq_len": args.seq_len,
+                        "d_model": args.d_model,
+                        "nhead": args.nhead,
+                        "hidden_size": args.hidden_size,
+                        "num_layers": args.num_layers,
+                        "dropout": args.dropout,
+                        "best_val_loss": vl,
+                        "best_val_sharpe_proxy": v_sh,
+                        "best_metric": float(v_sh if stop_on_sharpe else vl),
+                        "best_metric_name": "val_sharpe" if stop_on_sharpe else "val_loss",
+                        "best_train_loss": tl,
+                        "train_val_loss_gap": float(vl - tl),
+                        "early_stop_metric": args.early_stop_metric,
+                        "epoch": ep,
+                        "n_samples": n_samples,
+                        "loss": args.loss,
+                        "fold_id": fold_id,
+                    },
+                    _cfg_fp,
+                    indent=2,
+                )
+            _safe_wandb_summary_update(
+                run,
+                {
+                    "best_val_loss": vl,
+                    "best_val_sharpe_proxy": v_sh,
+                    "best_epoch": ep,
+                },
+            )
 
-        if (ep+1) % args.save_every == 0:
+        if (ep + 1) % args.save_every == 0:
             core = _core_model(model)
-            ep_tag = f"{fold_suffix}_ep{ep+1}" if fold_suffix else f"_ep{ep+1}"
-            _safe_save(core.state_dict(), ckpt_dir / f"{model_name}{ep_tag}.pt", metadata={
+            ep_tag = f"{fold_suffix}_ep{ep + 1}" if fold_suffix else f"_ep{ep + 1}"
+            _safe_save(
+                core.state_dict(),
+                ckpt_dir / f"{model_name}{ep_tag}.pt",
+                metadata={
+                    "model_name": model_name,
+                    "n_features": n_features,
+                    "seq_len": int(curr_seq_len),
+                    "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
+                    "epoch": ep + 1,
+                    "fold_id": fold_id,
+                },
+            )
+
+        # Exact resume checkpoint (model + optimizer + scheduler + AMP scaler + history)
+        core = _core_model(model)
+        _safe_save(
+            {
+                "epoch": ep,
+                "model_state": core.state_dict(),
+                "opt_state": opt.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
+                "best_val_loss": best_val_loss,
+                "best_sharpe": best_sharpe,
+                "no_improve": no_improve,
+                "history": history,
+                "fold_id": fold_id,
+                "chunk_sharpe_history": _chunk_sharpe_history,
+                "chunk_worse_streak": _chunk_worse_streak,
+                "feat_stability_state": _feat_stability.get_state(),
+            },
+            last_path,
+            metadata={
                 "model_name": model_name,
                 "n_features": n_features,
                 "seq_len": int(curr_seq_len),
                 "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
                 "epoch": ep + 1,
                 "fold_id": fold_id,
-            })
-
-        # Exact resume checkpoint (model + optimizer + scheduler + AMP scaler + history)
-        core = _core_model(model)
-        _safe_save({
-            "epoch": ep,
-            "model_state": core.state_dict(),
-            "opt_state": opt.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
-            "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
-            "best_val_loss": best_val_loss,
-            "best_sharpe": best_sharpe,
-            "no_improve": no_improve,
-            "history": history,
-            "fold_id": fold_id,
-            "chunk_sharpe_history": _chunk_sharpe_history,
-            "chunk_worse_streak":   _chunk_worse_streak,
-            "feat_stability_state": _feat_stability.get_state(),
-        }, last_path, metadata={
-            "model_name": model_name,
-            "n_features": n_features,
-            "seq_len": int(curr_seq_len),
-            "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
-            "epoch": ep + 1,
-            "fold_id": fold_id,
-            "checkpoint_type": "resume",
-        })
+                "checkpoint_type": "resume",
+            },
+        )
 
         if no_improve >= args.patience:
-            print(f"\n[Train] Early stop (patience={args.patience}, "
-                  f"metric={args.early_stop_metric})")
+            print(f"\n[Train] Early stop (patience={args.patience}, metric={args.early_stop_metric})")
             break
         if _ctrl_stop_early:
             print("\n[Train] Early stop (TrainingController Sharpe-collapse signal)")
@@ -3191,16 +3587,19 @@ def supervised_train(
         # Track val Sharpe across epochs; abort if it has dropped for K consecutive epochs.
         _chunk_sharpe_history.append(v_sh)
         if len(_chunk_sharpe_history) >= _chunk_patience + 1:
-            recent  = _chunk_sharpe_history[-_chunk_patience:]
-            prior   = _chunk_sharpe_history[-(  _chunk_patience + 1)]
+            recent = _chunk_sharpe_history[-_chunk_patience:]
+            prior = _chunk_sharpe_history[-(_chunk_patience + 1)]
             if all(s < prior for s in recent):
                 _chunk_worse_streak += 1
             else:
                 _chunk_worse_streak = 0
             if _chunk_worse_streak >= _chunk_patience:
-                msg = (f"[ChunkEarlyStop] Val Sharpe dropped {_chunk_patience} consecutive "
-                       f"epochs (last={v_sh:.4f}). Aborting epoch loop.")
-                print(f"\n{msg}"); _log_warn(msg)
+                msg = (
+                    f"[ChunkEarlyStop] Val Sharpe dropped {_chunk_patience} consecutive "
+                    f"epochs (last={v_sh:.4f}). Aborting epoch loop."
+                )
+                print(f"\n{msg}")
+                _log_warn(msg)
                 break
 
     # -- SWA: fix batch-norm running stats and save final averaged model -------
@@ -3222,11 +3621,13 @@ def supervised_train(
             # Reload best weights before calibrating
             core = _core_model(model)
             core.load_state_dict(torch.load(best_path, map_location=device))
-            cal_model = TemperatureScaler(core).to(device)
+            cal_model = TemperatureScaler(core).to(device)  # type: ignore
             calibrate_as_classification = bool(classification or multitask)
             # Use tune_idx to prevent calibration leakage if available
             if getattr(args, "_tune_eval_idx", None) is not None:
-                cal_ds = ZarrStreamDataset(cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask)
+                cal_ds = ZarrStreamDataset(
+                    cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask
+                )
                 cal_dl = DataLoader(cal_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
                 cal_model.calibrate(cal_dl, device, classification=calibrate_as_classification)
             else:
@@ -3234,9 +3635,14 @@ def supervised_train(
                 cal_model.calibrate(val_dl, device, classification=calibrate_as_classification)
 
             cal_path = ckpt_dir / f"{model_name}{fold_suffix}_calibrated.pt"
-            _safe_save({"model_state": core.state_dict(),
-                        "temperature": cal_model.temperature.item(),
-                        "classification": calibrate_as_classification}, cal_path)
+            _safe_save(
+                {
+                    "model_state": core.state_dict(),
+                    "temperature": cal_model.temperature.item(),
+                    "classification": calibrate_as_classification,
+                },
+                cal_path,
+            )
             print(f"[Calibration] Saved calibrated model -> {cal_path}")
 
             # INF-004: Emit calibration metadata sidecar
@@ -3259,17 +3665,21 @@ def supervised_train(
             _log_warn(f"[Calibration] Failed: {_cal_e}")
 
     if history["val_sharpe"]:
-        _best_ep = int(history["val_sharpe"].index(max(history["val_sharpe"]))) if stop_on_sharpe else int(history["val_loss"].index(min(history["val_loss"])))
+        _best_ep = (
+            int(history["val_sharpe"].index(max(history["val_sharpe"])))
+            if stop_on_sharpe
+            else int(history["val_loss"].index(min(history["val_loss"])))
+        )
     else:
         _best_ep = 0
     _best_met = best_sharpe if stop_on_sharpe else best_val_loss
 
     if _TRAIN_LOGGER is not None:
         _TRAIN_LOGGER.on_training_complete(
-            best_epoch  = _best_ep,
-            best_metric = _best_met,
-            total_s     = time.time() - _t_start,
-            metric_name = "val_sharpe" if stop_on_sharpe else "val_loss",
+            best_epoch=_best_ep,
+            best_metric=_best_met,
+            total_s=time.time() - _t_start,
+            metric_name="val_sharpe" if stop_on_sharpe else "val_loss",
         )
 
     if _rich_display is not None:
@@ -3279,14 +3689,17 @@ def supervised_train(
     if _tb_writer is not None:
         _tb_writer.add_hparams(
             hparam_dict={
-                "lr": args.lr, "batch_size": args.batch_size,
-                "d_model": args.d_model, "num_layers": args.num_layers,
-                "dropout": args.dropout, "loss": args.loss,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "d_model": args.d_model,
+                "num_layers": args.num_layers,
+                "dropout": args.dropout,
+                "loss": args.loss,
             },
             metric_dict={
                 "hparam/best_val_sharpe": best_sharpe,
-                "hparam/best_val_loss":   best_val_loss,
-                "hparam/best_epoch":      float(_best_ep),
+                "hparam/best_val_loss": best_val_loss,
+                "hparam/best_epoch": float(_best_ep),
             },
         )
         _tb_writer.flush()
@@ -3294,7 +3707,11 @@ def supervised_train(
 
     # -- Generate Training Control Report ---------------------------------------
     _control_report_path = ckpt_dir / f"{model_name}{fold_suffix}_training_control_report.json"
-    _final_train_val_gap = history["val_loss"][-1] - history["train_loss"][-1] if history.get("val_loss") and history.get("train_loss") else 0.0
+    _final_train_val_gap = (
+        history["val_loss"][-1] - history["train_loss"][-1]
+        if history.get("val_loss") and history.get("train_loss")
+        else 0.0
+    )
     _early_stopped = (no_improve >= args.patience) or bool(_ctrl_stop_early)
     _best_idx = int(_best_ep) if _best_ep is not None and _best_ep >= 0 else 0
 
@@ -3310,21 +3727,13 @@ def supervised_train(
         "epochs_run": len(history.get("val_loss", [])),
         "best_epoch": _best_ep,
         "best_epoch_state": {
-
             "val_sharpe": float(_hist_at("val_sharpe", 0.0)),
-
             "dir_acc": float(_hist_at("dir_acc", 0.0)),
-
             "val_loss": float(_hist_at("val_loss", 0.0)),
-
             "train_loss": float(_hist_at("train_loss", 0.0)),
-
             "lr": float(_hist_at("lr", getattr(args, "lr", 0.0))),
-
             "seq_len": int(_hist_at("seq_len", _active_seq_len)),
-
         },
-
         "final_train_val_gap": _final_train_val_gap,
         "early_stopped": _early_stopped,
         "overfitting_warnings": [],
@@ -3337,12 +3746,8 @@ def supervised_train(
         final_sh = history["val_sharpe"][-1]
         if max_sh - final_sh > 0.3:
             _control_report["overfitting_warnings"].append(f"Sharpe collapsed by {max_sh - final_sh:.3f} from peak")
-    _control_report["controller_signals"] = list(
-        _train_ctrl.report_data.get("overfitting_signals_detected") or []
-    )
-    _control_report["controller_actions"] = list(
-        _train_ctrl.report_data.get("actions_applied") or []
-    )
+    _control_report["controller_signals"] = list(_train_ctrl.report_data.get("overfitting_signals_detected") or [])
+    _control_report["controller_actions"] = list(_train_ctrl.report_data.get("actions_applied") or [])
 
     # Restore best-epoch weights into the live model before finalize / return
     _restored_best = False
@@ -3384,7 +3789,12 @@ def supervised_train(
         if getattr(args, "ollama_auto_tune", False):
             try:
                 from infrastructure.ollama_helper import ollama
-                final_metrics = {"best_sharpe": float(best_sharpe), "best_val_loss": float(best_val_loss), "best_epoch": int(_best_ep)}
+
+                final_metrics = {
+                    "best_sharpe": float(best_sharpe),
+                    "best_val_loss": float(best_val_loss),
+                    "best_epoch": int(_best_ep),
+                }
                 ollama.auto_tune_model(model_name, final_metrics)
             except Exception:
                 pass
@@ -3403,4 +3813,3 @@ def supervised_train(
         except Exception:
             pass
     return history, best_val_loss
-

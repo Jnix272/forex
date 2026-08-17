@@ -28,7 +28,7 @@ class PortfolioAllocator:
             return 0.0
 
         kelly = win_rate - ((1.0 - win_rate) / win_loss_ratio)
-        return max(0.0, kelly) # Never return negative sizing
+        return max(0.0, kelly)  # Never return negative sizing
 
     def get_optimal_lot_size(
         self,
@@ -37,7 +37,7 @@ class PortfolioAllocator:
         win_loss_ratio: float,
         stop_loss_pips: float,
         pip_value: float = 10.0,
-        fractional_kelly: float = 0.5
+        fractional_kelly: float = 0.5,
     ) -> float:
         """
         Calculate the exact lot size to trade based on Half-Kelly criterion,

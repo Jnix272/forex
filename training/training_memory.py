@@ -41,11 +41,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_PATH = _REPO_ROOT / "logs" / "training_memory.json"
 
 # Maximum ratio by which a single run may nudge the recommended LR
-_MAX_LR_CHANGE = 0.5          # can halve or double in one step, but clamped below
-_LR_FLOOR      = 1e-6
-_LR_CEIL       = 1e-2
-_DO_FLOOR      = 0.05
-_DO_CEIL       = 0.60
+_MAX_LR_CHANGE = 0.5  # can halve or double in one step, but clamped below
+_LR_FLOOR = 1e-6
+_LR_CEIL = 1e-2
+_DO_FLOOR = 0.05
+_DO_CEIL = 0.60
 
 
 class TrainingMemory:
@@ -72,11 +72,13 @@ class TrainingMemory:
             try:
                 with open(self.path, encoding="utf-8") as f:
                     self._data = json.load(f)
-                print(f"[TrainingMemory] Loaded from {self.path}  "
-                      f"(runs={self._data.get('total_runs', 0)}, "
-                      f"best_sharpe={self._data.get('best_sharpe', 'n/a')})")
+                print(
+                    f"[TrainingMemory] Loaded from {self.path}  "
+                    f"(runs={self._data.get('total_runs', 0)}, "
+                    f"best_sharpe={self._data.get('best_sharpe', 'n/a')})"
+                )
             except Exception as e:
-                print(f"[TrainingMemory] Could not load {self.path}: {e} — starting fresh")
+                print(f"[TrainingMemory] Could not load {self.path}: {e} - starting fresh")
                 self._data = {}
         else:
             self._data = {}
@@ -84,9 +86,7 @@ class TrainingMemory:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._data["updated_at"] = datetime.now(UTC).isoformat()
-        fd, tmp = tempfile.mkstemp(
-            prefix=".training_memory.", suffix=".tmp", dir=str(self.path.parent)
-        )
+        fd, tmp = tempfile.mkstemp(prefix=".training_memory.", suffix=".tmp", dir=str(self.path.parent))
         os.close(fd)
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -118,14 +118,14 @@ class TrainingMemory:
             gate_result     dict  (keys: promoted, reasons, ...)
             failure_reason  str | None
         """
-        model  = run_result.get("model_name", "unknown")
-        run    = run_result.get("run_name",   "unknown")
+        model = run_result.get("model_name", "unknown")
+        run = run_result.get("run_name", "unknown")
         sharpe = run_result.get("best_sharpe")
-        vloss  = run_result.get("best_val_loss")
-        b_ep   = run_result.get("best_epoch")
-        t_ep   = run_result.get("total_epochs")
-        hist   = run_result.get("history") or {}
-        gate   = run_result.get("gate_result") or {}
+        vloss = run_result.get("best_val_loss")
+        b_ep = run_result.get("best_epoch")
+        t_ep = run_result.get("total_epochs")
+        hist = run_result.get("history") or {}
+        gate = run_result.get("gate_result") or {}
         failure = run_result.get("failure_reason", "")
 
         # total runs
@@ -135,15 +135,15 @@ class TrainingMemory:
         if sharpe is not None:
             prev_best = self._data.get("best_sharpe")
             if prev_best is None or sharpe > prev_best:
-                self._data["best_sharpe"]  = round(float(sharpe), 6)
+                self._data["best_sharpe"] = round(float(sharpe), 6)
                 self._data["best_val_loss"] = round(float(vloss), 6) if vloss is not None else None
-                self._data["best_model"]   = model
-                self._data["best_run"]     = run
-                self._data["best_epoch"]   = b_ep
+                self._data["best_model"] = model
+                self._data["best_run"] = run
+                self._data["best_epoch"] = b_ep
 
             sharpe_hist: list[float] = self._data.get("sharpe_history", [])
             sharpe_hist.append(round(float(sharpe), 6))
-            self._data["sharpe_history"] = sharpe_hist[-50:]   # keep last 50
+            self._data["sharpe_history"] = sharpe_hist[-50:]  # keep last 50
 
         # epoch pattern
         val_sharpe_curve: list[float] = hist.get("val_sharpe", [])
@@ -190,8 +190,8 @@ class TrainingMemory:
             prev = m_block.get("best_sharpe")
             if prev is None or sharpe > prev:
                 m_block["best_sharpe"] = round(float(sharpe), 6)
-                m_block["best_epoch"]  = b_ep
-                m_block["best_run"]    = run
+                m_block["best_epoch"] = b_ep
+                m_block["best_run"] = run
         per_model[model] = m_block
         self._data["per_model"] = per_model
 
@@ -205,25 +205,25 @@ class TrainingMemory:
 
     def _update_recommendations(self, run_result: dict[str, Any]) -> None:
         """Conservative hyperparameter nudges based on run outcome."""
-        hist   = run_result.get("history") or {}
-        b_ep   = run_result.get("best_epoch")
-        t_ep   = run_result.get("total_epochs") or 0
-        gate   = run_result.get("gate_result") or {}
-        args   = run_result.get("args_snapshot") or {}
+        hist = run_result.get("history") or {}
+        b_ep = run_result.get("best_epoch")
+        t_ep = run_result.get("total_epochs") or 0
+        gate = run_result.get("gate_result") or {}
+        args = run_result.get("args_snapshot") or {}
 
-        current_lr      = float(args.get("lr",      self._data.get("recommended_lr",      5e-5)))
-        current_do      = float(args.get("dropout",  self._data.get("recommended_dropout", 0.25)))
-        current_pat     = int(  args.get("patience", self._data.get("recommended_patience", 6)))
-        current_maxep   = int(  args.get("epochs",   self._data.get("recommended_max_epochs", 24)))
+        current_lr = float(args.get("lr", self._data.get("recommended_lr", 5e-5)))
+        current_do = float(args.get("dropout", self._data.get("recommended_dropout", 0.25)))
+        current_pat = int(args.get("patience", self._data.get("recommended_patience", 6)))
+        current_maxep = int(args.get("epochs", self._data.get("recommended_max_epochs", 24)))
 
-        new_lr    = current_lr
-        new_do    = current_do
-        new_pat   = current_pat
+        new_lr = current_lr
+        new_do = current_do
+        new_pat = current_pat
         new_maxep = current_maxep
 
         # Overfitting: val_loss >> train_loss
         tl_curve = hist.get("train_loss", [])
-        vl_curve = hist.get("val_loss",   [])
+        vl_curve = hist.get("val_loss", [])
         if tl_curve and vl_curve:
             gen_gap = vl_curve[-1] - tl_curve[-1]
             if gen_gap > tl_curve[-1] * 0.15:
@@ -235,14 +235,14 @@ class TrainingMemory:
             peak = max(vs_curve)
             final = vs_curve[-1]
             if peak > 0 and (peak - final) / max(abs(peak), 1e-9) > 0.15:
-                new_lr    = max(_LR_FLOOR, current_lr * 0.5)
-                new_do    = min(_DO_CEIL, current_do + 0.05)
-                new_pat   = max(3, current_pat - 1)
+                new_lr = max(_LR_FLOOR, current_lr * 0.5)
+                new_do = min(_DO_CEIL, current_do + 0.05)
+                new_pat = max(3, current_pat - 1)
                 new_maxep = max(12, b_ep + 4) if b_ep is not None else current_maxep
 
         # Early stopping: best epoch was very early
         if t_ep > 0 and b_ep is not None and b_ep < t_ep * 0.25:
-            new_lr  = max(_LR_FLOOR, current_lr * 0.5)
+            new_lr = max(_LR_FLOOR, current_lr * 0.5)
 
         # Gate failure on drawdown → keep patience, nudge dropout
         reasons = gate.get("reasons", [])
@@ -253,10 +253,10 @@ class TrainingMemory:
         if gate.get("promoted"):
             new_do = max(_DO_FLOOR, new_do - 0.01)
 
-        self._data["recommended_lr"]          = round(float(new_lr),    8)
-        self._data["recommended_dropout"]     = round(float(new_do),    4)
-        self._data["recommended_patience"]    = int(new_pat)
-        self._data["recommended_max_epochs"]  = int(new_maxep)
+        self._data["recommended_lr"] = round(float(new_lr), 8)
+        self._data["recommended_dropout"] = round(float(new_do), 4)
+        self._data["recommended_patience"] = int(new_pat)
+        self._data["recommended_max_epochs"] = int(new_maxep)
 
     # ── apply nudges ─────────────────────────────────────────────────────────
 
@@ -268,14 +268,14 @@ class TrainingMemory:
         high-risk fields (data range, label method, checkpoint dir, etc.).
         """
         if not self._data:
-            return   # no history yet
+            return  # no history yet
 
-        rec_lr   = self._data.get("recommended_lr")
-        rec_do   = self._data.get("recommended_dropout")
-        rec_pat  = self._data.get("recommended_patience")
-        rec_ep   = self._data.get("recommended_max_epochs")
-        pattern  = self._data.get("best_epoch_pattern")
-        runs     = self._data.get("total_runs", 0)
+        rec_lr = self._data.get("recommended_lr")
+        rec_do = self._data.get("recommended_dropout")
+        rec_pat = self._data.get("recommended_patience")
+        rec_ep = self._data.get("recommended_max_epochs")
+        pattern = self._data.get("best_epoch_pattern")
+        runs = self._data.get("total_runs", 0)
 
         # Need at least 1 completed run before nudging
         if runs < 1:
@@ -340,11 +340,11 @@ class TrainingMemory:
     def summary(self) -> str:
         d = self._data
         return (
-            f"TrainingMemory(runs={d.get('total_runs',0)}, "
-            f"best_model={d.get('best_model','?')}, "
-            f"best_sharpe={d.get('best_sharpe','?')}, "
-            f"pattern={d.get('best_epoch_pattern','?')}, "
-            f"common_failure={d.get('common_failure','?')})"
+            f"TrainingMemory(runs={d.get('total_runs', 0)}, "
+            f"best_model={d.get('best_model', '?')}, "
+            f"best_sharpe={d.get('best_sharpe', '?')}, "
+            f"pattern={d.get('best_epoch_pattern', '?')}, "
+            f"common_failure={d.get('common_failure', '?')})"
         )
 
     def get(self, key: str, default: Any = None) -> Any:

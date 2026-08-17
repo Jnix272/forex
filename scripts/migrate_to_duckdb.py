@@ -82,9 +82,7 @@ def _discover_pairs(compact: Path) -> list[str]:
         print("Run first: python scripts/download_data.py")
         return []
     all_pairs = sorted(
-        p.name.replace("pair=", "")
-        for p in pair_dir.iterdir()
-        if p.is_dir() and p.name.startswith("pair=")
+        p.name.replace("pair=", "") for p in pair_dir.iterdir() if p.is_dir() and p.name.startswith("pair=")
     )
     return all_pairs
 
@@ -123,7 +121,7 @@ def migrate_to_duckdb(
     if output.exists():
         try:
             with duckdb.connect(str(output), read_only=True) as c:
-                db_pairs = set(r[0] for r in c.execute("SELECT DISTINCT pair FROM ticks").fetchall())
+                db_pairs = {r[0] for r in c.execute("SELECT DISTINCT pair FROM ticks").fetchall()}
         except Exception:
             pass
 
@@ -131,12 +129,10 @@ def migrate_to_duckdb(
     planned: dict[str, str] = {}
     pair_max_mtimes: dict[str, float] = {}
     for pair in pairs:
-        src_mtime = _pair_parquet_max_mtime(
-            compact / f"granularity={GRANULARITY}" / f"pair={pair}"
-        )
+        src_mtime = _pair_parquet_max_mtime(compact / f"granularity={GRANULARITY}" / f"pair={pair}")
         pair_max_mtimes[pair] = src_mtime
         last = manifest.get(pair)
-        
+
         if pair not in db_pairs:
             planned[pair] = "add"
         elif last is None:
@@ -151,18 +147,17 @@ def migrate_to_duckdb(
         planned = dict.fromkeys(pairs, "refresh")
 
     n_skip = sum(1 for v in planned.values() if v == "skip")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  DuckDB migration  ({len(pairs)} pairs, {n_skip} up-to-date)")
     print(f"  Compact : {compact / f'granularity={GRANULARITY}'}")
     print(f"  Output  : {output}")
     print(f"  Mode    : {'DRY-RUN' if dry_run else ('FORCE' if force else 'INCREMENTAL')}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if dry_run:
         for pair in pairs:
             print(f"  {pair:<8} -> {planned[pair]:>8}  (parquet mtime {pair_max_mtimes[pair]:.0f})")
-        print(f"\nDry run complete. {n_skip} skipped, "
-              f"{sum(1 for v in planned.values() if v != 'skip')} to process.")
+        print(f"\nDry run complete. {n_skip} skipped, {sum(1 for v in planned.values() if v != 'skip')} to process.")
         return {"dry_run": True, "pairs": planned}
 
     if not force and n_skip == len(pairs):
@@ -215,22 +210,22 @@ def migrate_to_duckdb(
                 manifest[pair] = pair_max_mtimes[pair]
                 continue
 
-            glob_path = _pair_glob(compact, pair)
+            _pair_glob(compact, pair)
             t0 = time.time()
             print(f"[{i}/{len(pairs)}] {pair} ({action})... ", end="", flush=True)
 
-            before = conn.execute(
-                "SELECT COUNT(*) FROM ticks WHERE pair = ?", [pair]
-            ).fetchone()[0]
+            before = conn.execute("SELECT COUNT(*) FROM ticks WHERE pair = ?", [pair]).fetchone()[0]
 
             if table_exists and before > 0:
                 conn.execute("DELETE FROM ticks WHERE pair = ?", [pair])
 
             pair_path = compact / f"granularity={GRANULARITY}" / f"pair={pair}"
             year_dirs = sorted([d.name for d in pair_path.iterdir() if d.is_dir() and d.name.startswith("year=")])
-            
+
             for y_dir in year_dirs:
-                month_dirs = sorted([d.name for d in (pair_path / y_dir).iterdir() if d.is_dir() and d.name.startswith("month=")])
+                month_dirs = sorted(
+                    [d.name for d in (pair_path / y_dir).iterdir() if d.is_dir() and d.name.startswith("month=")]
+                )
                 for m_dir in month_dirs:
                     m_glob = str(pair_path / y_dir / m_dir / "day=*" / "ticks.parquet")
                     conn.execute(f"""
@@ -241,9 +236,7 @@ def migrate_to_duckdb(
                 # Force WAL flush to disk to prevent OOM
                 conn.execute("CHECKPOINT")
 
-            after = conn.execute(
-                "SELECT COUNT(*) FROM ticks WHERE pair = ?", [pair]
-            ).fetchone()[0]
+            after = conn.execute("SELECT COUNT(*) FROM ticks WHERE pair = ?", [pair]).fetchone()[0]
             elapsed = time.time() - t0
             print(f"{after:>12,} ticks ({elapsed:.0f}s)")
 
@@ -288,7 +281,7 @@ def migrate_to_duckdb(
         _cleanup_temp_storage(output)
 
     size_gb = output.stat().st_size / 1e9
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Migration complete: {total:,} ticks in {len(stats)} pairs")
     print(f"Size: {size_gb:.2f} GB")
     print(f"Path: {output}")
@@ -312,7 +305,7 @@ def build_indexes(
 ) -> dict:
     """Build (or rebuild) the ticks indexes on an existing consolidated DB.
 
-    Safe to run after `migrate_to_duckdb` has finished — does not touch the row
+    Safe to run after `migrate_to_duckdb` has finished - does not touch the row
     data, only the secondary indexes. Designed to be re-runnable: an index that
     already exists is skipped unless `drop_existing=True`.
 
@@ -324,7 +317,7 @@ def build_indexes(
     set. To stay within RAM on a 16GB box:
 
       * One connection per index (released + spilled before the next starts)
-      * `memory_limit` capped low (default 3GB) — DuckDB will spill to
+      * `memory_limit` capped low (default 3GB) - DuckDB will spill to
         `temp_directory` rather than OOM
       * `threads = 1` to bound the parallel-sort memory
       * `CHECKPOINT` + `gc()` after each build to release memory back to the OS
@@ -335,7 +328,7 @@ def build_indexes(
     output_path : path to the consolidated forex_ticks.duckdb
     memory_limit : DuckDB memory_limit, e.g. '3GB', '2GB'
     threads : DuckDB thread count for the build (1 = lowest peak RAM)
-    only : list of index names to build — 'pair', 'ts', 'pair_ts'.
+    only : list of index names to build - 'pair', 'ts', 'pair_ts'.
            None = build all three in the recommended order.
     drop_existing : if True, DROP INDEX first so a previously-failed/partial
                     index is rebuilt from scratch instead of being skipped.
@@ -349,9 +342,9 @@ def build_indexes(
     spill_dir.mkdir(parents=True, exist_ok=True)
 
     all_indexes = [
-        ("idx_ticks_pair",    "CREATE INDEX IF NOT EXISTS idx_ticks_pair    ON ticks(pair)",                 "pair"),
-        ("idx_ticks_ts",       "CREATE INDEX IF NOT EXISTS idx_ticks_ts       ON ticks(timestamp)",           "ts"),
-        ("idx_ticks_pair_ts",  "CREATE INDEX IF NOT EXISTS idx_ticks_pair_ts  ON ticks(pair, timestamp)",    "pair_ts"),
+        ("idx_ticks_pair", "CREATE INDEX IF NOT EXISTS idx_ticks_pair    ON ticks(pair)", "pair"),
+        ("idx_ticks_ts", "CREATE INDEX IF NOT EXISTS idx_ticks_ts       ON ticks(timestamp)", "ts"),
+        ("idx_ticks_pair_ts", "CREATE INDEX IF NOT EXISTS idx_ticks_pair_ts  ON ticks(pair, timestamp)", "pair_ts"),
     ]
     if only:
         wanted = set(only)
@@ -379,12 +372,12 @@ def build_indexes(
                 conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
             t0 = time.time()
             conn.execute(create_sql)
-            conn.execute("CHECKPOINT")     # flush + free
+            conn.execute("CHECKPOINT")  # flush + free
             elapsed = time.time() - t0
             print(f"  idx_{short_name}: {elapsed:.0f}s")
             results.append({"name": idx_name, "elapsed_s": round(elapsed, 1)})
         except Exception as e:
-            print(f"  idx_{short_name}: FAILED — {e}")
+            print(f"  idx_{short_name}: FAILED - {e}")
             results.append({"name": idx_name, "error": str(e)})
         finally:
             conn.close()
@@ -406,8 +399,7 @@ def build_indexes(
 
 def _pair_glob(compact: Path, pair: str) -> str:
     return str(
-        compact / f"granularity={GRANULARITY}" / f"pair={pair}"
-        / "year=*" / "month=*" / "day=*" / "ticks.parquet"
+        compact / f"granularity={GRANULARITY}" / f"pair={pair}" / "year=*" / "month=*" / "day=*" / "ticks.parquet"
     )
 
 
@@ -418,16 +410,27 @@ if __name__ == "__main__":
     ap.add_argument("--pairs", nargs="+", default=None)
     ap.add_argument("--force", action="store_true", help="Rebuild every pair")
     ap.add_argument("--dry-run", action="store_true", help="Show planned actions without touching the DB")
-    ap.add_argument("--indexes-only", action="store_true",
-                    help="Skip ingestion and only build the ticks indexes on an existing DB")
-    ap.add_argument("--index-memory", default="3GB",
-                    help="DuckDB memory_limit for index builds (default 3GB)")
-    ap.add_argument("--index-threads", type=int, default=1,
-                    help="DuckDB thread count for index builds (default 1 = lowest peak RAM)")
-    ap.add_argument("--index-only", action="append", choices=["pair", "ts", "pair_ts"],
-                    help="Build only the named index(es); may be repeated. Default = all three")
-    ap.add_argument("--rebuild-indexes", action="store_true",
-                    help="Drop existing indexes before rebuilding (useful after a failed/partial build)")
+    ap.add_argument(
+        "--indexes-only", action="store_true", help="Skip ingestion and only build the ticks indexes on an existing DB"
+    )
+    ap.add_argument("--index-memory", default="3GB", help="DuckDB memory_limit for index builds (default 3GB)")
+    ap.add_argument(
+        "--index-threads",
+        type=int,
+        default=1,
+        help="DuckDB thread count for index builds (default 1 = lowest peak RAM)",
+    )
+    ap.add_argument(
+        "--index-only",
+        action="append",
+        choices=["pair", "ts", "pair_ts"],
+        help="Build only the named index(es); may be repeated. Default = all three",
+    )
+    ap.add_argument(
+        "--rebuild-indexes",
+        action="store_true",
+        help="Drop existing indexes before rebuilding (useful after a failed/partial build)",
+    )
     args = ap.parse_args()
 
     if args.indexes_only:

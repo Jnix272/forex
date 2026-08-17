@@ -1,4 +1,5 @@
 """Device setup, thermal throttle, and training preflight helpers.\n\nSee docs/CONTINUE.md."""
+
 from __future__ import annotations
 
 import os
@@ -7,109 +8,24 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-_HOST = None
-_BOUND = False
-_HOST_DEPS = (
-    '_log_error',
-    '_log_warn',
-    '_log_info',
-    '_TRAIN_LOGGER',
-    '_GPU_CFG',
-)
-
-
-def bind_host(host_mod) -> None:
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
-
-
-def _ensure_bound() -> None:
-    import training.train_gpu as tg
-    bind_host(tg)
-
-def run_preflight_sanity_checks(model, device, loader, args):
-    """
-    Perform pre-flight checks to catch bugs/errors before full training:
-    1. Check for NaNs/Infs in a sample batch.
-    2. Verify model forward/backward pass stability.
-    3. Check GPU memory headroom.
-    """
-    _ensure_bound()
-    print("[Preflight] Running sanity checks...")
-    model.eval()
-    try:
-        # 1. Sample Batch Check
-        batch = next(iter(loader))
-        xb, yb = batch[0].to(device), batch[1].to(device)
-        xb = _crop_to_seq_len(xb, getattr(args, "seq_len", None))
-
-        if not torch.isfinite(xb).all():
-            raise RuntimeError("Input features contain NaNs or Infs! Check your data source or normalization.")
-        if not torch.isfinite(yb).all():
-            raise RuntimeError("Labels contain NaNs or Infs! Check your labeling logic.")
-
-        # 2. Forward Pass
-        with torch.no_grad():
-            out = model(xb)
-            # Handle MultiTaskWrapper tuples
-            out_tensor = out[0] if isinstance(out, tuple) else out
-            if not torch.isfinite(out_tensor).all():
-                raise RuntimeError("Model produced NaNs/Infs in forward pass! Initial weights may be too large.")
-
-        # 3. Memory Check
-        if device.type == "cuda":
-            free, total = torch.cuda.mem_get_info(device)
-            free_gb = free / 1024**3
-            total_gb = total / 1024**3
-            print(f"[Preflight] VRAM: {free_gb:.2f}GB free / {total_gb:.2f}GB total.")
-            if free_gb < 1.0:
-                print("[Preflight] WARNING: Less than 1GB VRAM free. You may hit OOM soon.")
-
-        print("[Preflight] PASS: Data and model sanity checks complete.")
-    except StopIteration:
-        print("[Preflight] WARNING: Loader is empty. Skipping sanity checks.")
-    except Exception as e:
-        print(f"[Preflight] FATAL: {e}")
-        raise
-
-def _crop_to_seq_len(x, seq_len):
-    """Use the most recent bars when a cached window is longer than a model profile.
-
-    INF-001: Now logs when cropping occurs so data loss is visible in training logs.
-    """
-    if seq_len is None:
-        return x
-    target = int(seq_len)
-    if target <= 0:
-        return x
-    if getattr(x, "ndim", 0) >= 3 and x.shape[1] > target:
-        original_len = x.shape[1]
-        dropped = original_len - target
-        if dropped > target * 0.5:
-            print(f"[WARN] _crop_to_seq_len: dropping {dropped}/{original_len} bars "
-                  f"({dropped/original_len*100:.0f}%) to fit seq_len={target}. "
-                  f"Consider increasing seq_len or reducing cache window.")
-        return x[:, -target:, :]
-    return x
+from training.core import _GPU_CFG, _log_info, _log_warn
 
 # -----------------------------------------------------------------------------
 # THERMAL THROTTLE  (laptop-safe GPU temperature guard)
 # -----------------------------------------------------------------------------
 
+
 def _gpu_temp_celsius() -> int:
     """Return current GPU 0 temperature in ┬░C, or -1 if pynvml unavailable."""
     try:
         import pynvml
+
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         return int(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
     except Exception:
         return -1
+
 
 def _thermal_check(limit: int = 83, pause_secs: float = 2.0) -> None:
     """
@@ -117,7 +33,6 @@ def _thermal_check(limit: int = 83, pause_secs: float = 2.0) -> None:
     Called every N batches in the training loop.
     limit=0 disables the check (desktop with active cooling).
     """
-    _ensure_bound()
     if limit <= 0:
         return
     temp = _gpu_temp_celsius()
@@ -127,12 +42,15 @@ def _thermal_check(limit: int = 83, pause_secs: float = 2.0) -> None:
         msg = f"[Thermal] GPU {temp}┬░C >= limit {limit}┬░C ΓÇö pausing {pause_secs}s"
         print(msg)
         _log_warn(msg)
-        import time as _t; _t.sleep(pause_secs)
+        import time as _t
+
+        _t.sleep(pause_secs)
 
 
 # -----------------------------------------------------------------------------
 # GPU SETUP
 # -----------------------------------------------------------------------------
+
 
 def resolve_amp_dtype(preference: str = "auto") -> torch.dtype:
     """Select AMP dtype from ``auto`` / ``bf16`` / ``fp16`` / ``fp32``.
@@ -147,7 +65,8 @@ def resolve_amp_dtype(preference: str = "auto") -> torch.dtype:
     if pref == "fp16":
         return torch.float16
 
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        torch.backends.cudnn.enabled = False
         return torch.float32
 
     cc_major = int(torch.cuda.get_device_capability(0)[0])
@@ -156,9 +75,7 @@ def resolve_amp_dtype(preference: str = "auto") -> torch.dtype:
     if pref == "bf16":
         if bf16_ok:
             return torch.bfloat16
-        print(
-            f"[GPU] BF16 requested but unsupported (CC {cc_major}.x) — falling back to FP16"
-        )
+        print(f"[GPU] BF16 requested but unsupported (CC {cc_major}.x) - falling back to FP16")
         return torch.float16
 
     # auto: force BF16 on all Ampere+ GPUs
@@ -176,22 +93,21 @@ def setup_device(dtype_override: str = "auto", deterministic: bool = False) -> t
     (device, n_gpus, amp_dtype)
 
     AMP dtype selection (override with --dtype or GPU["amp_dtype"] in settings):
-    - BF16 — Ampere+ (CC >= 8.0): full FP32 range, no GradScaler, preferred.
-    - FP16 — pre-Ampere: needs GradScaler to prevent underflow.
-    - FP32 — CPU fallback or --dtype fp32 for debugging.
+    - BF16 - Ampere+ (CC >= 8.0): full FP32 range, no GradScaler, preferred.
+    - FP16 - pre-Ampere: needs GradScaler to prevent underflow.
+    - FP32 - CPU fallback or --dtype fp32 for debugging.
 
     Tensor Cores activate automatically when:
       1. Mixed precision is enabled (FP16 or BF16 via autocast).
       2. Standard layers are used (nn.Linear, nn.Conv*).
       3. Feature/hidden dims are multiples of 8 (all arch defaults satisfy this).
     """
-    _ensure_bound()
     if not torch.cuda.is_available():
-        print("[GPU] No CUDA detected — running on CPU (very slow for 20M ticks)")
-        _log_warn("[GPU] CUDA unavailable — CPU mode")
+        print("[GPU] No CUDA detected - running on CPU (very slow for 20M ticks)")
+        _log_warn("[GPU] CUDA unavailable - CPU mode")
         return torch.device("cpu"), 1, torch.float32
 
-    n   = torch.cuda.device_count()
+    n = torch.cuda.device_count()
     dev = torch.device("cuda:0")
 
     # -- Linux-specific: set multiprocessing start method to fork ---------------
@@ -201,9 +117,10 @@ def setup_device(dtype_override: str = "auto", deterministic: bool = False) -> t
     if os.name != "nt":
         try:
             import torch.multiprocessing as _tmp
+
             _tmp.set_start_method("fork", force=True)
         except RuntimeError:
-            pass   # already set elsewhere — fine
+            pass  # already set elsewhere - fine
 
     # -- Linux-specific: pin CPU threads so DataLoader workers don't fight ------
     # Without this, 4 workers each try to use all CPU cores via OpenMP/MKL,
@@ -211,23 +128,23 @@ def setup_device(dtype_override: str = "auto", deterministic: bool = False) -> t
     # zarr decompression (Blosc already uses internal multi-threading per chunk).
     if os.name != "nt":
         _n_cpu = os.cpu_count() or 4
-        os.environ.setdefault("OMP_NUM_THREADS",  "1")
-        os.environ.setdefault("MKL_NUM_THREADS",  "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
         os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        os.environ.setdefault("NUMEXPR_NUM_THREADS",  str(min(4, _n_cpu)))
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", str(min(4, _n_cpu)))
 
     # -- cuDNN / TF32 flags ----------------------------------------------------
     allow_tf32 = bool(_GPU_CFG.get("allow_tf32", True))
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32
-    torch.backends.cudnn.allow_tf32       = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
     if deterministic:
-        torch.backends.cudnn.benchmark     = False
+        torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
     else:
-        torch.backends.cudnn.benchmark        = bool(_GPU_CFG.get("cudnn_benchmark", True))
-        torch.backends.cudnn.deterministic    = False   # max speed
+        torch.backends.cudnn.benchmark = bool(_GPU_CFG.get("cudnn_benchmark", True))
+        torch.backends.cudnn.deterministic = False  # max speed
     # Unlock TF32 Tensor Cores for all FP32 matmuls (~3x faster on Ada/Ampere).
-    # 'high' = TF32 matmul + BF16 AMP — recommended for RTX 40-series.
+    # 'high' = TF32 matmul + BF16 AMP - recommended for RTX 40-series.
     torch.set_float32_matmul_precision("high")
 
     # -- CUDA memory: use 95% of VRAM, leave 5% for driver/display overhead ----
@@ -236,7 +153,7 @@ def setup_device(dtype_override: str = "auto", deterministic: bool = False) -> t
     try:
         torch.cuda.set_per_process_memory_fraction(0.95, dev)
     except Exception:
-        pass   # older PyTorch versions don't support this
+        pass  # older PyTorch versions don't support this
 
     # -- AMP dtype selection ---------------------------------------------------
     cfg_dtype = _GPU_CFG.get("amp_dtype", "auto")
@@ -244,17 +161,20 @@ def setup_device(dtype_override: str = "auto", deterministic: bool = False) -> t
     amp_dtype = resolve_amp_dtype(str(effective_override))
 
     dtype_name = {torch.bfloat16: "BF16", torch.float16: "FP16", torch.float32: "FP32"}.get(amp_dtype, "?")
-
+    cc = "N/A"
     for i in range(n):
         g = torch.cuda.get_device_properties(i)
         vram = g.total_memory / 1e9
-        cc   = f"{g.major}.{g.minor}"
+        cc = f"{g.major}.{g.minor}"
         print(f"[GPU {i}] {g.name} | {vram:.0f} GB VRAM | CC {cc} | CUDA {torch.version.cuda}")
-        print(f"         AMP dtype: {dtype_name} | TF32: {allow_tf32} | "
-              f"cuDNN benchmark: {torch.backends.cudnn.benchmark}")
+        print(
+            f"         AMP dtype: {dtype_name} | TF32: {allow_tf32} | cuDNN benchmark: {torch.backends.cudnn.benchmark}"
+        )
         if vram < 12:
-            print(f"         NOTE: low VRAM ({vram:.0f} GB). Use --hardware-profile "
-                  "rtx_4060_16gb_ram or ubuntu_rtx_laptop and --batch-size 384–512.")
+            print(
+                f"         NOTE: low VRAM ({vram:.0f} GB). Use --hardware-profile "
+                "rtx_4060_16gb_ram or ubuntu_rtx_laptop and --batch-size 384–512."  # noqa: RUF001
+            )
     _log_info(f"[GPU] device={dev} n_gpus={n} amp_dtype={dtype_name} CC={cc}")
     return dev, n, amp_dtype
 
@@ -310,7 +230,6 @@ def maybe_torch_compile(model: nn.Module, device: torch.device, gpu_cfg: dict | 
     via :func:`disable_compile_on_rnn_modules` rather than skipping compile for
     the whole network.
     """
-    _ensure_bound()
     cfg = gpu_cfg if gpu_cfg is not None else (_GPU_CFG or {})
     if device.type != "cuda" or not hasattr(torch, "compile"):
         return model
@@ -321,20 +240,18 @@ def maybe_torch_compile(model: nn.Module, device: torch.device, gpu_cfg: dict | 
     triton_ok = False
     try:
         import triton  # noqa: F401
+
         triton_ok = True
     except ImportError:
         pass
     if not triton_ok:
-        print("[Model] torch.compile skipped (Triton not available — running eager mode)")
-        _log_info("[Model] torch.compile skipped — eager mode")
+        print("[Model] torch.compile skipped (Triton not available - running eager mode)")
+        _log_info("[Model] torch.compile skipped - eager mode")
         return model
 
     n_rnn = disable_compile_on_rnn_modules(model)
     if n_rnn:
-        print(
-            f"[Model] Left {n_rnn} LSTM/GRU/RNN module(s) eager "
-            "(torch.compiler.disable); compiling the rest"
-        )
+        print(f"[Model] Left {n_rnn} LSTM/GRU/RNN module(s) eager (torch.compiler.disable); compiling the rest")
 
     mode = str(cfg.get("torch_compile_mode", "reduce-overhead"))
     try:
@@ -401,9 +318,7 @@ def build_adamw(
             from apex.optimizers import FusedAdamW as _ApexFusedAdamW  # type: ignore
 
             _log("[Optim] Using apex.optimizers.FusedAdamW")
-            return _ApexFusedAdamW(
-                param_list, lr=lr, weight_decay=weight_decay, **kwargs
-            )
+            return _ApexFusedAdamW(param_list, lr=lr, weight_decay=weight_decay, **kwargs)
         except Exception:
             pass
         try:
@@ -419,11 +334,9 @@ def build_adamw(
             )
         except Exception:
             pass
-        _log("[Optim] Fused AdamW unavailable — falling back to eager AdamW", warn=True)
+        _log("[Optim] Fused AdamW unavailable - falling back to eager AdamW", warn=True)
 
     opt_kwargs = dict(kwargs)
     if foreach is not None:
         opt_kwargs["foreach"] = bool(foreach)
-    return torch.optim.AdamW(
-        param_list, lr=lr, weight_decay=weight_decay, **opt_kwargs
-    )
+    return torch.optim.AdamW(param_list, lr=lr, weight_decay=weight_decay, **opt_kwargs)

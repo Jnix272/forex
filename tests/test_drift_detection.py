@@ -1,15 +1,15 @@
 """
-Tests for Phase 2 — Drift Detection: PSI, KS, DriftTracker, and report generation.
+Tests for Phase 2 - Drift Detection: PSI, KS, DriftTracker, and report generation.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
 import pytest
-import sqlite3
 
 from data.feature_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import (
@@ -25,6 +25,7 @@ from monitoring.drift_detection import (
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
 # ════════════════════════════════════════════════════════════════════════════
+
 
 @pytest.fixture
 def tmp_store(tmp_path) -> FeatureStore:
@@ -45,34 +46,36 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
     n_base = 200
     n_live = 100
 
-    base_ts = [
-        datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
-        for i in range(n_base)
-    ]
-    live_ts = [
-        datetime(2024, 6, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
-        for i in range(n_live)
-    ]
+    base_ts = [datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i) for i in range(n_base)]
+    live_ts = [datetime(2024, 6, 1, 8, tzinfo=UTC) + timedelta(minutes=i) for i in range(n_live)]
 
     # Feature A: shifted distribution (drift)
-    feat_a_base = pl.DataFrame({
-        "timestamp_utc": base_ts,
-        "feat_a": rng.normal(0, 1, n_base),
-    })
-    feat_a_live = pl.DataFrame({
-        "timestamp_utc": live_ts,
-        "feat_a": rng.normal(0.5, 1.2, n_live),
-    })
+    feat_a_base = pl.DataFrame(
+        {
+            "timestamp_utc": base_ts,
+            "feat_a": rng.normal(0, 1, n_base),
+        }
+    )
+    feat_a_live = pl.DataFrame(
+        {
+            "timestamp_utc": live_ts,
+            "feat_a": rng.normal(0.5, 1.2, n_live),
+        }
+    )
 
     # Feature B: same distribution (no drift)
-    feat_b_base = pl.DataFrame({
-        "timestamp_utc": base_ts,
-        "feat_b": rng.normal(0, 1, n_base),
-    })
-    feat_b_live = pl.DataFrame({
-        "timestamp_utc": live_ts,
-        "feat_b": rng.normal(0, 1, n_live),
-    })
+    feat_b_base = pl.DataFrame(
+        {
+            "timestamp_utc": base_ts,
+            "feat_b": rng.normal(0, 1, n_base),
+        }
+    )
+    feat_b_live = pl.DataFrame(
+        {
+            "timestamp_utc": live_ts,
+            "feat_b": rng.normal(0, 1, n_live),
+        }
+    )
 
     # Register ad-hoc feature rows before storing materializations (the
     # materializations FK references features(name); bypassing materialize()
@@ -88,30 +91,51 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
                 " dependencies, params, version, tags, owner, "
                 " created_at, updated_at, deprecated, content_hash) "
                 "VALUES (?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?, ?, ?)",
-                (name, "test", "ad-hoc drift-test feature", "tests", "",
-                 "", "", 1, "", "tests",
-                 now_dt, now_dt, 0, name),
+                (
+                    name,
+                    "test",
+                    "ad-hoc drift-test feature",
+                    "tests",
+                    "",
+                    "",
+                    "",
+                    1,
+                    "",
+                    "tests",
+                    now_dt,
+                    now_dt,
+                    0,
+                    name,
+                ),
             )
             conn.commit()
 
     store._store_materialization(
-        "feat_a", feat_a_base,
-        base_ts[0], base_ts[-1],
+        "feat_a",
+        feat_a_base,
+        base_ts[0],
+        base_ts[-1],
         MaterializationStrategy.EAGER_BATCH,
     )
     store._store_materialization(
-        "feat_a", feat_a_live,
-        live_ts[0], live_ts[-1],
+        "feat_a",
+        feat_a_live,
+        live_ts[0],
+        live_ts[-1],
         MaterializationStrategy.EAGER_BATCH,
     )
     store._store_materialization(
-        "feat_b", feat_b_base,
-        base_ts[0], base_ts[-1],
+        "feat_b",
+        feat_b_base,
+        base_ts[0],
+        base_ts[-1],
         MaterializationStrategy.EAGER_BATCH,
     )
     store._store_materialization(
-        "feat_b", feat_b_live,
-        live_ts[0], live_ts[-1],
+        "feat_b",
+        feat_b_live,
+        live_ts[0],
+        live_ts[-1],
         MaterializationStrategy.EAGER_BATCH,
     )
 
@@ -122,6 +146,7 @@ def drift_tracker_with_data(tmp_path) -> tuple[FeatureStore, DriftTracker]:
 # ════════════════════════════════════════════════════════════════════════════
 # PSI / KS Core
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestSafePSI:
     def test_identical_distributions_return_low_psi(self):
@@ -209,6 +234,7 @@ class TestCheckFeatureDrift:
 # DriftReport
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestRunDriftCheck:
     def test_empty_data_returns_no_drift(self):
         report = run_drift_check({}, {})
@@ -234,9 +260,7 @@ class TestRunDriftCheck:
         rng = np.random.default_rng(42)
         bl = {"x": rng.normal(0, 1, 100)}
         lv = {"x": rng.normal(0.5, 1, 100)}
-        report = run_drift_check(
-            bl, lv, baseline_time="2024-01-01", live_time="2024-06-01"
-        )
+        report = run_drift_check(bl, lv, baseline_time="2024-01-01", live_time="2024-06-01")
         assert report.baseline_time == "2024-01-01"
         assert report.live_time == "2024-06-01"
 
@@ -252,10 +276,12 @@ class TestRunDriftCheck:
 # DriftTracker (FeatureStore integration)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestDriftTracker:
     def test_init_creates_tables(self, tmp_store):
         tracker = DriftTracker(tmp_store)
         import sqlite3
+
         with sqlite3.connect(tracker.store.db_path) as conn:
             tables = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'drift_%'"
@@ -329,15 +355,13 @@ class TestDriftTracker:
         assert summary["drift_rate"] > 0
 
     def test_check_from_store(self, drift_tracker_with_data):
-        store, tracker = drift_tracker_with_data
+        _store, tracker = drift_tracker_with_data
         base_start = datetime(2024, 1, 1, 8, tzinfo=UTC)
         base_end = datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=199)
         live_start = datetime(2024, 6, 1, 8, tzinfo=UTC)
         live_end = datetime(2024, 6, 1, 8, tzinfo=UTC) + timedelta(minutes=99)
 
-        report = tracker.check_from_store(
-            ["feat_a", "feat_b"], base_start, base_end, live_start, live_end
-        )
+        report = tracker.check_from_store(["feat_a", "feat_b"], base_start, base_end, live_start, live_end)
         assert report.n_features == 2
         # feat_a should have drift, feat_b should not
         for r in report.feature_results:
@@ -355,6 +379,7 @@ class TestDriftTracker:
 # ════════════════════════════════════════════════════════════════════════════
 # Convenience: schedule_drift_check
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestScheduleDriftCheck:
     def test_requires_data_in_store(self, tmp_store):

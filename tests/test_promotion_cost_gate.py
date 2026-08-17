@@ -27,7 +27,8 @@ if str(_ROOT) not in sys.path:
 
 # Import is heavy (torch via post_train); try and skip if unavailable.
 try:
-    from validation.promotion_gate import PromotionGate, GateConfig
+    from validation.promotion_gate import GateConfig, PromotionGate
+
     _PROMOTIONS_AVAILABLE = True
     _SKIP_REASON = ""
 except Exception as e:
@@ -38,6 +39,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # normalize_backtest_metrics now exposes gross_pnl and total_commission
 # ---------------------------------------------------------------------------
+
 
 def test_normalize_backtest_metrics_passes_gross_pnl_and_commission():
     """Calls to ``_normalize_backtest_metrics`` should emit gross_pnl and
@@ -94,6 +96,7 @@ def test_normalize_backtest_metrics_handles_missing_gross_pnl():
 # PromotionGate cost gate: behavior with real gross_pnl and costs
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not _PROMOTIONS_AVAILABLE, reason=_SKIP_REASON)
 def test_cost_gate_fails_when_costs_exceed_gross_pnl_pct():
     """With realistic cost data, the cost gate should fail when
@@ -104,14 +107,19 @@ def test_cost_gate_fails_when_costs_exceed_gross_pnl_pct():
     costs = 2000.0  # cost_pct = 0.4 = 40% > 30% → reject
     # Other gates pass
     result = gate.evaluate(
-        sharpe=2.0, profit_factor=1.8, max_drawdown=0.10, n_trades=100,
-        gross_pnl=gross, transaction_costs=costs, n_obs=100,
-        turnover_rate=2.0, avg_latency_ms=50.0,
-        n_backtest_trials=3, backtest_sharpe_std=0.5,
+        sharpe=2.0,
+        profit_factor=1.8,
+        max_drawdown=0.10,
+        n_trades=100,
+        gross_pnl=gross,
+        transaction_costs=costs,
+        n_obs=100,
+        turnover_rate=2.0,
+        avg_latency_ms=50.0,
+        n_backtest_trials=3,
+        backtest_sharpe_std=0.5,
     )
-    assert not result["promoted"], (
-        "Gate should have been rejected due to cost_pct=0.40 > max=0.30"
-    )
+    assert not result["promoted"], "Gate should have been rejected due to cost_pct=0.40 > max=0.30"
     # The cost_ok gate should be False in particular
     assert result["gates"].get("cost_ok") is False
     assert result["details"]["cost_pct"] >= 0.30
@@ -125,26 +133,39 @@ def test_cost_gate_passes_with_reasonable_costs():
     costs = 250.0  # cost_pct = 0.05 = 5% < 30% → pass
     # All other gates set to pass
     result = gate.evaluate(
-        sharpe=2.0, profit_factor=1.8, max_drawdown=0.10, n_trades=100,
-        gross_pnl=gross, transaction_costs=costs, n_obs=100,
-        turnover_rate=2.0, avg_latency_ms=50.0,
-        n_backtest_trials=3, backtest_sharpe_std=0.5,
+        sharpe=2.0,
+        profit_factor=1.8,
+        max_drawdown=0.10,
+        n_trades=100,
+        gross_pnl=gross,
+        transaction_costs=costs,
+        n_obs=100,
+        turnover_rate=2.0,
+        avg_latency_ms=50.0,
+        n_backtest_trials=3,
+        backtest_sharpe_std=0.5,
     )
     assert result["gates"].get("cost_ok") is True
-    # Note: may still be rejected by other gates (psr, dsr, etc.) — only check cost
+    # Note: may still be rejected by other gates (psr, dsr, etc.) - only check cost
 
 
 @pytest.mark.skipif(not _PROMOTIONS_AVAILABLE, reason=_SKIP_REASON)
 def test_cost_pct_zero_with_zero_costs_is_documented():
     """When no cost is passed (transaction_costs=0), the cost gate now PASSES
-    (optional gate behavior) — this is the FIX for P1 where missing cost data
+    (optional gate behavior) - this is the FIX for P1 where missing cost data
     would previously cause a silent fail-closed rejection.
     """
     gate = PromotionGate(GateConfig(max_cost_pct=0.30))
     result = gate.evaluate(
-        sharpe=2.0, profit_factor=1.8, max_drawdown=0.10, n_trades=100,
-        gross_pnl=5000.0, transaction_costs=0.0, n_obs=100,
-        turnover_rate=2.0, avg_latency_ms=50.0,
+        sharpe=2.0,
+        profit_factor=1.8,
+        max_drawdown=0.10,
+        n_trades=100,
+        gross_pnl=5000.0,
+        transaction_costs=0.0,
+        n_obs=100,
+        turnover_rate=2.0,
+        avg_latency_ms=50.0,
     )
     assert result["gates"].get("cost_ok") is True, (
         "When transaction_costs=0 (no info), the cost gate should now PASS (optional gate)"
@@ -155,19 +176,15 @@ def test_cost_pct_zero_with_zero_costs_is_documented():
 # Source-level: post_train uses real gross_pnl and transaction_costs
 # ---------------------------------------------------------------------------
 
+
 def test_post_train_does_not_substitute_net_pnl_for_gross_pnl():
-    """The OLD bug line `gross_pnl=bt_metrics["net_pnl"]` must NOT appear.
-    """
+    """The OLD bug line `gross_pnl=bt_metrics["net_pnl"]` must NOT appear."""
     post_train = _ROOT / "training" / "post_train.py"
     if not post_train.exists():
         pytest.skip("training/post_train.py not found")
     src = post_train.read_text(encoding="utf-8")
-    assert 'gross_pnl=bt_metrics["net_pnl"]' not in src, (
-        "P1 bug is back! net_pnl substituted for gross_pnl"
-    )
-    assert 'gross_pnl=gross_for_cost_gate' in src, (
-        "post_train should pass the real (derived) gross_pnl to the gate"
-    )
+    assert 'gross_pnl=bt_metrics["net_pnl"]' not in src, "P1 bug is back! net_pnl substituted for gross_pnl"
+    assert "gross_pnl=gross_for_cost_gate" in src, "post_train should pass the real (derived) gross_pnl to the gate"
 
 
 def test_post_train_does_not_pass_hardcoded_zero_costs():
@@ -178,7 +195,7 @@ def test_post_train_does_not_pass_hardcoded_zero_costs():
     if not post_train.exists():
         pytest.skip("training/post_train.py not found")
     src = post_train.read_text(encoding="utf-8")
-    assert 'transaction_costs=0.0, # Already accounted for' not in src, (
+    assert "transaction_costs=0.0, # Already accounted for" not in src, (
         "P1 bug is back! hardcoded zero transaction_costs"
     )
     assert "transaction_costs_value" in src
@@ -190,6 +207,7 @@ def test_post_train_does_not_pass_hardcoded_zero_costs():
 # post_train derives gross_pnl from net_pnl + total_commission as fallback
 # ---------------------------------------------------------------------------
 
+
 def test_post_train_falls_back_to_net_plus_costs_when_gross_missing():
     """When gross_pnl=0 but total_commission>0, gross is reconstructed as
     net_pnl + total_commission.
@@ -199,12 +217,13 @@ def test_post_train_falls_back_to_net_plus_costs_when_gross_missing():
         pytest.skip("training/post_train.py not found")
     src = post_train.read_text(encoding="utf-8")
     # The fallback formula should be present
-    assert "gross_pnl_value = float(bt_metrics.get(\"net_pnl\", 0.0) or 0.0) + transaction_costs_value" in src
+    assert 'gross_pnl_value = float(bt_metrics.get("net_pnl", 0.0) or 0.0) + transaction_costs_value' in src
 
 
 # ---------------------------------------------------------------------------
-# Result telemetry — record cost_pct and gross_pnl in details
+# Result telemetry - record cost_pct and gross_pnl in details
 # ---------------------------------------------------------------------------
+
 
 def test_normalize_includes_profit_factor_passthrough():
     """profit_factor should also be threaded through the normalizer so
@@ -213,10 +232,16 @@ def test_normalize_includes_profit_factor_passthrough():
         from scripts.backtest_model import _normalize_backtest_metrics
     except Exception as e:
         pytest.skip(f"could not import: {e}")
-    raw = {"n_trades": 100, "sharpe": 1.5, "profit_factor": 1.7,
-           "win_rate_pct": 55.0, "max_drawdown_pct": 12.0,
-           "net_pnl_usd": 4000.0, "gross_pnl_usd": 5000.0,
-           "total_commission_usd": 200.0}
+    raw = {
+        "n_trades": 100,
+        "sharpe": 1.5,
+        "profit_factor": 1.7,
+        "win_rate_pct": 55.0,
+        "max_drawdown_pct": 12.0,
+        "net_pnl_usd": 4000.0,
+        "gross_pnl_usd": 5000.0,
+        "total_commission_usd": 200.0,
+    }
     out = _normalize_backtest_metrics(raw)
     assert out["profit_factor"] == 1.7
 

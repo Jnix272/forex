@@ -7,8 +7,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 class LMAXFixApp(fix.Application if fix else object):
-    def __init__(self, username: str = None, password: str = None):
+    def __init__(self, username: str | None = None, password: str | None = None):
         super().__init__()
         self.username = username
         self.password = password
@@ -30,7 +31,7 @@ class LMAXFixApp(fix.Application if fix else object):
     def toAdmin(self, message, sessionID):
         msgType = fix.MsgType()
         message.getHeader().getField(msgType)
-        
+
         if msgType.getValue() == fix.MsgType_Logon:
             if self.username:
                 message.setField(fix.Username(self.username))
@@ -47,19 +48,19 @@ class LMAXFixApp(fix.Application if fix else object):
     def fromApp(self, message, sessionID):
         msgType = fix.MsgType()
         message.getHeader().getField(msgType)
-        
+
         if msgType.getValue() == fix.MsgType_ExecutionReport:
             clOrdID = fix.ClOrdID()
             ordStatus = fix.OrdStatus()
-            
+
             cl_id_val = ""
             if message.isSetField(clOrdID):
                 message.getField(clOrdID)
                 cl_id_val = clOrdID.getValue()
-                
+
             status_val = ""
             if message.isSetField(ordStatus):
                 message.getField(ordStatus)
                 status_val = ordStatus.getValue()
-                
+
             logger.info(f"[LMAX FIX] ExecutionReport: ClOrdID={cl_id_val}, Status={status_val}")

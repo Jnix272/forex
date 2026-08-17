@@ -91,15 +91,9 @@ def build_window_loading_report(
         reasons.append("finbert_batch_size must be > 0")
 
     prefetch_batches = (
-        build_finbert_prefetch_batches(headlines, cfg.finbert_batch_size)
-        if gates["finbert_batch_size_ok"]
-        else []
+        build_finbert_prefetch_batches(headlines, cfg.finbert_batch_size) if gates["finbert_batch_size_ok"] else []
     )
-    window_groups = (
-        group_date_windows(windows, cfg.window_batch_days)
-        if gates["window_batch_days_ok"]
-        else []
-    )
+    window_groups = group_date_windows(windows, cfg.window_batch_days) if gates["window_batch_days_ok"] else []
 
     return {
         "ok": all(gates.values()),

@@ -91,6 +91,10 @@ ignore = [
 "tests/**" = ["B011", "E402"]
 "scripts/**" = ["E402", "F401"]
 "training/train_gpu.py" = ["E402"]  # late imports in monolith
+"training/direction_control.py" = ["E402"]  # late imports in monolith
+"training/post_train.py" = ["E402"]  # late imports in monolith
+"training/pretrain_runner.py" = ["E402"]  # late imports in monolith
+"training/gpu_cli.py" = ["E402"]  # late imports in monolith
 
 [tool.ruff.lint.isort]
 known-first-party = [

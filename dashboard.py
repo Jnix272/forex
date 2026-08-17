@@ -18,19 +18,18 @@ if str(ROOT) not in sys.path:
 
 # Enforce clean page configuration
 st.set_page_config(
-    page_title="Forex Scaling Model - Dashboard",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Forex Scaling Model - Dashboard", page_icon="📈", layout="wide", initial_sidebar_state="expanded"
 )
 
 # Try imports of core modules
 try:
     from backtesting.backtest import ForexScalingBacktest, ScalingAction  # noqa: F401
     from models.rl_agents import ForexTradingEnv  # noqa: F401
+
     HAS_STRATEGY_LIBS = True
 except ImportError:
     HAS_STRATEGY_LIBS = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. DATA LOADERS & ROBUST FALLBACKS
@@ -52,6 +51,7 @@ def get_zarr_sources():
 
     return sources
 
+
 def generate_synthetic_zarr():
     """Generate mock Zarr arrays in case no caches are present."""
     n = 1000
@@ -66,13 +66,8 @@ def generate_synthetic_zarr():
     X = np.random.randn(n, 60, 10)
     y = np.random.choice([-1, 0, 1], size=n)
 
-    return {
-        "close": close,
-        "atr": atr,
-        "spread": spread,
-        "X": X,
-        "y": y
-    }
+    return {"close": close, "atr": atr, "spread": spread, "X": X, "y": y}
+
 
 def load_zarr_data(path_or_synthetic):
     """Load real Zarr data or return synthetic fallback."""
@@ -93,6 +88,7 @@ def load_zarr_data(path_or_synthetic):
         st.sidebar.error(f"Failed to load Zarr: {e}. Using synthetic fallback.")
         return generate_synthetic_zarr(), True
 
+
 def load_base_model_metrics():
     """Read performance and pretraining reports from checkpoints/haelt."""
     haelt_dir = ROOT / "checkpoints" / "haelt"
@@ -107,7 +103,7 @@ def load_base_model_metrics():
         "pretrained_acc": 0.4098,
         "promoted": False,
         "reasons": ["No promotion run details found."],
-        "history": None
+        "history": None,
     }
 
     # Check model_comparison.json
@@ -155,6 +151,7 @@ def load_base_model_metrics():
 
     return metrics
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. INTERACTIVE SIMULATION ENGINE (RL / STRATEGY FALLBACK)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -194,33 +191,35 @@ def run_interactive_backtest(data, risk_mult, comm, slippage, lot_size):
             if pnl_pips <= -12.0 * risk_mult or pnl_pips >= 18.0 * risk_mult or i == n - 1:
                 pnl_usd = (pnl_pips * pip_size * lot_size * 0.1) - tx_costs
                 equity += pnl_usd
-                trade_log.append({
-                    "Trade ID": len(trade_log) + 1,
-                    "Timestamp": timestamps[entry_idx].strftime("%Y-%m-%d %H:%M:%S"),
-                    "Exit Time": timestamps[i].strftime("%Y-%m-%d %H:%M:%S"),
-                    "Type": "BUY (Long)" if position == 1 else "SELL (Short)",
-                    "Entry Price": entry_price,
-                    "Exit Price": cur_close,
-                    "PnL (Pips)": round(pnl_pips, 1),
-                    "PnL (USD)": round(pnl_usd, 2),
-                    "Exit Reason": "Stop Loss" if pnl_pips < 0 else "Take Profit" if pnl_pips > 0 else "EOD"
-                })
+                trade_log.append(
+                    {
+                        "Trade ID": len(trade_log) + 1,
+                        "Timestamp": timestamps[entry_idx].strftime("%Y-%m-%d %H:%M:%S"),
+                        "Exit Time": timestamps[i].strftime("%Y-%m-%d %H:%M:%S"),
+                        "Type": "BUY (Long)" if position == 1 else "SELL (Short)",
+                        "Entry Price": entry_price,
+                        "Exit Price": cur_close,
+                        "PnL (Pips)": round(pnl_pips, 1),
+                        "PnL (USD)": round(pnl_usd, 2),
+                        "Exit Reason": "Stop Loss" if pnl_pips < 0 else "Take Profit" if pnl_pips > 0 else "EOD",
+                    }
+                )
                 position = 0
 
         # Entry logic
         if position == 0 and i > 30 and i < n - 5:
-            if ma_fast[i] > ma_slow[i] and ma_fast[i-1] <= ma_slow[i-1]:
+            if ma_fast[i] > ma_slow[i] and ma_fast[i - 1] <= ma_slow[i - 1]:
                 position = 1
                 entry_price = cur_close + (cur_spread / 2.0)
                 entry_idx = i
-            elif ma_fast[i] < ma_slow[i] and ma_fast[i-1] >= ma_slow[i-1]:
+            elif ma_fast[i] < ma_slow[i] and ma_fast[i - 1] >= ma_slow[i - 1]:
                 position = -1
                 entry_price = cur_close - (cur_spread / 2.0)
                 entry_idx = i
 
         equity_curve.append(equity)
 
-    equity_curve = equity_curve[1:] # Align lengths
+    equity_curve = equity_curve[1:]  # Align lengths
 
     # Calculate performance metrics
     eq_series = pd.Series(equity_curve)
@@ -244,30 +243,42 @@ def run_interactive_backtest(data, risk_mult, comm, slippage, lot_size):
         "net_pnl": f"${round(net_pnl, 2)}",
         "equity_curve": equity_curve,
         "drawdowns": drawdowns.values,
-        "trades": pd.DataFrame(trade_log) if trade_log else pd.DataFrame(columns=["Trade ID", "Timestamp", "Exit Time", "Type", "Entry Price", "Exit Price", "PnL (Pips)", "PnL (USD)", "Exit Reason"])
+        "trades": pd.DataFrame(trade_log)
+        if trade_log
+        else pd.DataFrame(
+            columns=[
+                "Trade ID",
+                "Timestamp",
+                "Exit Time",
+                "Type",
+                "Entry Price",
+                "Exit Price",
+                "PnL (Pips)",
+                "PnL (USD)",
+                "Exit Reason",
+            ]
+        ),
     }
 
     return summary, timestamps
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. APP LAYOUT & RENDER
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("📈 Forex Scaling Model — Global Streamlit Dashboard")
+st.title("📈 Forex Scaling Model - Global Streamlit Dashboard")
 st.markdown("---")
 
 # Sidebar Configuration
 st.sidebar.header("📂 Data Ingest & Cache Config")
 zarr_sources = get_zarr_sources()
-selected_source_name = st.sidebar.selectbox(
-    "Active Zarr Cache Source",
-    list(zarr_sources.keys()) + ["Synthetic Data"]
-)
+selected_source_name = st.sidebar.selectbox("Active Zarr Cache Source", [*list(zarr_sources.keys()), "Synthetic Data"])
 
 zarr_path = zarr_sources.get(selected_source_name, "Synthetic Data")
 zarr_data, is_synthetic = load_zarr_data(zarr_path)
 
 if is_synthetic:
-    st.sidebar.info("ℹ️ Using synthetic/mock data source.")
+    st.sidebar.info("ℹ️ Using synthetic/mock data source.")  # noqa: RUF001
 else:
     st.sidebar.success(f"Loaded: {selected_source_name}")
 
@@ -283,11 +294,7 @@ st.sidebar.text(f"Root dir: {ROOT.name}")
 st.sidebar.text(f"Python ver: {sys.version.split()[0]}")
 
 # Create tabs for Dashboard View
-tab1, tab2, tab3 = st.tabs([
-    "🎯 Supervised Base Models",
-    "🔀 Ensemble Meta-Learner",
-    "🤖 RL Agent Execution"
-])
+tab1, tab2, tab3 = st.tabs(["🎯 Supervised Base Models", "🔀 Ensemble Meta-Learner", "🤖 RL Agent Execution"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1: SUPERVISED BASE MODELS METRICS
@@ -305,24 +312,26 @@ with tab1:
 
     st.markdown("### 📊 Baseline vs. Pretrained Ablation Comparison")
 
-    ablation_df = pd.DataFrame({
-        "Metric": ["Best Validation Sharpe", "Best Validation Loss", "Directional Accuracy"],
-        "Supervised Control (Baseline)": [
-            f"{metrics['baseline_sharpe']:.4f}",
-            f"{metrics['baseline_loss']:.4f}",
-            f"{metrics['baseline_acc']:.2%}"
-        ],
-        "Contrastive Pretrained (Main)": [
-            f"{metrics['pretrained_sharpe']:.4f}",
-            f"{metrics['pretrained_loss']:.4f}",
-            f"{metrics['pretrained_acc']:.2%}"
-        ],
-        "Benefit (Delta)": [
-            f"{metrics['pretrained_sharpe'] - metrics['baseline_sharpe']:.4f}",
-            f"{metrics['pretrained_loss'] - metrics['baseline_loss']:.4f}",
-            f"{metrics['pretrained_acc'] - metrics['baseline_acc']:.2%}"
-        ]
-    })
+    ablation_df = pd.DataFrame(
+        {
+            "Metric": ["Best Validation Sharpe", "Best Validation Loss", "Directional Accuracy"],
+            "Supervised Control (Baseline)": [
+                f"{metrics['baseline_sharpe']:.4f}",
+                f"{metrics['baseline_loss']:.4f}",
+                f"{metrics['baseline_acc']:.2%}",
+            ],
+            "Contrastive Pretrained (Main)": [
+                f"{metrics['pretrained_sharpe']:.4f}",
+                f"{metrics['pretrained_loss']:.4f}",
+                f"{metrics['pretrained_acc']:.2%}",
+            ],
+            "Benefit (Delta)": [
+                f"{metrics['pretrained_sharpe'] - metrics['baseline_sharpe']:.4f}",
+                f"{metrics['pretrained_loss'] - metrics['baseline_loss']:.4f}",
+                f"{metrics['pretrained_acc'] - metrics['baseline_acc']:.2%}",
+            ],
+        }
+    )
 
     st.table(ablation_df)
 
@@ -338,7 +347,10 @@ with tab1:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(go.Scatter(x=epochs, y=history["train_loss"], name="Train Loss"), secondary_y=False)
         fig.add_trace(go.Scatter(x=epochs, y=history["val_loss"], name="Val Loss"), secondary_y=False)
-        fig.add_trace(go.Scatter(x=epochs, y=history["val_sharpe"], name="Val Sharpe (Proxy)", line=dict(dash='dash')), secondary_y=True)
+        fig.add_trace(
+            go.Scatter(x=epochs, y=history["val_sharpe"], name="Val Sharpe (Proxy)", line={"dash": "dash"}),
+            secondary_y=True,
+        )
         fig.update_layout(title="Ablation Walk-Forward Fold 0 History", xaxis_title="Epochs", height=400)
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -351,7 +363,9 @@ with tab1:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(go.Scatter(x=x, y=train_loss, name="Train Loss"), secondary_y=False)
         fig.add_trace(go.Scatter(x=x, y=val_loss, name="Validation Loss"), secondary_y=False)
-        fig.add_trace(go.Scatter(x=x, y=sharpe, name="Sharpe Proxy", line=dict(dash='dash', color='green')), secondary_y=True)
+        fig.add_trace(
+            go.Scatter(x=x, y=sharpe, name="Sharpe Proxy", line={"dash": "dash", "color": "green"}), secondary_y=True
+        )
         fig.update_layout(title="Cross-Validation Metrics History (Simulated)", xaxis_title="Epochs", height=400)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -370,8 +384,8 @@ with tab2:
 
     with col1:
         st.markdown("#### Average Portfolio Allocation")
-        fig_pie = go.Figure(data=[go.Pie(labels=models, values=avg_weights, hole=.3)])
-        fig_pie.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
+        fig_pie = go.Figure(data=[go.Pie(labels=models, values=avg_weights, hole=0.3)])
+        fig_pie.update_layout(height=350, margin={"l": 20, "r": 20, "t": 20, "b": 20})
         st.plotly_chart(fig_pie, use_container_width=True)
 
         # Performance/diversity metrics
@@ -395,18 +409,12 @@ with tab2:
 
         fig_area = go.Figure()
         for idx, m_name in enumerate(models):
-            fig_area.add_trace(go.Scatter(
-                x=x_ticks, y=weights_matrix[idx],
-                mode='lines',
-                name=m_name,
-                stackgroup='one'
-            ))
+            fig_area.add_trace(
+                go.Scatter(x=x_ticks, y=weights_matrix[idx], mode="lines", name=m_name, stackgroup="one")
+            )
 
         fig_area.update_layout(
-            height=350,
-            xaxis_title="Bar Index",
-            yaxis_title="Weight Allocation",
-            margin=dict(l=20, r=20, t=20, b=20)
+            height=350, xaxis_title="Bar Index", yaxis_title="Weight Allocation", margin={"l": 20, "r": 20, "t": 20, "b": 20}
         )
         st.plotly_chart(fig_area, use_container_width=True)
 
@@ -430,14 +438,17 @@ with tab3:
     st.markdown("### 📊 Backtest Visualization")
 
     # Interactive subplots: Price Chart and Portfolio Equity
-    fig_backtest = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                 vertical_spacing=0.08,
-                                 subplot_titles=("Price Series & Trades", "Portfolio Equity Curve ($)"))
+    fig_backtest = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=("Price Series & Trades", "Portfolio Equity Curve ($)"),
+    )
 
     # 1. Price series subplot
     fig_backtest.add_trace(
-        go.Scatter(x=t_stamps, y=zarr_data["close"], name="Close Price", line=dict(color="blue")),
-        row=1, col=1
+        go.Scatter(x=t_stamps, y=zarr_data["close"], name="Close Price", line={"color": "blue"}), row=1, col=1
     )
 
     # Add buy and sell trade markers
@@ -447,22 +458,31 @@ with tab3:
         sells = trades_df[trades_df["Type"] == "SELL (Short)"]
 
         fig_backtest.add_trace(
-            go.Scatter(x=pd.to_datetime(buys["Timestamp"]), y=buys["Entry Price"],
-                       mode="markers", name="Buy Entry",
-                       marker=dict(symbol="triangle-up", size=10, color="green")),
-            row=1, col=1
+            go.Scatter(
+                x=pd.to_datetime(buys["Timestamp"]),
+                y=buys["Entry Price"],
+                mode="markers",
+                name="Buy Entry",
+                marker={"symbol": "triangle-up", "size": 10, "color": "green"},
+            ),
+            row=1,
+            col=1,
         )
         fig_backtest.add_trace(
-            go.Scatter(x=pd.to_datetime(sells["Timestamp"]), y=sells["Entry Price"],
-                       mode="markers", name="Sell Entry",
-                       marker=dict(symbol="triangle-down", size=10, color="red")),
-            row=1, col=1
+            go.Scatter(
+                x=pd.to_datetime(sells["Timestamp"]),
+                y=sells["Entry Price"],
+                mode="markers",
+                name="Sell Entry",
+                marker={"symbol": "triangle-down", "size": 10, "color": "red"},
+            ),
+            row=1,
+            col=1,
         )
 
     # 2. Equity curve subplot
     fig_backtest.add_trace(
-        go.Scatter(x=t_stamps, y=res["equity_curve"], name="Account Equity", line=dict(color="green")),
-        row=2, col=1
+        go.Scatter(x=t_stamps, y=res["equity_curve"], name="Account Equity", line={"color": "green"}), row=2, col=1
     )
 
     fig_backtest.update_layout(height=600, showlegend=True)
@@ -470,8 +490,10 @@ with tab3:
 
     # Drawdown chart
     st.markdown("### 📉 Account Under-water Drawdown (%)")
-    fig_dd = go.Figure(go.Scatter(x=t_stamps, y=res["drawdowns"] * 100.0, fill='tozeroy', line=dict(color="red"), name="Drawdown"))
-    fig_dd.update_layout(height=200, yaxis_title="Drawdown %", margin=dict(t=20, b=20))
+    fig_dd = go.Figure(
+        go.Scatter(x=t_stamps, y=res["drawdowns"] * 100.0, fill="tozeroy", line={"color": "red"}, name="Drawdown")
+    )
+    fig_dd.update_layout(height=200, yaxis_title="Drawdown %", margin={"t": 20, "b": 20})
     st.plotly_chart(fig_dd, use_container_width=True)
 
     # Detailed Trade Log

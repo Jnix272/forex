@@ -41,9 +41,11 @@ if _config_path.exists():
 _d_cfg = _yaml_config.get("download", {})
 _data_cfg = _yaml_config.get("data", {})
 
-DEF_PAIRS = _data_cfg.get("pairs", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"])
+DEF_PAIRS = _data_cfg.get(
+    "pairs", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
+)
 DEF_START = int(str(_data_cfg.get("start", "2018-01-01"))[:4])
-DEF_END   = int(str(_data_cfg.get("end", "2025-12-31"))[:4])
+DEF_END = int(str(_data_cfg.get("end", "2025-12-31"))[:4])
 DEF_FULL_DAY = bool(_data_cfg.get("full_day_data", False))
 DEF_KEEP_GOING = _d_cfg.get("keep_going", True)
 
@@ -69,8 +71,7 @@ def _auto_finalize_storage(
     for pair in pairs:
         item = compact_summary.get(pair, {})
         print(
-            f"  {pair:<10} partitions={item.get('partitions_written', 0):>4} "
-            f"ticks={item.get('ticks_written', 0):>12,}"
+            f"  {pair:<10} partitions={item.get('partitions_written', 0):>4} ticks={item.get('ticks_written', 0):>12,}"
         )
 
     if build_duckdb:
@@ -83,34 +84,39 @@ def _parse_args() -> argparse.Namespace:
         description="Download Dukascopy data pair-by-pair and year-by-year with verification.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS, metavar="PAIR",
-                        help="FX pairs to download")
-    parser.add_argument("--start", type=int, default=DEF_START, metavar="YEAR",
-                        help="First year to download")
-    parser.add_argument("--end", type=int, default=DEF_END, metavar="YEAR",
-                        help="Last year to download, inclusive")
-    parser.add_argument("--full-day", action="store_true", default=DEF_FULL_DAY,
-                        help="Download all 24 hours instead of session hours (07-17 UTC)")
-    parser.add_argument("--concurrency", type=int, default=12,
-                        help="Concurrent hour downloads per pair")
-    parser.add_argument("--request-delay", type=float, default=0.05,
-                        help="Pause around each HTTP GET")
-    parser.add_argument("--tick-cache", default=DEFAULT_DUKASCOPY_CACHE_DIR,
-                        help="Parquet cache root")
-    parser.add_argument("--compact-cache", default=DEFAULT_DUKASCOPY_COMPACT_DIR,
-                        help="Compacted Parquet root")
-    parser.add_argument("--redownload-passes", type=int, default=2,
-                        help="How many automatic missing-hour redownload passes to allow")
-    parser.add_argument("--keep-going", action="store_true", default=DEF_KEEP_GOING,
-                        help="Continue to later years/pairs even if one year still has missing hours")
-    parser.add_argument("--compact-granularity", choices=["daily", "monthly"], default="daily",
-                        help="Partition size for automatic compaction after download")
-    parser.add_argument("--no-auto-compact", action="store_true",
-                        help="Skip automatic compaction after download")
-    parser.add_argument("--no-auto-duckdb", action="store_true",
-                        help="Skip automatic DuckDB view build after compaction")
-    parser.add_argument("--as-table", action="store_true",
-                        help="Build DuckDB as a physical TABLE instead of a VIEW")
+    parser.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS, metavar="PAIR", help="FX pairs to download")
+    parser.add_argument("--start", type=int, default=DEF_START, metavar="YEAR", help="First year to download")
+    parser.add_argument("--end", type=int, default=DEF_END, metavar="YEAR", help="Last year to download, inclusive")
+    parser.add_argument(
+        "--full-day",
+        action="store_true",
+        default=DEF_FULL_DAY,
+        help="Download all 24 hours instead of session hours (07-17 UTC)",
+    )
+    parser.add_argument("--concurrency", type=int, default=12, help="Concurrent hour downloads per pair")
+    parser.add_argument("--request-delay", type=float, default=0.05, help="Pause around each HTTP GET")
+    parser.add_argument("--tick-cache", default=DEFAULT_DUKASCOPY_CACHE_DIR, help="Parquet cache root")
+    parser.add_argument("--compact-cache", default=DEFAULT_DUKASCOPY_COMPACT_DIR, help="Compacted Parquet root")
+    parser.add_argument(
+        "--redownload-passes", type=int, default=2, help="How many automatic missing-hour redownload passes to allow"
+    )
+    parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        default=DEF_KEEP_GOING,
+        help="Continue to later years/pairs even if one year still has missing hours",
+    )
+    parser.add_argument(
+        "--compact-granularity",
+        choices=["daily", "monthly"],
+        default="daily",
+        help="Partition size for automatic compaction after download",
+    )
+    parser.add_argument("--no-auto-compact", action="store_true", help="Skip automatic compaction after download")
+    parser.add_argument(
+        "--no-auto-duckdb", action="store_true", help="Skip automatic DuckDB view build after compaction"
+    )
+    parser.add_argument("--as-table", action="store_true", help="Build DuckDB as a physical TABLE instead of a VIEW")
     return parser.parse_args()
 
 
@@ -161,10 +167,7 @@ def main() -> None:
             item = pair_summary[year]
             coverage = item["coverage"]
             cov_txt = f"{coverage['present_hours_count']}/{coverage['requested_hours_count']}"
-            print(
-                f"  {pair:<10} {year:<6} {item['ticks']:>12,} "
-                f"{cov_txt:>14} {coverage['missing_hours_count']:>8}"
-            )
+            print(f"  {pair:<10} {year:<6} {item['ticks']:>12,} {cov_txt:>14} {coverage['missing_hours_count']:>8}")
     print("=" * 72)
 
     if not args.no_auto_compact:

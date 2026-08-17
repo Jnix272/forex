@@ -7,17 +7,18 @@ from confluent_kafka import Producer
 
 def delivery_report(err, msg):
     if err is not None:
-        print(f'Message delivery failed: {err}')
+        print(f"Message delivery failed: {err}")
+
 
 def main():
     print("Starting Redpanda Tick Pump...")
-    producer = Producer({'bootstrap.servers': 'localhost:9092'})
+    producer = Producer({"bootstrap.servers": "localhost:9092"})
 
     symbols = ["EURUSD", "GBPUSD", "USDJPY"]
     base_prices = {"EURUSD": 1.08, "GBPUSD": 1.27, "USDJPY": 149.5}
 
     try:
-        for i in range(1, 100):
+        for _i in range(1, 100):
             symbol = random.choice(symbols)
             price = base_prices[symbol] + random.gauss(0, 0.0005)
             spread = random.uniform(0.0001, 0.0003)
@@ -25,24 +26,24 @@ def main():
             tick = {
                 "symbol": symbol,
                 "timestamp": int(time.time_ns()),
-                "bid": price - spread/2,
-                "ask": price + spread/2,
+                "bid": price - spread / 2,
+                "ask": price + spread / 2,
                 "bid_size": random.uniform(1, 10),
                 "ask_size": random.uniform(1, 10),
                 "trade_price": price if random.random() < 0.1 else None,
                 "trade_size": random.uniform(1, 100) if random.random() < 0.1 else None,
                 "trade_side": random.choice(["buy", "sell"]) if random.random() < 0.1 else None,
-                "exchange": "synthetic"
+                "exchange": "synthetic",
             }
 
             # Remove None values
             tick = {k: v for k, v in tick.items() if v is not None}
 
             producer.produce(
-                'market.ticks',
-                key=symbol.encode('utf-8'),
-                value=json.dumps(tick).encode('utf-8'),
-                callback=delivery_report
+                "market.ticks",
+                key=symbol.encode("utf-8"),
+                value=json.dumps(tick).encode("utf-8"),
+                callback=delivery_report,
             )
             producer.poll(0)
 
@@ -55,5 +56,6 @@ def main():
         print("Flushing final messages...")
         producer.flush()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

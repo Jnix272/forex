@@ -9,11 +9,11 @@ from pipeline.orchestrator import PipelineOrchestrator, PipelineStage, StageStat
 from pipeline.quality_gates import DataQualityGates, create_quality_gates
 
 __all__ = [
+    "DataQualityGates",
     "PipelineConfig",
-    "load_pipeline_config",
     "PipelineOrchestrator",
     "PipelineStage",
     "StageStatus",
-    "DataQualityGates",
     "create_quality_gates",
+    "load_pipeline_config",
 ]

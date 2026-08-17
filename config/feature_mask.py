@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 FEATURE_MASK = {
-    # Core microstructure / momentum – keep high-value ones
+    # Core microstructure / momentum – keep high-value ones  # noqa: RUF003
     "ofi": True,
     "ofi_z": True,
     "ofi_l2": True,
@@ -26,7 +26,6 @@ FEATURE_MASK = {
     "amihud_illiq": True,
     "realized_spread": True,
     "vpin": True,
-
     # Volatility / ATR
     "atr_6": True,
     "atr_20": True,
@@ -39,14 +38,12 @@ FEATURE_MASK = {
     "vol_ratio_6_20": True,
     "vol_ratio_20_60": True,
     "vol_of_vol": True,
-
-    # Bollinger Bands — bb_mid is near-collinear with price; keep width/pct
+    # Bollinger Bands - bb_mid is near-collinear with price; keep width/pct
     "bb_mid": False,
     "bb_upper": True,
     "bb_lower": True,
     "bb_width": True,
     "bb_pct": True,
-
     # Momentum & Returns
     "rsi_14": True,
     "macd": True,
@@ -55,7 +52,6 @@ FEATURE_MASK = {
     "ret_5": True,
     "ret_20": True,
     "ret_60": True,
-
     # VWAP / Breakout & Spread
     "breakout_pressure": True,
     "liquidity_vacuum": True,
@@ -66,7 +62,6 @@ FEATURE_MASK = {
     "spread_widening_5m": True,
     "spread_widening_20m": True,
     "cost_to_atr": True,
-
     # Market Regime / Tradeability
     "adx_14": True,
     "chop_index": True,
@@ -78,7 +73,6 @@ FEATURE_MASK = {
     "hurst_exponent": True,
     "noise_to_signal_60": True,
     "trailing_volatility_60": True,
-
     # Higher-timeframe context
     "ret_5m": True,
     "rsi_5m": True,
@@ -98,28 +92,23 @@ FEATURE_MASK = {
     "trend_slope_1h": True,
     "distance_to_vwap_1h": True,
     "volatility_regime_1h": True,
-
-    # Temporal & Latency — enable for RL reward labeling (latency penalty)
+    # Temporal & Latency - enable for RL reward labeling (latency penalty)
     "time_sin": True,
     "time_cos": True,
     "day_sin": True,
     "day_cos": True,
     "london_ny": True,
     "expected_latency_ms": True,
-
-    # Advanced groups — sparse / optional exotic cross-breaks off by default
+    # Advanced groups - sparse / optional exotic cross-breaks off by default
     "carry_spot_forward": False,
     "yield_curve_slope": True,
     "corr_break_gold_DXY": False,
-
     # Sentiment tiers
     "sentiment_raw": True,
     "sentiment_decayed": True,
-
     # FinBERT projection (8 dims = SENTIMENT["finbert_proj_dim"] from settings.py)
     **{f"fb_{i}": True for i in range(8)},
-
-    # News & Economic Calendar — pre/post are redundant with news_ok timing
+    # News & Economic Calendar - pre/post are redundant with news_ok timing
     "eco_surprise": True,
     "eco_revision": True,
     "news_ok": True,
@@ -132,7 +121,6 @@ FEATURE_MASK = {
     "cat_growth": True,
     "cat_geopolitical": True,
     "cat_commentary": True,
-
     # News missingness / staleness tracking (drift detection)
     "sentiment_decayed_missing": True,
     "sentiment_decayed_staleness": True,
@@ -140,13 +128,11 @@ FEATURE_MASK = {
     "eco_surprise_staleness": True,
     "buzz_missing": False,
     "buzz_staleness": False,
-
     # COT Features
     "cot_net_hf": True,
     "cot_net_comm": True,
     "cot_hf_mom_4w": True,
     "cot_extreme": True,
-
     # Macro Spreads
     "spread_us_de": True,
     "spread_us_jp": True,
@@ -157,7 +143,6 @@ FEATURE_MASK = {
     "spread_de_gb": True,
     "spread_de_jp": True,
     "spread_us_ch": True,
-
     # Macro Carry Signals
     "carry_eur": True,
     "carry_jpy": True,
@@ -168,12 +153,10 @@ FEATURE_MASK = {
     "carry_eurgbp": True,
     "carry_eurjpy": True,
     "carry_chf": True,
-
     # Macro Yield Momentum & Volatility
     "yield_momentum_5d": True,
     "yield_momentum_20d": True,
     "yield_vol_20d": True,
-
     # Volume profile / volatility clock (built by FeatureEngineer)
     "vp_poc_pos": True,
     "vp_poc_dist": True,
@@ -190,14 +173,32 @@ FEATURE_MASK = {
 
 # Always retained when present (market / join keys). Not curriculum-staged.
 # asia_london is labeling-only aux (dropped from X via drop_unlisted unless listed).
-_MASK_ALLOWLIST: frozenset[str] = frozenset({
-    "open", "high", "low", "close", "mid_close", "volume",
-    "bid_close", "ask_close", "bid_open", "ask_open",
-    "timestamp_utc", "pair", "session_label", "regime_class", "regime_label",
-    "no_trade_score",
-    # Auxiliary joining / labeling columns (safe to retain but not curriculum-staged)
-    "mid", "spread", "asia_london", "london_ny", "time_idx",
-})
+_MASK_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "mid_close",
+        "volume",
+        "bid_close",
+        "ask_close",
+        "bid_open",
+        "ask_open",
+        "timestamp_utc",
+        "pair",
+        "session_label",
+        "regime_class",
+        "regime_label",
+        "no_trade_score",
+        # Auxiliary joining / labeling columns (safe to retain but not curriculum-staged)
+        "mid",
+        "spread",
+        "asia_london",
+        "london_ny",
+        "time_idx",
+    }
+)
 
 
 def enabled_feature_names(mask: dict[str, bool] | None = None) -> list[str]:
@@ -233,7 +234,7 @@ def apply_feature_mask(
     drop = [c for c in cols if m.get(c) is False]
     if drop_unlisted:
         keep = {k for k, v in m.items() if v} | _MASK_ALLOWLIST
-        # Multipair schemas use ``PAIR::feature`` — keep when base is allowed.
+        # Multipair schemas use ``PAIR::feature`` - keep when base is allowed.
         for c in cols:
             if c in drop:
                 continue

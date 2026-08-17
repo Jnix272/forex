@@ -4,6 +4,7 @@ Scrape ForexLive headlines via Playwright.
 Primary: intercept homepage/API JSON responses.
 Fallback: parse article links from the rendered DOM (site layout changes often).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -150,11 +151,11 @@ def main() -> None:
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(2500)
             scrape_dom(page)
-            print(f"Scroll {scrolls+1}/{max_scrolls} | {len(all_data)} articles", flush=True)
+            print(f"Scroll {scrolls + 1}/{max_scrolls} | {len(all_data)} articles", flush=True)
             if len(all_data) == prev:
                 stagnant += 1
                 if stagnant >= 3:
-                    print("No new articles for 3 scrolls — stopping.", flush=True)
+                    print("No new articles for 3 scrolls - stopping.", flush=True)
                     break
             else:
                 stagnant = 0

@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from kafka import KafkaConsumer, KafkaProducer
+
     KAFKA = True
 except ImportError:
     KAFKA = False
@@ -20,17 +21,20 @@ from features.finbert_sentiment import SentimentPipeline
 # Zero-shot classification for event tagging
 try:
     from transformers import pipeline
+
     TRANSFORMERS = True
 except ImportError:
     TRANSFORMERS = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+
 class StreamingNewsEnricher:
     """
     Consumes raw news, computes FinBERT sentiment and DistilBERT event classification,
     and publishes the enriched payload to be ingested by the TimescaleDB consumer.
     """
+
     def __init__(self, raw_topic="forex.raw_news", enriched_topic="forex.news", servers="localhost:9092"):
         self.raw_topic = raw_topic
         self.enriched_topic = enriched_topic
@@ -50,11 +54,10 @@ class StreamingNewsEnricher:
                 self.raw_topic,
                 bootstrap_servers=self.servers,
                 group_id="news_enricher",
-                value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+                value_deserializer=lambda x: json.loads(x.decode("utf-8")),
             )
             self.producer = KafkaProducer(
-                bootstrap_servers=self.servers,
-                value_serializer=lambda x: json.dumps(x).encode('utf-8')
+                bootstrap_servers=self.servers, value_serializer=lambda x: json.dumps(x).encode("utf-8")
             )
         else:
             logging.warning("kafka-python not installed. Running in mock mode.")
@@ -69,8 +72,10 @@ class StreamingNewsEnricher:
 
         if self.event_classifier:
             try:
-                res = self.event_classifier(headline, candidate_labels=["macroeconomic policy decision", "routine market news"])
-                if res['labels'][0] == "macroeconomic policy decision" and res['scores'][0] > 0.6:
+                res = self.event_classifier(
+                    headline, candidate_labels=["macroeconomic policy decision", "routine market news"]
+                )
+                if res["labels"][0] == "macroeconomic policy decision" and res["scores"][0] > 0.6:
                     return True
             except Exception as e:
                 logging.error(f"Classification error: {e}")
@@ -102,7 +107,7 @@ class StreamingNewsEnricher:
             "headline": headline,
             "sentiment_score": sentiment_score,
             "finbert_embedding": embedding,
-            "is_high_impact": high_impact
+            "is_high_impact": high_impact,
         }
 
         if KAFKA:
@@ -121,9 +126,7 @@ class StreamingNewsEnricher:
                 self._emb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
                 self._emb_model = AutoModel.from_pretrained("ProsusAI/finbert")
                 self._emb_model.eval()
-            inputs = self._emb_tok(
-                headline, padding=True, truncation=True, max_length=128, return_tensors="pt"
-            )
+            inputs = self._emb_tok(headline, padding=True, truncation=True, max_length=128, return_tensors="pt")
             with torch.no_grad():
                 out = self._emb_model(**inputs)
                 vec = out.last_hidden_state[:, 0, :].cpu().numpy().reshape(-1)
@@ -135,9 +138,7 @@ class StreamingNewsEnricher:
             padded[: vec.size] = vec
             return padded.tolist()
         except Exception as e:
-            logging.warning(
-                "FinBERT embedding unavailable (%s); using sentiment-score vector", e
-            )
+            logging.warning("FinBERT embedding unavailable (%s); using sentiment-score vector", e)
             return [float(sentiment_score)] * dim
 
     def run(self):
@@ -149,6 +150,7 @@ class StreamingNewsEnricher:
 
         for message in self.consumer:
             self.process_message(message.value)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

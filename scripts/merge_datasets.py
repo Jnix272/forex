@@ -24,7 +24,7 @@ def main():
         "forecast": pl.Utf8,
         "source": pl.Utf8,
         "url": pl.Utf8,
-        "sentiment_score": pl.Utf8
+        "sentiment_score": pl.Utf8,
     }
 
     lazy_frames = []
@@ -54,25 +54,20 @@ def main():
 
     # String comparison is incredibly fast and memory efficient for ISO dates.
     # Drop completely invalid rows first, then filter for >= 2003
-    master_lf = master_lf.filter(
-        pl.col("timestamp_utc").is_not_null()
-    ).filter(
-        pl.col("timestamp_utc") >= "2003-01-01"
-    )
+    master_lf = master_lf.filter(pl.col("timestamp_utc").is_not_null()).filter(pl.col("timestamp_utc") >= "2003-01-01")
 
     # Sort chronologically
     master_lf = master_lf.sort("timestamp_utc")
 
-    # PIPE-010: Sink to compressed Parquet instead of flat CSV (10-50× faster reads)
+    # PIPE-010: Sink to compressed Parquet instead of flat CSV (10-50x faster reads)
     # Add year column for optional partitioning
-    master_lf = master_lf.with_columns(
-        pl.col("timestamp_utc").str.slice(0, 4).alias("year")
-    )
+    master_lf = master_lf.with_columns(pl.col("timestamp_utc").str.slice(0, 4).alias("year"))
     print(f"Executing graph and streaming to {output_file}...")
     master_lf.sink_parquet(output_file, compression="zstd")
 
     elapsed = time.time() - start_time
     print(f"Merge completed successfully in {elapsed:.2f} seconds!")
+
 
 if __name__ == "__main__":
     main()

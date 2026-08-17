@@ -2,6 +2,7 @@
 Tests for cross-asset factor model (Improvement #2):
 PCA/ICA factors, Granger causality, lead-lag network.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -38,6 +39,7 @@ def _lead_lag_panel(n=600, seed=7, lag=2):
 # ---------------------------------------------------------------------------
 # Granger causality (vs statsmodels reference)
 # ---------------------------------------------------------------------------
+
 
 def test_granger_f_test_matches_statsmodels_significant():
     rng = np.random.default_rng(0)
@@ -80,9 +82,9 @@ def test_granger_f_test_constant_inputs_return_one():
 # Rolling factor scores (PCA)
 # ---------------------------------------------------------------------------
 
+
 def test_pca_first_factor_dominates_common_factor_panel():
-    F = rolling_factor_scores(_common_factor_panel(), n_factors=3, method="pca",
-                              window=120, step=10)
+    F = rolling_factor_scores(_common_factor_panel(), n_factors=3, method="pca", window=120, step=10)
     tail = F.tail(100)
     assert tail["factor_1_vev"].mean() > 0.9
     assert tail["factor_1_vev"].mean() > tail["factor_2_vev"].mean()
@@ -93,8 +95,9 @@ def test_pca_output_shape_and_alignment():
     rets = _common_factor_panel()
     F = rolling_factor_scores(rets, n_factors=3, window=120, step=10)
     assert len(F) == len(rets)
-    assert {"factor_1_score", "factor_2_score", "factor_3_score",
-            "factor_1_vev", "factor_total_vev"}.issubset(F.columns)
+    assert {"factor_1_score", "factor_2_score", "factor_3_score", "factor_1_vev", "factor_total_vev"}.issubset(
+        F.columns
+    )
     assert "factor_load_1_A0" in F.columns
     assert F.tail(100).isna().sum().sum() == 0
     # leading rows before first full window are zero
@@ -119,9 +122,9 @@ def test_pca_single_asset_returns_zeros():
 # Lead-lag network
 # ---------------------------------------------------------------------------
 
+
 def test_leadlag_detects_known_lag():
-    LL = lead_lag_network(_lead_lag_panel(lag=2), max_lag=5, window=120, step=10,
-                          min_abs_corr=0.05)
+    LL = lead_lag_network(_lead_lag_panel(lag=2), max_lag=5, window=120, step=10, min_abs_corr=0.05)
     tail = LL.tail(50)
     assert tail["leadlag_lead_lag_B"].max() == 2.0
     assert tail["leadlag_lead_corr_B"].max() > 0.5
@@ -133,8 +136,13 @@ def test_leadlag_output_shape():
     rets = _lead_lag_panel()
     LL = lead_lag_network(rets, max_lag=3, window=120, step=10)
     assert len(LL) == len(rets)
-    assert {"leadlag_lead_corr_A", "leadlag_lead_lag_A", "leadlag_outdegree_A",
-            "leadlag_indegree_B", "leadlag_density"}.issubset(LL.columns)
+    assert {
+        "leadlag_lead_corr_A",
+        "leadlag_lead_lag_A",
+        "leadlag_outdegree_A",
+        "leadlag_indegree_B",
+        "leadlag_density",
+    }.issubset(LL.columns)
     assert LL.tail(100).isna().sum().sum() == 0
 
 
@@ -147,6 +155,7 @@ def test_leadlag_single_asset():
 # ---------------------------------------------------------------------------
 # Granger lead scores (rolling)
 # ---------------------------------------------------------------------------
+
 
 def test_granger_scores_detect_best_predictor():
     rets = _lead_lag_panel(lag=2)
@@ -178,6 +187,7 @@ def test_granger_scores_single_asset():
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
+
 
 def test_build_cross_asset_factors_all_columns():
     rets = pd.concat([_common_factor_panel(), _lead_lag_panel().drop(columns=["A", "C"])], axis=1)

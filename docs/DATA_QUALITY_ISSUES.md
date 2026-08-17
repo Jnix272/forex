@@ -98,9 +98,7 @@ Configurable via `ForexDataPipeline(spread_cap_multiplier=3.0)` (default 3x medi
 
 ```python
 # In sentiment_tiers():
-df = df.with_columns([
-    pl.col("sentiment").fill_null(0.0).alias("sentiment_raw")
-])
+df = df.with_columns([pl.col("sentiment").fill_null(0.0).alias("sentiment_raw")])
 ```
 
 This ensures the model's news features treat missing sentiment as neutral (0) rather than NaN.
@@ -140,13 +138,17 @@ from data.data_ingestion import ForexDataPipeline, filter_embargo_gaps
 import polars as pl
 
 # Test embargo filtering
-df = pl.DataFrame({
-    "timestamp_utc": pl.datetime_range(
-        start="2018-11-20", end="2019-01-05", interval="1h", time_zone="UTC"
-    ),
-    "open": 1.3, "high": 1.31, "low": 1.29, "close": 1.305,
-    "volume": 1000, "spread_avg": 0.0001
-})
+df = pl.DataFrame(
+    {
+        "timestamp_utc": pl.datetime_range(start="2018-11-20", end="2019-01-05", interval="1h", time_zone="UTC"),
+        "open": 1.3,
+        "high": 1.31,
+        "low": 1.29,
+        "close": 1.305,
+        "volume": 1000,
+        "spread_avg": 0.0001,
+    }
+)
 
 filtered = filter_embargo_gaps(df, "GBPUSD")
 # Should have gap from Nov 23 - Jan 2 removed

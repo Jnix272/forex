@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from inference._scaler_load import apply_inference_scaler, load_inference_scaler  # noqa: E402
+from inference._scaler_load import apply_inference_scaler, load_inference_scaler
 
 try:
     from sklearn.preprocessing import StandardScaler  # type: ignore
@@ -91,7 +91,7 @@ def test_apply_inference_scaler_handles_nan_inf():
         pytest.skip("sklearn not available")
     s = StandardScaler()
     s.fit(np.array([[0.0], [1.0]]))
-    raw = np.array([[np.nan, np.inf, -np.inf, 0.5]], dtype=np.float32)
+    np.array([[np.nan, np.inf, -np.inf, 0.5]], dtype=np.float32)
     # scaler has 1 feature; reshape raw to (1, 1) for an n_features=1 fallback test
     raw_2d = np.array([[np.nan], [np.inf], [-np.inf], [0.5]], dtype=np.float32)
     out = apply_inference_scaler(s, raw_2d)
@@ -125,7 +125,7 @@ def test_pytorch_engine_applies_scaler_when_cache_path_set(tmp_path: Path):
             return self.lin(x)
 
     model = _SimpleModel(n_features)
-    
+
     # Materialise a checkpoint at production_best.pt and a sidecar config
     # file pointing at the cache path. Use "transformer" as model name in config
     # so the training factory can build something, but we'll replace it.
@@ -144,6 +144,7 @@ def test_pytorch_engine_applies_scaler_when_cache_path_set(tmp_path: Path):
         "dropout": 0.0,
     }
     import json
+
     (ckpt_dir / "production_best_config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
     eng = PyTorchInferenceEngine(
@@ -163,14 +164,14 @@ def test_pytorch_engine_applies_scaler_when_cache_path_set(tmp_path: Path):
     out1 = eng.predict_proba(window)
     out2 = eng.predict_proba(window)
     np.testing.assert_allclose(out1, out2, atol=1e-5)
-    
+
     # Also verify the scaler actually transforms the data by comparing
     # with direct scaler transform
-    expected_scaled = eng.scaler.transform(np.full((3, n_features), 5.0))
+    eng.scaler.transform(np.full((3, n_features), 5.0))
     # The engine should have internally transformed the window before feeding to model
     # We can't easily intercept the model input, but we can verify the scaler is loaded
-    assert hasattr(eng.scaler, 'mean_')
-    assert hasattr(eng.scaler, 'scale_')
+    assert hasattr(eng.scaler, "mean_")
+    assert hasattr(eng.scaler, "scale_")
     assert eng.scaler.mean_.shape == (n_features,)
     assert eng.scaler.scale_.shape == (n_features,)
 
@@ -185,6 +186,7 @@ def test_pytorch_engine_raises_on_schema_hash_mismatch(tmp_path: Path):
     except ImportError:
         pytest.skip("torch not available")
     import json
+
     from inference.pytorch_inference import PyTorchInferenceEngine
 
     n_features = 4
@@ -194,7 +196,10 @@ def test_pytorch_engine_raises_on_schema_hash_mismatch(tmp_path: Path):
     ckpt_dir.mkdir(exist_ok=True)
 
     from models.architectures import build_model
-    model = build_model("transformer", input_size=n_features, seq_len=3, hidden_size=16, num_layers=1, nhead=2, dropout=0.0)
+
+    model = build_model(
+        "transformer", input_size=n_features, seq_len=3, hidden_size=16, num_layers=1, nhead=2, dropout=0.0
+    )
 
     torch.save({"state_dict": model.state_dict()}, ckpt_dir / "production_best.pt")
     cfg = {
@@ -210,7 +215,7 @@ def test_pytorch_engine_raises_on_schema_hash_mismatch(tmp_path: Path):
     }
     (ckpt_dir / "production_best_config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="scaler|feature|schema"):
+    with pytest.raises(RuntimeError, match="scaler|feature|schema"):  # noqa: RUF043
         PyTorchInferenceEngine(
             checkpoint_path=str(ckpt_dir / "production_best.pt"),
             model_name="transformer",

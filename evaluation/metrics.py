@@ -3,21 +3,21 @@ Evaluation Module: Performance Metrics (Improvement #2)
 =======================================================
 Robust strategy-evaluation metrics beyond raw Sharpe:
 
-  * Probabilistic Sharpe Ratio (PSR) — Bailey & López de Prado; the probability
+  * Probabilistic Sharpe Ratio (PSR) - Bailey & López de Prado; the probability
     that the true Sharpe exceeds a benchmark SR*, adjusting for non-Gaussian
     skew/kurtosis.
-  * Deflated Sharpe Ratio (DSR) — Bailey–López de Prado multiple-trials
+  * Deflated Sharpe Ratio (DSR) - Bailey–López de Prado multiple-trials
     correction: inflate the benchmark by the number of trials actually run.
-  * Calmar ratio — CAGR / |max drawdown|.
-  * Omega ratio — probability-weighted gain/loss ratio above a threshold.
-  * Tail ratio — 95th / 5th percentile of returns (upside/downside).
+  * Calmar ratio - CAGR / |max drawdown|.
+  * Omega ratio - probability-weighted gain/loss ratio above a threshold.
+  * Tail ratio - 95th / 5th percentile of returns (upside/downside).
   * Sortino + downside deviation.
   * Minimum backtest length for a given SR to be significant at confidence.
 
 All functions accept a return series and (where relevant) a benchmark Sharpe;
 ``backtest_metrics`` accepts a backtest-like object exposing
 ``results_df``/``_trade_pnls`` or a DataFrame with a return column.
-"""
+"""  # noqa: RUF002
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ try:
     from scipy.stats import kurtosis as _kurtosis_fn
     from scipy.stats import norm
     from scipy.stats import skew as _skew_fn
+
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
@@ -53,28 +54,43 @@ def _norm_ppf(p: float) -> float:
     # Abramowitz-Stegun approximation for the probit function.
     if not 0.0 < p < 1.0:
         return math.inf if p >= 1.0 else -math.inf
-    a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2,
-         1.383577518672690e2, -3.066479806614716e1, 2.506628277459239]
-    b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2,
-         6.680131188771972e1, -1.328068155288572e1]
-    c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838,
-         -2.549732539343734, 4.374664141464968, 2.938163982698783]
-    d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996,
-         3.754408661907416]
+    a = [
+        -3.969683028665376e1,
+        2.209460984245205e2,
+        -2.759285104469687e2,
+        1.383577518672690e2,
+        -3.066479806614716e1,
+        2.506628277459239,
+    ]
+    b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1]
+    c = [
+        -7.784894002430293e-3,
+        -3.223964580411365e-1,
+        -2.400758277161838,
+        -2.549732539343734,
+        4.374664141464968,
+        2.938163982698783,
+    ]
+    d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416]
     plow = 0.02425
-    phi = lambda x: math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)  # noqa: E731
+    lambda x: math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
     if p < plow:
         q = math.sqrt(-2.0 * math.log(p))
-        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
     if p <= 1.0 - plow:
         q = p - 0.5
         r = q * q
-        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
-               (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        return (
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+            * q
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        )
     q = math.sqrt(-2.0 * math.log(1.0 - p))
-    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-           ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+        (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+    )
 
 
 def sharpe_ratio(returns, annual_factor: float = 252) -> float:
@@ -129,12 +145,12 @@ def deflated_sharpe_ratio(
     ``n_trials`` is the number of strategy/trial combinations actually tested
     during model selection. ``variance_of_trials`` is the variance of the
     cross-sectional Sharpe distribution (expected max of N Gaussians when None).
-    """
+    """  # noqa: RUF002
     r = _as_returns(returns)
     n = r.size
     if n < 3:
         return 0.5
-    sr = sharpe_ratio(r, annual_factor)
+    sharpe_ratio(r, annual_factor)
 
     # Benchmark Sharpe inflation from multiple trials:
     #   E[max of N ~ N(0,1)] ~ sqrt(2 ln N)  (per-period basis).
@@ -146,8 +162,9 @@ def deflated_sharpe_ratio(
     else:
         sr_benchmark = _expected_max_of_normals(n_trials) / math.sqrt(annual_factor)
 
-    return probabilistic_sharpe_ratio(r, benchmark_sharpe=sr_benchmark * math.sqrt(annual_factor),
-                                      annual_factor=annual_factor)
+    return probabilistic_sharpe_ratio(
+        r, benchmark_sharpe=sr_benchmark * math.sqrt(annual_factor), annual_factor=annual_factor
+    )
 
 
 def _expected_max_of_normals(n: int) -> float:
@@ -159,7 +176,11 @@ def _expected_max_of_normals(n: int) -> float:
         for _ in range(2, n + 1):
             mu += _norm_pdf(mu) / _norm_cdf(mu)
         return mu
-    return math.sqrt(2.0 * math.log(n)) - (math.log(math.log(n)) + 2.0 * math.log(4.0 * math.pi)) / (2.0 * math.sqrt(2.0 * math.log(n))) + 0.5 / math.sqrt(2.0 * math.log(n))
+    return (
+        math.sqrt(2.0 * math.log(n))
+        - (math.log(math.log(n)) + 2.0 * math.log(4.0 * math.pi)) / (2.0 * math.sqrt(2.0 * math.log(n)))
+        + 0.5 / math.sqrt(2.0 * math.log(n))
+    )
 
 
 def _norm_pdf(x: float) -> float:
@@ -198,7 +219,7 @@ def downside_deviation(returns, target: float = 0.0) -> float:
     downside = np.minimum(r - target, 0.0)
     if not np.any(downside):
         return 0.0
-    return float(math.sqrt(np.mean(downside ** 2)))
+    return float(math.sqrt(np.mean(downside**2)))
 
 
 def sortino_ratio(returns, annual_factor: float = 252, target: float = 0.0) -> float:
@@ -212,7 +233,7 @@ def sortino_ratio(returns, annual_factor: float = 252, target: float = 0.0) -> f
 
 
 def omega_ratio(returns, threshold: float = 0.0) -> float:
-    """Omega = ∫(1−F(x))dx / ∫F(x)dx above/below the threshold."""
+    """Omega = ∫(1−F(x))dx / ∫F(x)dx above/below the threshold."""  # noqa: RUF002
     r = _as_returns(returns)
     if r.size == 0:
         return 1.0
@@ -247,7 +268,7 @@ def minimum_backtest_length(
     statistically distinguishable from 0 at ``confidence``."""
     z = _norm_ppf(confidence)
     sr_period = target_sharpe / math.sqrt(annual_factor)
-    num = (1.0 - skewness * sr_period + (kurtosis - 1.0) / 4.0 * sr_period ** 2)
+    num = 1.0 - skewness * sr_period + (kurtosis - 1.0) / 4.0 * sr_period**2
     denom = sr_period * sr_period
     if denom <= 0:
         return math.inf
@@ -301,7 +322,11 @@ def _extract_returns(backtest: Any) -> np.ndarray | None:
         trades = backtest.trades
         pnls = []
         for t in trades:
-            pnls.append(t.get("pnl_usd", t.get("pnl", 0)) if isinstance(t, dict) else getattr(t, "pnl_usd", getattr(t, "pnl", 0)))
+            pnls.append(
+                t.get("pnl_usd", t.get("pnl", 0))
+                if isinstance(t, dict)
+                else getattr(t, "pnl_usd", getattr(t, "pnl", 0))
+            )
         return np.asarray(pnls, dtype=np.float64) / 10_000.0
     if hasattr(backtest, "columns") and "returns" in backtest.columns:
         return backtest["returns"].to_numpy(dtype=np.float64)
@@ -311,6 +336,7 @@ def _extract_returns(backtest: Any) -> np.ndarray | None:
 @dataclass
 class MetricReport:
     """Typed convenience wrapper around the dict returned by backtest_metrics."""
+
     values: dict[str, float]
 
     @property

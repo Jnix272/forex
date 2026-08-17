@@ -26,6 +26,7 @@ def _feat_frame(**overrides) -> pd.DataFrame:
 
 def test_no_trade_gate_disabled_by_default():
     from trading.live_guards import NoTradeZoneGate
+
     gate = NoTradeZoneGate()
     res = gate.check(_feat_frame())
     assert not res.blocked
@@ -34,6 +35,7 @@ def test_no_trade_gate_disabled_by_default():
 
 def test_no_trade_gate_blocks_high_score():
     from trading.live_guards import NoTradeZoneGate
+
     gate = NoTradeZoneGate(threshold=0.5, enabled=True)
     df = _feat_frame(no_trade_score=0.95)
     res = gate.check(df)
@@ -43,6 +45,7 @@ def test_no_trade_gate_blocks_high_score():
 
 def test_no_trade_gate_allows_low_score():
     from trading.live_guards import NoTradeZoneGate
+
     gate = NoTradeZoneGate(threshold=0.5, enabled=True)
     df = _feat_frame(no_trade_score=0.1)
     res = gate.check(df)
@@ -51,6 +54,7 @@ def test_no_trade_gate_allows_low_score():
 
 def test_no_trade_gate_heuristic_fallback():
     from trading.live_guards import NoTradeZoneGate
+
     gate = NoTradeZoneGate(threshold=0.5, enabled=True)
     df = _feat_frame()
     res = gate.check(df)
@@ -78,7 +82,7 @@ def test_live_safety_blocks_wide_spread():
 
 
 def test_live_safety_jpy_pip_scale():
-    """USDJPY 1-pip spread must not be treated as 100 pips (×10000 bug)."""
+    """USDJPY 1-pip spread must not be treated as 100 pips (x10000 bug)."""
     gate = LiveSafetyGate(
         LiveSafetyConfig(max_spread_pips=2.0),
         starting_equity=10_000.0,
@@ -121,22 +125,29 @@ def test_paper_fallback_requires_explicit_flag():
     class _FailBroker(BrokerInterface):
         def connect(self) -> bool:
             return False
+
         def disconnect(self) -> None:
             return None
+
         def get_bid_ask(self, pair: str):
             return 1.1, 1.10005
+
         def get_account(self) -> dict:
             return {"equity": 10_000.0}
+
         def market_order(self, pair: str, side: str, lots: float) -> dict:
             return {"ok": True}
+
         def close_position(self, pair: str) -> dict:
             return {"ok": True}
+
         def get_positions(self):
             return {}
 
     class _DummyAgent:
         def set_agent_state(self, **kwargs):
             pass
+
         def select_action(self, obs):
             return 1
 

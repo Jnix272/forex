@@ -35,6 +35,7 @@ from scipy import stats
 # Internal helpers
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def _refit_indices(n: int, window: int, step: int) -> list[int]:
     """Refit row indices: rows ``window..n-1`` every ``step`` (incl. last)."""
     if n <= window:
@@ -75,6 +76,7 @@ def _ffill_refits(n: int, positions: list[int], rows: list[np.ndarray]) -> np.nd
 # 1. PCA / ICA common-factor model
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def rolling_factor_scores(
     returns: pd.DataFrame,
     n_factors: int = 3,
@@ -95,9 +97,12 @@ def rolling_factor_scores(
     n, p = returns.shape
     n_comp = max(1, min(n_factors, max(p - 1, 1)))
     load_cols = [f"factor_load_{k}_{a}" for k in range(1, n_comp + 1) for a in assets]
-    cols = ([f"factor_{k}_score" for k in range(1, n_comp + 1)] +
-            [f"factor_{k}_vev" for k in range(1, n_comp + 1)] +
-            load_cols + ["factor_total_vev"])
+    cols = (
+        [f"factor_{k}_score" for k in range(1, n_comp + 1)]
+        + [f"factor_{k}_vev" for k in range(1, n_comp + 1)]
+        + load_cols
+        + ["factor_total_vev"]
+    )
 
     if p < 2:
         return pd.DataFrame(np.zeros((n, len(cols))), columns=cols, index=returns.index)
@@ -105,11 +110,12 @@ def rolling_factor_scores(
     positions = _refit_indices(n, window, step)
     rows: list[np.ndarray] = []
     for t in positions:
-        W = returns.iloc[max(0, t - window + 1): t + 1].fillna(0.0).to_numpy(dtype=float)
+        W = returns.iloc[max(0, t - window + 1) : t + 1].fillna(0.0).to_numpy(dtype=float)
         X = _stdize(W)
         if method == "ica":
             try:
                 from sklearn.decomposition import FastICA
+
                 ica = FastICA(n_components=n_comp, max_iter=2000, tol=1e-8, random_state=0)
                 scores = ica.fit_transform(X)[:, :n_comp]
                 loads = ica.mixing_.T
@@ -140,12 +146,13 @@ def _shared_var(scores: np.ndarray, X: np.ndarray) -> float:
     """Variance explained: mean squared Pearson corr of factor with each asset."""
     c = np.array([np.corrcoef(scores, X[:, j])[0, 1] for j in range(X.shape[1])])
     c = np.nan_to_num(c)
-    return float(np.mean(c ** 2))
+    return float(np.mean(c**2))
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Granger causality (manual joint F-test, validated against statsmodels)
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def _ols_rss(y: np.ndarray, X: np.ndarray) -> float:
     """Residual sum of squares of y on design X (intercept appended)."""
@@ -168,8 +175,8 @@ def granger_f_test(y: np.ndarray, x: np.ndarray, maxlag: int = 1) -> float:
     p = int(maxlag)
     if 2 * p + 2 >= T or np.std(y) < 1e-12 or np.std(x) < 1e-12:
         return 1.0
-    Y = np.stack([y[p - 1 - l: T - 1 - l] for l in range(p)], axis=1)  # y_{t-l}
-    Xl = np.stack([x[p - 1 - l: T - 1 - l] for l in range(p)], axis=1)  # x_{t-l}
+    Y = np.stack([y[p - 1 - l : T - 1 - l] for l in range(p)], axis=1)  # y_{t-l}  # noqa: E741
+    Xl = np.stack([x[p - 1 - l : T - 1 - l] for l in range(p)], axis=1)  # x_{t-l}  # noqa: E741
     y_obs = y[p:]
     rss_r = _ols_rss(y_obs, Y)
     rss_u = _ols_rss(y_obs, np.concatenate([Y, Xl], axis=1))
@@ -207,7 +214,7 @@ def granger_lead_scores(
     positions = _refit_indices(n, window, step)
     rows: list[tuple[np.ndarray, list[str]]] = []
     for t in positions:
-        W = returns.iloc[max(0, t - window + 1): t + 1].fillna(0.0)
+        W = returns.iloc[max(0, t - window + 1) : t + 1].fillna(0.0)
         pvec = np.ones(n_assets)
         names: list[str] = [""] * n_assets
         for i, target in enumerate(assets):
@@ -248,6 +255,7 @@ def granger_lead_scores(
 # 3. Lead-lag network (vectorized lagged cross-correlation)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def lead_lag_network(
     returns: pd.DataFrame,
     max_lag: int = 5,
@@ -266,13 +274,15 @@ def lead_lag_network(
     assets = list(returns.columns)
     n = len(returns)
     n_assets = len(assets)
-    cols = ([f"leadlag_lead_corr_{a}" for a in assets] +
-            [f"leadlag_lead_lag_{a}" for a in assets] +
-            [f"leadlag_follow_corr_{a}" for a in assets] +
-            [f"leadlag_follow_lag_{a}" for a in assets] +
-            [f"leadlag_indegree_{a}" for a in assets] +
-            [f"leadlag_outdegree_{a}" for a in assets] +
-            ["leadlag_density"])
+    cols = (
+        [f"leadlag_lead_corr_{a}" for a in assets]
+        + [f"leadlag_lead_lag_{a}" for a in assets]
+        + [f"leadlag_follow_corr_{a}" for a in assets]
+        + [f"leadlag_follow_lag_{a}" for a in assets]
+        + [f"leadlag_indegree_{a}" for a in assets]
+        + [f"leadlag_outdegree_{a}" for a in assets]
+        + ["leadlag_density"]
+    )
     out = np.zeros((n, len(cols)), dtype=float)
     if n_assets < 2:
         return pd.DataFrame(out, columns=cols, index=returns.index)
@@ -289,7 +299,7 @@ def lead_lag_network(
 def _refit_leadlag(returns: pd.DataFrame, assets, t, max_lag, window, min_abs_corr) -> np.ndarray:
     """Refit lead-lag network on trailing window ending at row t; returns flat row."""
     n_assets = len(assets)
-    W = returns.iloc[max(0, t - window + 1): t + 1].fillna(0.0).to_numpy(dtype=float)
+    W = returns.iloc[max(0, t - window + 1) : t + 1].fillna(0.0).to_numpy(dtype=float)
     X = _stdize(W)
     T = X.shape[0]
     L = int(max_lag)
@@ -299,10 +309,10 @@ def _refit_leadlag(returns: pd.DataFrame, assets, t, max_lag, window, min_abs_co
     out_corr = np.zeros(n_assets)
     out_lag = np.zeros(n_assets, dtype=float)
 
-    for l in range(1, L + 1):
+    for l in range(1, L + 1):  # noqa: E741
         if T - l < 2:
             continue
-        corr = (X[:T - l].T @ X[l:]) / (T - l)   # corr[j,i] = j leads i at lag l
+        corr = (X[: T - l].T @ X[l:]) / (T - l)  # corr[j,i] = j leads i at lag l
         for i in range(n_assets):
             for j in range(n_assets):
                 if j == i:
@@ -329,22 +339,27 @@ def _refit_leadlag(returns: pd.DataFrame, assets, t, max_lag, window, min_abs_co
     n_possible = n_assets * (n_assets - 1)
     density = (indeg.sum() / n_possible) if n_possible else 0.0
 
-    return np.concatenate([
-        np.abs(in_corr), in_lag,
-        np.abs(out_corr), out_lag,
-        indeg, outdeg,
-        [density],
-    ]).astype(float)
+    return np.concatenate(
+        [
+            np.abs(in_corr),
+            in_lag,
+            np.abs(out_corr),
+            out_lag,
+            indeg,
+            outdeg,
+            [density],
+        ]
+    ).astype(float)
 
 
 def _best_dir_corr(X: np.ndarray, i: int, j: int, max_lag: int) -> float:
     """Best (signed) lagged corr that asset i leads asset j across lags."""
     best = 0.0
     T = X.shape[0]
-    for l in range(1, max_lag + 1):
+    for l in range(1, max_lag + 1):  # noqa: E741
         if T - l < 2:
             continue
-        c = float((X[:T - l, i] @ X[l:, j]) / (T - l))
+        c = float((X[: T - l, i] @ X[l:, j]) / (T - l))
         if abs(c) > abs(best):
             best = c
     return best
@@ -353,6 +368,7 @@ def _best_dir_corr(X: np.ndarray, i: int, j: int, max_lag: int) -> float:
 # ════════════════════════════════════════════════════════════════════════════
 # 4. Orchestrator
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def build_cross_asset_factors(
     returns: pd.DataFrame,

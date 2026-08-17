@@ -1,9 +1,9 @@
 import datetime
 
-with open('docs/SESSION_REPORT.md', 'r') as f:
+with open("docs/SESSION_REPORT.md") as f:
     content = f.read()
 
-new_content = f"""## {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Data Leakage & Feature Correctness Fixes (D1-D6)
+new_content = f"""## {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - Data Leakage & Feature Correctness Fixes (D1-D6)
 
 ### Summary
 Addressed several data leakage and feature correctness issues that artificially inflated validation metrics. This included strict PIT (point-in-time) alignment for cross-asset data, causal feature engineering, and appropriate per-fold data scaling.
@@ -30,5 +30,5 @@ Addressed several data leakage and feature correctness issues that artificially 
 
 {content}"""
 
-with open('docs/SESSION_REPORT.md', 'w') as f:
+with open("docs/SESSION_REPORT.md", "w") as f:
     f.write(new_content)

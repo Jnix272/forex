@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 class RegimeRouter(nn.Module):
     """Lightweight regime classifier → model weights."""
+
     def __init__(self, n_models: int, n_regimes: int = 6, hidden: int = 32):
         super().__init__()
         self.n_models = n_models
@@ -30,15 +31,16 @@ class RegimeRouter(nn.Module):
 class RegimeEnsembleMetaLearner(nn.Module):
     """
     Ensemble that weights base models by detected regime.
-    
-    Regime encoding (6 regimes = 3 vol × 2 trend):
+
+    Regime encoding (6 regimes = 3 vol x 2 trend):
     0: low_vol + trending
-    1: low_vol + ranging  
+    1: low_vol + ranging
     2: normal_vol + trending
     3: normal_vol + ranging
     4: high_vol + trending
     5: high_vol + ranging
     """
+
     def __init__(
         self,
         base_models: list[nn.Module],
@@ -50,7 +52,7 @@ class RegimeEnsembleMetaLearner(nn.Module):
         self.regime_features = regime_features
         self.n_models = len(base_models)
         self.n_regimes = n_regimes
-        # Column indices resolved at construction time — stored so forward()
+        # Column indices resolved at construction time - stored so forward()
         # does NOT rely on a fragile "last N columns" assumption.
         self._regime_col_indices: list[int] | None = None  # set via register_feature_schema()
 
@@ -88,17 +90,18 @@ class RegimeEnsembleMetaLearner(nn.Module):
             if self._regime_col_indices is not None:
                 regime_feats = x[:, -1, self._regime_col_indices].to(x.device)
             else:
-                # Fallback with loud warning — schema not registered
+                # Fallback with loud warning - schema not registered
                 import warnings
+
                 warnings.warn(
                     "RegimeEnsembleMetaLearner: feature schema not registered. "
                     "Call register_feature_schema(all_feature_names) after construction. "
                     "Falling back to last-N-columns slice which may be WRONG.",
                     stacklevel=2,
                 )
-                regime_feats = x[:, -1, -len(self.regime_features):].to(x.device)
+                regime_feats = x[:, -1, -len(self.regime_features) :].to(x.device)
 
-        # Get base model predictions (no grad) — guard against NaN outputs
+        # Get base model predictions (no grad) - guard against NaN outputs
         with torch.no_grad():
             base_preds = []
             for model in self.base_models:
@@ -154,11 +157,11 @@ def train_regime_ensemble(
         model.train()
         train_losses = []
 
-        for xb, yb, *extra in train_loader:
+        for xb, yb, *_extra in train_loader:
             xb, yb = xb.to(device), yb.to(device)
 
             # regime_feats extracted inside forward() via registered schema
-            pred, weights, regime_probs = model(xb)
+            pred, _weights, _regime_probs = model(xb)
 
             # MSE loss on continuous reward
             loss = F.mse_loss(pred, yb)
@@ -183,12 +186,14 @@ def train_regime_ensemble(
         model.eval()
         val_losses = []
         with torch.no_grad():
-            for xb, yb, *extra in val_loader:
+            for xb, yb, *_extra in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred, _, _ = model(xb)  # regime_feats resolved inside forward()
                 val_losses.append(F.mse_loss(pred, yb).item())
 
-        print(f"RegimeEnsemble Epoch {epoch}: train_loss={np.mean(train_losses):.4f} val_loss={np.mean(val_losses):.4f}")
+        print(
+            f"RegimeEnsemble Epoch {epoch}: train_loss={np.mean(train_losses):.4f} val_loss={np.mean(val_losses):.4f}"
+        )
 
     return model
 
@@ -203,7 +208,7 @@ def export_regime_ensemble_onnx(
 ) -> None:
     """
     Export regime ensemble to ONNX.
-    
+
     Note: ONNX export requires fixed input shapes. The base models are embedded
     in the forward pass, so we export the routing logic separately.
     """
@@ -235,16 +240,16 @@ def export_regime_ensemble_onnx(
     torch.onnx.export(
         router,
         dummy_regime,
-        output_path.replace('.onnx', '_router.onnx'),
+        output_path.replace(".onnx", "_router.onnx"),
         export_params=True,
         opset_version=opset_version,
         do_constant_folding=True,
-        input_names=['regime_features'],
-        output_names=['model_weights', 'regime_probs'],
+        input_names=["regime_features"],
+        output_names=["model_weights", "regime_probs"],
         dynamic_axes={
-            'regime_features': {0: 'batch'},
-            'model_weights': {0: 'batch'},
-            'regime_probs': {0: 'batch'},
-        }
+            "regime_features": {0: "batch"},
+            "model_weights": {0: "batch"},
+            "regime_probs": {0: "batch"},
+        },
     )
     print(f"Exported regime router to {output_path.replace('.onnx', '_router.onnx')}")

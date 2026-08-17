@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 
 def _git_commit() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(Path(__file__).resolve().parent.parent),
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        ).decode().strip()[:12]
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            .decode()
+            .strip()[:12]
+        )
     except Exception:
         return ""
 
@@ -116,20 +120,14 @@ class DatasetManifest:
 
         if manifest["sequence_length"] != expected_seq_len:
             raise ValueError(
-                f"Cache sequence length ({manifest['sequence_length']}) "
-                f"does not match expected ({expected_seq_len})."
+                f"Cache sequence length ({manifest['sequence_length']}) does not match expected ({expected_seq_len})."
             )
 
         if manifest.get("frequency") != expected_freq:
-            raise ValueError(
-                f"Cache bar_freq ({manifest.get('frequency')}) "
-                f"does not match expected ({expected_freq})."
-            )
+            raise ValueError(f"Cache bar_freq ({manifest.get('frequency')}) does not match expected ({expected_freq}).")
 
         if expected_schema_hash and manifest["schema_hash"] != expected_schema_hash:
-            raise ValueError(
-                "Schema hash mismatch! The features in this cache have been altered."
-            )
+            raise ValueError("Schema hash mismatch! The features in this cache have been altered.")
 
         self.logger.info("Dataset manifest validated successfully.")
         return True
@@ -179,13 +177,14 @@ class DatasetManifest:
         try:
             if p.suffix == ".zarr" or p.is_dir():
                 import zarr
+
                 z = zarr.open(str(p), mode="r")
                 if hasattr(z, "shape"):
                     shape = z.shape
                     content = f"{shape}"
                     if len(shape) >= 1 and shape[0] > 0:
-                        first_row = str(z[0][:min(10, shape[1] if len(shape) > 1 else 1)])
-                        last_row = str(z[-1][:min(10, shape[1] if len(shape) > 1 else 1)])
+                        first_row = str(z[0][: min(10, shape[1] if len(shape) > 1 else 1)])
+                        last_row = str(z[-1][: min(10, shape[1] if len(shape) > 1 else 1)])
                         content += first_row + last_row
                 else:
                     arrays = list(z.arrays()) if hasattr(z, "arrays") else []
@@ -193,6 +192,7 @@ class DatasetManifest:
                     content = str([(name, arr.shape) for name, arr in arrays[:5]])
             elif p.suffix == ".parquet":
                 import pyarrow.parquet as pq
+
                 meta = pq.read_metadata(str(p))
                 shape = (meta.num_rows, meta.num_columns)
                 content = f"{shape}_{meta.serialized_size}"
@@ -238,7 +238,7 @@ class DatasetManifest:
         max_abs_corr: float = 0.3,
     ) -> list[dict]:
         """
-        Flag features that are correlated with forward returns — a sign
+        Flag features that are correlated with forward returns - a sign
         they may contain future information (data leakage).
 
         Returns list of {feature, corr, flagged} dicts.

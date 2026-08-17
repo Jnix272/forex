@@ -11,8 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 
 def validate_pair_coverage(
     pairs: list[str],
@@ -23,14 +21,15 @@ def validate_pair_coverage(
 ) -> tuple[list[str], list[dict]]:
     """
     Validate data coverage for each pair.
-    
+
     Returns:
-        (valid_pairs, coverage_report) — pairs with >= min_years of data, and full report.
+        (valid_pairs, coverage_report) - pairs with >= min_years of data, and full report.
     """
     # Check both raw and compact directories
     raw_path = Path(raw_dir) / data_source
-    if not raw_path.exists():
-        # Fallback to raw directory for backwards compatibility
+    if not raw_path.exists() or not any(d.is_dir() for d in raw_path.iterdir()):
+        # Fallback to raw directory for backwards compatibility - also when the
+        # preferred dir exists but is an empty stub (e.g. data/compact/dukascopy).
         raw_path = Path("data/raw") / data_source
         if not raw_path.exists():
             raise FileNotFoundError(f"Raw data directory not found: {raw_path}")
@@ -41,37 +40,48 @@ def validate_pair_coverage(
     for pair in pairs:
         pair_dir = raw_path / pair.upper().replace("/", "")
         hive_pair_dir = raw_path / "granularity=daily" / f"pair={pair}"
-        
+
         if hive_pair_dir.exists():
             # New Hive partitioned structure
-            years = sorted([int(d.name.replace("year=", "")) for d in hive_pair_dir.iterdir() 
-                          if d.is_dir() and d.name.startswith("year=")])
+            years = sorted(
+                [
+                    int(d.name.replace("year=", ""))
+                    for d in hive_pair_dir.iterdir()
+                    if d.is_dir() and d.name.startswith("year=")
+                ]
+            )
             n_files = len(list(hive_pair_dir.rglob("*.parquet")))
         elif pair_dir.exists():
             # Check for granularity=daily subdirectory (compact structure)
             granularity_dir = pair_dir / "granularity=daily"
             if granularity_dir.exists():
-                years = sorted([int(d.name) for d in granularity_dir.iterdir() 
-                              if d.is_dir() and d.name.isdigit()])
+                years = sorted([int(d.name) for d in granularity_dir.iterdir() if d.is_dir() and d.name.isdigit()])
                 n_files = len(list(granularity_dir.rglob("*.parquet")))
             else:
                 # Fallback to old structure (year directories directly under pair)
-                years = sorted([int(d.name) for d in pair_dir.iterdir() 
-                              if d.is_dir() and d.name.isdigit()])
+                years = sorted([int(d.name) for d in pair_dir.iterdir() if d.is_dir() and d.name.isdigit()])
                 n_files = len(list(pair_dir.rglob("*.parquet")))
         else:
-            reports.append({
-                "pair": pair, "status": "MISSING", "years": 0,
-                "message": f"Pair directory not found: {pair_dir} or {hive_pair_dir}"
-            })
+            reports.append(
+                {
+                    "pair": pair,
+                    "status": "MISSING",
+                    "years": 0,
+                    "message": f"Pair directory not found: {pair_dir} or {hive_pair_dir}",
+                }
+            )
             continue
 
         if not years:
-            reports.append({
-                "pair": pair, "status": "EMPTY", "years": 0,
-                "files": n_files,
-                "message": f"No year directories found in {pair_dir}"
-            })
+            reports.append(
+                {
+                    "pair": pair,
+                    "status": "EMPTY",
+                    "years": 0,
+                    "files": n_files,
+                    "message": f"No year directories found in {pair_dir}",
+                }
+            )
             continue
 
         n_years = len(years)
@@ -81,20 +91,22 @@ def validate_pair_coverage(
         else:
             status = "SKIPPED"
 
-        reports.append({
-            "pair": pair,
-            "status": status,
-            "years": n_years,
-            "year_range": f"{years[0]}-{years[-1]}" if years else "N/A",
-            "files": n_files,
-            "min_years": min_years,
-            "expected_years": expected_years,
-            "message": (
-                f"{status}: {n_years} year(s) of data"
-                + (f" (need >= {min_years} to train)" if n_years < min_years else "")
-                + (f" — shorter than expected {expected_years} years" if status == "LOW" else "")
-            ),
-        })
+        reports.append(
+            {
+                "pair": pair,
+                "status": status,
+                "years": n_years,
+                "year_range": f"{years[0]}-{years[-1]}" if years else "N/A",
+                "files": n_files,
+                "min_years": min_years,
+                "expected_years": expected_years,
+                "message": (
+                    f"{status}: {n_years} year(s) of data"
+                    + (f" (need >= {min_years} to train)" if n_years < min_years else "")
+                    + (f" - shorter than expected {expected_years} years" if status == "LOW" else "")
+                ),
+            }
+        )
 
     return valid_pairs, reports
 
@@ -136,8 +148,8 @@ def validate_news_data(
     combined = path / "historical_news_combined.parquet"
     if combined.exists():
         try:
-            import pyarrow.parquet as pq
             import pandas as pd
+            import pyarrow.parquet as pq
 
             pf = pq.ParquetFile(combined)
             report["stats"]["rows"] = pf.metadata.num_rows
@@ -145,21 +157,21 @@ def validate_news_data(
             report["stats"]["row_groups"] = pf.metadata.num_row_groups
 
             # Check timestamps in first and last row group
-            table = pf.read_row_group(0, columns=['timestamp_utc'])
+            table = pf.read_row_group(0, columns=["timestamp_utc"])
             df = table.to_pandas()
-            ts = pd.to_datetime(df['timestamp_utc'], errors='coerce')
+            ts = pd.to_datetime(df["timestamp_utc"], errors="coerce")
             bad_ts = int(ts.isna().sum())
             if bad_ts > 0:
                 report["issues"].append(
-                    f"BAD_TIMESTAMPS: {bad_ts}/{len(ts)} ({bad_ts/len(ts)*100:.1f}%) "
+                    f"BAD_TIMESTAMPS: {bad_ts}/{len(ts)} ({bad_ts / len(ts) * 100:.1f}%) "
                     f"unparseable timestamps in first row group"
                 )
                 report["stats"]["bad_timestamps"] = bad_ts
 
-            if 'sentiment_score' in pf.schema_arrow.names:
-                table2 = pf.read_row_group(0, columns=['sentiment_score'])
+            if "sentiment_score" in pf.schema_arrow.names:
+                table2 = pf.read_row_group(0, columns=["sentiment_score"])
                 df2 = table2.to_pandas()
-                scores = df2['sentiment_score'].dropna()
+                scores = df2["sentiment_score"].dropna()
                 report["stats"]["sentiment_min"] = float(scores.min()) if len(scores) else None
                 report["stats"]["sentiment_max"] = float(scores.max()) if len(scores) else None
                 report["stats"]["sentiment_mean"] = float(scores.mean()) if len(scores) else None
@@ -176,7 +188,7 @@ def validate_news_data(
 
 def validate_source_directories(
     raw_dir: str = "data/raw",
-    expected_sources: list[str] = None,
+    expected_sources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate that expected source directories exist and are populated."""
     if expected_sources is None:
@@ -196,13 +208,11 @@ def validate_source_directories(
 
     if report["empty"]:
         report["issues"].append(
-            f"EMPTY: {len(report['empty'])} source directories have no data: "
-            + ", ".join(report["empty"])
+            f"EMPTY: {len(report['empty'])} source directories have no data: " + ", ".join(report["empty"])
         )
     if report["missing"]:
         report["issues"].append(
-            f"MISSING: {len(report['missing'])} source directories not found: "
-            + ", ".join(report["missing"])
+            f"MISSING: {len(report['missing'])} source directories not found: " + ", ".join(report["missing"])
         )
 
     if report["issues"]:
@@ -244,7 +254,7 @@ def run_data_coverage_check(
         )
         if len(valid_pairs) < 2:
             report["issues"].append(
-                f"CRITICAL: Only {len(valid_pairs)} pair(s) available — "
+                f"CRITICAL: Only {len(valid_pairs)} pair(s) available - "
                 f"multi-pair training requires at least 2. Run download_data.py first."
             )
     elif any(r["status"] == "LOW" for r in coverage):
@@ -271,9 +281,7 @@ def run_data_coverage_check(
     # 4. Recommendations
     if len(valid_pairs) < len(pairs):
         report["recommendations"].append(
-            "Run: python scripts/download_data.py --pairs " + " ".join(
-                p for p in pairs if p not in valid_pairs
-            )
+            "Run: python scripts/download_data.py --pairs " + " ".join(p for p in pairs if p not in valid_pairs)
         )
     if any(r["status"] == "LOW" for r in coverage):
         report["recommendations"].append(
@@ -296,15 +304,15 @@ def save_coverage_report(report: dict, output_dir: str = "logs"):
 
 def print_coverage_summary(report: dict):
     """Print human-readable coverage summary."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("DATA COVERAGE CHECK")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Pair coverage
-    print(f"\n📊 Pair Coverage:")
+    print("\n📊 Pair Coverage:")
     for r in report["sections"].get("pair_coverage", []):
         icon = {"OK": "✅", "LOW": "⚠️", "SKIPPED": "❌", "MISSING": "❌", "EMPTY": "❌"}.get(r["status"], "?")
-        print(f"  {icon} {r['pair']:8s} — {r['message']}")
+        print(f"  {icon} {r['pair']:8s} - {r['message']}")
 
     # Issues
     issues = report.get("issues", [])
@@ -320,7 +328,7 @@ def print_coverage_summary(report: dict):
     # Recommendations
     recs = report.get("recommendations", [])
     if recs:
-        print(f"\n💡 Recommendations:")
+        print("\n💡 Recommendations:")
         for r in recs:
             print(f"  → {r}")
 
@@ -334,13 +342,18 @@ def print_coverage_summary(report: dict):
     if sources.get("empty"):
         print(f"\n📁 Empty dirs: {', '.join(sources['empty'])}")
 
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Run data coverage check")
-    parser.add_argument("--pairs", nargs="+", default=["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "NZDUSD", "USDCAD", "USDCHF"])
+    parser.add_argument(
+        "--pairs",
+        nargs="+",
+        default=["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "NZDUSD", "USDCAD", "USDCHF"],
+    )
     parser.add_argument("--data-source", default="dukascopy")
     parser.add_argument("--min-years", type=int, default=2)
     parser.add_argument("--expected-years", type=int, default=18)
@@ -349,10 +362,11 @@ if __name__ == "__main__":
     report = run_data_coverage_check(args, min_years=args.min_years, expected_years=args.expected_years)
     print_coverage_summary(report)
     save_coverage_report(report)
-    
+
     # Fail if insufficient pairs
     valid_pairs = report.get("valid_pairs", [])
     if len(valid_pairs) < len(args.pairs):
         import sys
+
         print(f"ERROR: {len(args.pairs) - len(valid_pairs)} pairs failed coverage requirements.", file=sys.stderr)
         sys.exit(1)

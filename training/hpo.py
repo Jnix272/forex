@@ -23,6 +23,7 @@ try:
     import optuna
     from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
     from optuna.samplers import TPESampler
+
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
@@ -31,6 +32,7 @@ except ImportError:
 @dataclass
 class HPOConfig:
     """Configuration for HPO algorithms."""
+
     population_size: int = 8
     perturbation_interval: int = 10
     perturbation_factor: float = 0.2
@@ -59,13 +61,15 @@ class HPOConfig:
     checkpoint_interval: int = 5
 
     # Default search space used by HyperBand / BOHB suggest_params
-    search_space: dict[str, Any] = field(default_factory=lambda: {
-        "lr": {"type": "loguniform", "low": 1e-5, "high": 1e-2},
-        "dropout": {"type": "uniform", "low": 0.1, "high": 0.5},
-        "hidden_size": {"type": "choice", "values": [128, 256, 512]},
-        "batch_size": {"type": "choice", "values": [64, 128, 256, 512]},
-        "weight_decay": {"type": "loguniform", "low": 1e-6, "high": 1e-2},
-    })
+    search_space: dict[str, Any] = field(
+        default_factory=lambda: {
+            "lr": {"type": "loguniform", "low": 1e-5, "high": 1e-2},
+            "dropout": {"type": "uniform", "low": 0.1, "high": 0.5},
+            "hidden_size": {"type": "choice", "values": [128, 256, 512]},
+            "batch_size": {"type": "choice", "values": [64, 128, 256, 512]},
+            "weight_decay": {"type": "loguniform", "low": 1e-6, "high": 1e-2},
+        }
+    )
 
 
 def _sample_search_space(rng: np.random.Generator, space: dict[str, Any]) -> dict[str, Any]:
@@ -99,6 +103,7 @@ def _sample_search_space(rng: np.random.Generator, space: dict[str, Any]) -> dic
 @dataclass
 class TrialState:
     """State of a single trial in population-based methods."""
+
     trial_id: str
     params: dict[str, Any]
     step: int = 0
@@ -132,7 +137,7 @@ class TrialScheduler(ABC):
 
 
 class PopulationBasedTraining:
-    """Population-Based Training (PBT) — Jaderberg et al., 2017."""
+    """Population-Based Training (PBT) - Jaderberg et al., 2017."""
 
     def __init__(self, config: HPOConfig):
         self.config = config
@@ -235,7 +240,7 @@ class PopulationBasedTraining:
 
 
 class HyperBandScheduler:
-    """HyperBand Scheduler — Li et al., 2017."""
+    """HyperBand Scheduler - Li et al., 2017."""
 
     def __init__(self, config: HPOConfig):
         self.config = config
@@ -253,16 +258,18 @@ class HyperBandScheduler:
 
     def _init_brackets(self) -> None:
         for s in range(self.s_max + 1):
-            n = int(math.ceil((self.s_max + 1) / (s + 1) * self.eta ** s))
+            n = math.ceil((self.s_max + 1) / (s + 1) * self.eta**s)
             r = self.min_budget * (self.eta ** (self.s_max - s))
             bracket: dict[str, Any] = {"s": s, "n": n, "r": r, "rungs": [], "promoted": []}
             for i in range(s + 1):
-                bracket["rungs"].append({
-                    "budget": self.min_budget * (self.eta ** i),
-                    "trials": [],
-                    "completed": 0,
-                    "promoted": 0,
-                })
+                bracket["rungs"].append(
+                    {
+                        "budget": self.min_budget * (self.eta**i),
+                        "trials": [],
+                        "completed": 0,
+                        "promoted": 0,
+                    }
+                )
             self.brackets.append(bracket)
 
     def suggest_params(self, trial_id: str, bracket_idx: int | None = None) -> dict[str, Any]:
@@ -278,17 +285,19 @@ class HyperBandScheduler:
         out = []
         for i, bracket in enumerate(self.brackets):
             tid = f"hb_s{bracket['s']}_{len(out)}"
-            out.append({
-                "trial_id": tid,
-                "bracket": i,
-                "budget": float(bracket["r"]),
-                "params": self.suggest_params(tid, bracket_idx=i),
-            })
+            out.append(
+                {
+                    "trial_id": tid,
+                    "bracket": i,
+                    "budget": float(bracket["r"]),
+                    "params": self.suggest_params(tid, bracket_idx=i),
+                }
+            )
         return out
 
 
 class AsyncSuccessiveHalvingScheduler:
-    """ASHA — Li et al., 2020."""
+    """ASHA - Li et al., 2020."""
 
     def __init__(self, config: HPOConfig):
         self.config = config
@@ -363,7 +372,7 @@ class AsyncSuccessiveHalvingScheduler:
 
 
 class BOHBScheduler:
-    """BOHB — Falkner et al., 2018."""
+    """BOHB - Falkner et al., 2018."""
 
     def __init__(self, config: HPOConfig):
         self.config = config
@@ -402,7 +411,7 @@ class BOHBScheduler:
                     # Mix: 70% good + 30% prior noise
                     out[k] = float(base[k]) * 0.7 + float(v) * 0.3
                     if isinstance(base[k], int):
-                        out[k] = int(round(out[k]))
+                        out[k] = round(out[k])
                 else:
                     out[k] = base.get(k, v)
             return out
@@ -493,9 +502,7 @@ class HPOManager:
             "config_mode": self.config.mode,
             "difficulty": self.difficulty,
             "self_paced_pace": self.get_pace(),
-            "adaptive_state": (
-                self.study.best_params if self.study is not None and self.study.best_trial else None
-            ),
+            "adaptive_state": (self.study.best_params if self.study is not None and self.study.best_trial else None),
         }
 
     def create_study(
@@ -511,9 +518,11 @@ class HPOManager:
             sampler_obj = TPESampler(seed=self.config.seed)
         elif sampler == "random":
             from optuna.samplers import RandomSampler
+
             sampler_obj = RandomSampler(seed=self.config.seed)
         elif sampler == "cmaes":
             from optuna.samplers import CmaEsSampler
+
             sampler_obj = CmaEsSampler(seed=self.config.seed)
         else:
             raise ValueError(f"Unknown sampler: {sampler}")
@@ -607,9 +616,7 @@ class HPOManager:
             elif algorithm == "bohb":
                 self.bohb.observe(trial_id, 0, params, score)
 
-            improved = (
-                score > best_score if self.config.mode == "maximize" else score < best_score
-            )
+            improved = score > best_score if self.config.mode == "maximize" else score < best_score
             if improved:
                 best_score = score
                 best_params = dict(params)
@@ -655,6 +662,7 @@ def build_optuna_search(
         )
     elif scheduler == "pbt":
         from optuna.samplers import CmaEsSampler
+
         sampler = CmaEsSampler(seed=seed)
         pruner = HyperbandPruner(
             min_resource=int(min_resource),
@@ -675,9 +683,11 @@ def run_hpo_study(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run an HPO study with the specified algorithm via ``HPOManager.run_hpo``."""
-    config = HPOConfig(max_epochs=max_epochs, n_trials=n_trials, **{
-        k: v for k, v in kwargs.items() if k in HPOConfig.__dataclass_fields__
-    })
+    config = HPOConfig(
+        max_epochs=max_epochs,
+        n_trials=n_trials,
+        **{k: v for k, v in kwargs.items() if k in HPOConfig.__dataclass_fields__},
+    )
     manager = HPOManager(config)
     result = manager.run_hpo(n_trials=n_trials, algorithm=algorithm)
     result["base_config_path"] = base_config_path

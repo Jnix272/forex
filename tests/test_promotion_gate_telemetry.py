@@ -33,11 +33,13 @@ if str(_ROOT) not in sys.path:
 # Comparator semantics (the contract)
 # ---------------------------------------------------------------------------
 
+
 def old_challenger_accepts(metric_val, prod_metric, use_sharpe) -> bool:
     """The OLD logic. Used for equivalence verification."""
     min_delta_old = 0.001 if use_sharpe else -0.001
-    if (use_sharpe and metric_val < prod_metric + min_delta_old) or \
-       (not use_sharpe and metric_val > prod_metric + min_delta_old):
+    if (use_sharpe and metric_val < prod_metric + min_delta_old) or (  # noqa: SIM103
+        not use_sharpe and metric_val > prod_metric + min_delta_old
+    ):
         return False  # rejected
     return True  # accepted
 
@@ -55,6 +57,7 @@ def new_challenger_accepts(metric_val, prod_metric, use_sharpe) -> bool:
 # Equivalence: old and new logic produce identical decisions
 # ---------------------------------------------------------------------------
 
+
 def test_old_and_new_produce_identical_decisions_on_loss_boundary():
     """The negative min_delta in the old logic cancels with `+ min_delta`,
     making old ≡ new. Verify the contract holds so that future edits
@@ -62,28 +65,40 @@ def test_old_and_new_produce_identical_decisions_on_loss_boundary():
     """
     test_cases = [
         # (use_sharpe, prod, challenger)
-        (False, 0.6, 0.59), (False, 0.6, 0.595), (False, 0.6, 0.599),
-        (False, 0.6, 0.5995), (False, 0.6, 0.6), (False, 0.6, 0.6005),
-        (False, 0.6, 0.601), (False, 0.6, 0.605),
+        (False, 0.6, 0.59),
+        (False, 0.6, 0.595),
+        (False, 0.6, 0.599),
+        (False, 0.6, 0.5995),
+        (False, 0.6, 0.6),
+        (False, 0.6, 0.6005),
+        (False, 0.6, 0.601),
+        (False, 0.6, 0.605),
         # audit edge case: prod=1.0
-        (False, 1.0, 0.99), (False, 1.0, 0.998), (False, 1.0, 0.999),
-        (False, 1.0, 0.9995), (False, 1.0, 1.0), (False, 1.0, 1.0005),
+        (False, 1.0, 0.99),
+        (False, 1.0, 0.998),
+        (False, 1.0, 0.999),
+        (False, 1.0, 0.9995),
+        (False, 1.0, 1.0),
+        (False, 1.0, 1.0005),
         # Sharpe direction
-        (True, 1.5, 1.4), (True, 1.5, 1.499), (True, 1.5, 1.5),
-        (True, 1.5, 1.5005), (True, 1.5, 1.599), (True, 1.5, 1.6),
+        (True, 1.5, 1.4),
+        (True, 1.5, 1.499),
+        (True, 1.5, 1.5),
+        (True, 1.5, 1.5005),
+        (True, 1.5, 1.599),
+        (True, 1.5, 1.6),
     ]
     for use_sharpe, prod, ch in test_cases:
         old_ok = old_challenger_accepts(ch, prod, use_sharpe)
         new_ok = new_challenger_accepts(ch, prod, use_sharpe)
         assert old_ok == new_ok, (
-            f" Old({ch}, {prod}, us={use_sharpe})={old_ok} but "
-            f"new({ch}, {prod}, us={use_sharpe})={new_ok}"
+            f" Old({ch}, {prod}, us={use_sharpe})={old_ok} but new({ch}, {prod}, us={use_sharpe})={new_ok}"
         )
 
 
 def test_fix_accepts_better_sharpe_challenger():
     """Higher sharpe than prod by >= min_delta should be accepted."""
-    assert new_challenger_accepts(1.5, 1.4, True)   # +0.1, big win
+    assert new_challenger_accepts(1.5, 1.4, True)  # +0.1, big win
     assert new_challenger_accepts(1.401, 1.4, True)  # +0.001 boundary
     assert not new_challenger_accepts(1.4, 1.4, True)
     assert not new_challenger_accepts(1.0, 1.4, True)
@@ -108,6 +123,7 @@ def test_rejects_slight_regression_for_loss():
 # Verify the fix is in the source
 # ---------------------------------------------------------------------------
 
+
 def test_post_train_uses_positive_min_delta():
     """Ensure the buggy `min_delta = -0.001` is gone from post_train.py."""
     post_train_path = _ROOT / "training" / "post_train.py"
@@ -128,14 +144,13 @@ def test_post_train_loss_comparator_uses_minus():
         pytest.skip("training/post_train.py not found")
 
     src = post_train_path.read_text(encoding="utf-8")
-    assert "metric_val > prod_metric - min_delta" in src, (
-        "Loss comparator must subtract min_delta (lower is better)"
-    )
+    assert "metric_val > prod_metric - min_delta" in src, "Loss comparator must subtract min_delta (lower is better)"
 
 
 # ---------------------------------------------------------------------------
 # Telemetry: on_promotion_decision method exists and emits CSV
 # ---------------------------------------------------------------------------
+
 
 def test_on_promotion_decision_method_exists():
     try:
@@ -143,7 +158,7 @@ def test_on_promotion_decision_method_exists():
     except Exception as e:
         pytest.skip(f"could not import TrainingLogger: {e}")
     assert hasattr(TrainingLogger, "on_promotion_decision")
-    assert callable(getattr(TrainingLogger, "on_promotion_decision"))
+    assert callable(TrainingLogger.on_promotion_decision)
 
 
 def test_on_promotion_decision_emits_csv(tmp_path):
@@ -190,8 +205,7 @@ def test_on_promotion_decision_emits_csv(tmp_path):
         gate_summary="PROMOTE ✅",
         gate_reasons=["sharpe_ok: ✓", "pf_ok: ✓"],
         gate_details={"sharpe": 1.85, "psr": 0.97},
-        challenger_vs_prod={"prod_metric": 1.7, "challenger_metric": 1.85,
-                            "direction": "sharpe", "accepted": True},
+        challenger_vs_prod={"prod_metric": 1.7, "challenger_metric": 1.85, "direction": "sharpe", "accepted": True},
     )
 
     # JSONL event emitted
@@ -256,9 +270,13 @@ def test_on_promotion_decision_handles_reject(tmp_path):
         gate_summary="REJECT ❌ Failed: sharpe, pf",
         gate_reasons=["sharpe: ✗", "pf: ✗"],
         gate_details={"sharpe": 0.8, "pf": 1.0},
-        challenger_vs_prod={"prod_metric": 0.6, "challenger_metric": 0.78,
-                            "direction": "loss", "rejected": True,
-                            "reason": "loss higher than prod"}
+        challenger_vs_prod={
+            "prod_metric": 0.6,
+            "challenger_metric": 0.78,
+            "direction": "loss",
+            "rejected": True,
+            "reason": "loss higher than prod",
+        },
     )
 
     assert len(captured_events) == 1
@@ -277,6 +295,7 @@ def test_on_promotion_decision_handles_reject(tmp_path):
 # Source-level: telemetry wiring in post_train.py
 # ---------------------------------------------------------------------------
 
+
 def test_post_train_emits_on_promotion_decision_after_gate():
     """Verify post_train.py calls on_promotion_decision after the gate runs."""
     post_train_path = _ROOT / "training" / "post_train.py"
@@ -284,9 +303,7 @@ def test_post_train_emits_on_promotion_decision_after_gate():
         pytest.skip("training/post_train.py not found")
 
     src = post_train_path.read_text(encoding="utf-8")
-    assert "on_promotion_decision" in src, (
-        "post_train.py should emit on_promotion_decision telemetry"
-    )
+    assert "on_promotion_decision" in src, "post_train.py should emit on_promotion_decision telemetry"
 
 
 if __name__ == "__main__":

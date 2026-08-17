@@ -151,7 +151,7 @@ def main() -> int:
     higher_is_better = stop_metric == "sharpe"
     es = _EarlyStop(best_metric=(-1e9 if higher_is_better else 1e9), best_epoch=-1)
 
-    print(f"[MinTrain] device={dev} | amp={use_amp} dtype={amp_dtype} | workers={getattr(args,'num_workers',0)}")
+    print(f"[MinTrain] device={dev} | amp={use_amp} dtype={amp_dtype} | workers={getattr(args, 'num_workers', 0)}")
     print(f"[MinTrain] cache={cache_path} | samples={n_samples:,} | features={n_features} | seq_len={args.seq_len}")
     print(f"[MinTrain] model={model_name} | loss={args.loss} | epochs={args.epochs} | batch={args.batch_size}")
 
@@ -210,13 +210,13 @@ def main() -> int:
 
         elapsed = time.time() - t0
         print(
-            f"[MinTrain] ep {ep+1:03d}/{int(args.epochs)} | "
+            f"[MinTrain] ep {ep + 1:03d}/{int(args.epochs)} | "
             f"tr={tr_loss:.4f} va={va_loss:.4f} acc={dir_acc:.3f} sharpe={sharpe:.3f} | "
-            f"{tag} | {elapsed/60:.1f}m"
+            f"{tag} | {elapsed / 60:.1f}m"
         )
 
         if es.bad_epochs >= int(args.patience):
-            print(f"[MinTrain] early stop at ep={ep+1} (best ep={es.best_epoch+1})")
+            print(f"[MinTrain] early stop at ep={ep + 1} (best ep={es.best_epoch + 1})")
             break
 
     print(f"[MinTrain] done. best_ckpt={ckpt_path}")
@@ -227,4 +227,3 @@ if __name__ == "__main__":
     # Avoid torch.compile/inductor surprises on Windows; keep eager.
     os.environ.setdefault("TORCH_LOGS", "")
     raise SystemExit(main())
-

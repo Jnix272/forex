@@ -60,15 +60,20 @@ def parse_args() -> argparse.Namespace:
     # Audit 2026-08-07 fix (finding E3): previously this script sampled
     # ``rng.choice(total, ...)`` uniformly across the WHOLE cache, including
     # the chronological promotion holdout that the base models were also
-    # trained on — same canonical leak as the triple-barrier meta-labeler's
+    # trained on - same canonical leak as the triple-barrier meta-labeler's
     # B4. The flags below drive the existing helpers
     # ``cache_integrity._trainable_max_index`` and ``cv_splits._embargo_bars``
     # so the meta-learner only sees the [0, _trainable) prefix; the
     # [trainable, total) tail stays quarantined for the promotion gate.
-    p.add_argument("--promote-forward-frac", type=float, default=0.1,
-                   help="Chronological promotion-holdout fraction (default 0.1)")
-    p.add_argument("--embargo-bars", type=int, default=None,
-                   help="Override dynamic embargo gap; default uses seq_len + lookahead + delay")
+    p.add_argument(
+        "--promote-forward-frac", type=float, default=0.1, help="Chronological promotion-holdout fraction (default 0.1)"
+    )
+    p.add_argument(
+        "--embargo-bars",
+        type=int,
+        default=None,
+        help="Override dynamic embargo gap; default uses seq_len + lookahead + delay",
+    )
     return p.parse_args()
 
 
@@ -189,7 +194,7 @@ def load_base_model(model_name: str, ckpt_path: Path, n_features: int, seq_len: 
         model.load_state_dict(state, strict=True)
     except Exception:
         core = model.backbone if hasattr(model, "backbone") else model
-        has_prefix = any(k.startswith("backbone.") for k in state.keys())
+        has_prefix = any(k.startswith("backbone.") for k in state)
         core_has_prefix = any(p.startswith("backbone.") for p, _ in core.named_parameters())
         if has_prefix and not core_has_prefix:
             state = {k.replace("backbone.", "", 1): v for k, v in state.items()}
@@ -233,12 +238,14 @@ def main() -> int:
     # production path ``training/post_train.run_ensemble_meta:164-174``.
     if args.embargo_bars is not None:
         # Helper reads args.validation_embargo_bars; mirror the key.
-        setattr(args, "validation_embargo_bars", int(args.embargo_bars))
+        args.validation_embargo_bars = int(args.embargo_bars)
     _trainable = int(_trainable_prefix_end(total, args))
     if _trainable < 100:
-        log(f"[EnsembleMeta] Trainable prefix too small ({_trainable}); "
-            f"total={total}. Skipping meta training — re-run with a larger "
-            "cache or a smaller --promote-forward-frac.")
+        log(
+            f"[EnsembleMeta] Trainable prefix too small ({_trainable}); "
+            f"total={total}. Skipping meta training - re-run with a larger "
+            "cache or a smaller --promote-forward-frac."
+        )
         return 1
     n_meta = min(int(args.samples), int(_trainable))
     rng = np.random.default_rng(int(args.seed))
@@ -249,8 +256,10 @@ def main() -> int:
     device = torch.device(args.device)
     log(f"[EnsembleMeta] cache={cache_path}")
     log(f"[EnsembleMeta] samples={n_meta:,}/{total:,} | seq_len={seq_len} | n_features={n_features}")
-    log(f"[EnsembleMeta] trainable_prefix=[0,{_trainable}) | holdout_tail=[{_trainable},"
-        f"{total}) | device={args.device} | output={out}")
+    log(
+        f"[EnsembleMeta] trainable_prefix=[0,{_trainable}) | holdout_tail=[{_trainable},"
+        f"{total}) | device={args.device} | output={out}"
+    )
     if _embargo:
         log(f"[EnsembleMeta] explicit embargo_bars={_embargo} applied between meta-train and holdout")
 

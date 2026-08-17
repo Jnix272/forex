@@ -43,9 +43,7 @@ class TestConfiguration:
 class TestDataPipelineSmoke:
     def test_synthetic_ticks_to_env_observation(self):
         ticks = generate_synthetic_tick_data(n_rows=25_000, seed=1)
-        bars = ForexDataPipeline(
-            bar_freq="5min", session_filter=False, apply_frac_diff=False
-        ).run(ticks)
+        bars = ForexDataPipeline(bar_freq="5min", session_filter=False, apply_frac_diff=False).run(ticks)
         fe = FeatureEngineer()
         feats = fe.build(bars)
         bars_a = bars.join(feats.select("timestamp_utc"), on="timestamp_utc", how="inner")

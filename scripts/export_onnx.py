@@ -29,6 +29,7 @@ def export_to_onnx(
         n_features=n_features,
     )
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export PyTorch models to ONNX.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the .pt checkpoint file")

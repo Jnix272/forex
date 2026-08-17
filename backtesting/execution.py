@@ -21,6 +21,7 @@ import numpy as np
 
 try:
     import polars as pl
+
     _POLARS_OK = True
 except ImportError:  # pragma: no cover
     _POLARS_OK = False
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover
 
 try:
     import pandas as pd
+
     _PANDAS_OK = True
 except ImportError:  # pragma: no cover
     _PANDAS_OK = False
@@ -35,34 +37,31 @@ except ImportError:  # pragma: no cover
 
 from backtesting.improvements import SlippageCalibrator
 
-try:
-    from backtesting.backtest import Trade
-except ImportError:  # e.g. Numba/NumPy mismatch — keep execution usable
-    from dataclasses import dataclass, field
 
-    @dataclass
-    class Trade:
-        trade_id: int
-        entry_time: object
-        entry_price: float
-        entry_lots: float
-        direction: int
-        stop_loss: float
-        take_profit: float
-        exit_time: object | None = None
-        exit_price: float | None = None
-        exit_lots: float | None = None
-        pnl_pips: float = 0.0
-        gross_pnl_usd: float = 0.0
-        pnl_usd: float = 0.0
-        commission: float = 0.0
-        slippage_pips: float = 0.0
-        exit_reason: str = ""
-        scale_additions: list = field(default_factory=list)
+@dataclass
+class Trade:
+    trade_id: int
+    entry_time: object
+    entry_price: float
+    entry_lots: float
+    direction: int
+    stop_loss: float
+    take_profit: float
+    exit_time: object | None = None
+    exit_price: float | None = None
+    exit_lots: float | None = None
+    pnl_pips: float = 0.0
+    gross_pnl_usd: float = 0.0
+    pnl_usd: float = 0.0
+    commission: float = 0.0
+    slippage_pips: float = 0.0
+    exit_reason: str = ""
+    scale_additions: list = field(default_factory=list)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Queue Position & Order Book Models
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class OrderSide(IntEnum):
     BUY = 1
@@ -75,7 +74,7 @@ class OrderType(IntEnum):
     STOP = 2
     STOP_LIMIT = 3
     IOC = 4  # Immediate or Cancel
-    FOK = 5   # Fill or Kill
+    FOK = 5  # Fill or Kill
 
 
 class OrderStatus(IntEnum):
@@ -90,17 +89,18 @@ class OrderStatus(IntEnum):
 @dataclass
 class Order:
     """Enhanced order with queue position tracking."""
+
     order_id: int
     symbol: str
     side: OrderSide
     order_type: OrderType
-    quantity: float          # lots
-    price: float | None = None    # limit price
+    quantity: float  # lots
+    price: float | None = None  # limit price
     stop_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
 
     # Queue position
-    queue_position: int = 0          # position in limit order book
+    queue_position: int = 0  # position in limit order book
     queue_timestamp: datetime | None = None
 
     # Partial fills
@@ -114,9 +114,9 @@ class Order:
     expiry_time: datetime | None = None
 
     # Latency & adverse selection
-    submission_latency_us: float = 0.0      # network + gateway
-    exchange_latency_us: float = 0.0         # exchange processing
-    adverse_selection_score: float = 0.0    # 0-1 toxicity metric
+    submission_latency_us: float = 0.0  # network + gateway
+    exchange_latency_us: float = 0.0  # exchange processing
+    adverse_selection_score: float = 0.0  # 0-1 toxicity metric
 
     # Partial fills
     fills: list[Fill] = field(default_factory=list)
@@ -134,6 +134,7 @@ class Order:
 @dataclass
 class Fill:
     """Individual fill record."""
+
     fill_id: int
     order_id: int
     timestamp: datetime
@@ -148,6 +149,7 @@ class Fill:
 @dataclass
 class LimitOrderBookSnapshot:
     """L2 order book snapshot for queue position modeling."""
+
     timestamp: datetime
     symbol: str
     bids: list[tuple[float, float]]  # [(price, size), ...] sorted descending
@@ -158,7 +160,7 @@ class LimitOrderBookSnapshot:
 class LimitOrderBook:
     """
     Simulated limit order book with queue position tracking.
-    
+
     Models:
     - Price-time priority (FIFO within price level)
     - Pro-rata allocation (optional)
@@ -183,8 +185,8 @@ class LimitOrderBook:
         self.dissemination_latency_us = dissemination_latency_us
 
         # Order book state
-        self.bids: dict[float, list[dict]] = {}  # price -> list of orders (FIFO)
-        self.asks: dict[float, list[dict]] = {}  # price -> list of orders (FIFO)
+        self.bids: dict[float, list[Order]] = {}  # price -> list of orders (FIFO)
+        self.asks: dict[float, list[Order]] = {}  # price -> list of orders (FIFO)
         self.best_bid: float | None = None
         self.best_ask: float | None = None
         self.sequence_num = 0
@@ -223,7 +225,7 @@ class LimitOrderBook:
         order.submit_time = current_time
         order.status = OrderStatus.PENDING
 
-        price = self._tick_round(order.price) if order.price else None
+        price = self._tick_round(float(order.price)) if order.price is not None else None
 
         if order.side == OrderSide.BUY:
             if order.order_type == OrderType.MARKET:
@@ -233,12 +235,12 @@ class LimitOrderBook:
                 if price is None:
                     order.status = OrderStatus.REJECTED
                     return order.order_id
-                level = self.bids.setdefault(order.price, [])
+                level = self.bids.setdefault(price, [])
                 order.queue_position = len(level) + 1
                 order.queue_timestamp = current_time
                 level.append(order)
                 self.active_orders[order.order_id] = order
-                self.order_to_level[order.order_id] = (order.price, True)
+                self.order_to_level[order.order_id] = (price, True)
                 self._update_best_prices()
         else:
             if order.order_type == OrderType.MARKET:
@@ -247,12 +249,12 @@ class LimitOrderBook:
                 if price is None:
                     order.status = OrderStatus.REJECTED
                     return order.order_id
-                level = self.asks.setdefault(order.price, [])
+                level = self.asks.setdefault(price, [])
                 order.queue_position = len(level) + 1
                 order.queue_timestamp = current_time
                 level.append(order)
                 self.active_orders[order.order_id] = order
-                self.order_to_level[order.order_id] = (order.price, False)
+                self.order_to_level[order.order_id] = (price, False)
                 self._update_best_prices()
 
         return order.order_id
@@ -272,19 +274,13 @@ class LimitOrderBook:
                 fill_qty = min(remaining, resting_order.remaining_qty())
                 fill_price = price
                 self._record_fill(
-                    order.order_id,
-                    resting_order.order_id,
-                    fill_price,
-                    fill_qty,
-                    current_time,
-                    liquidity_flag="taker"
+                    order.order_id, resting_order.order_id, fill_price, fill_qty, current_time, liquidity_flag="taker"
                 )
                 self._update_order_after_fill(resting_order, fill_qty, price, current_time)
                 order.filled_qty += fill_qty
                 order.avg_fill_price = (
-                    (order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty)
-                    / order.filled_qty
-                )
+                    order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty
+                ) / order.filled_qty
                 remaining -= fill_qty
                 filled += fill_qty
 
@@ -318,21 +314,15 @@ class LimitOrderBook:
                 fill_qty = min(remaining, resting_order.remaining_qty())
                 fill_price = price
                 self._record_fill(
-                    order.order_id,
-                    resting_order.order_id,
-                    fill_price,
-                    fill_qty,
-                    current_time,
-                    liquidity_flag="taker"
+                    order.order_id, resting_order.order_id, fill_price, fill_qty, current_time, liquidity_flag="taker"
                 )
                 self._update_order_after_fill(resting_order, fill_qty, price, current_time)
                 order.filled_qty += fill_qty
                 order.avg_fill_price = (
-                    (order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty)
-                    / order.filled_qty
-                )
+                    order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty
+                ) / order.filled_qty
                 remaining -= fill_qty
-                filled += fill_qty  # FIX E1: was missing — kept filled=0 so every sell was REJECTED
+                filled += fill_qty  # FIX E1: was missing - kept filled=0 so every sell was REJECTED
 
                 if resting_order.remaining_qty() <= 1e-9:
                     self._remove_order_from_level(resting_order, True)
@@ -356,10 +346,10 @@ class LimitOrderBook:
         price: float,
         quantity: float,
         timestamp: datetime,
-        liquidity_flag: str
+        liquidity_flag: str,
     ):
         """Record a fill event."""
-        fill = Fill(
+        Fill(
             fill_id=self._fill_id_counter,
             order_id=taker_order_id,
             timestamp=datetime.now(),
@@ -367,7 +357,7 @@ class LimitOrderBook:
             quantity=quantity,
             fee=0.0,  # would be calculated separately
             liquidity_flag=liquidity_flag,
-            queue_position=0  # would track queue position at fill
+            queue_position=0,  # would track queue position at fill
         )
         self._fill_id_counter += 1
         # Would add to order.fills in real implementation
@@ -376,9 +366,8 @@ class LimitOrderBook:
         """Update resting order after partial fill."""
         order.filled_qty += fill_qty
         order.avg_fill_price = (
-            (order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty)
-            / order.filled_qty
-        )
+            order.avg_fill_price * (order.filled_qty - fill_qty) + fill_price * fill_qty
+        ) / order.filled_qty
         if order.first_fill_time is None:
             order.first_fill_time = timestamp
         order.last_fill_time = timestamp
@@ -390,11 +379,14 @@ class LimitOrderBook:
 
     def _remove_order_from_level(self, order: Order, is_bid: bool):
         """Remove filled/cancelled order from book level."""
-        level = self.bids[order.price] if is_bid else self.asks[order.price]
+        if order.price is None:
+            return
+        price = float(order.price)
+        level = self.bids[price] if is_bid else self.asks[price]
         if order in level:
             level.remove(order)
             if not level:
-                del (self.bids if is_bid else self.asks)[order.price]
+                del (self.bids if is_bid else self.asks)[price]
             if order.order_id in self.active_orders:
                 del self.active_orders[order.order_id]
             if order.order_id in self.order_to_level:
@@ -416,12 +408,12 @@ class LimitOrderBook:
         self._update_best_prices()
 
         bids = []
-        for price in sorted(self.bids.keys(), reverse=True)[:self.max_depth]:
+        for price in sorted(self.bids.keys(), reverse=True)[: self.max_depth]:
             total_size = sum(o.remaining_qty() for o in self.bids[price])
             bids.append((price, total_size))
 
         asks = []
-        for price in sorted(self.asks.keys())[:self.max_depth]:
+        for price in sorted(self.asks.keys())[: self.max_depth]:
             total_size = sum(o.remaining_qty() for o in self.asks[price])
             asks.append((price, total_size))
 
@@ -430,7 +422,7 @@ class LimitOrderBook:
             symbol="SYM",  # would be passed in
             bids=bids,
             asks=asks,
-            sequence_num=self.sequence_num
+            sequence_num=self.sequence_num,
         )
 
     def get_queue_position(self, order_id: int) -> int:
@@ -438,17 +430,23 @@ class LimitOrderBook:
         if order_id not in self.active_orders:
             return -1
         order = self.active_orders[order_id]
-        price, is_bid = self.order_to_level.get(order_id, (0, True))
-        level = self.bids[order.price] if order.side == OrderSide.BUY else self.asks[order.price]
+        if order.price is None:
+            return -1
+        price = float(order.price)
+        _price, is_bid = self.order_to_level.get(order_id, (price, order.side == OrderSide.BUY))
+        level = self.bids[price] if order.side == OrderSide.BUY else self.asks[price]
         try:
-            return level.index(next(o for o in (self.bids[order.price] if is_bid else self.asks[order.price]) if o.order_id == order_id)) + 1
-        except (StopIteration, ValueError):
+            return level.index(next(o for o in level if o.order_id == order_id)) + 1
+        except StopIteration:
+            return -1
+        except ValueError:
             return -1
 
 
 # ════════════════════════════════════════════════════════════════════════════════
 # 2. Latency Simulation
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class LatencyModel:
     """
@@ -457,7 +455,7 @@ class LatencyModel:
     - Exchange matching engine processing
     - Market data dissemination
     - Gateway processing
-    
+
     Components:
     - Network: log-normal distribution (cross-connect / internet)
     - Gateway: deterministic + jitter
@@ -468,7 +466,7 @@ class LatencyModel:
     def __init__(
         self,
         # Network (client -> gateway)
-        network_mean_us: float = 500.0,      # mean RTT in microseconds
+        network_mean_us: float = 500.0,  # mean RTT in microseconds
         network_std_us: float = 100.0,
         # Gateway
         gateway_fixed_us: float = 50.0,
@@ -507,13 +505,11 @@ class LatencyModel:
         """Total latency from strategy decision to exchange receipt."""
         if self.is_colocated:
             net = self._rng.lognormal(
-                mean=np.log(self.network_mean_us / 10) - 0.5 * self.network_std_us**2,
-                sigma=self.network_std_us
+                mean=np.log(self.network_mean_us / 10) - 0.5 * self.network_std_us**2, sigma=self.network_std_us
             )
         else:
             net = self._rng.lognormal(
-                mean=np.log(self.network_mean_us) - 0.5 * self.network_std_us**2,
-                sigma=self.network_std_us
+                mean=np.log(self.network_mean_us) - 0.5 * self.network_std_us**2, sigma=self.network_std_us
             )
         gateway = self.gateway_fixed_us + max(0, self._rng.normal(0, self.gateway_jitter_us))
         return max(0, net + gateway)
@@ -546,10 +542,11 @@ class LatencyModel:
 # 3. Adverse Selection Modeling
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class AdverseSelectionModel:
     """
     Models adverse selection / toxic flow risk.
-    
+
     Components:
     1. VPIN (Volume-synchronized PIN) - Easley et al.
     2. Order flow toxicity - real-time toxicity score
@@ -559,9 +556,9 @@ class AdverseSelectionModel:
 
     def __init__(
         self,
-        bucket_volume: int = 1000,    # VPIN bucket size
-        window_buckets: int = 50,      # rolling window
-        kappa: float = 1.5,            # Kyle's lambda scaling
+        bucket_volume: int = 1000,  # VPIN bucket size
+        window_buckets: int = 50,  # rolling window
+        kappa: float = 1.5,  # Kyle's lambda scaling
         toxic_threshold: float = 0.7,  # VPIN threshold for toxic
     ):
         self.bucket_volume = bucket_volume
@@ -624,11 +621,7 @@ class AdverseSelectionModel:
         # Exponential increase in adverse selection toward back of queue
         return float(np.clip(1.0 - np.exp(-3.0 * relative_pos), 0.0, 1.0))
 
-    def compute_toxicity_score(self,
-                               queue_position: int,
-                               max_queue: int,
-                               spread: float,
-                               volatility: float) -> float:
+    def compute_toxicity_score(self, queue_position: int, max_queue: int, spread: float, volatility: float) -> float:
         """
         Composite toxicity score [0, 1].
         Higher = more toxic/adverse.
@@ -644,11 +637,7 @@ class AdverseSelectionModel:
         vol_component = min(1.0, volatility * 100)
 
         toxicity = (
-            0.4 * vpin +
-            0.2 * min(1.0, lambda_ / 5.0) +
-            0.2 * queue_risk +
-            0.1 * spread_component +
-            0.1 * vol_component
+            0.4 * vpin + 0.2 * min(1.0, lambda_ / 5.0) + 0.2 * queue_risk + 0.1 * spread_component + 0.1 * vol_component
         )
         return float(np.clip(toxicity, 0.0, 1.0))
 
@@ -661,15 +650,17 @@ class AdverseSelectionModel:
 # 4. Implementation Shortfall & Slippage Decomposition
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class SlippageDecomposition:
     """Perlmold (1988) / Almgren-Chriss slippage decomposition."""
+
     # Components
-    delay_cost: float = 0.0        # decision price -> arrival price
-    spread_cost: float = 0.0       # half spread crossed
-    market_impact: float = 0.0     # temporary market impact
-    timing_cost: float = 0.0       # adverse price movement during execution
-    adverse_selection: float = 0.0 # informed trader cost
+    delay_cost: float = 0.0  # decision price -> arrival price
+    spread_cost: float = 0.0  # half spread crossed
+    market_impact: float = 0.0  # temporary market impact
+    timing_cost: float = 0.0  # adverse price movement during execution
+    adverse_selection: float = 0.0  # informed trader cost
     opportunity_cost: float = 0.0  # unfilled portion
 
     # Summary
@@ -699,18 +690,20 @@ class SlippageDecomposition:
         }
 
     @classmethod
-    def from_execution(cls,
-                       direction: float,
-                       decision_price: float,
-                       arrival_mid: float,
-                       execution_price: float,
-                       fill_rate: float,
-                       spread: float,
-                       volatility: float,
-                       participation_rate: float,
-                       adverse_selection_model: AdverseSelectionModel | None = None,
-                       queue_position: int = 0,
-                       max_queue: int = 1) -> SlippageDecomposition:
+    def from_execution(
+        cls,
+        direction: float,
+        decision_price: float,
+        arrival_mid: float,
+        execution_price: float,
+        fill_rate: float,
+        spread: float,
+        volatility: float,
+        participation_rate: float,
+        adverse_selection_model: AdverseSelectionModel | None = None,
+        queue_position: int = 0,
+        max_queue: int = 1,
+    ) -> SlippageDecomposition:
         """Compute full slippage decomposition (Almgren-Chriss style)."""
         d = cls()
         d.decision_price = float(decision_price)
@@ -728,7 +721,7 @@ class SlippageDecomposition:
         half_spread = max(0.0, float(spread)) * 0.5
         d.spread_cost = half_spread / mid
 
-        # 3. Temporary market impact ~ σ √(participation)
+        # 3. Temporary market impact ~ σ √(participation)  # noqa: RUF003
         part = max(0.0, float(participation_rate))
         vol = max(0.0, float(volatility))
         d.market_impact = vol * float(np.sqrt(part)) if part > 0 else 0.0
@@ -739,9 +732,7 @@ class SlippageDecomposition:
         # 5. Adverse selection from queue / toxicity model
         if adverse_selection_model is not None:
             try:
-                d.adverse_selection = float(
-                    adverse_selection_model.compute_queue_risk(queue_position, max_queue)
-                )
+                d.adverse_selection = float(adverse_selection_model.compute_queue_risk(queue_position, max_queue))
             except Exception:
                 d.adverse_selection = float(queue_position) / max(1, max_queue) * 0.01
         else:
@@ -751,8 +742,12 @@ class SlippageDecomposition:
         d.opportunity_cost = 0.0 if d.fill_rate >= 1.0 - 1e-9 else (1.0 - d.fill_rate) * d.spread_cost
 
         d.total_slippage = (
-            abs(d.delay_cost) + d.spread_cost + d.market_impact
-            + abs(d.timing_cost) + d.adverse_selection + d.opportunity_cost
+            abs(d.delay_cost)
+            + d.spread_cost
+            + d.market_impact
+            + abs(d.timing_cost)
+            + d.adverse_selection
+            + d.opportunity_cost
         )
         d.implementation_shortfall = direction * (d.execution_price - d.decision_price) / mid
         return d
@@ -761,6 +756,7 @@ class SlippageDecomposition:
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. Advanced Execution Engine
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class AdvancedExecutionEngine:
     """
@@ -846,7 +842,6 @@ class AdvancedExecutionEngine:
 
     def _match_order(self, order: Order, current_time: datetime) -> list[Fill]:
         """Match order against current book state."""
-        fills = []
         # Implementation would match against current book state
         return []
 
@@ -901,8 +896,10 @@ class AdvancedExecutionEngine:
         if self.lob.best_bid is not None and self.lob.best_ask is not None:
             spread = float(self.lob.best_ask) - float(self.lob.best_bid)
         decision = float(order.price) if order.price else mid
-        fill_rate = float(order.fill_ratio()) if hasattr(order, "fill_ratio") else (
-            float(order.filled_qty) / float(order.quantity) if order.quantity else 1.0
+        fill_rate = (
+            float(order.fill_ratio())
+            if hasattr(order, "fill_ratio")
+            else (float(order.filled_qty) / float(order.quantity) if order.quantity else 1.0)
         )
         # Participation proxy: order size vs book depth capacity
         depth = max(1.0, float(self.max_queue_depth))
@@ -916,7 +913,9 @@ class AdvancedExecutionEngine:
         if vol <= 0:
             vol = max(spread / mid, 1e-6)
 
+        direction = 1.0 if order.side == OrderSide.BUY else -1.0
         return SlippageDecomposition.from_execution(
+            direction=direction,
             decision_price=decision,
             arrival_mid=mid,
             execution_price=exec_px if exec_px > 0 else mid,
@@ -933,6 +932,7 @@ class AdvancedExecutionEngine:
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. Backtesting Integration
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class AdvancedBacktestEngine:
     """
@@ -985,12 +985,20 @@ class AdvancedBacktestEngine:
             bid_px = lob._tick_round(mid - half - (i - 1) * self._pip_size)
             ask_px = lob._tick_round(mid + half + (i - 1) * self._pip_size)
             bid = Order(
-                order_id=0, symbol=lob.symbol, side=OrderSide.BUY,
-                order_type=OrderType.LIMIT, quantity=depth, price=bid_px,
+                order_id=0,
+                symbol=lob.symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.LIMIT,
+                quantity=depth,
+                price=bid_px,
             )
             ask = Order(
-                order_id=0, symbol=lob.symbol, side=OrderSide.SELL,
-                order_type=OrderType.LIMIT, quantity=depth, price=ask_px,
+                order_id=0,
+                symbol=lob.symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.LIMIT,
+                quantity=depth,
+                price=ask_px,
             )
             lob.submit_order(bid, ts)
             lob.submit_order(ask, ts)
@@ -1026,22 +1034,25 @@ class AdvancedBacktestEngine:
         pnl_usd = pnl_pips * self._pip_value_per_lot * lots
         self.equity += pnl_usd
         self._trade_id += 1
-        self.trades.append(Trade(
-            trade_id=self._trade_id,
-            entry_time=pd.Timestamp(ts),
-            entry_price=self.avg_entry,
-            entry_lots=lots,
-            direction=direction,
-            stop_loss=0.0,
-            take_profit=0.0,
-            exit_time=pd.Timestamp(ts),
-            exit_price=fill_price,
-            exit_lots=lots,
-            pnl_pips=float(pnl_pips),
-            gross_pnl_usd=float(pnl_usd),
-            pnl_usd=float(pnl_usd),
-            exit_reason=reason,
-        ))
+        entry_ts = pd.Timestamp(ts) if pd is not None else ts
+        self.trades.append(
+            Trade(
+                trade_id=self._trade_id,
+                entry_time=entry_ts,
+                entry_price=self.avg_entry,
+                entry_lots=lots,
+                direction=direction,
+                stop_loss=0.0,
+                take_profit=0.0,
+                exit_time=entry_ts,
+                exit_price=fill_price,
+                exit_lots=lots,
+                pnl_pips=float(pnl_pips),
+                gross_pnl_usd=float(pnl_usd),
+                pnl_usd=float(pnl_usd),
+                exit_reason=reason,
+            )
+        )
         self.position = 0.0
         self.avg_entry = 0.0
 
@@ -1090,7 +1101,7 @@ class AdvancedBacktestEngine:
             for k in ("timestamp_utc", "timestamp", "time", "date", "index"):
                 if k in row and row[k] is not None:
                     v = row[k]
-                    if _PANDAS_OK and pd is not None and hasattr(v, "to_pydatetime"):
+                    if _PANDAS_OK and pd is not None and isinstance(v, pd.Timestamp):
                         return v
                     try:
                         return datetime.fromisoformat(str(v))
@@ -1103,13 +1114,13 @@ class AdvancedBacktestEngine:
             bar = get_bar(i)
             sig = get_sig(i)
             ts = get_ts(i)
-            if hasattr(ts, "to_pydatetime"):
+            if pd is not None and isinstance(ts, pd.Timestamp):
                 ts_dt = ts.to_pydatetime()
             elif isinstance(ts, datetime):
                 ts_dt = ts
             else:
                 ts_dt = datetime.utcnow()
-            # FIX E4: bar is now a plain dict — use .get() safely
+            # FIX E4: bar is now a plain dict - use .get() safely
             mid = float(bar.get("close") or bar.get("mid_close") or float("nan"))
             if not np.isfinite(mid):
                 equity_curve.append({"timestamp": ts, "equity": self.equity, "position": self.position})
@@ -1123,8 +1134,10 @@ class AdvancedBacktestEngine:
             if abs(desired) < 1e-12 and abs(self.position) > 1e-12:
                 close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
                 order = Order(
-                    order_id=0, symbol=self.execution_engine.symbol,
-                    side=close_side, order_type=OrderType.MARKET,
+                    order_id=0,
+                    symbol=self.execution_engine.symbol,
+                    side=close_side,
+                    order_type=OrderType.MARKET,
                     quantity=abs(self.position),
                 )
                 self.execution_engine.submit_order(order, ts_dt)
@@ -1134,8 +1147,10 @@ class AdvancedBacktestEngine:
                 # Reverse
                 close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
                 order = Order(
-                    order_id=0, symbol=self.execution_engine.symbol,
-                    side=close_side, order_type=OrderType.MARKET,
+                    order_id=0,
+                    symbol=self.execution_engine.symbol,
+                    side=close_side,
+                    order_type=OrderType.MARKET,
                     quantity=abs(self.position),
                 )
                 self.execution_engine.submit_order(order, ts_dt)
@@ -1146,8 +1161,10 @@ class AdvancedBacktestEngine:
             if abs(desired) > 1e-12 and abs(self.position) < 1e-12:
                 open_side = OrderSide.BUY if desired > 0 else OrderSide.SELL
                 order = Order(
-                    order_id=0, symbol=self.execution_engine.symbol,
-                    side=open_side, order_type=OrderType.MARKET,
+                    order_id=0,
+                    symbol=self.execution_engine.symbol,
+                    side=open_side,
+                    order_type=OrderType.MARKET,
                     quantity=abs(desired),
                 )
                 self.execution_engine.submit_order(order, ts_dt)
@@ -1156,18 +1173,20 @@ class AdvancedBacktestEngine:
                     self.avg_entry = float(order.avg_fill_price)
                     self.orders[order.order_id] = order
 
-            equity_curve.append({
-                "timestamp": ts,
-                "equity": self.equity,
-                "position": self.position,
-                "mid": mid,
-            })
+            equity_curve.append(
+                {
+                    "timestamp": ts,
+                    "equity": self.equity,
+                    "position": self.position,
+                    "mid": mid,
+                }
+            )
 
         # Force flat at end
         if abs(self.position) > 1e-12 and equity_curve:
             last_mid = float(equity_curve[-1].get("mid", self.avg_entry))
             last_ts = equity_curve[-1]["timestamp"]
-            if hasattr(last_ts, "to_pydatetime"):
+            if pd is not None and isinstance(last_ts, pd.Timestamp):
                 ts_dt = last_ts.to_pydatetime()
             elif isinstance(last_ts, datetime):
                 ts_dt = last_ts
@@ -1176,8 +1195,10 @@ class AdvancedBacktestEngine:
             self._seed_book(last_mid, ts_dt)
             close_side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
             order = Order(
-                order_id=0, symbol=self.execution_engine.symbol,
-                side=close_side, order_type=OrderType.MARKET,
+                order_id=0,
+                symbol=self.execution_engine.symbol,
+                side=close_side,
+                order_type=OrderType.MARKET,
                 quantity=abs(self.position),
             )
             self.execution_engine.submit_order(order, ts_dt)
@@ -1192,6 +1213,7 @@ class AdvancedBacktestEngine:
         if _PANDAS_OK and pd is not None:
             return pd.DataFrame(equity_curve)
         return equity_curve
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. Export

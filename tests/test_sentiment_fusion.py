@@ -2,6 +2,7 @@
 Tests for multi-modal sentiment (Improvement #3):
 financial NER, lexicon scoring, topic modeling, bar fusion.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -33,17 +34,23 @@ def _bars(n=24, start=datetime(2024, 1, 1, tzinfo=UTC)):
 
 def _events(n_ev=3):
     start = datetime(2024, 1, 1, tzinfo=UTC)
-    return pl.DataFrame({
-        "timestamp_utc": [start + timedelta(hours=1), start + timedelta(hours=2),
-                          start + timedelta(hours=1, minutes=30)],
-        "source": ["news", "news", "social"],
-        "text": _HEADLINES[:3],
-    })
+    return pl.DataFrame(
+        {
+            "timestamp_utc": [
+                start + timedelta(hours=1),
+                start + timedelta(hours=2),
+                start + timedelta(hours=1, minutes=30),
+            ],
+            "source": ["news", "news", "social"],
+            "text": _HEADLINES[:3],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Financial NER
 # ---------------------------------------------------------------------------
+
 
 def test_ner_detects_known_categories():
     out = financial_ner_counts(_HEADLINES)
@@ -73,14 +80,15 @@ def test_ner_empty_and_neutral():
 def test_lexicon_score_ranges_and_direction():
     sc = lexicon_score(_HEADLINES)
     assert np.all((sc >= -1.0) & (sc <= 1.0))
-    assert sc[0] > 0.0      # EUR/USD surges
-    assert sc[1] < 0.0      # US Dollar falls, NFP miss
+    assert sc[0] > 0.0  # EUR/USD surges
+    assert sc[1] < 0.0  # US Dollar falls, NFP miss
     assert abs(sc[2]) < 0.5  # Fed holds = neutral-ish
 
 
 # ---------------------------------------------------------------------------
 # Topic model
 # ---------------------------------------------------------------------------
+
 
 def test_topic_model_weights_sum_to_one():
     W, top = fit_topic_model(_HEADLINES, n_topics=3)
@@ -106,6 +114,7 @@ def test_topic_model_empty_corpus():
 # Bar fusion
 # ---------------------------------------------------------------------------
 
+
 def test_build_sentiment_features_counts_by_source():
     F = build_sentiment_features(_events(), _bars(), lam=0.2, dt_sec=3600, n_topics=3)
     assert len(F) == 24
@@ -127,8 +136,7 @@ def test_build_sentiment_features_ner_columns():
 
 def test_build_sentiment_features_fusion_with_cot():
     cot = pl.Series(np.random.default_rng(0).normal(size=24))
-    F = build_sentiment_features(_events(), _bars(), lam=0.2, dt_sec=3600,
-                                 n_topics=3, cot_z=cot)
+    F = build_sentiment_features(_events(), _bars(), lam=0.2, dt_sec=3600, n_topics=3, cot_z=cot)
     assert "sent_cot" in F.columns
     assert F["sent_modalities"].to_list()[1] >= 3.0
     assert np.all(np.isfinite(F["sent_fused"].to_numpy()))
@@ -146,11 +154,13 @@ def test_build_sentiment_features_no_events():
 
 def test_build_sentiment_features_all_zero_events():
     bars = _bars()
-    zero = pl.DataFrame({
-        "timestamp_utc": [bars[0]],
-        "source": ["news"],
-        "text": ["nothing relevant here"],
-    })
+    zero = pl.DataFrame(
+        {
+            "timestamp_utc": [bars[0]],
+            "source": ["news"],
+            "text": ["nothing relevant here"],
+        }
+    )
     F = build_sentiment_features(zero, bars, lam=0.2, dt_sec=3600, n_topics=3)
     assert F["sent_news_count"].to_list()[0] == 1.0
     assert np.isfinite(F["sent_news"].to_numpy()).all()
@@ -164,16 +174,21 @@ def test_build_sentiment_features_lexicon_fallback_when_no_sent_col():
 
 def test_add_sentiment_features_appends_to_bars():
     from features.sentiment_fusion import add_sentiment_features
+
     start = datetime(2024, 1, 1, tzinfo=UTC)
-    bars = pl.DataFrame({
-        "timestamp_utc": [start + timedelta(hours=i) for i in range(6)],
-        "close": [1.0 + 0.01 * i for i in range(6)],
-    })
-    ev = pl.DataFrame({
-        "timestamp_utc": [start + timedelta(hours=1)],
-        "source": ["news"],
-        "text": ["ECB hikes rates EUR/USD surges"],
-    })
+    bars = pl.DataFrame(
+        {
+            "timestamp_utc": [start + timedelta(hours=i) for i in range(6)],
+            "close": [1.0 + 0.01 * i for i in range(6)],
+        }
+    )
+    ev = pl.DataFrame(
+        {
+            "timestamp_utc": [start + timedelta(hours=1)],
+            "source": ["news"],
+            "text": ["ECB hikes rates EUR/USD surges"],
+        }
+    )
     out = add_sentiment_features(bars, ev, lam=0.2, dt_sec=3600, n_topics=2)
     assert "sent_news_count" in out.columns
     assert "ner_rate_hike" in out.columns

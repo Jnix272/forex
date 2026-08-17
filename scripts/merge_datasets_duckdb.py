@@ -14,7 +14,8 @@ def main():
     # Configure DuckDB to use max 12GB of RAM (adjust if needed)
     con.execute("PRAGMA memory_limit='12GB'")
     import os
-    os.makedirs('data/raw/news/tmp', exist_ok=True)
+
+    os.makedirs("data/raw/news/tmp", exist_ok=True)
     # Configure temp directory for out-of-core spilling
     con.execute("PRAGMA temp_directory='data/raw/news/tmp'")
 
@@ -27,15 +28,15 @@ def main():
             SELECT timestamp_utc, event_type, currency, impact, headline, actual, forecast, source, url, sentiment_score
             FROM read_csv_auto('data/raw/news/historical_news_fnspid_full.csv', ignore_errors=true)
             WHERE timestamp_utc >= '2003-01-01'
-            
+
             UNION ALL
-            
+
             SELECT timestamp_utc, event_type, currency, impact, headline, actual, forecast, source, url, sentiment_score
             FROM read_csv_auto('data/raw/news/historical_news_2021_2025.csv', ignore_errors=true)
             WHERE timestamp_utc >= '2003-01-01'
-            
+
             UNION ALL
-            
+
             SELECT timestamp_utc, event_type, currency, impact, headline, actual, forecast, source, url, null as sentiment_score
             FROM read_csv_auto('data/raw/news/Hugging_Face.csv', ignore_errors=true)
             WHERE timestamp_utc >= '2003-01-01'
@@ -53,6 +54,7 @@ def main():
         print(f"Error during DuckDB merge: {e}")
     finally:
         con.close()
+
 
 if __name__ == "__main__":
     main()

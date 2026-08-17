@@ -1,7 +1,7 @@
 """
 trading/live_engine.py
 =======================
-Live trading engine — connects all model components to broker execution.
+Live trading engine - connects all model components to broker execution.
 
 Architecture:
   Kafka (live ticks) -> Feature pipeline -> TIP-Search inference
@@ -30,6 +30,7 @@ import numpy as np
 
 try:
     import polars as pl
+
     _POLARS = True
 except ImportError:
     pl = None
@@ -51,6 +52,7 @@ class _LazyPandas:
     def _load(self):
         if self._module is None:
             import pandas as pandas_module
+
             self._module = pandas_module
         return self._module
 
@@ -100,7 +102,7 @@ SHAPFeatureTracker = _LazySymbol("monitoring.pipeline", "SHAPFeatureTracker")
 DemotionMonitor = _LazySymbol("monitoring.demotion_monitor", "DemotionMonitor")
 ForexPrometheusExporter = _LazySymbol("monitoring.prometheus_exporter", "ForexPrometheusExporter")
 LiveLogger = _LazySymbol("monitoring.live_logger", "LiveLogger")
-from config.settings import (
+from config.settings import (  # noqa: E402
     ALERTS,
     FEATURES,
     GOVERNANCE,
@@ -111,11 +113,11 @@ from config.settings import (
     price_to_pips,
     resolve_checkpoint_paths,
 )
-from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile
+from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile  # noqa: E402
 
 load_cross_asset_panel = _LazySymbol("data.cross_asset", "load_cross_asset_panel")
 get_latest_headlines = _LazySymbol("data.news_feed", "get_latest_headlines")
-from trading.live_actions import LiveAction, model_class_to_live_action
+from trading.live_actions import LiveAction, model_class_to_live_action  # noqa: E402
 
 DisagreementGate = _LazySymbol("trading.live_guards", "DisagreementGate")
 EconomicCalendarGuard = _LazySymbol("trading.live_guards", "EconomicCalendarGuard")
@@ -144,6 +146,7 @@ def _is_numeric_dtype(dtype) -> bool:
         return bool(method() if callable(method) else method)
     try:
         import numpy as _np
+
         return bool(_np.issubdtype(dtype, _np.number))
     except Exception:
         return str(dtype).lower().startswith(("float", "int", "uint", "double"))
@@ -153,13 +156,15 @@ def _is_numeric_dtype(dtype) -> bool:
 # CHECKPOINT LOADING + HOT RELOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class _DemoAgent:
-    """Random-action placeholder — only when --demo or no checkpoint."""
+    """Random-action placeholder - only when --demo or no checkpoint."""
 
     returns_live_actions = True
 
     def __init__(self, label: str = "demo"):
         import random
+
         self._r = random
         self.label = label
 
@@ -173,6 +178,7 @@ class _DemoAgent:
 def _read_sidecar_model_name(pt_path: Path, fallback: str) -> str:
     try:
         from inference.onnx_inference import _read_training_config
+
         cfg = _read_training_config(pt_path, fallback)
         return str(cfg.get("model") or fallback).lower().strip()
     except Exception:
@@ -230,7 +236,7 @@ def build_inference_agents(
     }
 
     if demo:
-        print("[Live] WARN: --demo flag set — using random DemoAgent (no trained weights)")
+        print("[Live] WARN: --demo flag set - using random DemoAgent (no trained weights)")
         agent = _DemoAgent("demo")
         return agent, agent, meta
 
@@ -249,20 +255,24 @@ def build_inference_agents(
     if runtime == "onnx":
         ckpt_onnx = paths.onnx_path
         if ckpt_onnx is None and paths.pt_path is not None:
-            print("[Live] ONNX not found — exporting from PyTorch checkpoint...")
+            print("[Live] ONNX not found - exporting from PyTorch checkpoint...")
             from inference.onnx_inference import export_to_onnx
-            ckpt_onnx = Path(export_to_onnx(
-                checkpoint_path=str(paths.pt_path),
-                model_name=arch_name,
-                seq_len=seq_len,
-                n_features=n_features,
-            ))
+
+            ckpt_onnx = Path(
+                export_to_onnx(
+                    checkpoint_path=str(paths.pt_path),
+                    model_name=arch_name,
+                    seq_len=seq_len,
+                    n_features=n_features,
+                )
+            )
         if ckpt_onnx is None or not Path(ckpt_onnx).is_file():
             raise RuntimeError(
                 f"[Live] No ONNX or PyTorch checkpoint under {paths.checkpoint_dir}. "
                 "Train and promote a model, or pass --demo for paper testing."
             )
         from inference.onnx_inference import DirectMLInferenceEngine
+
         slow_engine = DirectMLInferenceEngine(
             onnx_path=str(ckpt_onnx),
             seq_len=seq_len,
@@ -276,6 +286,7 @@ def build_inference_agents(
                 "Train and promote a model, or pass --demo."
             )
         from inference.pytorch_inference import PyTorchInferenceEngine
+
         slow_engine = PyTorchInferenceEngine(
             checkpoint_path=str(paths.pt_path),
             model_name=arch_name,
@@ -289,6 +300,7 @@ def build_inference_agents(
     if use_rl_fast:
         try:
             from inference.rl_inference import build_rl_fast_agent
+
             rl_agent = build_rl_fast_agent(
                 checkpoint_dir=str(paths.checkpoint_dir),
                 model_name=arch_name,
@@ -308,9 +320,15 @@ def build_inference_agents(
 
 def _pandas_freq_to_polars(freq: str) -> str:
     mapping = {
-        "1min": "1m", "1t": "1m", "min": "1m",
-        "5min": "5m", "15min": "15m", "30min": "30m",
-        "1h": "1h", "1H": "1h", "1d": "1d",
+        "1min": "1m",
+        "1t": "1m",
+        "min": "1m",
+        "5min": "5m",
+        "15min": "15m",
+        "30min": "30m",
+        "1h": "1h",
+        "1H": "1h",
+        "1d": "1d",
     }
     return mapping.get(str(freq), str(freq).replace("min", "m"))
 
@@ -361,13 +379,15 @@ class LiveTickBuffer:
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
         with self._lock:
-            self._ticks.append({
-                "timestamp": ts,
-                "bid": float(bid),
-                "ask": float(ask),
-                "mid": (float(bid) + float(ask)) / 2.0,
-                "volume": float(volume),
-            })
+            self._ticks.append(
+                {
+                    "timestamp": ts,
+                    "bid": float(bid),
+                    "ask": float(ask),
+                    "mid": (float(bid) + float(ask)) / 2.0,
+                    "volume": float(volume),
+                }
+            )
 
     def get_bars(self):
         with self._lock:
@@ -405,21 +425,23 @@ class LiveTickBuffer:
             frame.with_columns(pl.col("timestamp").cast(pl.Datetime(time_zone="UTC")))
             .sort("timestamp")
             .group_by_dynamic("timestamp", every=every)
-            .agg([
-                pl.col("mid").first().alias("open"),
-                pl.col("mid").max().alias("high"),
-                pl.col("mid").min().alias("low"),
-                pl.col("mid").last().alias("close"),
-                pl.col("volume").sum().alias("volume"),
-                pl.col("bid").last().alias("bid_close"),
-                pl.col("ask").last().alias("ask_close"),
-            ])
+            .agg(
+                [
+                    pl.col("mid").first().alias("open"),
+                    pl.col("mid").max().alias("high"),
+                    pl.col("mid").min().alias("low"),
+                    pl.col("mid").last().alias("close"),
+                    pl.col("volume").sum().alias("volume"),
+                    pl.col("bid").last().alias("bid_close"),
+                    pl.col("ask").last().alias("ask_close"),
+                ]
+            )
             .drop_nulls()
         )
         return bars
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass  # noqa: E402
 
 
 class BrokerInterface:
@@ -432,16 +454,17 @@ class BrokerInterface:
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         raise NotImplementedError
 
-    def market_order(self, pair: str, side: str, lots: float,
-                     *, stop_loss: float = None, take_profit: float = None) -> dict:
+    def market_order(
+        self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
+    ) -> dict:
         raise NotImplementedError(
-            f"{type(self).__name__}.market_order is not implemented — "
+            f"{type(self).__name__}.market_order is not implemented - "
             "refusing fake fills. Use PaperBroker or a real broker override."
         )
 
     def close_position(self, pair: str) -> dict:
         raise NotImplementedError(
-            f"{type(self).__name__}.close_position is not implemented — "
+            f"{type(self).__name__}.close_position is not implemented - "
             "refusing fake closes. Use PaperBroker or a real broker override."
         )
 
@@ -547,12 +570,19 @@ class PaperBroker(BrokerInterface):
     def get_account(self) -> dict:
         return {"equity": self.equity}
 
-    def market_order(self, pair: str, side: str, lots: float,
-                     *, stop_loss: float = None, take_profit: float = None) -> dict:
+    def market_order(
+        self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
+    ) -> dict:
         signed = float(lots) if str(side).lower() in ("buy", "long") else -float(lots)
         self._positions[pair] = self._positions.get(pair, 0.0) + signed
-        return {"ok": True, "pair": pair, "side": side, "lots": lots,
-                "stop_loss": stop_loss, "take_profit": take_profit}
+        return {
+            "ok": True,
+            "pair": pair,
+            "side": side,
+            "lots": lots,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
 
     def close_position(self, pair: str) -> dict:
         self._positions.pop(pair, None)
@@ -565,7 +595,7 @@ class LMAXBroker(BrokerInterface):
 
     Pricing path uses the LMAX REST API when ``LMAX_USERNAME`` /
     ``LMAX_PASSWORD`` are set (via ``data.sources.LmaxDataSource``).
-    Order routing still requires a FIX 4.4 session — ``market_order`` /
+    Order routing still requires a FIX 4.4 session - ``market_order`` /
     ``close_position`` refuse fake fills until FIX is configured.
     """
 
@@ -584,6 +614,7 @@ class LMAXBroker(BrokerInterface):
 
     def connect(self) -> bool:
         import os
+
         user = os.getenv("LMAX_USERNAME")
         password = os.getenv("LMAX_PASSWORD")
         if not user or not password:
@@ -595,24 +626,26 @@ class LMAXBroker(BrokerInterface):
             return False
         try:
             from data.sources import LMAXLoader
+
             self._client = LMAXLoader(username=user, password=password, verbose=True)
             ok = bool(self._client.login())
             self._connected = ok
             if ok:
                 print("[Live] LMAXBroker: REST session OK.")
-                
+
                 # FIX Init
                 fix_cfg = os.getenv("LMAX_FIX_CONFIG")
                 if fix_cfg:
                     try:
                         import quickfix as fix
+
                         from execution.lmax_fix_app import LMAXFixApp
-                        
+
                         settings = fix.SessionSettings(fix_cfg)
                         self._fix_app = LMAXFixApp(username=user, password=password)
                         storeFactory = fix.FileStoreFactory(settings)
                         logFactory = fix.ScreenLogFactory(settings)
-                        
+
                         self._fix_initiator = fix.SocketInitiator(self._fix_app, storeFactory, settings, logFactory)
                         self._fix_initiator.start()
                         print(f"[Live] LMAXBroker: FIX session started via {fix_cfg}")
@@ -636,39 +669,37 @@ class LMAXBroker(BrokerInterface):
 
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         if not self._connected or self._client is None:
-            raise RuntimeError(
-                "LMAXBroker not connected — call connect() with LMAX_USERNAME/PASSWORD"
-            )
+            raise RuntimeError("LMAXBroker not connected - call connect() with LMAX_USERNAME/PASSWORD")
         book = self._client.fetch_orderbook(pair)
         if not book or book.get("best_bid") is None or book.get("best_ask") is None:
             raise RuntimeError(f"LMAXBroker: no book for {pair}")
         return float(book["best_bid"]), float(book["best_ask"])
 
-    def market_order(self, pair: str, side: str, lots: float,
-                     *, stop_loss: float = None, take_profit: float = None) -> dict:
+    def market_order(
+        self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
+    ) -> dict:
         if self._fix_initiator is None or not getattr(self._fix_app, "connected", False):
-            raise RuntimeError(
-                "LMAXBroker.market_order: FIX session not connected. Set LMAX_FIX_CONFIG."
-            )
-            
-        import quickfix as fix
-        import uuid
+            raise RuntimeError("LMAXBroker.market_order: FIX session not connected. Set LMAX_FIX_CONFIG.")
+
         import time
-        
+        import uuid
+
+        import quickfix as fix
+
         msg = fix.Message()
         msg.getHeader().setField(fix.MsgType(fix.MsgType_NewOrderSingle))
-        
+
         cl_ord_id = str(uuid.uuid4())[:16]
         msg.setField(fix.ClOrdID(cl_ord_id))
         msg.setField(fix.Symbol(pair))
-        
+
         fix_side = fix.Side_BUY if side.upper() == "BUY" else fix.Side_SELL
         msg.setField(fix.Side(fix_side))
-        
+
         msg.setField(fix.TransactTime(int(time.time())))
         msg.setField(fix.OrderQty(float(lots)))
         msg.setField(fix.OrdType(fix.OrdType_MARKET))
-        
+
         try:
             fix.Session.sendToTarget(msg, self._fix_app.session_id)
             print(f"[LMAX FIX] Sent NewOrderSingle: {cl_ord_id}")
@@ -688,7 +719,7 @@ class LMAXBroker(BrokerInterface):
         flat_side = "SELL" if net > 0 else "BUY"
         flat_lots = abs(net)
         result = self.market_order(pair, flat_side, flat_lots)
-        # Clear local tracking regardless — the flatten order is in flight.
+        # Clear local tracking regardless - the flatten order is in flight.
         self._positions.pop(pair, None)
         return result
 
@@ -698,6 +729,7 @@ class BridgeBrokerAdapter(BrokerInterface):
 
     def __init__(self, venue: str = "MT5", config: dict | None = None):
         from execution.broker_bridge import BrokerBridge
+
         self._bridge = BrokerBridge(broker=str(venue).upper(), config=config or {})
         self.venue = str(venue).upper()
 
@@ -710,8 +742,9 @@ class BridgeBrokerAdapter(BrokerInterface):
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         return self._bridge.get_bid_ask(pair)
 
-    def market_order(self, pair: str, side: str, lots: float,
-                     *, stop_loss: float = None, take_profit: float = None) -> dict:
+    def market_order(
+        self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
+    ) -> dict:
         ok = self._bridge.execute_order(
             pair,
             side=str(side).upper(),
@@ -760,9 +793,7 @@ class OANDABroker(BrokerInterface):
         self._token = os.environ.get("OANDA_BEARER_TOKEN") or os.environ.get("OANDA_API_TOKEN")
         self._account_id = os.environ.get("OANDA_ACCOUNT_ID")
         self._host = (
-            os.environ.get("OANDA_API_URL")
-            or os.environ.get("OANDA_API_HOST")
-            or "https://api-fxpractice.oanda.com"
+            os.environ.get("OANDA_API_URL") or os.environ.get("OANDA_API_HOST") or "https://api-fxpractice.oanda.com"
         ).rstrip("/")
         self._bid = None
         self._ask = None
@@ -792,6 +823,7 @@ class OANDABroker(BrokerInterface):
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         import json as _json
         import urllib.request
+
         inst = self._instrument(pair)
         url = f"{self._host}/v3/accounts/{self._account_id}/pricing?instruments={inst}"
         req = urllib.request.Request(url, headers=self._headers())
@@ -812,6 +844,7 @@ class OANDABroker(BrokerInterface):
     def get_account(self) -> dict:
         import json as _json
         import urllib.request
+
         url = f"{self._host}/v3/accounts/{self._account_id}/summary"
         req = urllib.request.Request(url, headers=self._headers())
         try:
@@ -828,11 +861,13 @@ class OANDABroker(BrokerInterface):
         except Exception as exc:
             raise RuntimeError(f"OANDA get_account failed: {exc}") from exc
 
-    def market_order(self, pair: str, side: str, lots: float,
-                     *, stop_loss: float = None, take_profit: float = None) -> dict:
+    def market_order(
+        self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
+    ) -> dict:
         import json as _json
         import urllib.request
-        units = int(round(float(lots) * 10_000))
+
+        units = round(float(lots) * 10_000)
         if str(side).lower() in ("sell", "short"):
             units = -abs(units)
         else:
@@ -857,6 +892,7 @@ class OANDABroker(BrokerInterface):
     def close_position(self, pair: str) -> dict:
         import json as _json
         import urllib.request
+
         url = f"{self._host}/v3/accounts/{self._account_id}/positions/{self._instrument(pair)}/close"
         body = _json.dumps({"longUnits": "ALL", "shortUnits": "ALL"}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=self._headers(), method="PUT")
@@ -869,6 +905,7 @@ class OANDABroker(BrokerInterface):
     def get_positions(self):
         import json as _json
         import urllib.request
+
         req = urllib.request.Request(
             f"{self._host}/v3/accounts/{self._account_id}/positions",
             headers=self._headers(),
@@ -933,6 +970,7 @@ class LiveTradingEngine:
 
         try:
             from risk.risk_engine import RiskEngine
+
             self.risk_engine = risk_engine if risk_engine is not None else RiskEngine(equity=self.equity)
         except Exception as e:
             print(f"[Live] RiskEngine unavailable ({e}); continuing with legacy guards only")
@@ -947,6 +985,7 @@ class LiveTradingEngine:
         # INF-008: Persistent execution audit trail
         try:
             from execution.execution_logger import ExecutionLogger
+
             self.exec_logger = ExecutionLogger(log_dir=str(self.log_dir / "execution"))
         except ImportError:
             self.exec_logger = None
@@ -977,6 +1016,7 @@ class LiveTradingEngine:
         self.pvar = PortfolioVaR()
         try:
             from config.settings import LIVE_RISK as _LR
+
             self.session_limits = SessionLimitsEnforcer(
                 session_limits=_LR.get("session_limits"),
             )
@@ -987,11 +1027,15 @@ class LiveTradingEngine:
         self.sentiment = DualStreamSentiment(prefer_backend=mode, use_cache=True)
         self.finbert = SentimentPipeline()
         self._sent_backend = mode
-        self.logger.event("INFO", "sentiment_backend", f"[Live] Sentiment mode={mode}", pair=self.pair, mode=mode, backend=mode)
+        self.logger.event(
+            "INFO", "sentiment_backend", f"[Live] Sentiment mode={mode}", pair=self.pair, mode=mode, backend=mode
+        )
 
         flatten = os.getenv("LIVE_CALENDAR_FLATTEN", "0") not in ("0", "false", "False", "")
         self.calendar_guard = EconomicCalendarGuard(
-            pair=self.pair, calendar_file=calendar_file, flatten_before_event=flatten,
+            pair=self.pair,
+            calendar_file=calendar_file,
+            flatten_before_event=flatten,
         )
         self.spread_vol_guard = SpreadVolatilityGuard(max_spread_pips=max_spread_pips, pair=self.pair)
         self.regime_router = RegimeRouter()
@@ -1026,6 +1070,7 @@ class LiveTradingEngine:
                 if bool(getattr(agent, "returns_live_actions", False)):
                     return action
                 return model_class_to_live_action(action)
+
             return _adapt
 
         self._live_action_adapter = _live_action_adapter
@@ -1055,18 +1100,14 @@ class LiveTradingEngine:
 
         self._model_name = str(self._inference_meta.get("model_name") or "haelt")
         self._runtime = str(self._inference_meta.get("runtime") or "pytorch")
-        self._checkpoint_dir = Path(
-            self._inference_meta.get("checkpoint_dir") or active_checkpoint_dir()
-        )
-        self._reload_flag = Path(
-            self._inference_meta.get("reload_flag")
-            or (self._checkpoint_dir / RELOAD_MODEL_FLAG)
-        )
+        self._checkpoint_dir = Path(self._inference_meta.get("checkpoint_dir") or active_checkpoint_dir())
+        self._reload_flag = Path(self._inference_meta.get("reload_flag") or (self._checkpoint_dir / RELOAD_MODEL_FLAG))
 
         self._discord = None
         if bool(ALERTS.get("alert_on_demotion", True)):
             try:
                 from monitoring.discord_alerts import DiscordAlerter
+
                 self._discord = DiscordAlerter(
                     min_interval_s=float(ALERTS.get("discord_min_interval_s", 300)),
                     environment=str(ALERTS.get("discord_environment", "production")),
@@ -1105,7 +1146,7 @@ class LiveTradingEngine:
                     "[Live] Broker connection failed. Pass allow_paper_fallback=True "
                     "or --allow-paper-fallback only for intentional paper testing."
                 )
-            print("[Live] Broker connection failed — using PaperBroker (explicit fallback)")
+            print("[Live] Broker connection failed - using PaperBroker (explicit fallback)")
             self.broker = PaperBroker(initial_equity=self.equity)
             if not self.broker.connect():
                 raise RuntimeError("PaperBroker fallback failed to connect")
@@ -1118,7 +1159,7 @@ class LiveTradingEngine:
                         f"[Live] Broker pricing probe failed ({e}). "
                         "Pass --allow-paper-fallback to continue on PaperBroker."
                     ) from e
-                print(f"[Live] Broker pricing probe failed ({e}) — falling back to PaperBroker")
+                print(f"[Live] Broker pricing probe failed ({e}) - falling back to PaperBroker")
                 self.broker = PaperBroker(initial_equity=self.equity)
                 self.broker.connect()
         self._running = True
@@ -1169,10 +1210,16 @@ class LiveTradingEngine:
             return
         try:
             from config.settings import get_pip_size
+
             pip = get_pip_size(self.pair)
-            pnl = (float(mid) - self._entry_price) * (
-                float(self._position) / pos          # sign: +1 long, -1 short
-            ) / max(pip, 1e-12) * pos
+            pnl = (
+                (float(mid) - self._entry_price)
+                * (
+                    float(self._position) / pos  # sign: +1 long, -1 short
+                )
+                / max(pip, 1e-12)
+                * pos
+            )
             direction = "long" if self._position > 0 else "short"
             self.risk_engine.close_position(self.pair)
             self.risk_engine.on_trade_closed(
@@ -1182,14 +1229,16 @@ class LiveTradingEngine:
                 lots=pos,
                 direction=direction,
             )
-            self.trade_journal.record({
-                "event": "trade_closed",
-                "reason": reason,
-                "pnl_usd": round(float(pnl), 4),
-                "position": self._position,
-                "entry": self._entry_price,
-                "exit": float(mid),
-            })
+            self.trade_journal.record(
+                {
+                    "event": "trade_closed",
+                    "reason": reason,
+                    "pnl_usd": round(float(pnl), 4),
+                    "position": self._position,
+                    "entry": self._entry_price,
+                    "exit": float(mid),
+                }
+            )
         except Exception:
             pass
 
@@ -1231,7 +1280,13 @@ class LiveTradingEngine:
                     headlines = get_latest_headlines(limit=12) or ["Market update"]
                     bias = float(self.finbert.score_headlines(headlines))
                     self._sent_backend = "finbert"
-                    self.logger.event("WARN", "sentiment_fallback", "[Live] Sentiment fallback -> finbert", pair=self.pair, backend="finbert")
+                    self.logger.event(
+                        "WARN",
+                        "sentiment_fallback",
+                        "[Live] Sentiment fallback -> finbert",
+                        pair=self.pair,
+                        backend="finbert",
+                    )
                 except Exception as e:
                     self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
                     bias = 0.0
@@ -1266,34 +1321,35 @@ class LiveTradingEngine:
         # ATR stop-loss: flatten when adverse move exceeds stop_loss_atr * ATR
         if abs(self._position) > 0 and atr > 0 and self._entry_price > 0:
             stop_dist = float(self.stop_loss_atr) * float(atr)
-            hit_sl = (
-                (self._position > 0 and mid <= self._entry_price - stop_dist)
-                or (self._position < 0 and mid >= self._entry_price + stop_dist)
+            hit_sl = (self._position > 0 and mid <= self._entry_price - stop_dist) or (
+                self._position < 0 and mid >= self._entry_price + stop_dist
             )
             if hit_sl:
                 self.broker.close_position(self.pair)
-                self.trade_journal.record({
-                    "event": "stop_loss",
-                    "reason": "atr_stop",
-                    "stop_loss_atr": self.stop_loss_atr,
-                    "atr": atr,
-                    "entry": self._entry_price,
-                    "mid": mid,
-                    "position": self._position,
-                })
+                self.trade_journal.record(
+                    {
+                        "event": "stop_loss",
+                        "reason": "atr_stop",
+                        "stop_loss_atr": self.stop_loss_atr,
+                        "atr": atr,
+                        "entry": self._entry_price,
+                        "mid": mid,
+                        "position": self._position,
+                    }
+                )
                 self._risk_trade_closed(mid, "atr_stop")
                 self._position = 0.0
                 self._holding_bars = 0
                 self._entry_price = 0.0
                 return
 
-        state_kw = dict(
-            position_lots=self._position,
-            entry_price=self._entry_price,
-            equity=self.equity,
-            holding_bars=self._holding_bars,
-            current_price=mid,
-        )
+        state_kw = {
+            "position_lots": self._position,
+            "entry_price": self._entry_price,
+            "equity": self.equity,
+            "holding_bars": self._holding_bars,
+            "current_price": mid,
+        }
         self.fast.set_agent_state(**state_kw)
         self.slow.set_agent_state(**state_kw)
 
@@ -1311,19 +1367,26 @@ class LiveTradingEngine:
                     self.broker.close_position(self.pair)
                     self._position = 0.0
                     self._holding_bars = 0
-                    self.trade_journal.record({
-                        "event": "blocked", "reason": "risk_circuit_breaker",
-                        "details": _risk_mon.get("breach_reasons"),
-                    })
+                    self.trade_journal.record(
+                        {
+                            "event": "blocked",
+                            "reason": "risk_circuit_breaker",
+                            "details": _risk_mon.get("breach_reasons"),
+                        }
+                    )
                     return
         except Exception as e:
             self._equity_fetch_failures = getattr(self, "_equity_fetch_failures", 0) + 1
-            self.logger.event("WARN", "equity_fetch_failed",
-                              f"[Live] Broker equity fetch failed ({self._equity_fetch_failures}x): {e}",
-                              pair=self.pair)
+            self.logger.event(
+                "WARN",
+                "equity_fetch_failed",
+                f"[Live] Broker equity fetch failed ({self._equity_fetch_failures}x): {e}",
+                pair=self.pair,
+            )
             if self._equity_fetch_failures >= 5:
-                self.logger.event("ERROR", "equity_stale_halt",
-                                  "[Live] 5 consecutive equity fetch failures — halting", pair=self.pair)
+                self.logger.event(
+                    "ERROR", "equity_stale_halt", "[Live] 5 consecutive equity fetch failures - halting", pair=self.pair
+                )
                 self._running = False
                 return
         pnl = self.equity - prev_equity
@@ -1337,23 +1400,29 @@ class LiveTradingEngine:
         if demotion_alert and demotion_alert.get("demoted"):
             triggers = demotion_alert.get("triggers") or ["unknown"]
             self.logger.event(
-                "WARN", "demotion",
+                "WARN",
+                "demotion",
                 f"[Live] DEMOTION triggered: {triggers}",
-                pair=self.pair, triggers=triggers,
+                pair=self.pair,
+                triggers=triggers,
             )
             if self._discord is not None:
                 try:
                     status = demotion_alert.get("status") or {}
-                    self._discord.send("model_demoted", {
-                        "Pair": self.pair,
-                        "Triggers": ", ".join(str(t) for t in triggers),
-                        "Equity": f"${self.equity:,.2f}",
-                        "Sharpe": str(status.get("sharpe", "n/a")),
-                        "WinRate": str(status.get("win_rate", "n/a")),
-                    })
+                    self._discord.send(
+                        "model_demoted",
+                        {
+                            "Pair": self.pair,
+                            "Triggers": ", ".join(str(t) for t in triggers),
+                            "Equity": f"${self.equity:,.2f}",
+                            "Sharpe": str(status.get("sharpe", "n/a")),
+                            "WinRate": str(status.get("win_rate", "n/a")),
+                        },
+                    )
                 except Exception as exc:
                     self.logger.event(
-                        "ERROR", "discord_alert_failed",
+                        "ERROR",
+                        "discord_alert_failed",
                         f"[Live] Discord demotion alert failed: {exc}",
                         pair=self.pair,
                     )
@@ -1365,24 +1434,38 @@ class LiveTradingEngine:
             self.broker.close_position(self.pair)
             self._position = 0.0
             self._holding_bars = 0
-            self.trade_journal.record({
-                "event": "blocked", "reason": "drawdown_guard",
-                "time": datetime.now(UTC).isoformat(), "bar": int(bar_idx),
-                "final_action": "HOLD",
-            })
+            self.trade_journal.record(
+                {
+                    "event": "blocked",
+                    "reason": "drawdown_guard",
+                    "time": datetime.now(UTC).isoformat(),
+                    "bar": int(bar_idx),
+                    "final_action": "HOLD",
+                }
+            )
             return
 
         calendar_result = self.calendar_guard.check(now=datetime.now(UTC))
         if calendar_result.blocked:
             self.logger.event("WARN", "calendar_guard", "[Live] Economic calendar block -> HOLD", pair=self.pair)
-            self.trade_journal.record({"event": "blocked", "reason": calendar_result.reason, "details": calendar_result.to_dict()})
-            if calendar_result.details and calendar_result.details.get("flatten_before_event") and abs(self._position) > 0:
+            self.trade_journal.record(
+                {"event": "blocked", "reason": calendar_result.reason, "details": calendar_result.to_dict()}
+            )
+            if (
+                calendar_result.details
+                and calendar_result.details.get("flatten_before_event")
+                and abs(self._position) > 0
+            ):
                 self._risk_trade_closed(mid, "calendar_flatten")
                 self.broker.close_position(self.pair)
                 self._position = 0.0
             return
 
-        tip_out = self.tip.select_action(obs, current_atr=atr) if hasattr(self.tip, "select_action") else self.fast.select_action(obs)
+        tip_out = (
+            self.tip.select_action(obs, current_atr=atr)
+            if hasattr(self.tip, "select_action")
+            else self.fast.select_action(obs)
+        )
         if isinstance(tip_out, tuple):
             action = int(tip_out[0])
             model_used = str(tip_out[1]) if len(tip_out) > 1 else "unknown"
@@ -1390,8 +1473,9 @@ class LiveTradingEngine:
             action = int(tip_out)
             model_used = "fast"
         # BUG-010: Track predictions for concept drift detection
-        if not hasattr(self, '_recent_predictions'):
+        if not hasattr(self, "_recent_predictions"):
             from collections import deque
+
             self._recent_predictions = deque(maxlen=2000)
         self._recent_predictions.append(float(action))
         if self.prom is not None and hasattr(self.prom, "set_sentiment"):
@@ -1405,7 +1489,11 @@ class LiveTradingEngine:
             return
         regime_result = self.regime_router.route(features, calendar_blocked=False)
         disagreement_result = self.disagreement_gate.check(
-            action, obs, fast_model=self.fast, slow_model=self.slow, confidence=None,
+            action,
+            obs,
+            fast_model=self.fast,
+            slow_model=self.slow,
+            confidence=None,
         )
         if disagreement_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": disagreement_result.reason})
@@ -1431,7 +1519,7 @@ class LiveTradingEngine:
         ret = _last_float(features, "ret_5", 0.0)
         try:
             # R-1/R-2 fix: parametric_var now expects price-fraction returns
-            # (NOT pip-scaled). The notional × price-fraction math gives dollar
+            # (NOT pip-scaled). The notional x price-fraction math gives dollar
             # VaR directly. Pass `ret` as-is; the auto-normalizer guards against
             # any future caller accidentally feeding pip values again.
             self.pvar.update_returns(self.pair, float(ret))
@@ -1443,7 +1531,9 @@ class LiveTradingEngine:
             positions = {}
         positions[self.pair] = float(self._position)
         var_result = self.pvar.parametric_var(positions, self.equity)
-        size_adj = 0.5 if float(var_result.get("var_pct", 0.0) or 0.0) > float(getattr(self.pvar, "max_var", 0.02)) else 1.0
+        size_adj = (
+            0.5 if float(var_result.get("var_pct", 0.0) or 0.0) > float(getattr(self.pvar, "max_var", 0.02)) else 1.0
+        )
 
         hurst = _last_float(features, "hurst_60", 0.5)
         corr_stab = _last_float(features, "corr_break", 0.0)
@@ -1459,7 +1549,11 @@ class LiveTradingEngine:
             recent_returns = np.full(60, float(ret if ret else vol * 0.1), dtype=np.float64)
 
         sizing = self.rck.size(
-            self.equity, 0.55, 1.5, recent_returns, atr,
+            self.equity,
+            0.55,
+            1.5,
+            recent_returns,
+            atr,
             corr_avg=float(var_result.get("correlation_avg", 0.0) or 0.0),
             hurst=float(hurst),
             corr_break=float(corr_stab),
@@ -1487,11 +1581,13 @@ class LiveTradingEngine:
                 now=datetime.now(UTC),
             )
             if not sess_chk.get("allowed", True):
-                self.trade_journal.record({
-                    "event": "blocked",
-                    "reason": "session_limits",
-                    "details": sess_chk,
-                })
+                self.trade_journal.record(
+                    {
+                        "event": "blocked",
+                        "reason": "session_limits",
+                        "details": sess_chk,
+                    }
+                )
                 return
 
             if self.risk_engine is not None:
@@ -1501,11 +1597,13 @@ class LiveTradingEngine:
                     price=mid,
                 )
                 if not _rd.allowed:
-                    self.trade_journal.record({
-                        "event": "blocked",
-                        "reason": f"risk_engine:{_rd.rule}",
-                        "details": _rd.reason,
-                    })
+                    self.trade_journal.record(
+                        {
+                            "event": "blocked",
+                            "reason": f"risk_engine:{_rd.rule}",
+                            "details": _rd.reason,
+                        }
+                    )
                     return
 
         if lots > 0 and action in (int(LiveAction.BUY), int(LiveAction.SELL)):
@@ -1528,16 +1626,21 @@ class LiveTradingEngine:
             # others (OANDA direct) raise or return fill data without an ok key.
             def _place(side: str, qty: float) -> bool:
                 r = self.broker.market_order(
-                    self.pair, side, float(qty),
-                    stop_loss=sl, take_profit=tp,
+                    self.pair,
+                    side,
+                    float(qty),
+                    stop_loss=sl,
+                    take_profit=tp,
                 )
                 if isinstance(r, dict) and r.get("ok") is False:
-                    self.trade_journal.record({
-                        "event": "order_rejected",
-                        "side": side,
-                        "lots": float(qty),
-                        "venue": r.get("venue") or getattr(self.broker, "venue", "?"),
-                    })
+                    self.trade_journal.record(
+                        {
+                            "event": "order_rejected",
+                            "side": side,
+                            "lots": float(qty),
+                            "venue": r.get("venue") or getattr(self.broker, "venue", "?"),
+                        }
+                    )
                     return False
                 return True
 
@@ -1558,7 +1661,9 @@ class LiveTradingEngine:
             self._entry_price = mid
             self._holding_bars = 0
             if self.risk_engine is not None:
-                self.risk_engine.open_position(self.pair, abs(self._position), self._entry_price, direction="long" if buy else "short")
+                self.risk_engine.open_position(
+                    self.pair, abs(self._position), self._entry_price, direction="long" if buy else "short"
+                )
         elif action == int(LiveAction.HOLD):
             self._holding_bars += 1
 
@@ -1566,18 +1671,20 @@ class LiveTradingEngine:
         if self.prom is not None:
             self.prom.update_latency(lat_total)
             self.prom.set_position(self._position)
-        self._bar_log.append({
-            "bar": int(bar_idx),
-            "pair": self.pair,
-            "action": int(action),
-            "model": model_used,
-            "lots": round(lots, 4),
-            "equity": round(self.equity, 2),
-            "sentiment": round(float(bias), 4),
-            "latency_ms": round(lat_total, 2),
-            "var_pct": float(var_result.get("var_pct", 0.0) or 0.0),
-            "ts": datetime.now(UTC).isoformat(),
-        })
+        self._bar_log.append(
+            {
+                "bar": int(bar_idx),
+                "pair": self.pair,
+                "action": int(action),
+                "model": model_used,
+                "lots": round(lots, 4),
+                "equity": round(self.equity, 2),
+                "sentiment": round(float(bias), 4),
+                "latency_ms": round(lat_total, 2),
+                "var_pct": float(var_result.get("var_pct", 0.0) or 0.0),
+                "ts": datetime.now(UTC).isoformat(),
+            }
+        )
         if len(self._bar_log) % 60 == 0:
             self._save_log()
 
@@ -1586,8 +1693,9 @@ class LiveTradingEngine:
         if not consume_reload_flag(self._reload_flag):
             return
         self.logger.event(
-            "INFO", "model_reload",
-            "[Live] reload_model.flag detected — reloading weights",
+            "INFO",
+            "model_reload",
+            "[Live] reload_model.flag detected - reloading weights",
             pair=self.pair,
         )
         try:
@@ -1603,13 +1711,16 @@ class LiveTradingEngine:
             self._agent_wrap_slow.set_model(slow, self._live_action_adapter(slow))
             self._inference_meta.update(meta)
             self.logger.event(
-                "INFO", "model_reload_ok",
+                "INFO",
+                "model_reload_ok",
                 f"[Live] Reloaded from {meta.get('source')} | pt={meta.get('pt_path')}",
-                pair=self.pair, source=meta.get("source"),
+                pair=self.pair,
+                source=meta.get("source"),
             )
         except Exception as exc:
             self.logger.event(
-                "ERROR", "model_reload_failed",
+                "ERROR",
+                "model_reload_failed",
                 f"[Live] Hot reload failed: {exc}",
                 pair=self.pair,
             )
@@ -1628,7 +1739,8 @@ class LiveTradingEngine:
                 raise RuntimeError(err_msg)
             return list(self._expected_features)
         return [
-            c for c, dtype in zip(features.columns, features.dtypes)
+            c
+            for c, dtype in zip(features.columns, features.dtypes, strict=False)
             if c != "timestamp_utc" and _is_numeric_dtype(dtype)
         ]
 
@@ -1641,10 +1753,10 @@ class LiveTradingEngine:
 
         # BUG-010: Use actual model predictions instead of random noise for labels.
         # This enables concept drift detection (target shift) in addition to covariate shift.
-        if hasattr(self, '_recent_predictions') and len(self._recent_predictions) > 0:
-            y = np.array(self._recent_predictions[-len(X):])
+        if hasattr(self, "_recent_predictions") and len(self._recent_predictions) > 0:
+            y = np.array(self._recent_predictions[-len(X) :])
             if len(y) < len(X):
-                y = np.pad(y, (len(X) - len(y), 0), mode='edge')
+                y = np.pad(y, (len(X) - len(y), 0), mode="edge")
         else:
             y = np.zeros(len(X))
 
@@ -1656,9 +1768,11 @@ class LiveTradingEngine:
         result = self.drift.check(X[-500:], y_recent)
         if result.get("drift_detected"):
             self.logger.event(
-                "WARN", "drift_detected",
+                "WARN",
+                "drift_detected",
                 f"[Live] DRIFT DETECTED: {result.get('reasons')}",
-                pair=self.pair, reasons=result.get("reasons") or [],
+                pair=self.pair,
+                reasons=result.get("reasons") or [],
             )
             if self.prom is not None:
                 self.prom.set_drift(True)
@@ -1688,9 +1802,12 @@ class LiveTradingEngine:
         script = Path(__file__).resolve().parent.parent / "training" / "train_gpu.py"
         cmd = [sys.executable, str(script), "--model", "haelt", "--resume"]
         self.logger.event(
-            "WARN", "retrain_trigger",
+            "WARN",
+            "retrain_trigger",
             f"[Live] Auto-retrain started ({reason}).",
-            pair=self.pair, reason=reason, details=details,
+            pair=self.pair,
+            reason=reason,
+            details=details,
         )
         try:
             subprocess.Popen(
@@ -1700,9 +1817,11 @@ class LiveTradingEngine:
             )
         except Exception as e:
             self.logger.event(
-                "ERROR", "retrain_spawn_failed",
+                "ERROR",
+                "retrain_spawn_failed",
                 f"[Live] Retrain spawn failed: {e}",
-                pair=self.pair, reason=reason,
+                pair=self.pair,
+                reason=reason,
             )
             try:
                 self._retrain_lock.unlink(missing_ok=True)
@@ -1719,6 +1838,7 @@ class LiveTradingEngine:
                 except Exception:
                     pass
                 time.sleep(60)
+
         threading.Thread(target=_loop, daemon=True).start()
 
     def _next_bar(self) -> datetime:
@@ -1733,9 +1853,11 @@ class LiveTradingEngine:
 
     def stop(self):
         self.logger.event(
-            "INFO", "shutdown",
+            "INFO",
+            "shutdown",
             f"[Live] Stopping engine | bars logged: {len(self._bar_log)}",
-            pair=self.pair, bars_logged=len(self._bar_log),
+            pair=self.pair,
+            bars_logged=len(self._bar_log),
         )
         self._running = False
         try:
@@ -1751,6 +1873,7 @@ class LiveTradingEngine:
 
 class MultiPairLiveTradingEngine:
     """Synchronized multi-pair loop with shared broker session and risk budget."""
+
     def __init__(
         self,
         broker: BrokerInterface,
@@ -1786,7 +1909,13 @@ class MultiPairLiveTradingEngine:
                 sentiment_mode=sentiment_mode,
                 prometheus_enabled=False,
                 calendar_file=calendar_file,
-                journal_path=None if journal_path is None else str(Path(journal_path).with_name(f"{Path(journal_path).stem}_{p.lower()}{Path(journal_path).suffix or '.jsonl'}")),
+                journal_path=None
+                if journal_path is None
+                else str(
+                    Path(journal_path).with_name(
+                        f"{Path(journal_path).stem}_{p.lower()}{Path(journal_path).suffix or '.jsonl'}"
+                    )
+                ),
                 max_spread_pips=max_spread_pips,
                 guard_min_confidence=guard_min_confidence,
                 bar_freq=bar_freq,
@@ -1810,10 +1939,9 @@ class MultiPairLiveTradingEngine:
         if not self.broker.connect():
             if not self.allow_paper_fallback and not isinstance(self.broker, PaperBroker):
                 raise RuntimeError(
-                    "[Live] Broker connection failed. Pass --allow-paper-fallback "
-                    "only for intentional paper testing."
+                    "[Live] Broker connection failed. Pass --allow-paper-fallback only for intentional paper testing."
                 )
-            print("[Live] Broker connection failed — using PaperBroker (explicit fallback)")
+            print("[Live] Broker connection failed - using PaperBroker (explicit fallback)")
             self.broker = PaperBroker(initial_equity=self.engines[0].equity if self.engines else 10_000.0)
             if not self.broker.connect():
                 raise RuntimeError("PaperBroker fallback failed to connect")
@@ -1866,6 +1994,7 @@ class MultiPairLiveTradingEngine:
 
 if __name__ == "__main__":
     import argparse
+
     try:
         import yaml
     except Exception:
@@ -1883,49 +2012,87 @@ if __name__ == "__main__":
             return []
 
     p = argparse.ArgumentParser(description="Live Trading Engine")
-    p.add_argument("--strategy-mode", default="scalping", choices=sorted(STRATEGY_PROFILES.keys()),
-                   help="Trading horizon profile. scalping=1min; normal=1h slower trading.")
-    p.add_argument("--bar-freq", default=None,
-                   help="Live aggregation frequency, e.g. 1min, 15min, 1h. Defaults to strategy profile.")
-    p.add_argument("--broker",   default="paper",
-                   choices=["paper", "lmax", "oanda", "mt5", "ibkr"],
-                   help="Venue: paper/lmax/oanda or BrokerBridge-backed mt5/ibkr")
+    p.add_argument(
+        "--strategy-mode",
+        default="scalping",
+        choices=sorted(STRATEGY_PROFILES.keys()),
+        help="Trading horizon profile. scalping=1min; normal=1h slower trading.",
+    )
+    p.add_argument(
+        "--bar-freq",
+        default=None,
+        help="Live aggregation frequency, e.g. 1min, 15min, 1h. Defaults to strategy profile.",
+    )
+    p.add_argument(
+        "--broker",
+        default="paper",
+        choices=["paper", "lmax", "oanda", "mt5", "ibkr"],
+        help="Venue: paper/lmax/oanda or BrokerBridge-backed mt5/ibkr",
+    )
     p.add_argument("--mt5-login", type=int, default=None, help="MT5 account login (with --broker mt5)")
     p.add_argument("--mt5-password", default=None, help="MT5 password")
     p.add_argument("--mt5-server", default=None, help="MT5 server name")
     p.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
     p.add_argument("--ibkr-port", type=int, default=7497, help="IBKR port (7497 paper, 7496 live)")
     p.add_argument("--ibkr-client-id", type=int, default=1, help="IBKR client id")
-    p.add_argument("--pair",     default="EURUSD")
-    p.add_argument("--pairs",    default="", help="Comma-separated pairs (overrides --pair). If empty, attempts config/run.yaml data.pairs")
+    p.add_argument("--pair", default="EURUSD")
+    p.add_argument(
+        "--pairs",
+        default="",
+        help="Comma-separated pairs (overrides --pair). If empty, attempts config/run.yaml data.pairs",
+    )
     p.add_argument("--pairs-config", default="config/run.yaml", help="YAML config path used to auto-load data.pairs")
-    p.add_argument("--equity",   type=float, default=10_000.0)
+    p.add_argument("--equity", type=float, default=10_000.0)
     p.add_argument("--max-lots", type=float, default=0.5)
-    p.add_argument("--model",    default="haelt")
+    p.add_argument("--model", default="haelt")
     p.add_argument("--max-bars", type=int, default=None)
-    p.add_argument("--runtime",  default="pytorch", choices=["pytorch","onnx"],
-                   help="Inference backend: pytorch (CUDA) or onnx (AMD DirectML)")
-    p.add_argument("--sentiment-mode", default="auto", choices=["auto", "ollama", "finbert"],
-                   help="Sentiment backend priority")
-    p.add_argument("--seq-len",  type=int, default=None,
-                   help="Sequence length used during training (default: strategy profile / run.yaml)")
-    p.add_argument("--n-feat",   type=int, default=None,
-                   help="Number of input features used during training (required for older ONNX exports)")
-    p.add_argument("--calendar-file", default=None,
-                   help="CSV/JSON economic calendar for live no-trade guard")
-    p.add_argument("--journal-path", default=None,
-                   help="Optional JSONL path for structured trade journal")
-    p.add_argument("--max-spread-pips", type=float, default=2.5,
-                   help="Block new entries when live spread exceeds this value")
-    p.add_argument("--guard-min-confidence", type=float, default=0.45,
-                   help="Minimum confidence for BUY/SELL when model confidence is available")
-    p.add_argument("--demo", action="store_true", default=False,
-                   help="Use random DemoAgent instead of loading trained checkpoints")
-    p.add_argument("--allow-paper-fallback", action="store_true", default=False,
-                   help="If live broker connect/pricing fails, fall back to PaperBroker "
-                        "(off by default — prevents silent paper trading on real runs)")
-    p.add_argument("--risk-config", default=None,
-                   help="Optional JSON/YAML RiskEngine overrides (same schema as train_gpu --risk-config)")
+    p.add_argument(
+        "--runtime",
+        default="pytorch",
+        choices=["pytorch", "onnx"],
+        help="Inference backend: pytorch (CUDA) or onnx (AMD DirectML)",
+    )
+    p.add_argument(
+        "--sentiment-mode", default="auto", choices=["auto", "ollama", "finbert"], help="Sentiment backend priority"
+    )
+    p.add_argument(
+        "--seq-len",
+        type=int,
+        default=None,
+        help="Sequence length used during training (default: strategy profile / run.yaml)",
+    )
+    p.add_argument(
+        "--n-feat",
+        type=int,
+        default=None,
+        help="Number of input features used during training (required for older ONNX exports)",
+    )
+    p.add_argument("--calendar-file", default=None, help="CSV/JSON economic calendar for live no-trade guard")
+    p.add_argument("--journal-path", default=None, help="Optional JSONL path for structured trade journal")
+    p.add_argument(
+        "--max-spread-pips", type=float, default=2.5, help="Block new entries when live spread exceeds this value"
+    )
+    p.add_argument(
+        "--guard-min-confidence",
+        type=float,
+        default=0.45,
+        help="Minimum confidence for BUY/SELL when model confidence is available",
+    )
+    p.add_argument(
+        "--demo", action="store_true", default=False, help="Use random DemoAgent instead of loading trained checkpoints"
+    )
+    p.add_argument(
+        "--allow-paper-fallback",
+        action="store_true",
+        default=False,
+        help="If live broker connect/pricing fails, fall back to PaperBroker "
+        "(off by default - prevents silent paper trading on real runs)",
+    )
+    p.add_argument(
+        "--risk-config",
+        default=None,
+        help="Optional JSON/YAML RiskEngine overrides (same schema as train_gpu --risk-config)",
+    )
     args = p.parse_args()
     prof = strategy_profile(args.strategy_mode)
     if args.bar_freq is None:
@@ -1935,6 +2102,7 @@ if __name__ == "__main__":
         args.seq_len = int(prof.get("seq_len", 80))
         try:
             import yaml
+
             cfg_path = Path(args.pairs_config)
             if cfg_path.is_file():
                 with open(cfg_path, encoding="utf-8") as fh:
@@ -1958,8 +2126,7 @@ if __name__ == "__main__":
     ckpt_paths = resolve_checkpoint_paths(args.model, checkpoint_dir=ckpt_dir_override)
     print(f"[Live] Checkpoint dir     : {ckpt_paths.checkpoint_dir}")
     print(f"[Live] Target Model       : {args.model.upper()}")
-    print(f"[Live] PyTorch checkpoint : {'OK' if ckpt_paths.pt_path else 'missing'} "
-          f"({ckpt_paths.source})")
+    print(f"[Live] PyTorch checkpoint : {'OK' if ckpt_paths.pt_path else 'missing'} ({ckpt_paths.source})")
     if ckpt_paths.pt_path:
         print(f"[Live]   -> {ckpt_paths.pt_path}")
     print(f"[Live] ONNX checkpoint    : {'OK' if ckpt_paths.onnx_path else 'missing'}")
@@ -1970,6 +2137,7 @@ if __name__ == "__main__":
     if not _maturity:
         try:
             from config.settings import MATURITY as _MAT
+
             _maturity = str(_MAT.get("stage", "paper")).lower()
         except Exception:
             _maturity = "paper"
@@ -1988,6 +2156,7 @@ if __name__ == "__main__":
                 continue
             try:
                 import json as _json
+
                 _pg = _json.loads(_cand.read_text(encoding="utf-8"))
                 if bool(_pg.get("promoted")):
                     _promoted = True
@@ -2005,7 +2174,7 @@ if __name__ == "__main__":
             )
     elif _maturity == "production" and args.broker == "paper" and not args.demo:
         print(
-            "[Live] WARN: maturity.stage=production with --broker paper — "
+            "[Live] WARN: maturity.stage=production with --broker paper - "
             "promote via promotion_gate.json before live capital."
         )
 
@@ -2049,9 +2218,10 @@ if __name__ == "__main__":
         broker = BridgeBrokerAdapter(venue=venue, config=bridge_cfg)
         print(f"[Live] BrokerBridge adapter: {venue}")
     else:
-        broker = broker_map[args.broker](
-            initial_equity=args.equity) if args.broker == "paper" else broker_map[args.broker]()
-    # Paper broker is an intentional choice — allow its own "fallback" path trivially.
+        broker = (
+            broker_map[args.broker](initial_equity=args.equity) if args.broker == "paper" else broker_map[args.broker]()
+        )
+    # Paper broker is an intentional choice - allow its own "fallback" path trivially.
     allow_paper = bool(args.allow_paper_fallback) or args.broker == "paper"
 
     risk_engine = None
@@ -2060,6 +2230,7 @@ if __name__ == "__main__":
             import json as _json
 
             from risk.risk_engine import RiskConfig, RiskEngine
+
             raw = str(args.risk_config).strip()
             if raw.startswith("{"):
                 cfg_dict = _json.loads(raw)
@@ -2068,6 +2239,7 @@ if __name__ == "__main__":
                 text = path.read_text(encoding="utf-8")
                 if path.suffix.lower() in (".yaml", ".yml"):
                     import yaml
+
                     cfg_dict = yaml.safe_load(text) or {}
                 else:
                     cfg_dict = _json.loads(text)
@@ -2096,7 +2268,9 @@ if __name__ == "__main__":
             allow_paper_fallback=allow_paper,
             risk_engine=risk_engine,
         )
-        print(f"\n[Live] Starting {args.broker.upper()} multi-pair engine | {pair_list} | max {args.max_lots:.4f} lots total")
+        print(
+            f"\n[Live] Starting {args.broker.upper()} multi-pair engine | {pair_list} | max {args.max_lots:.4f} lots total"
+        )
     else:
         engine = LiveTradingEngine(
             broker=broker,

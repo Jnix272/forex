@@ -1,4 +1,5 @@
 """Focused tests for session SoT (P1), live enforcer wiring (P3), spread/slip names (P4)."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -22,7 +23,7 @@ class TestSessionSoT:
         assert normalize_session_name("overnight") == "off"
 
     def test_classify_london_ny_summer(self):
-        # 14:00 UTC on 2026-08-06 — London BST + NY EDT overlap
+        # 14:00 UTC on 2026-08-06 - London BST + NY EDT overlap
         info = classify_session(datetime(2026, 8, 6, 14, 0, tzinfo=UTC))
         assert info.london_ny is True
         assert info.policy_key == "london_ny"
@@ -46,11 +47,13 @@ class TestSessionSoT:
 
 class TestSessionLimitsLiveContract:
     def test_enforcer_uses_london_ny_not_overlap(self):
-        enf = SessionLimitsEnforcer(session_limits={
-            "london": {"max_lots": 3.0, "max_open_trades": 5},
-            "london_ny": {"max_lots": 2.0, "max_open_trades": 4},
-            "off": {"max_lots": 0.0, "max_open_trades": 0},
-        })
+        enf = SessionLimitsEnforcer(
+            session_limits={
+                "london": {"max_lots": 3.0, "max_open_trades": 5},
+                "london_ny": {"max_lots": 2.0, "max_open_trades": 4},
+                "off": {"max_lots": 0.0, "max_open_trades": 0},
+            }
+        )
         r = enf.check(now=datetime(2026, 8, 6, 14, 0, tzinfo=UTC), open_lots=0.0, open_trades=0)
         assert r["session"] == "london_ny"
         assert r["max_lots"] == 2.0

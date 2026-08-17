@@ -192,20 +192,15 @@ def validate_priority2_promotion(
         reasons.append(f"calibration: nll {nll:.6g} > {cfg.calibration.max_nll:.6g}")
     if not gates["calibration_gap_ok"]:
         reasons.append(
-            f"calibration: confidence/accuracy gap {gap:.6g} "
-            f"> {cfg.calibration.max_confidence_accuracy_gap:.6g}"
+            f"calibration: confidence/accuracy gap {gap:.6g} > {cfg.calibration.max_confidence_accuracy_gap:.6g}"
         )
 
     rank = _leaderboard_rank(diagnostics, model)
-    gates["leaderboard_rank_ok"] = (
-        not cfg.require_leaderboard_rank
-        or (rank is not None and rank <= cfg.max_leaderboard_rank)
+    gates["leaderboard_rank_ok"] = not cfg.require_leaderboard_rank or (
+        rank is not None and rank <= cfg.max_leaderboard_rank
     )
     if not gates["leaderboard_rank_ok"]:
-        reasons.append(
-            f"model_diagnostics_report.json: leaderboard rank {rank} "
-            f"> {cfg.max_leaderboard_rank}"
-        )
+        reasons.append(f"model_diagnostics_report.json: leaderboard rank {rank} > {cfg.max_leaderboard_rank}")
 
     ready = all(gates.values())
     return {

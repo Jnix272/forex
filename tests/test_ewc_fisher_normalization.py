@@ -10,7 +10,7 @@ which had two defects:
    `batch_size` but did NOT track the actual sample count.
 2. **Underweighting when dataset < max_samples**: when the dataset had
    fewer than `max_samples`, the loop iterated fewer times but the divisor
-   stayed `max_samples`, diluting the Fisher diagonal by up to ~15×.
+   stayed `max_samples`, diluting the Fisher diagonal by up to ~15x.
 
 After the fix: accumulate raw `grad²` per-step, normalise ONCE at the end
 by `samples_processed` (the actual sample count processed). Fisher is now a
@@ -32,6 +32,7 @@ if str(_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 # Source-level checks
 # ---------------------------------------------------------------------------
+
 
 def test_fisher_diagonal_uses_samples_processed_normalisation():
     """The fixed `_compute_fisher_diagonal` should NOT divide by `self.max_samples`
@@ -80,14 +81,13 @@ def test_no_max_samples_in_per_step_divisor():
     end = src.find("fisher = {", start)
     loop_block = src[start:end]
     # `/ self.max_samples` should not appear inside this loop body
-    assert "/ self.max_samples" not in loop_block, (
-        "Per-step `/ self.max_samples` should not be inside the Fisher loop"
-    )
+    assert "/ self.max_samples" not in loop_block, "Per-step `/ self.max_samples` should not be inside the Fisher loop"
 
 
 # ---------------------------------------------------------------------------
 # Behavioural test (skipped if torch unavailable)
 # ---------------------------------------------------------------------------
+
 
 def test_fisher_diagonal_invariant_to_batch_size():
     """The Fisher diagonal computed with batch_size=32 and with batch_size=64
@@ -111,12 +111,13 @@ def test_fisher_diagonal_invariant_to_batch_size():
         def __init__(self):
             super().__init__()
             self.fc = nn.Linear(4, 1)
+
         def forward(self, x):
             return self.fc(x).squeeze(-1)
 
     def make_ds(n):
         X = torch.randn(n, 4)
-        y = (X[:, 0] + 0.1 * torch.randn(n))  # noisy linear
+        y = X[:, 0] + 0.1 * torch.randn(n)  # noisy linear
         return torch.utils.data.TensorDataset(X, y)
 
     fishers = {}
@@ -126,8 +127,7 @@ def test_fisher_diagonal_invariant_to_batch_size():
         ds = make_ds(128)  # dataset has 128 samples, max_samples=128 too
         # Patch the DataLoader creation inside _compute_fisher_diagonal by
         # instrumenting it to use the configured batch_size
-        ewc = ElasticWeightConsolidation(model, ds, device=torch.device("cpu"),
-                                            max_samples=128)
+        ewc = ElasticWeightConsolidation(model, ds, device=torch.device("cpu"), max_samples=128)
         # Monkey-patch the batch_size in the DataLoader creation call.
         # We do this by overriding the method to inject `batch_size=`.
         # Cleaner: trigger via the existing path with the fixed batch_size 32
@@ -135,11 +135,15 @@ def test_fisher_diagonal_invariant_to_batch_size():
         if batch_size != 32:
             # Save and patch the DataLoader class
             from torch.utils.data import DataLoader as _DL
+
             real_dl = _DL
+
             def _patched_dl(ds, **kw):
-                kw['batch_size'] = batch_size
-                return real_dl(ds, **kw)
+                kw["batch_size"] = batch_size  # noqa: B023
+                return real_dl(ds, **kw)  # noqa: B023
+
             import training.ewc as ewc_mod
+
             original_dl_attr = ewc_mod.__dict__.get("DataLoader")
             ewc_mod.DataLoader = _patched_dl  # type: ignore[attr-defined]
             try:
@@ -151,26 +155,26 @@ def test_fisher_diagonal_invariant_to_batch_size():
                     del ewc_mod.DataLoader  # type: ignore[attr-defined]
         else:
             f = ewc._compute_fisher_diagonal()
-        fishers[batch_size] = f['fc.weight'].abs().mean().item()
+        fishers[batch_size] = f["fc.weight"].abs().mean().item()
 
     # The Fisher diagonal means should be close (within an order of magnitude
-    # and ideally within ~30%) — the OLD bug would have made them scale
+    # and ideally within ~30%) - the OLD bug would have made them scale
     # with batch_size in a way that the per-sample-mean should not.
     ratio = max(fishers[32], fishers[64]) / max(min(fishers[32], fishers[64]), 1e-12)
     assert ratio < 5.0, (
-        f"Fisher diagonal magnitude differs by {ratio:.2f}× between batch_size=32 "
-        f"and batch_size=64 — should be invariant (fix regression)"
+        f"Fisher diagonal magnitude differs by {ratio:.2f}x between batch_size=32 "
+        f"and batch_size=64 - should be invariant (fix regression)"
     )
 
 
 def test_fisher_diagonal_invariant_to_dataset_size():
     """When the dataset has fewer samples than `max_samples`, the Fisher
-    diagonal should NOT be diluted — using a 65-sample dataset with
+    diagonal should NOT be diluted - using a 65-sample dataset with
     max_samples=1000 should produce ~same magnitude as
     a 65-sample dataset with max_samples=65.
 
     BEFORE the fix: the per-step `/ max_samples` constant divisor diluted
-    the Fisher by ~15× when dataset < max_samples.
+    the Fisher by ~15x when dataset < max_samples.
     AFTER the fix: dividing by `samples_processed` makes the diagonal
     independent of the `max_samples` choice.
     """
@@ -189,12 +193,13 @@ def test_fisher_diagonal_invariant_to_dataset_size():
         def __init__(self):
             super().__init__()
             self.fc = nn.Linear(4, 1)
+
         def forward(self, x):
             return self.fc(x).squeeze(-1)
 
     def make_ds(n):
         X = torch.randn(n, 4)
-        y = (X[:, 0] + 0.1 * torch.randn(n))
+        y = X[:, 0] + 0.1 * torch.randn(n)
         return torch.utils.data.TensorDataset(X, y)
 
     n_samples = 65
@@ -203,19 +208,18 @@ def test_fisher_diagonal_invariant_to_dataset_size():
         torch.manual_seed(0)
         model = Tiny()
         ds = make_ds(n_samples)
-        ewc = ElasticWeightConsolidation(model, ds, device=torch.device("cpu"),
-                                            max_samples=max_samples)
+        ewc = ElasticWeightConsolidation(model, ds, device=torch.device("cpu"), max_samples=max_samples)
         f = ewc._compute_fisher_diagonal()
-        magnitudes.append(f['fc.weight'].abs().mean().item())
+        magnitudes.append(f["fc.weight"].abs().mean().item())
 
     # The two magnitudes should be ~equal (within 20%). The OLD bug would
-    # have made max_samples=1000 produce a magnitude ~15× smaller than
+    # have made max_samples=1000 produce a magnitude ~15x smaller than
     # max_samples=65 due to the constant divisor.
     ratio = max(magnitudes) / max(min(magnitudes), 1e-12)
     assert ratio < 1.5, (
-        f"Fisher diagonal magnitude differs by {ratio:.2f}× between "
+        f"Fisher diagonal magnitude differs by {ratio:.2f}x between "
         f"max_samples=65 and max_samples=1000 (with same 65-sample dataset) "
-        f"— should be ~equal after the fix. magnitudes={magnitudes}"
+        f"- should be ~equal after the fix. magnitudes={magnitudes}"
     )
 
 

@@ -2,7 +2,7 @@
 
 Before the fix: ``ActorCritic.act`` always sampled from
 ``torch.distributions.Categorical(logits).sample()``, even during live
-inference — making the live trading engine nondeterministic for PPO.
+inference - making the live trading engine nondeterministic for PPO.
 
 After the fix:
 - ``ActorCritic.act`` accepts ``greedy: bool = False``. When True, dispatches
@@ -30,11 +30,13 @@ if str(_ROOT) not in sys.path:
 # Schematic causal semantics (no torch dependency in the bug logic)
 # ---------------------------------------------------------------------------
 
+
 def test_argmax_is_deterministic_greedy_action():
     """Pure-logic verification: argmax over logits gives the same answer
     every call, unlike a sample from a distribution.
     """
     import random
+
     random.seed(0)
     logits = [random.uniform(-1, 1) for _ in range(3)]
     # argmax:
@@ -47,14 +49,14 @@ def test_argmax_is_deterministic_greedy_action():
 
 def test_stochastic_sample_can_vary():
     """Sampling from a non-degenerate distribution CAN produce different
-    actions across calls — this is what we want to ELIMINATE during live
+    actions across calls - this is what we want to ELIMINATE during live
     inference by using greedy=True.
     """
     import random
+
     random.seed(0)
-    logits = [0.0, 0.0, 0.0]  # uniform
     # Simulate sampling: pick action uniformly
-    samples = set(random.choice(range(3)) for _ in range(100))
+    samples = {random.choice(range(3)) for _ in range(100)}
     assert len(samples) > 1, "Sampling from a uniform distribution must vary"
 
 
@@ -71,6 +73,7 @@ def test_greedy_argmax_matches_most_probable_action():
 # ---------------------------------------------------------------------------
 # Source-level: confirm the fix is present
 # ---------------------------------------------------------------------------
+
 
 def test_actor_critic_act_accepts_greedy_kwarg():
     """``ActorCritic.act`` should accept a ``greedy: bool = False`` kwarg."""
@@ -132,16 +135,17 @@ def test_rl_inference_agent_falls_back_for_dqn():
 # Behavioural test using torch (skipped if torch unavailable)
 # ---------------------------------------------------------------------------
 
+
 def test_actor_critic_act_greedy_returns_argmax():
     """End-to-end: build a tiny ActorCritic and verify that act(greedy=True)
     returns the argmax of the logits (deterministic)."""
     try:
         import torch
-        import torch.nn as nn
+        import torch.nn as nn  # noqa: F401
     except ImportError:
         pytest.skip("torch not available")
 
-    # Import the actual ActorCritic from rl_agents — it pulls torch via
+    # Import the actual ActorCritic from rl_agents - it pulls torch via
     # the heavy import chain of training. Try and skip if any import fails.
     try:
         from models.rl_agents import ActorCritic
@@ -160,9 +164,7 @@ def test_actor_critic_act_greedy_returns_argmax():
         action_g1, _, _ = net.act(obs, greedy=True)
         action_g2, _, _ = net.act(obs, greedy=True)
     # Greedy should be deterministic (same action both calls)
-    assert action_g1.item() == action_g2.item(), (
-        "greedy=True should return the same action every call (argmax)"
-    )
+    assert action_g1.item() == action_g2.item(), "greedy=True should return the same action every call (argmax)"
 
     # Stochastic may vary; with random init weights, repeated samples likely
     # differ. We don't strictly assert non-determinism, just that the call works.

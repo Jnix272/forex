@@ -15,9 +15,11 @@ import polars as pl
 # Data Classes
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class FeatureQuality:
     """Quality metrics for a single feature column."""
+
     name: str
     dtype: str
     null_count: int
@@ -45,6 +47,7 @@ class FeatureQuality:
 @dataclass
 class FeatureQualityReport:
     """Aggregate quality report for a feature DataFrame."""
+
     n_rows: int
     n_cols: int
     features: list[FeatureQuality]
@@ -60,18 +63,17 @@ class FeatureQualityReport:
 
     def get_problematic(self) -> list[FeatureQuality]:
         """Return features with quality issues."""
-        return [f for f in self.features
-                if f.has_nulls or f.has_inf or f.is_constant or f.near_constant]
+        return [f for f in self.features if f.has_nulls or f.has_inf or f.is_constant or f.near_constant]
 
     def get_clean(self) -> list[FeatureQuality]:
         """Return features passing all quality checks."""
-        return [f for f in self.features
-                if not (f.has_nulls or f.has_inf or f.is_constant or f.near_constant)]
+        return [f for f in self.features if not (f.has_nulls or f.has_inf or f.is_constant or f.near_constant)]
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # Core Computation
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def compute_quality_report(
     df: pl.DataFrame,
@@ -81,21 +83,18 @@ def compute_quality_report(
 ) -> FeatureQualityReport:
     """
     Compute comprehensive quality metrics for all numeric columns in a DataFrame.
-    
+
     Args:
         df: Input DataFrame
         exclude_cols: Columns to skip (e.g., "timestamp_utc", target columns)
         near_constant_threshold: Std threshold below which feature is near-constant
         high_cardinality_threshold: Fraction of unique values for high cardinality flag
-    
+
     Returns:
         FeatureQualityReport with per-feature metrics and summary
     """
     exclude = set(exclude_cols or [])
-    numeric_cols = [
-        c for c in df.columns
-        if c not in exclude and df[c].dtype.is_numeric()
-    ]
+    numeric_cols = [c for c in df.columns if c not in exclude and df[c].dtype.is_numeric()]
 
     n_rows = len(df)
     features = []
@@ -120,9 +119,15 @@ def compute_quality_report(
                 infinite_count=infinite_count,
                 constant=True,
                 unique_count=0,
-                mean=None, std=None, min=None, max=None,
-                skew=None, kurtosis=None,
-                q25=None, q50=None, q75=None,
+                mean=None,
+                std=None,
+                min=None,
+                max=None,
+                skew=None,
+                kurtosis=None,
+                q25=None,
+                q50=None,
+                q75=None,
                 has_nulls=null_count > 0,
                 has_inf=infinite_count > 0,
                 is_constant=True,
@@ -203,20 +208,21 @@ def _kurtosis(x: np.ndarray) -> float:
     s = np.std(x, ddof=1)
     if s == 0:
         return 0.0
-    return ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * \
-           np.sum(((x - m) / s) ** 4) - \
-           (3 * (n - 1) ** 2) / ((n - 2) * (n - 3))
+    return ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * np.sum(((x - m) / s) ** 4) - (3 * (n - 1) ** 2) / (
+        (n - 2) * (n - 3)
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # Convenience: Print Report
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def print_quality_report(report: FeatureQualityReport, show_clean: bool = False) -> None:
     """Pretty-print a quality report to stdout."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"FEATURE QUALITY REPORT  |  rows={report.n_rows:,}  cols={report.n_cols}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Summary: {report.summary}")
 
     problematic = report.get_problematic()
@@ -224,19 +230,23 @@ def print_quality_report(report: FeatureQualityReport, show_clean: bool = False)
         print(f"\n⚠️  PROBLEMATIC FEATURES ({len(problematic)}):")
         for f in problematic:
             issues = []
-            if f.has_nulls: issues.append(f"nulls={f.null_pct:.1%}")
-            if f.has_inf: issues.append(f"inf={f.infinite_count}")
-            if f.is_constant: issues.append("CONSTANT")
-            if f.near_constant: issues.append(f"near-const(std={f.std:.2e})")
-            if f.high_cardinality: issues.append("high-card")
+            if f.has_nulls:
+                issues.append(f"nulls={f.null_pct:.1%}")
+            if f.has_inf:
+                issues.append(f"inf={f.infinite_count}")
+            if f.is_constant:
+                issues.append("CONSTANT")
+            if f.near_constant:
+                issues.append(f"near-const(std={f.std:.2e})")
+            if f.high_cardinality:
+                issues.append("high-card")
             print(f"  {f.name:30s} | {'; '.join(issues)}")
 
     if show_clean:
         clean = report.get_clean()
         print(f"\n✅ CLEAN FEATURES ({len(clean)}):")
         for f in clean:
-            print(f"  {f.name:30s} | mean={f.mean:>10.4f} std={f.std:>8.4f} "
-                  f"[{f.min:>8.4f}, {f.max:>8.4f}]")
+            print(f"  {f.name:30s} | mean={f.mean:>10.4f} std={f.std:>8.4f} [{f.min:>8.4f}, {f.max:>8.4f}]")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -244,16 +254,17 @@ def print_quality_report(report: FeatureQualityReport, show_clean: bool = False)
 # ════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-
     # Quick self-test
     rng = np.random.default_rng(42)
-    df = pl.DataFrame({
-        "good_feat": rng.normal(0, 1, 1000),
-        "const_feat": np.ones(1000),
-        "null_feat": [1.0 if i % 10 != 0 else None for i in range(1000)],
-        "inf_feat": [1.0 if i != 500 else float("inf") for i in range(1000)],
-        "high_card": rng.uniform(0, 1, 1000),
-    })
+    df = pl.DataFrame(
+        {
+            "good_feat": rng.normal(0, 1, 1000),
+            "const_feat": np.ones(1000),
+            "null_feat": [1.0 if i % 10 != 0 else None for i in range(1000)],
+            "inf_feat": [1.0 if i != 500 else float("inf") for i in range(1000)],
+            "high_card": rng.uniform(0, 1, 1000),
+        }
+    )
 
     report = compute_quality_report(df)
     print_quality_report(report)

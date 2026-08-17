@@ -4,13 +4,13 @@ data/economic_calendar.py
 Economic event features for Forex models.
 
 Produces per-bar features:
-  eco_minutes_to_next  — minutes until next High-impact event (clipped 0–1440)
-  eco_minutes_since_last — minutes since last High-impact event
-  eco_surprise_norm    — (actual − forecast) / |prior|, forward-filled after each release
-  eco_release_flag     — 1.0 within news_buffer_minutes of any High-impact event
+  eco_minutes_to_next  - minutes until next High-impact event (clipped 0–1440)
+  eco_minutes_since_last - minutes since last High-impact event
+  eco_surprise_norm    - (actual − forecast) / |prior|, forward-filled after each release
+  eco_release_flag     - 1.0 within news_buffer_minutes of any High-impact event
 
 Data sources (in priority order):
-  1. Live: Alpha Vantage "REAL_GDP", "CPI", "FEDERAL_FUNDS_RATE" endpoints —
+  1. Live: Alpha Vantage "REAL_GDP", "CPI", "FEDERAL_FUNDS_RATE" endpoints -
      set AV_API_KEY env var (free tier, 25 req/day).
   2. Offline CSV cache in data/raw/eco_calendar/ (auto-populated on first live pull).
   3. Synthetic fallback: random event schedule matching density of real calendars.
@@ -19,7 +19,7 @@ Usage:
     from data.economic_calendar import EcoCalendarFeatureBuilder
     eco = EcoCalendarFeatureBuilder()
     df_features = eco.build(bars)   # bars: pd.DataFrame with DatetimeTZIndex (UTC)
-"""
+"""  # noqa: RUF002
 
 import json
 import os
@@ -34,24 +34,40 @@ warnings.filterwarnings("ignore")
 # ── constants ────────────────────────────────────────────────────────────────
 
 HIGH_IMPACT_EVENTS = [
-    "NFP", "NonFarm", "Non-Farm", "Payroll",
-    "CPI", "Inflation", "Core CPI",
-    "FOMC", "Fed", "Interest Rate Decision",
-    "GDP", "Gross Domestic",
-    "PMI", "Purchasing Managers",
-    "ECB", "European Central",
-    "BOE", "Bank of England",
-    "BOJ", "Bank of Japan",
-    "RBA", "Reserve Bank of Australia",
+    "NFP",
+    "NonFarm",
+    "Non-Farm",
+    "Payroll",
+    "CPI",
+    "Inflation",
+    "Core CPI",
+    "FOMC",
+    "Fed",
+    "Interest Rate Decision",
+    "GDP",
+    "Gross Domestic",
+    "PMI",
+    "Purchasing Managers",
+    "ECB",
+    "European Central",
+    "BOE",
+    "Bank of England",
+    "BOJ",
+    "Bank of Japan",
+    "RBA",
+    "Reserve Bank of Australia",
     "Retail Sales",
-    "Unemployment", "Jobless",
+    "Unemployment",
+    "Jobless",
 ]
 
-CACHE_DIR = Path(os.getenv("ECO_CACHE_DIR",
-                           str(Path(__file__).resolve().parent.parent / "data" / "raw" / "eco_calendar")))
+CACHE_DIR = Path(
+    os.getenv("ECO_CACHE_DIR", str(Path(__file__).resolve().parent.parent / "data" / "raw" / "eco_calendar"))
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def _is_high_impact(event_name: str) -> bool:
     """True if the event name matches any high-impact keyword."""
@@ -69,12 +85,11 @@ def _to_utc(ts) -> pd.Timestamp:
     return ts
 
 
-def _synthetic_calendar(start: pd.Timestamp, end: pd.Timestamp,
-                         seed: int = 42) -> pd.DataFrame:
+def _synthetic_calendar(start: pd.Timestamp, end: pd.Timestamp, seed: int = 42) -> pd.DataFrame:
     """
     Generate a synthetic economic calendar for testing / offline mode.
     Produces ~4–6 high-impact events per week, distributed across US / EU sessions.
-    """
+    """  # noqa: RUF002
     rng = np.random.default_rng(seed)
     days = pd.date_range(start.date(), end.date(), freq="D")
     events: list[dict] = []
@@ -92,46 +107,50 @@ def _synthetic_calendar(start: pd.Timestamp, end: pd.Timestamp,
     ]
 
     for day in days:
-        if rng.random() < 0.45:          # ~45% of days have an event
+        if rng.random() < 0.45:  # ~45% of days have an event
             n_events = rng.integers(1, 3)
             for _ in range(n_events):
                 ev_tmpl = event_menu[rng.integers(len(event_menu))]
                 hour = rng.choice([8, 12, 13, 14, 15])  # NY/EU session hours
                 minute = rng.choice([0, 30])
                 ts = _to_utc(pd.Timestamp(day) + pd.Timedelta(hours=int(hour), minutes=int(minute)))
-                actual   = float(ev_tmpl[1]) * (1 + rng.normal(0, 0.02))
+                actual = float(ev_tmpl[1]) * (1 + rng.normal(0, 0.02))
                 forecast = float(ev_tmpl[2]) * (1 + rng.normal(0, 0.01))
-                prior    = float(ev_tmpl[3])
-                events.append({
-                    "datetime": ts,
-                    "event":    ev_tmpl[0],
-                    "actual":   round(actual, 4),
-                    "forecast": round(forecast, 4),
-                    "prior":    round(prior, 4),
-                    "impact":   "High",
-                })
+                prior = float(ev_tmpl[3])
+                events.append(
+                    {
+                        "datetime": ts,
+                        "event": ev_tmpl[0],
+                        "actual": round(actual, 4),
+                        "forecast": round(forecast, 4),
+                        "prior": round(prior, 4),
+                        "impact": "High",
+                    }
+                )
 
-    df = pd.DataFrame(events) if events else pd.DataFrame(
-        columns=["datetime", "event", "actual", "forecast", "prior", "impact"])
+    df = (
+        pd.DataFrame(events)
+        if events
+        else pd.DataFrame(columns=["datetime", "event", "actual", "forecast", "prior", "impact"])
+    )
     return df.sort_values("datetime").reset_index(drop=True)
 
 
-def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
-                        end: pd.Timestamp) -> pd.DataFrame:
+def _load_alpha_vantage(av_key: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """
     Pull economic indicator data from Alpha Vantage.
     Covers: REAL_GDP, CPI, FEDERAL_FUNDS_RATE, UNEMPLOYMENT, RETAIL_SALES.
-    Free tier: 25 requests/day — results are cached locally.
+    Free tier: 25 requests/day - results are cached locally.
     """
     import urllib.parse
     import urllib.request
 
     functions = [
-        ("REAL_GDP",            "GDP"),
-        ("CPI",                 "CPI"),
-        ("FEDERAL_FUNDS_RATE",  "FOMC Rate Decision"),
-        ("UNEMPLOYMENT",        "Unemployment Rate"),
-        ("RETAIL_SALES",        "Retail Sales"),
+        ("REAL_GDP", "GDP"),
+        ("CPI", "CPI"),
+        ("FEDERAL_FUNDS_RATE", "FOMC Rate Decision"),
+        ("UNEMPLOYMENT", "Unemployment Rate"),
+        ("RETAIL_SALES", "Retail Sales"),
     ]
 
     rows: list[dict] = []
@@ -143,7 +162,7 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
 
         # Load from cache if fresh (< 24 h)
         if cache_path.exists():
-            age_h = (pd.Timestamp.now('UTC').timestamp() - cache_path.stat().st_mtime) / 3600
+            age_h = (pd.Timestamp.now("UTC").timestamp() - cache_path.stat().st_mtime) / 3600
             if age_h < 24:
                 try:
                     with open(cache_path) as f:
@@ -152,15 +171,14 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
                     data = None
 
         if data is None:
-            url = (f"https://www.alphavantage.co/query?"
-                   f"function={fn}&interval=monthly&apikey={av_key}")
+            url = f"https://www.alphavantage.co/query?function={fn}&interval=monthly&apikey={av_key}"
             try:
                 with urllib.request.urlopen(url, timeout=10) as r:
                     data = json.loads(r.read())
                 with open(cache_path, "w") as f:
                     json.dump(data, f)
             except Exception as e:
-                print(f"[EcoCalendar] AV fetch failed for {fn}: {e} — using cache/synth")
+                print(f"[EcoCalendar] AV fetch failed for {fn}: {e} - using cache/synth")
                 continue
 
         # Parse AV response
@@ -178,14 +196,16 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
                     if not (start <= ts <= end):
                         continue
                     actual = float(item.get("value", 0))
-                    rows.append({
-                        "datetime": ts,
-                        "event":    label,
-                        "actual":   actual,
-                        "forecast": actual * 0.99,   # AV doesn't give forecast
-                        "prior":    actual * 0.98,
-                        "impact":   "High",
-                    })
+                    rows.append(
+                        {
+                            "datetime": ts,
+                            "event": label,
+                            "actual": actual,
+                            "forecast": actual * 0.99,  # AV doesn't give forecast
+                            "prior": actual * 0.98,
+                            "impact": "High",
+                        }
+                    )
                 except Exception:
                     continue
 
@@ -195,6 +215,7 @@ def _load_alpha_vantage(av_key: str, start: pd.Timestamp,
 
 
 # ── main class ───────────────────────────────────────────────────────────────
+
 
 class EcoCalendarFeatureBuilder:
     """
@@ -216,9 +237,9 @@ class EcoCalendarFeatureBuilder:
         av_api_key: str | None = None,
         use_synthetic: bool = False,
     ):
-        self.buffer_min   = news_buffer_minutes
-        self._av_key      = av_api_key or os.getenv("AV_API_KEY", "")
-        self._use_synth   = use_synthetic or not self._av_key
+        self.buffer_min = news_buffer_minutes
+        self._av_key = av_api_key or os.getenv("AV_API_KEY", "")
+        self._use_synth = use_synthetic or not self._av_key
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -250,43 +271,32 @@ class EcoCalendarFeatureBuilder:
         if idx.tzinfo is None:
             idx = idx.tz_localize("UTC")
 
-        start = idx[0]  - pd.Timedelta(days=7)    # load some history
-        end   = idx[-1] + pd.Timedelta(days=1)
+        start = idx[0] - pd.Timedelta(days=7)  # load some history
+        end = idx[-1] + pd.Timedelta(days=1)
 
         events = self.load_events(start, end)
 
         # Initialise output
         out = pd.DataFrame(index=bars.index)
-        out["eco_minutes_to_next"]    = 1440.0
+        out["eco_minutes_to_next"] = 1440.0
         out["eco_minutes_since_last"] = 1440.0
-        out["eco_surprise_norm"]      = 0.0
-        out["eco_release_flag"]       = 0.0
+        out["eco_surprise_norm"] = 0.0
+        out["eco_release_flag"] = 0.0
 
         if len(events) == 0:
             return out
 
-        events["datetime"].values            # numpy datetime64
+        events["datetime"].values  # numpy datetime64  # noqa: B018
         pd.Timedelta(minutes=self.buffer_min)
         bars_df = pd.DataFrame({"bar_dt": bars.index})
         events_df = events.sort_values("datetime").copy()
 
         # Backward merge to find the LAST event
-        past = pd.merge_asof(
-            bars_df,
-            events_df,
-            left_on="bar_dt",
-            right_on="datetime",
-            direction="backward"
-        )
+        past = pd.merge_asof(bars_df, events_df, left_on="bar_dt", right_on="datetime", direction="backward")
 
         # Forward merge to find the NEXT event
         future = pd.merge_asof(
-            bars_df,
-            events_df,
-            left_on="bar_dt",
-            right_on="datetime",
-            direction="forward",
-            allow_exact_matches=False
+            bars_df, events_df, left_on="bar_dt", right_on="datetime", direction="forward", allow_exact_matches=False
         )
 
         # Calculate deltas
@@ -320,7 +330,7 @@ class EcoCalendarFeatureBuilder:
 # ── smoke test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Economic Calendar — smoke test")
+    print("Economic Calendar - smoke test")
     idx = pd.date_range("2024-01-01", periods=500, freq="1min", tz="UTC")
     bars = pd.DataFrame({"close": np.random.randn(500).cumsum() + 1.085}, index=idx)
 

@@ -266,13 +266,13 @@ data:
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
-  end: '2026-12-31'
+  end: '2015-12-31'
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
   n_ticks: 20000000
   min_pair_years: 2      # Minimum years of data per pair for multi-pair training
-  expected_pair_years: 18  # Warn if any pair has less than this
+  expected_pair_years: 17  # Data span 2008-01-01 → 2025-12-31 = ~17 years
   chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number
   shuffle_buffer_size: 16384  # Cross-chunk shuffle reservoir size (0 to disable)
   use_feature_cache: false    # Load pre-built feature cache instead of running FE per window
@@ -430,7 +430,10 @@ hardware:
   pin_memory: true
   prefetch_factor: 2
   force_thread_prefetch: false
-  profile: ubuntu_rtx_laptop
+  # 'auto' lets apply_hardware_profile() pick the right preset from the
+  # detected runtime (Linux vs Windows, GPU model).  Previously pinned to
+  # 'ubuntu_rtx_laptop' which only matched one environment.
+  profile: auto
   thread_prefetch_batches: 4
   torch_compile: true
   torch_compile_mode: reduce-overhead
@@ -443,7 +446,7 @@ maturity:
 model:
   all_models: false
   d_model: 256
-  dropout: 0.237
+  dropout: 0.25
   hidden_size: 256
   name: haelt
   nhead: 8
@@ -477,7 +480,7 @@ optuna:
   metric: val_loss
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/forex_3pair_2008_2025_haelt
+  checkpoint_dir: checkpoints/forex_10pair_2008_2025_haelt
   data_cache: ./data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:
@@ -626,7 +629,7 @@ training:
   direction_weight: 0.75
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
-  epochs: 1
+  epochs: 40
   grad_accum_steps: 2
   grad_clip: 0.75
   label_method: rl_reward
@@ -645,10 +648,18 @@ training:
   save_every: 5
   seed: 1337
   seq_len: "6h40m"
-  # Annualisation: sqrt(trading_days * bars_per_day)
-  # bar_freq=5m → 78 bars/day (390 min/day ÷ 5) → sqrt(252 × 78) = 140.2
-  # Was 325.0 (daily-bar factor) — wrong for 5m bars, inflated Sharpe ~2.3×
-  sharpe_annualization_factor: 140.0
+  # Annualisation: auto-detected from bar_freq × lookahead_bars.
+  # The hard-coded 140.0 was incorrect because it applied a per-bar
+  # factor to a per-trade (per-lookahead) return stream, inflating
+  # Sharpe by ~5.5× for a 30-bar lookahead. The training code now
+  # derives the factor as sqrt(bars_per_year / lookahead_bars), which
+  # is the textbook-correct per-trade annualisation. Set this to
+  # ``null`` (or omit) to use auto-detect; pin a number to override.
+  #
+  # Reference: sqrt(252 * 78 / 30) ≈ 25.6 (session) or
+  #            sqrt(252 * 288 / 30) ≈ 49.2 (full-day FX)
+  sharpe_annualization_factor: null
+  fx_full_day: true  # FX is 24/5 — use full-day bars-per-day (288 for 5m)
   # Weight vs Huber: designed default in gpu_losses.py is 0.2.
   # Was 1.0 (5× too high) — Sharpe gradient dominated loss, causing early_peak
   # pattern and best_sharpe=0.0 across 27 runs. Back to 0.25 (near default).

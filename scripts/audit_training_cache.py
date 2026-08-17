@@ -87,11 +87,7 @@ def _scan_array(arr, *, chunk_size: int) -> dict[str, object]:
 
 def _audit_zarr(path: Path, *, chunk_size: int) -> dict[str, dict[str, object]]:
     group = _open_zarr_group(path)
-    return {
-        key: _scan_array(group[key], chunk_size=chunk_size)
-        for key in ZARR_KEYS
-        if key in group
-    }
+    return {key: _scan_array(group[key], chunk_size=chunk_size) for key in ZARR_KEYS if key in group}
 
 
 def _audit_npy(path: Path, *, chunk_size: int) -> dict[str, dict[str, object]]:
@@ -131,6 +127,7 @@ def _print_report(path: Path, report: dict[str, dict[str, object]]) -> int:
     schema_code = 0
     try:
         import json
+
         base = path if path.suffix == ".zarr" else _base_from_x_npy(path)
         schema_path = Path(str(base) + "_feature_schema.json")
         if schema_path.exists() and "X" in report:
@@ -139,10 +136,7 @@ def _print_report(path: Path, report: dict[str, dict[str, object]]) -> int:
             x_shape = report["X"]["shape"]
             n_feat = int(x_shape[-1]) if isinstance(x_shape, tuple) and x_shape else 0
             if n_schema and n_feat and n_schema != n_feat:
-                print(
-                    f"  SCHEMA_MISMATCH schema_cols={n_schema} X_features={n_feat} "
-                    f"({schema_path.name})"
-                )
+                print(f"  SCHEMA_MISMATCH schema_cols={n_schema} X_features={n_feat} ({schema_path.name})")
                 schema_code = 2
             elif n_schema:
                 print(f"  schema_ok cols={n_schema} ({schema_path.name})")
@@ -158,7 +152,9 @@ def _print_report(path: Path, report: dict[str, dict[str, object]]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only finite-value audit for training caches.")
-    parser.add_argument("path", nargs="?", default="data/processed", help="Cache path, *_X.npy path, or cache directory")
+    parser.add_argument(
+        "path", nargs="?", default="data/processed", help="Cache path, *_X.npy path, or cache directory"
+    )
     parser.add_argument("--chunk-size", type=int, default=50_000)
     args = parser.parse_args()
 

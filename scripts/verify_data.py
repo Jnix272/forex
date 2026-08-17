@@ -43,7 +43,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple  # noqa: UP035
 
 # Project root on sys.path
 _ROOT = Path(__file__).resolve().parent.parent
@@ -58,29 +58,30 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_PAIRS       = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
-                       "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
-DEFAULT_START       = "2010-01-01"
-DEFAULT_END         = "2025-12-31"
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
+DEFAULT_START = "2010-01-01"
+DEFAULT_END = "2025-12-31"
 DEFAULT_DUKASCOPY_CACHE_DIR = str(_ROOT / "data" / "raw" / "dukascopy")
-SESSION_HOURS       = list(range(7, 18))   # 07-17 UTC
+SESSION_HOURS = list(range(7, 18))  # 07-17 UTC
 
 # Major forex holidays where ALL pairs are expected to have zero data
 # (Christmas, New Year's Day). Other partial holidays are handled
 # by the neighbour heuristic.
-KNOWN_HOLIDAYS_MD   = {(12, 25), (1, 1)}
-DEFAULT_NEWS_FILE   = "data/raw/news/historical_news_combined.parquet"
+KNOWN_HOLIDAYS_MD = {(12, 25), (1, 1)}
+DEFAULT_NEWS_FILE = "data/raw/news/historical_news_combined.parquet"
 
 
 # ---------------------------------------------------------------------------
 # Utility: generate expected hours
 # ---------------------------------------------------------------------------
 def _expected_hours(
-    start: str, end: str, hours: list[int],
+    start: str,
+    end: str,
+    hours: list[int],
 ) -> list[datetime]:
     """Generate all weekday x session-hour datetimes in the range."""
     start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
-    end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
+    end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC)
     result: list[datetime] = []
     current = start_dt
     while current <= end_dt:
@@ -96,9 +97,7 @@ def _is_known_holiday(dt: datetime) -> bool:
 
 
 def _cache_path(cache_dir: Path, pair: str, dt: datetime) -> Path:
-    return (cache_dir / pair /
-            f"{dt.year}" / f"{dt.month:02d}" /
-            f"{dt.day:02d}_{dt.hour:02d}.parquet")
+    return cache_dir / pair / f"{dt.year}" / f"{dt.month:02d}" / f"{dt.day:02d}_{dt.hour:02d}.parquet"
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +110,7 @@ def scan_duplicates(
     fix: bool = False,
 ) -> dict:
     """Scan all parquet files for a pair and detect duplicate timestamps."""
-    stats = {"files_scanned": 0, "files_with_dupes": 0,
-             "total_dupes": 0, "dupes_removed": 0}
+    stats = {"files_scanned": 0, "files_with_dupes": 0, "total_dupes": 0, "dupes_removed": 0}
 
     for dt in expected:
         fpath = _cache_path(cache_dir, pair, dt)
@@ -156,8 +154,8 @@ def scan_missing(
       ok          : count of healthy files
       empty_ok    : count of files absent but on known holidays
     """
-    missing:   list[datetime] = []
-    corrupt:   list[datetime] = []
+    missing: list[datetime] = []
+    corrupt: list[datetime] = []
     too_small: list[datetime] = []
     ok = 0
     empty_ok = 0
@@ -213,12 +211,12 @@ def analyse_gaps(
         return []
 
     sorted_dts = sorted(missing_dts)
-    hour_set   = set(hours)
+    hour_set = set(hours)
     gaps: list[tuple[datetime, datetime, int]] = []
 
     streak_start = sorted_dts[0]
-    streak_end   = sorted_dts[0]
-    streak_len   = 1
+    streak_end = sorted_dts[0]
+    streak_len = 1
 
     for i in range(1, len(sorted_dts)):
         prev = sorted_dts[i - 1]
@@ -227,8 +225,7 @@ def analyse_gaps(
         # Check if curr is the "next expected hour" after prev
         expected_next = prev + timedelta(hours=1)
         # Skip to next session hour / next weekday if needed
-        while (expected_next.hour not in hour_set or
-               expected_next.weekday() >= 5):
+        while expected_next.hour not in hour_set or expected_next.weekday() >= 5:
             expected_next += timedelta(hours=1)
             if (expected_next - prev).days > 4:
                 break
@@ -240,8 +237,8 @@ def analyse_gaps(
             if streak_len >= 3:  # Only report gaps >= 3 consecutive hours
                 gaps.append((streak_start, streak_end, streak_len))
             streak_start = curr
-            streak_end   = curr
-            streak_len   = 1
+            streak_end = curr
+            streak_len = 1
 
     # Close final streak
     if streak_len >= 3:
@@ -350,16 +347,14 @@ def redownload_hours(
         ) as sess:
             tasks = []
             for dt in hours_to_fix:
-                tasks.append(
-                    loader._load_hour_async(sess, sem, pair, dt, executor)
-                )
+                tasks.append(loader._load_hour_async(sess, sem, pair, dt, executor))
             results = await asyncio.gather(*tasks, return_exceptions=True)
         executor.shutdown(wait=True)
         return results
 
     results = _run_dukascopy_async(_refetch_all())
 
-    for dt, res in zip(hours_to_fix, results):
+    for dt, res in zip(hours_to_fix, results, strict=False):  # noqa: B007
         if isinstance(res, Exception) or (isinstance(res, pd.DataFrame) and res.empty):
             stats["still_missing"] += 1
         else:
@@ -399,21 +394,24 @@ def run_verification(
         print(f"  Min ticks  : {min_ticks} (files below this flagged as too-small)")
     print("=" * 72)
 
-    grand_dupes    = 0
-    grand_missing  = 0
-    grand_corrupt  = 0
-    grand_small    = 0
+    grand_dupes = 0
+    grand_missing = 0
+    grand_corrupt = 0
+    grand_small = 0
     grand_refetched = 0
 
     for pair in pairs:
         t0 = time.perf_counter()
-        print(f"\n  --- {pair} {'='*55}")
+        print(f"\n  --- {pair} {'=' * 55}")
 
         # 1. Duplicate scan
         dup_stats = scan_duplicates(cache, pair, expected, fix=fix)
         if dup_stats["files_with_dupes"] > 0:
-            print(f"  [Duplicates] {dup_stats['files_with_dupes']} files with "
-                  f"{dup_stats['total_dupes']:,} duplicate rows", end="")
+            print(
+                f"  [Duplicates] {dup_stats['files_with_dupes']} files with "
+                f"{dup_stats['total_dupes']:,} duplicate rows",
+                end="",
+            )
             if fix:
                 print(f"  -> REMOVED {dup_stats['dupes_removed']:,}")
             else:
@@ -424,14 +422,16 @@ def run_verification(
 
         # 2. Missing / corrupt scan
         miss_stats = scan_missing(cache, pair, expected, min_ticks=min_ticks)
-        n_missing  = len(miss_stats["missing"])
-        n_corrupt  = len(miss_stats["corrupt"])
-        n_small    = len(miss_stats["too_small"])
-        n_ok       = miss_stats["ok"]
-        coverage   = (n_ok / total_expected * 100) if total_expected > 0 else 0
+        n_missing = len(miss_stats["missing"])
+        n_corrupt = len(miss_stats["corrupt"])
+        n_small = len(miss_stats["too_small"])
+        n_ok = miss_stats["ok"]
+        coverage = (n_ok / total_expected * 100) if total_expected > 0 else 0
 
-        print(f"  [Coverage]   {n_ok:,}/{total_expected:,} OK "
-              f"({coverage:.1f}%)  |  {miss_stats['empty_ok']} holiday-skipped")
+        print(
+            f"  [Coverage]   {n_ok:,}/{total_expected:,} OK "
+            f"({coverage:.1f}%)  |  {miss_stats['empty_ok']} holiday-skipped"
+        )
 
         if n_corrupt > 0:
             print(f"  [Corrupt]    {n_corrupt} unreadable parquet files", end="")
@@ -444,8 +444,10 @@ def run_verification(
             # Apply neighbour heuristic
             suspicious = _filter_suspicious_missing(cache, pair, miss_stats["missing"])
             legit_empty = n_missing - len(suspicious)
-            print(f"  [Missing]    {n_missing} total  |  {len(suspicious)} suspicious "
-                  f"(neighbours have data)  |  {legit_empty} likely no-data")
+            print(
+                f"  [Missing]    {n_missing} total  |  {len(suspicious)} suspicious "
+                f"(neighbours have data)  |  {legit_empty} likely no-data"
+            )
         else:
             suspicious = []
             print("  [Missing]    0 (all expected hours accounted for)")
@@ -459,41 +461,40 @@ def run_verification(
 
         grand_missing += len(suspicious)
         grand_corrupt += n_corrupt
-        grand_small   += n_small
+        grand_small += n_small
 
         # 3. Gap analysis
-        all_problem_dts = sorted(
-            set(miss_stats["missing"]) | set(miss_stats["corrupt"])
-        )
+        all_problem_dts = sorted(set(miss_stats["missing"]) | set(miss_stats["corrupt"]))
         gaps = analyse_gaps(all_problem_dts, hours)
         if gaps:
             big_gaps = [g for g in gaps if g[2] >= 11]  # >= 1 full day
             if big_gaps:
-                print(f"  [Gaps]       {len(gaps)} streaks  |  "
-                      f"{len(big_gaps)} are >= 1 trading day:")
+                print(f"  [Gaps]       {len(gaps)} streaks  |  {len(big_gaps)} are >= 1 trading day:")
                 for gs, ge, gl in big_gaps[:5]:
-                    print(f"               {gs.strftime('%Y-%m-%d %H:00')} -> "
-                          f"{ge.strftime('%Y-%m-%d %H:00')}  ({gl} hours)")
+                    print(
+                        f"               {gs.strftime('%Y-%m-%d %H:00')} -> "
+                        f"{ge.strftime('%Y-%m-%d %H:00')}  ({gl} hours)"
+                    )
                 if len(big_gaps) > 5:
                     print(f"               ... and {len(big_gaps) - 5} more")
 
         # 4. Auto-fix
         if fix:
-            to_redownload = (
-                miss_stats["corrupt"] +
-                miss_stats["too_small"] +
-                suspicious
-            )
+            to_redownload = miss_stats["corrupt"] + miss_stats["too_small"] + suspicious
             if to_redownload:
                 to_redownload = sorted(set(to_redownload))
                 rd_stats = redownload_hours(
-                    cache, pair, to_redownload,
+                    cache,
+                    pair,
+                    to_redownload,
                     concurrency=concurrency,
                     request_delay=request_delay,
                 )
-                print(f"  [Repair]     Deleted: {rd_stats['deleted']}  |  "
-                      f"Re-fetched: {rd_stats['refetched']}  |  "
-                      f"Still missing: {rd_stats['still_missing']}")
+                print(
+                    f"  [Repair]     Deleted: {rd_stats['deleted']}  |  "
+                    f"Re-fetched: {rd_stats['refetched']}  |  "
+                    f"Still missing: {rd_stats['still_missing']}"
+                )
                 grand_refetched += rd_stats["refetched"]
             else:
                 print("  [Repair]     Nothing to fix")
@@ -623,10 +624,7 @@ def verify_news_dataset(news_file: str, pairs: list[str]) -> None:
             WHERE upper(coalesce(currency, '')) IN ({_pair_currency_sql(pair)})
             """
         ).fetchone()[0]
-        print(
-            f"    {pair}: rows={pair_rows:,} {months[0]}..{months[-1]} "
-            f"present={len(months)} missing={len(missing)}"
-        )
+        print(f"    {pair}: rows={pair_rows:,} {months[0]}..{months[-1]} present={len(months)} missing={len(missing)}")
         if missing:
             shown = ", ".join(missing[:80])
             suffix = " ..." if len(missing) > 80 else ""
@@ -643,31 +641,28 @@ def _parse_args() -> argparse.Namespace:
         description="Verify data quality and auto-repair Dukascopy tick cache.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS,
-                   metavar="PAIR", help="FX pairs to verify")
+    p.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS, metavar="PAIR", help="FX pairs to verify")
     p.add_argument("--start", default=DEFAULT_START, help="Start date YYYY-MM-DD")
-    p.add_argument("--end",   default=DEFAULT_END,   help="End date YYYY-MM-DD")
-    p.add_argument("--full-day", action="store_true",
-                   help="Check all 24 hours (default: session only 07-17 UTC)")
-    p.add_argument("--tick-cache", default=DEFAULT_DUKASCOPY_CACHE_DIR,
-                   help="Root directory for raw Parquet tick cache")
-    p.add_argument("--fix", action="store_true",
-                   help="Auto-fix: remove duplicates + redownload missing/corrupt")
-    p.add_argument("--min-ticks", type=int, default=0,
-                   help="Flag files with fewer than N ticks as too-small (0=off)")
-    p.add_argument("--concurrency", type=int, default=8,
-                   help="Concurrent downloads for repair")
-    p.add_argument("--request-delay", type=float, default=0.1,
-                   help="Delay between requests during repair")
-    p.add_argument("--verify-news", action="store_true",
-                   help="Verify historical news Parquet coverage instead of tick cache")
-    p.add_argument("--news-file", default=DEFAULT_NEWS_FILE,
-                   help="Historical news Parquet to verify with --verify-news")
+    p.add_argument("--end", default=DEFAULT_END, help="End date YYYY-MM-DD")
+    p.add_argument("--full-day", action="store_true", help="Check all 24 hours (default: session only 07-17 UTC)")
+    p.add_argument(
+        "--tick-cache", default=DEFAULT_DUKASCOPY_CACHE_DIR, help="Root directory for raw Parquet tick cache"
+    )
+    p.add_argument("--fix", action="store_true", help="Auto-fix: remove duplicates + redownload missing/corrupt")
+    p.add_argument("--min-ticks", type=int, default=0, help="Flag files with fewer than N ticks as too-small (0=off)")
+    p.add_argument("--concurrency", type=int, default=8, help="Concurrent downloads for repair")
+    p.add_argument("--request-delay", type=float, default=0.1, help="Delay between requests during repair")
+    p.add_argument(
+        "--verify-news", action="store_true", help="Verify historical news Parquet coverage instead of tick cache"
+    )
+    p.add_argument(
+        "--news-file", default=DEFAULT_NEWS_FILE, help="Historical news Parquet to verify with --verify-news"
+    )
     return p.parse_args()
 
 
 def main() -> None:
-    args  = _parse_args()
+    args = _parse_args()
     pairs = [p.upper().replace("/", "") for p in args.pairs]
     if args.verify_news:
         verify_news_dataset(args.news_file, pairs)
@@ -676,15 +671,15 @@ def main() -> None:
     hours = list(range(0, 24)) if args.full_day else SESSION_HOURS
 
     run_verification(
-        pairs         = pairs,
-        start         = args.start,
-        end           = args.end,
-        hours         = hours,
-        cache_dir     = args.tick_cache,
-        fix           = args.fix,
-        min_ticks     = args.min_ticks,
-        concurrency   = args.concurrency,
-        request_delay = args.request_delay,
+        pairs=pairs,
+        start=args.start,
+        end=args.end,
+        hours=hours,
+        cache_dir=args.tick_cache,
+        fix=args.fix,
+        min_ticks=args.min_ticks,
+        concurrency=args.concurrency,
+        request_delay=args.request_delay,
     )
 
 

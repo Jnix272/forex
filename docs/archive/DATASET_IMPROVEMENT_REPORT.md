@@ -40,10 +40,10 @@ By using mid-price for exit evaluation, the pipeline assumes **zero spread on ev
 ```python
 # In triple_barrier_labeling.py
 # Replace:
-hit_tp = (future_path >= tp_price)  # using close
+hit_tp = future_path >= tp_price  # using close
 # With:
-hit_tp_long  = (future_bid_path >= tp_price)   # exit long → bid
-hit_tp_short = (future_ask_path <= tp_price)   # exit short → ask
+hit_tp_long = future_bid_path >= tp_price  # exit long → bid
+hit_tp_short = future_ask_path <= tp_price  # exit short → ask
 ```
 Load bid/ask columns from the tick data loader and build separate `bid_path` and `ask_path` forward sequences alongside the existing `close_path`.
 
@@ -93,9 +93,11 @@ The loader parses `start`/`end` strings with `datetime.strptime(...)` and attach
 **Recommended Fix:**  
 After loading the lazy frame, explicitly enforce UTC timezone on the timestamp column before filtering:
 ```python
-lf = pl.scan_parquet(path).with_columns(
-    pl.col("ts_event").dt.replace_time_zone("UTC")
-).filter(pl.col("ts_event") >= start_dt)
+lf = (
+    pl.scan_parquet(path)
+    .with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    .filter(pl.col("ts_event") >= start_dt)
+)
 ```
 
 ---
@@ -117,7 +119,7 @@ Historical backfill data processed through this fallback will have systematicall
 **Recommended Fix:**  
 Remove the bag-of-words fallback entirely. If a FinBERT score is unavailable, fill with `0.0` (neutral) rather than guessing:
 ```python
-sentiment = row.get('sentiment_score') or 0.0  # neutral, not guessed
+sentiment = row.get("sentiment_score") or 0.0  # neutral, not guessed
 ```
 
 ---
@@ -173,9 +175,10 @@ The pipeline trains on dead/thin-liquidity bars during unhandled holidays. The R
 Integrate `pandas_market_calendars` to build a proper holiday mask per currency:
 ```python
 import pandas_market_calendars as mcal
-calendar = mcal.get_calendar('FOREX')
+
+calendar = mcal.get_calendar("FOREX")
 valid_days = calendar.valid_days(start_date, end_date)
-df = df.filter(pl.col('date').is_in(valid_days))
+df = df.filter(pl.col("date").is_in(valid_days))
 ```
 
 ---
@@ -198,6 +201,7 @@ Rename to `vol_regime_bucket` to accurately describe what it computes.
 Train a Gaussian HMM offline using `hmmlearn` on the full historical volatility series and merge the posterior regime probabilities as a precomputed feature column:
 ```python
 from hmmlearn.hmm import GaussianHMM
+
 model = GaussianHMM(n_components=3, covariance_type="full", n_iter=100)
 model.fit(vol_series.reshape(-1, 1))
 regime_probs = model.predict_proba(vol_series.reshape(-1, 1))
@@ -220,6 +224,7 @@ regime_probs = model.predict_proba(vol_series.reshape(-1, 1))
 Replace the in-memory set with a DuckDB or Polars on-disk deduplication at write time:
 ```python
 import duckdb
+
 con = duckdb.connect()
 con.execute(f"""
     INSERT INTO output SELECT * FROM new_rows

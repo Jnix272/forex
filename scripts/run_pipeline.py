@@ -30,6 +30,7 @@ if str(_ROOT) not in sys.path:
 
 def _python_exe() -> str:
     from scripts._python_env import python_exe as _resolve
+
     return _resolve()
 
 
@@ -65,16 +66,15 @@ def _duckdb_is_stale() -> bool:
 
     try:
         import duckdb
+
         with duckdb.connect(str(db), read_only=True) as c:
-            db_pairs = set(r[0] for r in c.execute("SELECT DISTINCT pair FROM ticks").fetchall())
+            db_pairs = {r[0] for r in c.execute("SELECT DISTINCT pair FROM ticks").fetchall()}
     except Exception:
         return True
 
-    compact_pairs = set(
-        p.name.replace("pair=", "")
-        for p in compact.iterdir()
-        if p.is_dir() and p.name.startswith("pair=")
-    )
+    compact_pairs = {
+        p.name.replace("pair=", "") for p in compact.iterdir() if p.is_dir() and p.name.startswith("pair=")
+    }
     if not compact_pairs.issubset(db_pairs):
         return True
 
@@ -101,11 +101,11 @@ def main() -> int:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
         parser.add_argument(
-            "command", choices=("download", "migrate", "validate", "data", "train", "backtest", "all"),
+            "command",
+            choices=("download", "migrate", "validate", "data", "train", "backtest", "all"),
             help="download | migrate | validate | data | train | backtest | all",
         )
-        parser.add_argument("passthrough", nargs=argparse.REMAINDER,
-                            help="Flags forwarded to the respective script")
+        parser.add_argument("passthrough", nargs=argparse.REMAINDER, help="Flags forwarded to the respective script")
         parser.print_help()
         return 0
 
@@ -127,8 +127,7 @@ def main() -> int:
         auto_migrate = "--no-auto-migrate" not in argv
         if auto_migrate and not _maybe_auto_migrate():
             return 1
-        return _run_script("backtest_model.py" if command == "backtest"
-                           else "train.py", passthrough)
+        return _run_script("backtest_model.py" if command == "backtest" else "train.py", passthrough)
     if command == "data":
         download_args = []
         train_args = []
@@ -138,12 +137,17 @@ def main() -> int:
             else:
                 download_args.append(arg)
                 train_args.append(arg)
-                
+
         if "--dry-run" in passthrough:
             print("[pipeline] --dry-run detected. Aborting before full data processing.", flush=True)
             return 0
-            
-        for script in ("download_all.py", "migrate_to_duckdb.py", "validate_data_quality.py", "../training/data_coverage.py"):
+
+        for script in (
+            "download_all.py",
+            "migrate_to_duckdb.py",
+            "validate_data_quality.py",
+            "../training/data_coverage.py",
+        ):
             if script == "download_all.py":
                 script_passthrough = download_args
             elif script == "migrate_to_duckdb.py":
@@ -152,7 +156,7 @@ def main() -> int:
                 script_passthrough = []
             else:
                 script_passthrough = train_args
-                
+
             rc = _run_script(script, script_passthrough)
             if rc != 0:
                 print(f"[pipeline] Stage {script} failed with code {rc}", flush=True)
@@ -172,8 +176,15 @@ def main() -> int:
         if "--dry-run" in passthrough:
             print("[pipeline] --dry-run detected. Aborting before execution of train/backtest.", flush=True)
             return 0
-            
-        for script in ("download_all.py", "migrate_to_duckdb.py", "validate_data_quality.py", "../training/data_coverage.py", "train.py", "backtest_model.py"):
+
+        for script in (
+            "download_all.py",
+            "migrate_to_duckdb.py",
+            "validate_data_quality.py",
+            "../training/data_coverage.py",
+            "train.py",
+            "backtest_model.py",
+        ):
             script_path = _ROOT / "scripts" / script
             if not script_path.exists():
                 print(f"[pipeline] ERROR: Required script {script} not found! Aborting.", flush=True)
@@ -194,7 +205,10 @@ def main() -> int:
                 return rc
         return 0
 
-    print(f"[pipeline] Unknown command: {command!r}. Use: download | migrate | validate | data | train | backtest | all", flush=True)
+    print(
+        f"[pipeline] Unknown command: {command!r}. Use: download | migrate | validate | data | train | backtest | all",
+        flush=True,
+    )
     return 2
 
 

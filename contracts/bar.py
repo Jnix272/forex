@@ -4,16 +4,16 @@ Bar Data Contract
 Contract for OHLCV bar data validation.
 """
 
-from contracts.base import DataContract, Stage, ContractVersion, ContractMetadata
 import polars as pl
-from datetime import datetime
+
+from contracts.base import ContractMetadata, ContractVersion, DataContract, Stage
 
 
 class BarContract(DataContract):
     contract_name = "bar"
     contract_version = ContractVersion.V1_1
     stage = Stage.RESAMPLING
-    
+
     required_columns = {
         "timestamp_utc": pl.Datetime("ns", "UTC"),
         "open": pl.Float64,
@@ -22,7 +22,7 @@ class BarContract(DataContract):
         "close": pl.Float64,
         "volume": pl.Float64,
     }
-    
+
     optional_columns = {
         "spread_avg": pl.Float64,
         "bid_close": pl.Float64,
@@ -33,7 +33,7 @@ class BarContract(DataContract):
         "vwap": pl.Float64,
         "trade_count": pl.Int64,
     }
-    
+
     column_constraints = {
         "open": {"not_null": True, "min": 0.0},
         "high": {"not_null": True, "min": 0.0},
@@ -47,7 +47,7 @@ class BarContract(DataContract):
         "trade_count": {"min": 0},
         "session_label": {"allowed": ["asia", "london", "ny", "asia_london", "london_ny", "off"]},
     }
-    
+
     invariants = [
         "high >= low",
         "high >= open",
@@ -58,15 +58,15 @@ class BarContract(DataContract):
         # Spread consistency
         "spread_avg IS NULL OR spread_avg >= 0",
     ]
-    
+
     pair_overrides = {
         "USDJPY": {"open": {"min": 50.0}, "high": {"min": 50.0}, "low": {"min": 50.0}, "close": {"min": 50.0}},
         "GBPJPY": {"open": {"min": 100.0}, "high": {"min": 100.0}, "low": {"min": 100.0}, "close": {"min": 100.0}},
         "EURJPY": {"open": {"min": 100.0}, "high": {"min": 100.0}, "low": {"min": 100.0}, "close": {"min": 100.0}},
     }
-    
+
     allow_unknown_columns = True
-    
+
     @classmethod
     def validate_frame(cls, df: pl.DataFrame, pair: str | None = None) -> tuple[pl.DataFrame, ContractMetadata]:
         errors = []
@@ -74,10 +74,10 @@ class BarContract(DataContract):
         errors.extend(cls._check_unknown_columns(df))
         errors.extend(cls._check_constraints(df, pair))
         errors.extend(cls._check_invariants(df))
-        
+
         if errors:
             raise ValueError(f"BarContract validation failed for {pair}: {'; '.join(errors)}")
-        
+
         metadata = ContractMetadata(
             contract_version=str(cls.contract_version),
             stage=cls.stage,
@@ -89,10 +89,11 @@ class BarContract(DataContract):
             schema_hash=cls._compute_schema_hash(df),
             data_hash=cls._compute_data_hash(df),
         )
-        
+
         return df, metadata
 
 
 # Register the contract
-from contracts.base import ContractRegistry
+from contracts.base import ContractRegistry  # noqa: E402
+
 ContractRegistry.register(BarContract)

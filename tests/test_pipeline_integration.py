@@ -1,5 +1,5 @@
 """
-Integration tests for Phase 4 — Full Pipeline: FeatureStore + DriftTracker + RetrainOrchestrator.
+Integration tests for Phase 4 - Full Pipeline: FeatureStore + DriftTracker + RetrainOrchestrator.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from retraining.pipeline import FullPipeline, PipelineConfig, load_config_from_y
 # Fixtures
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @pytest.fixture
 def seeded_store(tmp_path) -> FeatureStore:
     """FeatureStore with pre-materialized features for drift/retrain testing."""
@@ -28,46 +29,64 @@ def seeded_store(tmp_path) -> FeatureStore:
     n_base = 5000
     n_live = 2000
 
-    base_ts = [
-        datetime(2024, 1, 1, 0, tzinfo=UTC) + timedelta(minutes=i)
-        for i in range(n_base)
-    ]
-    live_ts = [
-        datetime(2024, 6, 1, 0, tzinfo=UTC) + timedelta(minutes=i)
-        for i in range(n_live)
-    ]
+    base_ts = [datetime(2024, 1, 1, 0, tzinfo=UTC) + timedelta(minutes=i) for i in range(n_base)]
+    live_ts = [datetime(2024, 6, 1, 0, tzinfo=UTC) + timedelta(minutes=i) for i in range(n_live)]
 
     # Feature with drift
     for col in ("close", "log_ret_1"):
-        base = pl.DataFrame({
-            "timestamp_utc": base_ts,
-            col: rng.normal(0, 1, n_base),
-        })
-        live = pl.DataFrame({
-            "timestamp_utc": live_ts,
-            col: rng.normal(0.5, 1.2, n_live),  # shifted
-        })
-        store._store_materialization(
-            col, base, base_ts[0], base_ts[-1], MaterializationStrategy.EAGER_BATCH,
+        base = pl.DataFrame(
+            {
+                "timestamp_utc": base_ts,
+                col: rng.normal(0, 1, n_base),
+            }
+        )
+        live = pl.DataFrame(
+            {
+                "timestamp_utc": live_ts,
+                col: rng.normal(0.5, 1.2, n_live),  # shifted
+            }
         )
         store._store_materialization(
-            col, live, live_ts[0], live_ts[-1], MaterializationStrategy.EAGER_BATCH,
+            col,
+            base,
+            base_ts[0],
+            base_ts[-1],
+            MaterializationStrategy.EAGER_BATCH,
+        )
+        store._store_materialization(
+            col,
+            live,
+            live_ts[0],
+            live_ts[-1],
+            MaterializationStrategy.EAGER_BATCH,
         )
 
     # Feature without drift
-    base2 = pl.DataFrame({
-        "timestamp_utc": base_ts,
-        "atr_6": rng.normal(0.001, 0.0005, n_base),
-    })
-    live2 = pl.DataFrame({
-        "timestamp_utc": live_ts,
-        "atr_6": rng.normal(0.001, 0.0005, n_live),
-    })
-    store._store_materialization(
-        "atr_6", base2, base_ts[0], base_ts[-1], MaterializationStrategy.EAGER_BATCH,
+    base2 = pl.DataFrame(
+        {
+            "timestamp_utc": base_ts,
+            "atr_6": rng.normal(0.001, 0.0005, n_base),
+        }
+    )
+    live2 = pl.DataFrame(
+        {
+            "timestamp_utc": live_ts,
+            "atr_6": rng.normal(0.001, 0.0005, n_live),
+        }
     )
     store._store_materialization(
-        "atr_6", live2, live_ts[0], live_ts[-1], MaterializationStrategy.EAGER_BATCH,
+        "atr_6",
+        base2,
+        base_ts[0],
+        base_ts[-1],
+        MaterializationStrategy.EAGER_BATCH,
+    )
+    store._store_materialization(
+        "atr_6",
+        live2,
+        live_ts[0],
+        live_ts[-1],
+        MaterializationStrategy.EAGER_BATCH,
     )
 
     return store
@@ -76,6 +95,7 @@ def seeded_store(tmp_path) -> FeatureStore:
 # ════════════════════════════════════════════════════════════════════════════
 # FeatureStore + Drift Integration
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestStoreDriftIntegration:
     def test_drift_check_from_store(self, seeded_store):
@@ -86,7 +106,11 @@ class TestStoreDriftIntegration:
         live_end = datetime(2024, 6, 2, tzinfo=UTC)
 
         report = tracker.check_from_store(
-            ["close", "atr_6"], base_start, base_end, live_start, live_end,
+            ["close", "atr_6"],
+            base_start,
+            base_end,
+            live_start,
+            live_end,
         )
         assert report.n_features == 2
         # close should have drift, atr_6 should not
@@ -102,7 +126,11 @@ class TestStoreDriftIntegration:
         live_end = datetime(2024, 6, 2, tzinfo=UTC)
 
         report = tracker.check_from_store(
-            ["close", "atr_6"], base_start, base_end, live_start, live_end,
+            ["close", "atr_6"],
+            base_start,
+            base_end,
+            live_start,
+            live_end,
         )
         alerts = tracker.get_active_alerts()
         # Drifted features should create alerts
@@ -114,6 +142,7 @@ class TestStoreDriftIntegration:
 # ════════════════════════════════════════════════════════════════════════════
 # Drift → Retrain Integration
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestDriftRetrainIntegration:
     def test_drift_triggers_retrain_check(self, seeded_store, tmp_path):
@@ -127,17 +156,19 @@ class TestDriftRetrainIntegration:
 
         # Manually add a drift alert to trigger retrain
         from monitoring.drift_detection import check_feature_drift
+
         rng = np.random.default_rng(42)
         check_feature_drift("close", rng.normal(0, 1, 1000), rng.normal(1, 1, 1000))
         tracker = DriftTracker(seeded_store)
         from monitoring.drift_detection import run_drift_check
+
         report = run_drift_check(
             {"close": rng.normal(0, 1, 1000)},
             {"close": rng.normal(1, 1, 500)},
         )
         tracker._persist_report(report)
 
-        should, reason, ctx = orch.should_retrain("haelt")
+        _should, reason, _ctx = orch.should_retrain("haelt")
         # May or may not trigger depending on drift_feature_frac
         assert reason in ("", RetrainReason.DRIFT_DETECTED.value, RetrainReason.INITIAL.value)
 
@@ -157,6 +188,7 @@ class TestDriftRetrainIntegration:
 # ════════════════════════════════════════════════════════════════════════════
 # FullPipeline End-to-End
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestFullPipeline:
     def test_pipeline_init(self, tmp_path):
@@ -198,21 +230,20 @@ class TestFullPipeline:
         # Create synthetic bars
         rng = np.random.default_rng(42)
         n = 1000
-        ts = [
-            datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i)
-            for i in range(n)
-        ]
+        ts = [datetime(2024, 1, 1, 8, tzinfo=UTC) + timedelta(minutes=i) for i in range(n)]
         close = 1.1000 + np.cumsum(rng.normal(0, 0.0001, n))
-        bars = pl.DataFrame({
-            "timestamp_utc": ts,
-            "open": close - rng.uniform(0, 0.0002, n),
-            "high": close + rng.uniform(0, 0.0003, n),
-            "low": close - rng.uniform(0, 0.0003, n),
-            "close": close,
-            "volume": rng.integers(50, 500, n).astype(float),
-            "tick_volume": rng.integers(100, 1000, n).astype(float),
-            "spread_pips": rng.uniform(0.5, 2.0, n),
-        })
+        bars = pl.DataFrame(
+            {
+                "timestamp_utc": ts,
+                "open": close - rng.uniform(0, 0.0002, n),
+                "high": close + rng.uniform(0, 0.0003, n),
+                "low": close - rng.uniform(0, 0.0003, n),
+                "close": close,
+                "volume": rng.integers(50, 500, n).astype(float),
+                "tick_volume": rng.integers(100, 1000, n).astype(float),
+                "spread_pips": rng.uniform(0.5, 2.0, n),
+            }
+        )
 
         start = datetime(2024, 1, 1, 8, tzinfo=UTC)
         end = datetime(2024, 1, 1, 10, tzinfo=UTC)
@@ -226,6 +257,7 @@ class TestFullPipeline:
         def fake_schedule_drift_check(*args, **kwargs):
             captured["as_of"] = kwargs.get("as_of")
             from monitoring.drift_detection import DriftReport, DriftSeverity
+
             return DriftReport(
                 feature_results=[],
                 psi_max=0.0,
@@ -258,6 +290,7 @@ class TestFullPipeline:
 # ════════════════════════════════════════════════════════════════════════════
 # Config loading
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestConfigLoading:
     def test_load_config_from_yaml(self):

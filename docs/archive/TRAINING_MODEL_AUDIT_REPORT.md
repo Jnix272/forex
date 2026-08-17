@@ -42,7 +42,7 @@ std = returns.std(unbiased=False)
 
 # After (numerically stable):
 var = returns.var(unbiased=False)
-std = torch.sqrt(var + 1e-8)   # eps prevents NaN gradient at std=0
+std = torch.sqrt(var + 1e-8)  # eps prevents NaN gradient at std=0
 ```
 
 ---
@@ -72,13 +72,13 @@ Additionally:
 from catboost import CatBoostClassifier, CatBoostRegressor
 
 model = CatBoostClassifier(
-    loss_function="MultiClass",    # not "multi:softmax"
+    loss_function="MultiClass",  # not "multi:softmax"
     eval_metric="Accuracy",
-    task_type="GPU",               # enable GPU
+    task_type="GPU",  # enable GPU
     iterations=1000,
     learning_rate=0.05,
     depth=6,
-    verbose=100
+    verbose=100,
 )
 ```
 
@@ -101,7 +101,7 @@ model = CatBoostClassifier(
 ```python
 # Current — broken: dropout stays permanently enabled
 def predict_with_uncertainty(self, x, n_samples=30):
-    self._enable_dropout()     # sets dropout to train mode
+    self._enable_dropout()  # sets dropout to train mode
     preds = [self(x) for _ in range(n_samples)]
     # ← missing: self._disable_dropout()
     return preds
@@ -118,7 +118,8 @@ def predict_with_uncertainty(self, x, n_samples=30):
         uncertainty = preds.std(0)
         return mean, uncertainty
     finally:
-        self._disable_dropout()   # always restore, even if exception
+        self._disable_dropout()  # always restore, even if exception
+
 
 def _disable_dropout(self):
     for m in self.modules():
@@ -141,8 +142,8 @@ The meta-learner trains with a diversity penalty:
 with torch.no_grad():
     base_preds = [model(x) for model in self.base_models]  # gradients blocked
 
-div_pen = meta.diversity_loss(base_preds)   # computed from no_grad tensors
-loss = task_loss + lambda_div * div_pen     # div_pen is a constant — no gradient!
+div_pen = meta.diversity_loss(base_preds)  # computed from no_grad tensors
+loss = task_loss + lambda_div * div_pen  # div_pen is a constant — no gradient!
 ```
 `base_preds` is generated inside `torch.no_grad()` — the resulting tensors have `requires_grad=False`. The diversity penalty computed from them is a constant and contributes **zero gradient** to the meta-learner weights. The `lambda_div` parameter has no effect whatsoever.
 
@@ -154,14 +155,14 @@ with torch.no_grad():
     base_preds = torch.stack([model(x) for model in self.base_models], dim=1)
 
 # Meta-learner weights (these DO have gradients)
-weights = self.meta(x)   # shape: (batch, n_models)
+weights = self.meta(x)  # shape: (batch, n_models)
 weighted_preds = (weights.unsqueeze(-1) * base_preds).sum(1)
 
 # Diversity: penalise when weights collapse to a single model
 weight_entropy = -(weights * weights.log().clamp(-10)).sum(1).mean()
-div_pen = -weight_entropy   # maximise entropy → maximise diversity
+div_pen = -weight_entropy  # maximise entropy → maximise diversity
 
-loss = task_loss + lambda_div * div_pen   # NOW has real gradients ✅
+loss = task_loss + lambda_div * div_pen  # NOW has real gradients ✅
 ```
 
 ---
@@ -176,7 +177,7 @@ loss = task_loss + lambda_div * div_pen   # NOW has real gradients ✅
 **Description:**  
 Config supplies `sharpe_annualization_factor: 325.0` (already `√(252×420)`). The loss applies `** 0.5` again:
 ```python
-self._ann_sqrt = float(ann) ** 0.5   # → √325 ≈ 18  (18× too weak)
+self._ann_sqrt = float(ann) ** 0.5  # → √325 ≈ 18  (18× too weak)
 ```
 Sharpe gradient is ~18× too weak, causing the Huber baseline loss to dominate.
 
@@ -244,8 +245,7 @@ All deep models rely entirely on PyTorch's default weight initialisation (`Unifo
 def _init_weights(self):
     for module in self.modules():
         if isinstance(module, nn.Linear):
-            nn.init.kaiming_normal_(module.weight, mode='fan_out', 
-                                    nonlinearity='relu')
+            nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.LayerNorm):
@@ -266,13 +266,13 @@ def _init_weights(self):
 
 **Description:**  
 ```python
-dt = torch.sigmoid(self.dt_proj(x2c))   # bounded to (0, 1)
+dt = torch.sigmoid(self.dt_proj(x2c))  # bounded to (0, 1)
 ```
 The standard Mamba SSM paper uses `softplus` for the step size (`dt`), which maps to `(0, ∞)`. Using `sigmoid` caps the maximum step size at 1.0, preventing the model from taking large discretisation steps when needed for long-range dependency capture.
 
 **Fix:**
 ```python
-dt = F.softplus(self.dt_proj(x2c))   # correct: unbounded positive ✅
+dt = F.softplus(self.dt_proj(x2c))  # correct: unbounded positive ✅
 ```
 
 ---

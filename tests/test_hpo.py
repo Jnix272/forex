@@ -2,6 +2,7 @@
 Tests for HPO module (Improvement #12):
 PBT, BOHB, ASHA, multi-fidelity ASHA.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -40,6 +41,7 @@ from training.hpo import (
 # Population-Based Training
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def test_pbt_initialization():
     """Test PBT initialization."""
     config = HPOConfig(population_size=4)
@@ -55,7 +57,7 @@ def test_pbt_add_trial():
     pbt = PopulationBasedTraining(config)
 
     for i in range(4):
-        pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i+1), "batch_size": 32 * (i+1)})
+        pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i + 1), "batch_size": 32 * (i + 1)})
 
     assert len(pbt.population) == 4
 
@@ -106,7 +108,7 @@ def test_pbt_exploit_and_perturb():
     pbt = PopulationBasedTraining(config)
 
     for i in range(4):
-        pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i+1)})
+        pbt.add_trial(f"trial_{i}", {"lr": 1e-3 * (i + 1)})
 
     pbt.update_score("trial_0", 0.5, 10)
     pbt.update_score("trial_1", 0.8, 10)
@@ -141,7 +143,7 @@ def test_pbt_population_stats():
     assert 0.3 <= stats["mean_score"] <= 0.8
 
 
-def test_pbt_exploit_and_perturb():
+def test_pbt_exploit_and_perturb():  # noqa: F811
     """Test exploit and perturb operation."""
     config = HPOConfig(population_size=3)
     pbt = PopulationBasedTraining(config)
@@ -164,6 +166,7 @@ def test_pbt_exploit_and_perturb():
 # ═════════════════════════════════════════════════════════════════════════════
 # HyperBand / ASHA Schedulers
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def test_hyperband_scheduler_init():
     """Test HyperBand scheduler initialization."""
@@ -242,8 +245,8 @@ def test_asha_stops_all_non_top_fraction():
         asha.add_trial(tid, {"lr": 1e-3})
     # Warm up so the rung has η-sized cohort
     for tid, s in scores.items():
-        action = asha.on_trial_result(tid, {"val_sharpe": s})
-    # Re-report mediocre "c" — with 4 trials, keep top 2 (a,b); c and d stop
+        asha.on_trial_result(tid, {"val_sharpe": s})
+    # Re-report mediocre "c" - with 4 trials, keep top 2 (a,b); c and d stop
     action_c = asha.on_trial_result("c", {"val_sharpe": 0.4})
     action_d = asha.on_trial_result("d", {"val_sharpe": 0.1})
     assert action_c["action"] == "stop"
@@ -267,6 +270,7 @@ def test_hpo_manager_run_hpo():
 # ══════════════════════════════════════════════════════════════════════════════
 # BOHB Scheduler
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def test_bohb_scheduler_init():
     """Test BOHB scheduler initialization."""
@@ -300,6 +304,7 @@ def test_bohb_observe():
 # Multi-Fidelity ASHA
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def test_mf_asha_init():
     """Test multi-fidelity ASHA initialization."""
     config = HPOConfig(grace_period=1, reduction_factor=3)
@@ -330,6 +335,7 @@ def test_mf_asha_add_trial():
 # HPOManager
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_hpo_manager_init():
     """Test HPOManager initialization."""
     config = HPOConfig(
@@ -351,7 +357,7 @@ def test_hpo_manager_sample_params():
     config = HPOConfig(seed=42)
     manager = HPOManager(config)
 
-    params = manager._sample_initial_params()
+    manager._sample_initial_params()
 
     assert "lr" in manager._sample_initial_params()
     assert "d_model" in manager._sample_initial_params()
@@ -364,7 +370,7 @@ def test_hpo_manager_create_study():
     manager = HPOManager(config)
 
     if True:  # OPTUNA_AVAILABLE
-        study = manager.create_study(direction="maximize", sampler="tpe", pruner="hyperband")
+        manager.create_study(direction="maximize", sampler="tpe", pruner="hyperband")
         assert manager.study is not None
         assert manager.study.direction.name == "MAXIMIZE"
 
@@ -372,6 +378,7 @@ def test_hpo_manager_create_study():
 # ══════════════════════════════════════════════════════════════════════════════
 # Integration Tests
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_pbt_integration():
     """Test PBT integration with HPOManager."""
@@ -450,13 +457,14 @@ def test_hpo_factory():
 # run_hpo_study
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_run_hpo_study():
     """Test run_hpo_study factory function."""
     X = np.random.randn(10, 5, 4).astype(np.float32)
 
     # This would fail without Optuna, but we can test the function signature
     try:
-        trainer, history = pretrain_multi_task(
+        _trainer, history = pretrain_multi_task(
             X,
             seq_len=5,
             n_features=3,
@@ -474,6 +482,7 @@ def test_run_hpo_study():
 # Domain Adaptation
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def test_adapt_encoder_to_target():
     """Test domain adaptation."""
     encoder = torch.nn.Sequential(
@@ -484,10 +493,7 @@ def test_adapt_encoder_to_target():
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0  # shift
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="dann", epochs=2, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="dann", epochs=2, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
@@ -501,16 +507,14 @@ def test_adapt_encoder_fine_tune():
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32)
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="fine_tune", epochs=2, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="fine_tune", epochs=2, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Domain Adaptation Losses
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def test_mmd_loss():
     """Test MMD loss."""
@@ -526,7 +530,7 @@ def test_mmd_loss():
 def test_mmd_loss_same_distribution():
     """Test MMD with same distribution."""
     X = torch.randn(20, 8)
-    idx = torch.randperm(20)
+    torch.randperm(20)
     source = X[:10]
     target = X[10:]
     mmd = MMDLoss(kernel="rbf", gamma=1.0)
@@ -561,6 +565,7 @@ def test_coral_loss_same():
 # Domain Discriminator
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def test_domain_discriminator():
     """Test DomainDiscriminator."""
     disc = DomainDiscriminator(64, 3, hidden_dim=64)
@@ -581,6 +586,7 @@ def test_grad_reverse():
 # ══════════════════════════════════════════════════════════════════════════════
 # Task Losses
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_nt_xent_loss():
     """Test NT-Xent contrastive loss."""
@@ -673,6 +679,7 @@ def test_domain_adversarial_loss():
 # Factory Functions
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_create_multi_task_pretrainer():
     """Test factory function."""
     X = np.random.randn(50, 20, 5).astype(np.float32)
@@ -695,7 +702,7 @@ def test_pretrain_multi_task():
     assert isinstance(history, dict)
 
 
-def test_adapt_encoder_to_target():
+def test_adapt_encoder_to_target():  # noqa: F811
     """Test domain adaptation utility."""
     encoder = torch.nn.Sequential(
         torch.nn.Linear(4, 16),
@@ -705,14 +712,11 @@ def test_adapt_encoder_to_target():
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32) + 2.0
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="dann", epochs=2, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="dann", epochs=2, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
-def test_adapt_encoder_fine_tune():
+def test_adapt_encoder_fine_tune():  # noqa: F811
     encoder = torch.nn.Sequential(
         torch.nn.Linear(4, 16),
         torch.nn.ReLU(),
@@ -721,16 +725,14 @@ def test_adapt_encoder_fine_tune():
     source = np.random.randn(50, 10, 4).astype(np.float32)
     target = np.random.randn(50, 10, 4).astype(np.float32)
 
-    adapted = adapt_encoder_to_target(
-        encoder, source, target,
-        method="fine_tune", epochs=2, lr=1e-3, device="cpu"
-    )
+    adapted = adapt_encoder_to_target(encoder, source, target, method="fine_tune", epochs=2, lr=1e-3, device="cpu")
     assert adapted is encoder
 
 
 def test_build_optuna_search_defaults():
     """tpe preserves the default Optuna behavior (TPE + MedianPruner)."""
     from training.hpo import build_optuna_search
+
     sampler, pruner = build_optuna_search("tpe", seed=42, max_resource=8)
     assert type(sampler).__name__ == "TPESampler"
     assert type(pruner).__name__ == "MedianPruner"
@@ -738,12 +740,14 @@ def test_build_optuna_search_defaults():
 
 def test_build_optuna_search_asha():
     from training.hpo import build_optuna_search
-    sampler, pruner = build_optuna_search("asha", seed=0, max_resource=8)
+
+    _sampler, pruner = build_optuna_search("asha", seed=0, max_resource=8)
     assert type(pruner).__name__ == "SuccessiveHalvingPruner"
 
 
 def test_build_optuna_search_bohb_pbt():
     from training.hpo import build_optuna_search
+
     _, pruner = build_optuna_search("bohb", seed=0, max_resource=8)
     assert type(pruner).__name__ == "HyperbandPruner"
     sampler, _ = build_optuna_search("pbt", seed=0, max_resource=8)
@@ -752,6 +756,7 @@ def test_build_optuna_search_bohb_pbt():
 
 def test_build_optuna_search_unknown():
     from training.hpo import build_optuna_search
+
     with pytest.raises(ValueError):
         build_optuna_search("nonexistent", seed=0)
 
@@ -761,6 +766,7 @@ def test_optuna_tune_hpo_scheduler_arg(monkeypatch):
     import sys
 
     from scripts.optuna_tune import parse_args
+
     monkeypatch.setattr(sys, "argv", ["optuna_tune", "--model", "tft", "--hpo-scheduler", "asha", "--trials", "1"])
     args = parse_args()
     assert args.hpo_scheduler == "asha"

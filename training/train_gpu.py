@@ -81,6 +81,7 @@ import asyncio
 
 if sys.platform == "win32":
     import warnings
+
     warnings.filterwarnings(
         "ignore",
         category=DeprecationWarning,
@@ -98,25 +99,46 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import yaml as _yaml; _YAML = True
+    import yaml as _yaml  # noqa: F401
+
+    _YAML = True
 except ImportError:
     _YAML = False
 
 try:
     from tqdm import tqdm as _tqdm
-    def _pbar(it=None, **kw): return _tqdm(it, **kw)
+
+    def _pbar(it=None, **kw):
+        return _tqdm(it, **kw)
 except ImportError:
+
     class _DummyBar:
         """No-op progress bar used when tqdm is not installed."""
-        def __init__(self, *a, **kw): pass
-        def update(self, n=1): pass
-        def set_postfix(self, **kw): pass
-        def close(self): pass
-        def __iter__(self): return iter([])
-        def __enter__(self): return self
-        def __exit__(self, *_): self.close()
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def update(self, n=1):
+            pass
+
+        def set_postfix(self, **kw):
+            pass
+
+        def close(self):
+            pass
+
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
     def _pbar(it=None, **kw):
         return iter(it) if it is not None else _DummyBar()
+
 
 import numpy as np
 
@@ -138,99 +160,92 @@ from monitoring.drift_gate import run_drift_gate
 from validation.mlflow_logger import MLflowModelLogger
 
 try:
-    from models.ensemble import EnsembleMetaLearner, train_meta_learner
+    from models.ensemble import EnsembleMetaLearner, train_meta_learner  # noqa: F401
+
     ENSEMBLE = True
 except ImportError:
     ENSEMBLE = False
 from config.settings import (
     MONITORING,
-    TRAINING,
 )
-
-try:
-    from config.settings import GPU as _GPU_CFG
-except ImportError:
-    _GPU_CFG = {}
 
 
 def _sharpe_ann_factor(args=None) -> float:
-    """Annualization factor for val Sharpe ΓÇö YAML via args, else settings default."""
+    """Annualization factor for val Sharpe - auto-detected from data.
+
+    Priority:
+
+      1. Explicit CLI / YAML override (``args.sharpe_annualization_factor``).
+      2. Auto-detect from the active cache's bar frequency and
+         lookahead horizon.  This is the textbook-correct factor for a
+         stream of per-trade (per-lookahead) returns:
+         ``sqrt(bars_per_year / lookahead_bars)``.
+      3. Last-resort neutral factor of 1.0 (so we never silently
+         inflate Sharpe when nothing is known).
+
+    Replaces the old hard-coded fallback of 325.0 which inflated Sharpe
+    by 2.3x–12.7x depending on the user's session/full-day assumption.
+    """  # noqa: RUF002
+    override = None
+    cache_path = None
+    bar_freq = None
+    lookahead = 1
+    full_day = False
     if args is not None:
-        val = getattr(args, "sharpe_annualization_factor", None)
-        if val is not None:
-            return float(val)
-    return float(TRAINING.get("sharpe_annualization_factor", 1.0))
+        override = getattr(args, "sharpe_annualization_factor", None)
+        cache_path = getattr(args, "cache_path", None) or getattr(args, "data_cache", None)
+        bar_freq = getattr(args, "bar_freq", None)
+        lookahead = int(getattr(args, "lookahead_bars", None) or getattr(args, "label_lookahead_bars", None) or 1)
+        full_day = bool(getattr(args, "fx_full_day", False))
+    try:
+        from training.sharpe_annualization import auto_annualization_factor
+
+        return float(
+            auto_annualization_factor(
+                cache_path=cache_path,
+                bar_freq=bar_freq,
+                lookahead_bars=lookahead,
+                full_day=full_day,
+                override=override,
+            )
+        )
+    except Exception:
+        # If auto-detection is unavailable for any reason, fall back to
+        # the override (or 1.0) rather than a stale magic number.
+        if override is not None:
+            try:
+                return float(override)
+            except (TypeError, ValueError):
+                pass
+        return 1.0
 
 
 try:
-    import numcodecs
+    import numcodecs  # noqa: F401
     import torch
-    import torch.nn as nn
-    import torch.nn.functional as F  # noqa: F401 — used in dynamic eval contexts
-    from torch.amp import GradScaler, autocast
-    from torch.utils.data import DataLoader, Dataset, IterableDataset
+    import torch.nn as nn  # noqa: F401
+    import torch.nn.functional as F  # noqa: F401 - used in dynamic eval contexts
+    from torch.amp import GradScaler, autocast  # noqa: F401
+    from torch.utils.data import DataLoader, Dataset, IterableDataset  # noqa: F401
+
     TORCH = True
 except ImportError:
-    print("[ERROR] PyTorch not installed. pip install torch"); sys.exit(1)
+    print("[ERROR] PyTorch not installed. pip install torch")
+    sys.exit(1)
 
 from training.gpu_cache_io import (
     ZARR,
-    _Blosc,
-    _ZARR_V3,
-    _atr_path,
-    _base_path,
-    _close_path,
-    _diff_path,
-    _pq_path,
-    _scaler_npz_path,
-    _spread_path,
-    _x_path,
-    _y_cls_path,
-    _y_path,
-    _zarr_create,
-    _zarr_open_group,
-    make_training_zarr_compressor,
 )
 
 if not ZARR:
-    print("[WARN] zarr not installed — using NPY memmap fallback. "
-          "pip install zarr numcodecs")
+    print("[WARN] zarr not installed - using NPY memmap fallback. pip install zarr numcodecs")
 
 
-try:
-    import wandb; WANDB = True
-except ImportError:
-    WANDB = False
-
-_WANDB_BROKEN = False
-
-
-def _safe_wandb_log(run, payload: dict, *, step=None) -> None:
-    global _WANDB_BROKEN
-    if not (WANDB and run is not None) or _WANDB_BROKEN:
-        return
-    try:
-        if step is None:
-            run.log(payload)
-        else:
-            run.log(payload, step=step)
-    except Exception as exc:
-        _WANDB_BROKEN = True
-        print(f"[W&B] Logging disabled after failure: {exc}")
-
-
-def _safe_wandb_summary_update(run, payload: dict) -> None:
-    global _WANDB_BROKEN
-    if not (WANDB and run is not None) or _WANDB_BROKEN:
-        return
-    try:
-        run.summary.update(payload)
-    except Exception as exc:
-        _WANDB_BROKEN = True
-        print(f"[W&B] Summary updates disabled after failure: {exc}")
+from training.core import WANDB, _safe_wandb_log
 
 try:
     from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
+
     TENSORBOARD = True
 except ImportError:
     _SummaryWriter = None  # type: ignore[misc, assignment]
@@ -238,41 +253,104 @@ except ImportError:
 
 try:
     from monitoring.rich_display import _RichDisplay
+
     RICH_DISPLAY = True
 except Exception:
     _RichDisplay = None  # type: ignore[misc, assignment]
     RICH_DISPLAY = False
 
-try:
-    import optuna; optuna.logging.set_verbosity(optuna.logging.WARNING); OPTUNA = True
-except ImportError:
-    OPTUNA = False
+# -----------------------------------------------------------------------------
+# DEVICE / PREFLIGHT - re-exported from training/gpu_device.py
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TRAINING LOGGER  (delegates to monitoring/train_logger.py)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CACHE / DATA PIPELINE HELPERS - re-exported from training/cache_integrity.py
+# -----------------------------------------------------------------------------
 
-
-
+# Keep chunk schema lock name on train_gpu for any residual refs
 
 # -----------------------------------------------------------------------------
-# DEVICE / PREFLIGHT — re-exported from training/gpu_device.py
+# DATASET BUILDER - re-exported from training/dataset_builder.py
 # -----------------------------------------------------------------------------
-import training.gpu_device as _gpu_device
-from training.gpu_device import (
-    run_preflight_sanity_checks,
-    setup_device,
+
+# -----------------------------------------------------------------------------
+# DIRECTION / LABEL HELPERS - re-exported from training/direction_control.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# PYTORCH PROFILER  (--profile flag)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# BEST-FOLD PROMOTION
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# FEATURE ABLATION - re-exported from training/feature_ablation.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CUSTOM LOSSES (TRADING-AWARE) - see training/gpu_losses.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# MODEL FACTORY - re-exported from training/model_factory.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# POST-TRAIN (ensemble / gate / auto-tune) - training/post_train.py
+# -----------------------------------------------------------------------------
+
+# supervised_train / encoder warm-start: training/supervised_loop.py
+# -----------------------------------------------------------------------------
+# PRETRAIN - re-exported from training/pretrain_runner.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# RL - re-exported from training/rl_runner.py
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TRAINING LOOP - re-exported from training/supervised_loop.py
+# -----------------------------------------------------------------------------
+from training.cache_integrity import (
+    _clamp_n_samples_to_disk,
+    _get_pairs,
+    _promotion_holdout_n,
+    _warn_multitask_cache_sidecars,
 )
 
-_gpu_device.bind_host(sys.modules[__name__])
-
-
-
-
-
-# -----------------------------------------------------------------------------
-# CUSTOM LOSSES (TRADING-AWARE) — see training/gpu_losses.py
-# -----------------------------------------------------------------------------
-import training.gpu_cli as _gpu_cli
+# Explicit imports for backward compatibility with test modules
+from training.config_validate import validate_run_config
+from training.core import (
+    _FIRST_CHUNK_COLS,
+    OPTUNA,
+)
 
 # -----------------------------------------------------------------------------
-# CLI — re-exported from training/gpu_cli.py
+# DATASETS - re-exported from training/gpu_datasets.py (imported near losses)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# SPLITS - re-exported from training/cv_splits.py
+# -----------------------------------------------------------------------------
+from training.cv_splits import (
+    _build_cv_splits,
+    _embargo_bars,
+    _purge_bars,
+    _validation_method,
+    walk_forward_splits,
+)
+from training.dataset_builder import (
+    _FIRST_CHUNK_COLS,  # noqa: F401, F811
+    build_dataset_chunked,
+)
+from training.feature_ablation import (
+    _atomic_copy,
+)
+
+# -----------------------------------------------------------------------------
+# CLI - re-exported from training/gpu_cli.py
 # -----------------------------------------------------------------------------
 from training.gpu_cli import (
     _apply_auto_run_dir,
@@ -290,246 +368,12 @@ from training.gpu_cli import (
 from training.gpu_datasets import (
     ZarrStreamDataset,
 )
-
-_gpu_cli.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# TRAINING LOGGER  (delegates to monitoring/train_logger.py)
-# -----------------------------------------------------------------------------
-
-try:
-    from monitoring.train_logger import TrainingLogger as _TrainingLogger
-    _TRAIN_LOGGER_AVAILABLE = True
-except Exception:
-    _TrainingLogger = None  # type: ignore[misc, assignment]
-    _TRAIN_LOGGER_AVAILABLE = False
-
-_TRAIN_LOGGER: Any | None = None   # TrainingLogger instance, set in supervised_train
-_FIRST_CHUNK_COLS: list | None = None  # feature-column order lock for chunk builds
-
-# Convenience shims ΓÇö used throughout the file so call-sites need no changes
-def _log_error(msg: str, exc: Exception | None = None) -> None:
-    if _TRAIN_LOGGER is not None:
-        _TRAIN_LOGGER.error(msg, exc)
-
-def _log_warn(msg: str) -> None:
-    if _TRAIN_LOGGER is not None:
-        _TRAIN_LOGGER.warning(msg)
-
-def _log_info(msg: str) -> None:
-    if _TRAIN_LOGGER is not None:
-        _TRAIN_LOGGER.info(msg)
-
-def _log_oom(batch_idx: int, epoch: int, oom_count: int) -> None:
-    if _TRAIN_LOGGER is not None:
-        _TRAIN_LOGGER.on_batch_oom(batch_idx, epoch, oom_count)
-
-def _log_nan(batch_idx: int, epoch: int, nan_count: int) -> None:
-    if _TRAIN_LOGGER is not None:
-        _TRAIN_LOGGER.on_batch_nan(batch_idx, epoch, nan_count)
-
-class _DummyCtx:
-    """No-op context manager ΓÇö used when rich display is unavailable."""
-    def __enter__(self): return self
-    def __exit__(self, *_): pass
-
-
-
-
-
-
-
-
-
-# -----------------------------------------------------------------------------
-# CACHE / DATA PIPELINE HELPERS — re-exported from training/cache_integrity.py
-# -----------------------------------------------------------------------------
-import training.cache_integrity as _cache_integrity
-from training.cache_integrity import (
-    _clamp_n_samples_to_disk,
-    _get_pairs,
-    _promotion_holdout_n,
-    _trainable_max_index,
-    _warn_multitask_cache_sidecars,
+from training.gpu_device import (
+    setup_device,
 )
-
-_cache_integrity.bind_host(sys.modules[__name__])
-
-
-
-
-# -----------------------------------------------------------------------------
-# MODEL FACTORY — re-exported from training/model_factory.py
-# -----------------------------------------------------------------------------
-import training.model_factory as _model_factory
 from training.model_factory import (
     build_model,
 )
-
-_model_factory.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# DATASET BUILDER — re-exported from training/dataset_builder.py
-# -----------------------------------------------------------------------------
-import training.dataset_builder as _dataset_builder
-from training.dataset_builder import (
-    build_dataset_chunked,
-)
-
-_dataset_builder.bind_host(sys.modules[__name__])
-# Keep chunk schema lock name on train_gpu for any residual refs
-import training.cv_splits as _cv_splits
-
-# -----------------------------------------------------------------------------
-# DATASETS — re-exported from training/gpu_datasets.py (imported near losses)
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# SPLITS — re-exported from training/cv_splits.py
-# -----------------------------------------------------------------------------
-from training.cv_splits import (
-    _build_cv_splits,
-    _embargo_bars,
-    _purge_bars,
-    _validation_method,
-    walk_forward_splits,
-)
-from training.dataset_builder import _FIRST_CHUNK_COLS  # noqa: F401
-
-_cv_splits.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# DIRECTION / LABEL HELPERS — re-exported from training/direction_control.py
-# -----------------------------------------------------------------------------
-import training.direction_control as _direction_control
-
-_direction_control.bind_host(sys.modules[__name__])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# TRAINING LOOP — re-exported from training/supervised_loop.py
-# -----------------------------------------------------------------------------
-import training.supervised_loop as _supervised_loop
-from training.supervised_loop import (
-    run_diversity_finetune,
-    supervised_train,
-)
-
-_supervised_loop.bind_host(sys.modules[__name__])
-
-
-
-
-
-
-# supervised_train / encoder warm-start: training/supervised_loop.py
-
-
-# -----------------------------------------------------------------------------
-# PRETRAIN — re-exported from training/pretrain_runner.py
-# -----------------------------------------------------------------------------
-import training.pretrain_runner as _pretrain_runner
-from training.pretrain_runner import (
-    _fold_history_summary,
-    _make_pretrain_span_plan,
-    _normalize_pretrain_method,
-    _parse_pretrain_ablation_models,
-    _pretrain_ablation_verdict,
-    _read_json_dict,
-    _select_pretrain_trainer_class,
-    _update_pretrain_report,
-    run_pretrain,
-)
-
-_pretrain_runner.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# RL — re-exported from training/rl_runner.py
-# -----------------------------------------------------------------------------
-import training.rl_runner as _rl_runner
-from training.rl_runner import (
-    _feature_schema_payload,
-    _rl_reward_weights,
-    _rl_train_val_slices,
-    _verify_onnx_schema_deployment,
-    run_rl,
-)
-
-_rl_runner.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# POST-TRAIN (ensemble / gate / auto-tune) — training/post_train.py
-# -----------------------------------------------------------------------------
-import training.post_train as _post_train
 from training.post_train import (
     _append_model_comparison_report,
     _best_epoch_from_history,
@@ -543,218 +387,32 @@ from training.post_train import (
     run_ensemble_meta,
     run_profiler,
 )
-
-_post_train.bind_host(sys.modules[__name__])
-
-
-
-# -----------------------------------------------------------------------------
-# PYTORCH PROFILER  (--profile flag)
-# -----------------------------------------------------------------------------
-
-
-
-# -----------------------------------------------------------------------------
-# BEST-FOLD PROMOTION
-# -----------------------------------------------------------------------------
-
-
-
-# -----------------------------------------------------------------------------
-# FEATURE ABLATION — re-exported from training/feature_ablation.py
-# -----------------------------------------------------------------------------
-import training.feature_ablation as _feature_ablation
-from training.feature_ablation import (
-    _atomic_copy,
+from training.pretrain_runner import (
+    _fold_history_summary,
+    _parse_pretrain_ablation_models,
+    _pretrain_ablation_verdict,
+    _read_json_dict,
+    _update_pretrain_report,
+    run_pretrain,
 )
-
-_feature_ablation.bind_host(sys.modules[__name__])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Explicit imports for backward compatibility with test modules
-from training.cache_integrity import (
-    _cache_has_multitask_sidecars,
-    _cache_length_snapshot,
-    _cache_target_col,
-    _delete_cache_artifacts,
-    _effective_window_days,
-    _get_cache_path,
-    _get_pairs,
-    _iter_date_windows,
-    _market_bar_arrays_from_feats,
-    _on_disk_sequence_count,
-    _postprocess_cache_integrity_check,
-    _promotion_holdout_n,
-    _real_data_window_days,
-    _require_rl_market_cache,
-    _resolve_cross_asset_source,
-    _resolve_pair_feat_indices,
-    _trainable_max_index,
-    _validate_cache_integrity,
-    _verify_dataset,
-    _warn_multitask_cache_sidecars,
+from training.rl_runner import (
+    _feature_schema_payload,
+    _verify_onnx_schema_deployment,
+    run_rl,
 )
-from training.cv_splits import (
-    _build_cv_splits,
-    _embargo_bars,
-    _embargo_split,
-    _purge_bars,
-    _three_way_split,
-    _validation_method,
+from training.supervised_loop import (
+    run_diversity_finetune,
+    supervised_train,
 )
-from training.dataset_builder import _build_chunk, _build_multipair_chunk
-from training.direction_control import (
-    _balanced_direction_indices,
-    _class_prior_array,
-    _class_prior_tensor,
-    _class_weights_tensor,
-    _coerce_auto_int,
-    _direction_class_index,
-    _direction_gate_failed,
-    _direction_preflight,
-    _direction_probe,
-    _direction_recall_from_confusion,
-    _gradients_are_finite,
-    _init_multitask_direction_bias,
-    _load_diff_array,
-    _load_feature_schema,
-    _read_y_cls_indices,
-    _recover_nonfinite_training_state,
-    _write_class_balance_failure,
-    labels_to_class_index,
-    _reward_to_class_index,
-)
-from training.feature_ablation import (
-    _atomic_copy,
-    _build_feature_ablation_mask,
-    _feature_ablation_config,
-)
-from training.gpu_cli import (
-    _apply_yaml_config,
-    _model_build_args,
-    parse_args,
-    _normalize_architecture_profile,
-    _apply_model_profile,
-)
-from training.gpu_device import _crop_to_seq_len, _thermal_check
-from training.gpu_datasets import (
-    MemmapSequenceDataset,
-    _ThreadPrefetchLoader,
-    wrap_loader_prefetch,
-)
-
-from training.memory_management import PrioritizedDataLoader
-from training.curriculum import create_curriculum_manager
-from training.curriculum_controller import CurriculumController
-from training.model_factory import (
-    _core_model,
-    _is_uninitialized_parameter,
-    _multitask_head_in,
-    _strict_load_report,
-    build_model,
-)
-from training.post_train import _promote_best_fold, _safe_save
-from training.pretrain_runner import _run_multi_task_pretrain
-from training.rl_runner import _rl_reward_weights
-from training.supervised_loop import FeatureStabilityMonitor, _sanitize_batch_tensors, train_epoch, validate_epoch
-from training.config_validate import validate_run_config, _effective_max_seq_len
-from monitoring.sidecar import Sidecar
-from config.settings import LABELING
 
 # Settings aliases expected by gpu_cli host bind / older tests
-from config.settings import (
-    CURRICULUM as SETTINGS_CURRICULUM,
-    ENSEMBLE as SETTINGS_ENSEMBLE,
-    EXECUTION as SETTINGS_EXECUTION,
-    MONITORING,
-    RISK,
-    RL,
-    SIZING,
-)
 
-# Re-bind after late imports so child modules see symbols that were not
-# available during the first bind pass (compat re-exports above).
-for _mod in (
-    _gpu_device,
-    _gpu_cli,
-    _cache_integrity,
-    _model_factory,
-    _dataset_builder,
-    _cv_splits,
-    _direction_control,
-    _supervised_loop,
-    _pretrain_runner,
-    _rl_runner,
-    _post_train,
-    _feature_ablation,
-):
-    _mod.bind_host(sys.modules[__name__])
+
 
 # -----------------------------------------------------------------------------
 # MAIN
 # -----------------------------------------------------------------------------
+
 
 class _StageTimer:
     """Accumulate wall-clock seconds + GPU util samples per pipeline stage."""
@@ -774,19 +432,19 @@ class _StageTimer:
         }
         try:
             import pynvml
+
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
             sample["gpu_util_pct"] = float(util.gpu)
             sample["gpu_mem_util_pct"] = float(util.memory)
-            sample["gpu_temp_c"] = float(
-                pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            )
+            sample["gpu_temp_c"] = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
             mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
             sample["gpu_mem_mb"] = float(mem.used / 1_000_000)
         except Exception:
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     sample["gpu_mem_mb"] = float(torch.cuda.memory_allocated() / 1_000_000)
             except Exception:
@@ -846,7 +504,7 @@ class _StageTimer:
 def main():
     run_start_time = datetime.now(UTC).isoformat()
     _timer = _StageTimer()
-    args     = parse_args()
+    args = parse_args()
     apply_hardware_profile(args)
     _set_global_seed(getattr(args, "seed", None))
 
@@ -854,6 +512,7 @@ def main():
     # bare `print()` statements the rest of the pipeline uses. Nothing fancy:
     # one-line INFO format keeps the run log readable and grep-able.
     import logging as _logging
+
     _logging.basicConfig(
         level=_logging.INFO,
         format="%(message)s",
@@ -862,16 +521,13 @@ def main():
 
     # Expand user-home-relative paths (e.g. ~/forex_data) from config/CLI
     args.checkpoint_dir = str(Path(args.checkpoint_dir).expanduser())
-    args.data_cache     = str(Path(args.data_cache).expanduser())
+    args.data_cache = str(Path(args.data_cache).expanduser())
 
     if getattr(args, "validate_config", False):
         sys.exit(validate_run_config(args))
 
     if getattr(args, "hparam_search", False) and getattr(args, "all_models", False):
-        print(
-            f"[HPO] --hparam-search runs only --model {args.model} "
-            "(config model.all_models ignored)."
-        )
+        print(f"[HPO] --hparam-search runs only --model {args.model} (config model.all_models ignored).")
         args.all_models = False
 
     run_name = _apply_auto_run_dir(args)
@@ -880,6 +536,7 @@ def main():
     # Initialize Discord alerter globally for the run
     try:
         from monitoring.discord_alerts import DiscordAlerter
+
         alerter = DiscordAlerter(verbose=False)
     except Exception as e:
         print(f"[Discord] Initialization failed: {e}")
@@ -890,9 +547,7 @@ def main():
     # run is intended to be a clean baseline/fresh start.
 
     if bool(getattr(args, "training_memory", True)):
-
         try:
-
             from training.training_memory import TrainingMemory
 
             _train_memory = TrainingMemory(path="logs/training_memory.json")
@@ -902,33 +557,20 @@ def main():
             print(f"[TrainingMemory] {_train_memory.summary()}")
 
         except Exception as _tm_e:
-
             print(f"[TrainingMemory] Could not load/apply: {_tm_e}")
 
             _train_memory = None
 
     else:
-
         print("[TrainingMemory] Disabled for this run (--no-training-memory)")
 
         _train_memory = None
 
-    
-    _all_pairs   = _get_pairs(args)
-    _pairs_str   = ", ".join(_all_pairs)
-    _embed_str   = (f"  embed={getattr(args,'pair_embed_dim',0)}d"
-                    if len(_all_pairs) > 1 else "")
+    _all_pairs = _get_pairs(args)
+    _pairs_str = ", ".join(_all_pairs)
+    _embed_str = f"  embed={getattr(args, 'pair_embed_dim', 0)}d" if len(_all_pairs) > 1 else ""
     if getattr(args, "all_models", False):
-
-        _requested_models = [
-
-            m.strip().lower()
-
-            for m in str(getattr(args, "models", "") or "").split(",")
-
-            if m.strip()
-
-        ]
+        _requested_models = [m.strip().lower() for m in str(getattr(args, "models", "") or "").split(",") if m.strip()]
 
         _display_models = _requested_models or list(MODEL_REGISTRY.keys())
 
@@ -937,55 +579,51 @@ def main():
         _queue_display = ", ".join(m.upper() for m in _display_models)
 
     else:
-
         _model_display = str(args.model).upper()
 
         _queue_display = None
-
 
     try:
         if alerter:
             alerter.send_training_started(
                 model=_model_display,
-
                 run_name=run_name,
-                pairs=getattr(args, 'pairs', []),
-                data_window=f"{getattr(args, 'start_date', 'unknown')} to {getattr(args, 'end_date', 'unknown')}"
+                pairs=getattr(args, "pairs", []),
+                data_window=f"{getattr(args, 'start_date', 'unknown')} to {getattr(args, 'end_date', 'unknown')}",
             )
     except Exception as e:
         print(f"[Discord] Failed to send training_started: {e}")
 
-    print(f"\n{'='*62}")
+    print(f"\n{'=' * 62}")
     print("  Forex Scaling Model ΓÇö 20M Tick GPU Trainer")
     print(f"  Run: {run_name}  |  Ticks: {args.n_ticks:,}  |  Mode: {_model_display}")
     if _queue_display:
         print(f"  Model queue: {_queue_display}")
     print(f"  Checkpoint dir: {args.checkpoint_dir}")
     print(f"  Pairs: {_pairs_str}{_embed_str}")
-    print(f"  Strategy: {args.strategy_mode}  |  Bars: {args.bar_freq}  |  "
-          f"Lookahead: {args.lookahead_bars} bars")
+    print(f"  Strategy: {args.strategy_mode}  |  Bars: {args.bar_freq}  |  Lookahead: {args.lookahead_bars} bars")
     print(f"  Batch: {args.batch_size}  |  Epochs: {args.epochs}  |  AMP: {args.amp}")
-    print(f"  Labels: {args.label_method}  |  Loss: {args.loss}  |  "
-          f"Early-stop: {args.early_stop_metric}")
-    print(f"  Historical news: {getattr(args, 'historical_news_mode', 'calendar')}  |  "
-          f"Cache format: {'NPY on Windows' if sys.platform == 'win32' else 'Zarr'}")
+    print(f"  Labels: {args.label_method}  |  Loss: {args.loss}  |  Early-stop: {args.early_stop_metric}")
+    print(
+        f"  Historical news: {getattr(args, 'historical_news_mode', 'calendar')}  |  "
+        f"Cache format: {'NPY on Windows' if sys.platform == 'win32' else 'Zarr'}"
+    )
     if getattr(args, "multitask", False):
         print(f"  MultiTask: ON  (w_ret={args.mt_w_ret}  w_conf={args.mt_w_conf})")
     if getattr(args, "pretrain_regime", False):
         print("  Pretrain: regime-aware TSCL (hard negatives from opposite regime)")
     if getattr(args, "train_ensemble", False):
-        print(f"  Ensemble meta-learner: ON  (epochs={args.ensemble_epochs}  "
-              f"div_weight={args.ensemble_div_weight})")
-    print(f"{'='*62}")
+        print(f"  Ensemble meta-learner: ON  (epochs={args.ensemble_epochs}  div_weight={args.ensemble_div_weight})")
+    print(f"{'=' * 62}")
 
     # ΓÜá∩╕Å  Synthetic data warning ΓÇö always visible
     if getattr(args, "data_source", "dukascopy") == "synthetic":
-        print(f"\n{'!'*62}")
+        print(f"\n{'!' * 62}")
         print("  ΓÜá  WARNING: SYNTHETIC DATA")
         print("  Training on artificially generated price data.")
         print("  Results DO NOT reflect real market performance.")
         print("  Use --data-source dukascopy for real data.")
-        print(f"{'!'*62}\n")
+        print(f"{'!' * 62}\n")
 
     device, n_gpus, amp_dtype = setup_device(
         dtype_override=getattr(args, "dtype", "auto"),
@@ -996,11 +634,10 @@ def main():
     if getattr(args, "deterministic", False):
         try:
             torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark     = False
+            torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(True, warn_only=True)
             os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-            print("[Deterministic] cudnn.deterministic=True, benchmark=False, "
-                  "deterministic algorithms ON")
+            print("[Deterministic] cudnn.deterministic=True, benchmark=False, deterministic algorithms ON")
         except Exception as _de:
             print(f"[Deterministic] Could not fully enable determinism: {_de}")
 
@@ -1019,28 +656,32 @@ def main():
 
     with _timer.stage("dataset_build"):
         cache_path, n_samples, n_features, scaler = build_dataset_chunked(args)
-    
+
     if getattr(args, "build_only", False):
         print(f"\n[Pipeline] Dataset built successfully at {cache_path}. Exiting due to --build-only.")
         sys.exit(0)
-        
+
     n_samples = _clamp_n_samples_to_disk(cache_path, n_samples)
+    _max_n = int(getattr(args, "max_samples", 0) or 0)
+    if _max_n > 0 and _max_n < n_samples:
+        print(
+            f"[Data] --max-samples {_max_n:,} applied (was {n_samples:,}; using the "
+            f"earliest {_max_n:,} rows of the time-ordered cache)."
+        )
+        n_samples = _max_n
     _warn_multitask_cache_sidecars(cache_path, args)
     if scaler is not None and hasattr(scaler, "feature_names_in_"):
         _fp = int(getattr(args, "_f_per_pair", n_features) or n_features)
         args._feat_names = list(scaler.feature_names_in_)[:_fp]
-    print(f"\n[Dataset] {n_samples:,} sequences ├ù {n_features} features ├ù "
-          f"seq_len {args.seq_len}")
+    print(f"\n[Dataset] {n_samples:,} sequences ├ù {n_features} features ├ù seq_len {args.seq_len}")
 
     if getattr(args, "data_quality_check", False):
         print("\n[DataQuality] Running data quality check...")
         import subprocess
+
         script_path = Path(__file__).resolve().parent.parent / "scripts" / "data_quality_check.py"
         try:
-            subprocess.run(
-                [sys.executable, str(script_path), "--cache-path", str(cache_path), "--full"],
-                check=True
-            )
+            subprocess.run([sys.executable, str(script_path), "--cache-path", str(cache_path), "--full"], check=True)
         except subprocess.CalledProcessError as e:
             print(f"[DataQuality] Error running data quality check: {e}")
             if not getattr(args, "skip_training", False):
@@ -1059,7 +700,9 @@ def main():
                 baseline_samples=int(getattr(args, "drift_baseline_samples", 20_000)),
                 live_samples=int(getattr(args, "drift_live_samples", 5_000)),
                 psi_threshold=float(getattr(args, "drift_psi_threshold", MONITORING.get("psi_threshold", 0.2))),
-                ks_pvalue_threshold=float(getattr(args, "drift_ks_pvalue_threshold", MONITORING.get("ks_pvalue_threshold", 0.05))),
+                ks_pvalue_threshold=float(
+                    getattr(args, "drift_ks_pvalue_threshold", MONITORING.get("ks_pvalue_threshold", 0.05))
+                ),
                 ks_statistic_threshold=float(getattr(args, "drift_ks_statistic_threshold", 0.05)),
             )
             if drift.get("drift_detected", False):
@@ -1075,12 +718,13 @@ def main():
     # -- W&B ------------------------------------------------------------------
     wandb_run: Any = None
     if WANDB and not args.no_wandb and os.getenv("WANDB_API_KEY"):
+        import wandb
+
         wandb_run = wandb.init(
-            project = args.wandb_project,
-            name    = run_name,
-            config  = {**vars(args), "n_samples": n_samples,
-                       "n_features": n_features},
-            tags    = [args.model, args.data_source, "20M"],
+            project=args.wandb_project,
+            name=run_name,
+            config={**vars(args), "n_samples": n_samples, "n_features": n_features},
+            tags=[args.model, args.data_source, "20M"],
         )
     elif not WANDB:
         print("[W&B] Skipped: wandb package not installed (pip install wandb)")
@@ -1114,25 +758,23 @@ def main():
         raise ValueError(f"Unknown deep model(s) {_bad}; expected one of {list(MODEL_REGISTRY)}")
     models_to_train = _deep
 
-    if args.all_models:
-
-        if getattr(args, "resume", False) and not getattr(args, "retrain_completed_models", False):
-            pending_models = []
-            skipped_models = []
-            for _idx, _model_name in enumerate(models_to_train):
-                _probe_args = _member_training_args(args, _model_name, _idx, len(models_to_train))
-                _done, _reason = _model_completion_status(_model_name, _probe_args.checkpoint_dir)
-                if _done:
-                    skipped_models.append((_model_name, _reason))
-                else:
-                    pending_models.append(_model_name)
-                    print(f"[AllModels] Will train {_model_name}: {_reason}")
-            for _model_name, _reason in skipped_models:
-                print(f"[AllModels] Skipping completed {_model_name}: {_reason}")
-            models_to_train = pending_models
-            if not models_to_train:
-                print("[AllModels] No unfinished models found. Use --retrain-completed-models to rerun all members.")
-                return
+    if args.all_models and getattr(args, "resume", False) and not getattr(args, "retrain_completed_models", False):
+        pending_models = []
+        skipped_models = []
+        for _idx, _model_name in enumerate(models_to_train):
+            _probe_args = _member_training_args(args, _model_name, _idx, len(models_to_train))
+            _done, _reason = _model_completion_status(_model_name, _probe_args.checkpoint_dir)
+            if _done:
+                skipped_models.append((_model_name, _reason))
+            else:
+                pending_models.append(_model_name)
+                print(f"[AllModels] Will train {_model_name}: {_reason}")
+        for _model_name, _reason in skipped_models:
+            print(f"[AllModels] Skipping completed {_model_name}: {_reason}")
+        models_to_train = pending_models
+        if not models_to_train:
+            print("[AllModels] No unfinished models found. Use --retrain-completed-models to rerun all members.")
+            return
 
     for _mi, model_name in enumerate(models_to_train):
         model_args = _member_training_args(args, model_name, _mi, len(models_to_train))
@@ -1146,18 +788,6 @@ def main():
         model_artifact_dir.mkdir(parents=True, exist_ok=True)
         model = build_model(model_name, n_features, model_args).to(device)
 
-        # -- Preflight Checks --------------------------------------------------
-        # Run a small sanity check using a subset of the dataset
-        if not getattr(model_args, "resume", False):
-            try:
-                temp_ds = ZarrStreamDataset(cache_path, np.arange(min(1000, n_samples)), shuffle_chunks=False)
-                temp_dl = DataLoader(temp_ds, batch_size=min(model_args.batch_size, 32), num_workers=0)
-                run_preflight_sanity_checks(model, device, temp_dl, model_args)
-                del temp_dl, temp_ds
-            except Exception as e:
-                print(f"[Main] Preflight failed for {model_name}: {e}")
-                if not getattr(model_args, "ignore_preflight", False):
-                    sys.exit(1)
 
         # -- PyTorch profiler (--profile) --------------------------------------
         if getattr(model_args, "profile", False):
@@ -1165,7 +795,10 @@ def main():
             _prof_dl = DataLoader(_prof_ds, batch_size=min(model_args.batch_size, 64), num_workers=0)
             run_profiler(
                 build_model(model_name, n_features, model_args).to(device),
-                _prof_dl, device, amp_dtype, model_args.amp,
+                _prof_dl,
+                device,
+                amp_dtype,
+                model_args.amp,
                 log_dir=str(Path(model_args.checkpoint_dir).parent / "logs"),
                 run_name=f"{model_name}_{run_name}",
                 seq_len=getattr(model_args, "seq_len", None),
@@ -1176,32 +809,32 @@ def main():
         # Optional HPO
         if model_args.hparam_search and OPTUNA:
             print(f"\n[HPO] Optuna {model_args.n_trials} trials...")
+
             def objective(trial):
-                ta = argparse.Namespace(**vars(model_args))
-                ta.lr          = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-                ta.hidden_size = trial.suggest_categorical("hidden_size", [128,256,512])
-                ta.d_model     = trial.suggest_categorical("d_model", [128,256,512])
-                ta.dropout     = trial.suggest_float("dropout", 0.05, 0.3)
-                ta.batch_size  = trial.suggest_categorical("batch_size", [128,256,512])
-                ta.epochs      = 5
-                ta.patience    = 3
-                ta.resume      = False
-                ta.all_models  = False
+                ta = argparse.Namespace(**vars(model_args))  # noqa: B023
+                ta.lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+                ta.hidden_size = trial.suggest_categorical("hidden_size", [128, 256, 512])
+                ta.d_model = trial.suggest_categorical("d_model", [128, 256, 512])
+                ta.dropout = trial.suggest_float("dropout", 0.05, 0.3)
+                ta.batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
+                ta.epochs = 5
+                ta.patience = 3
+                ta.resume = False
+                ta.all_models = False
                 # Architecture search changes hidden/d_model ΓÇö existing contrastive
                 # checkpoints won't transfer; skip pretrain for proxy trials.
-                ta.pretrain    = False
+                ta.pretrain = False
                 ta.disable_pretrain_load = True
                 ta.pretrain_ablation = "false"
-                ta.checkpoint_dir = str(
-                    Path(model_args.checkpoint_dir) / "hpo_trials" / f"trial_{trial.number}"
-                )
-                build_model(model_name, n_features, ta).to(device)
-                h, bv = supervised_train(model_name, cache_path, n_samples,
-                                          n_features, ta, device, n_gpus, run=None)
+                ta.checkpoint_dir = str(Path(model_args.checkpoint_dir) / "hpo_trials" / f"trial_{trial.number}")  # noqa: B023
+                build_model(model_name, n_features, ta).to(device)  # noqa: B023
+                h, bv = supervised_train(model_name, cache_path, n_samples, n_features, ta, device, n_gpus, run=None)  # noqa: B023, RUF059
                 return bv
+
             direction = "maximize" if model_args.early_stop_metric == "sharpe" else "minimize"
-            study = optuna.create_study(direction=direction,
-                                        pruner=optuna.pruners.MedianPruner())
+            import optuna
+
+            study = optuna.create_study(direction=direction, pruner=optuna.pruners.MedianPruner())
             study.optimize(
                 objective,
                 n_trials=model_args.n_trials,
@@ -1213,19 +846,15 @@ def main():
                     f"[HPO] All {model_args.n_trials} trials failed ΓÇö "
                     "check logs above; try scripts/optuna_tune.py for curriculum/arch search."
                 )
-            for k,v in study.best_params.items():
-                setattr(model_args, k.replace("-","_"), v)
+            for k, v in study.best_params.items():
+                setattr(model_args, k.replace("-", "_"), v)
             print(f"[HPO] Best: {study.best_params}  val={study.best_value:.6f}")
             model = build_model(model_name, n_features, model_args).to(device)
 
         # Optional contrastive pre-training (TSCL expects dense embeddings, not class logits)
         _baseline_cv_hist = None
         _abl_arg = str(getattr(model_args, "pretrain_ablation", "auto")).lower()
-        _pretrain_ablation_models = _parse_pretrain_ablation_models(
-
-            getattr(model_args, "pretrain_ablation_models", "")
-
-        )
+        _pretrain_ablation_models = _parse_pretrain_ablation_models(getattr(model_args, "pretrain_ablation_models", ""))
 
         _run_ablation = (_abl_arg == "true") or (_abl_arg == "auto" and model_name in _pretrain_ablation_models)
         if _run_ablation:
@@ -1233,8 +862,10 @@ def main():
                 model_name, model_args.checkpoint_dir, model_args
             )
             if getattr(model_args, "resume", False) and _baseline_done:
-                print(f"[Ablation] Baseline already complete for {model_name}; "
-                      f"skipping no-pretrain proof ({_baseline_reason}).")
+                print(
+                    f"[Ablation] Baseline already complete for {model_name}; "
+                    f"skipping no-pretrain proof ({_baseline_reason})."
+                )
                 _run_ablation = False
         if _run_ablation:
             print(f"\n[Ablation] Running baseline (NO PRETRAIN) for {model_name}...")
@@ -1247,7 +878,6 @@ def main():
 
             print(f"[Ablation] Baseline artifacts -> {base_args.checkpoint_dir}")
 
-
             _holdout_n = _promotion_holdout_n(n_samples, base_args)
             _cv_n = max(0, n_samples - _holdout_n)
 
@@ -1259,43 +889,51 @@ def main():
                 _baseline_cv_hist = []
                 for fi, (tr_i, va_i) in enumerate(splits):
                     _h, _bv = supervised_train(
-                        f"baseline_{model_name}", cache_path, n_samples, n_features,
-                        base_args, device, n_gpus, run=wandb_run,
-                        train_idx=tr_i, val_idx=va_i, fold_id=fi,
+                        f"baseline_{model_name}",
+                        cache_path,
+                        n_samples,
+                        n_features,
+                        base_args,
+                        device,
+                        n_gpus,
+                        run=wandb_run,
+                        train_idx=tr_i,
+                        val_idx=va_i,
+                        fold_id=fi,
                         amp_dtype=amp_dtype,
                     )
                     _baseline_cv_hist.append({"fold": fi, "best_metric": _bv, "history": _h})
             else:
                 _h, _bv = supervised_train(
-                    f"baseline_{model_name}", cache_path, n_samples, n_features,
-                    base_args, device, n_gpus, run=wandb_run,
+                    f"baseline_{model_name}",
+                    cache_path,
+                    n_samples,
+                    n_features,
+                    base_args,
+                    device,
+                    n_gpus,
+                    run=wandb_run,
                     amp_dtype=amp_dtype,
                 )
                 _baseline_cv_hist = [{"fold": 0, "best_metric": _bv, "history": _h}]
             print("[Ablation] Baseline completed.")
             _maybe_auto_tune_next_run(
-
                 base_args,
-
                 _history_for_auto_tune(_baseline_cv_hist),
-
                 {"promoted": True, "reasons": ["pretrain_ablation_baseline"]},
-
                 phase="pretrain_ablation_baseline",
-
                 model_name=f"baseline_{model_name}",
-
                 force_dry=True,
-
             )
-
 
         _supervised_started, _supervised_reason = _supervised_resume_status(
             model_name, model_args.checkpoint_dir, model_args
         )
         if model_args.pretrain and getattr(model_args, "resume", False) and _supervised_started:
-            print(f"[Pretrain] Supervised checkpoints already exist for {model_name}; "
-                  f"skipping pretrain on resume ({_supervised_reason}).")
+            print(
+                f"[Pretrain] Supervised checkpoints already exist for {model_name}; "
+                f"skipping pretrain on resume ({_supervised_reason})."
+            )
         elif model_args.pretrain:
             if model_args.loss == "cross_entropy":
                 pt_ns = argparse.Namespace(**vars(model_args))
@@ -1307,24 +945,23 @@ def main():
         # Supervised training (single split or walk-forward CV)
         log_dir = Path(model_args.checkpoint_dir).resolve().parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        _fold_metrics = None   # populated by walk-forward for the promotion gate
+        _fold_metrics = None  # populated by walk-forward for the promotion gate
         _holdout_n = _promotion_holdout_n(n_samples, model_args)
         _cv_n = max(0, n_samples - _holdout_n)
         if _holdout_n > 0:
-            print(f"[Holdout] Reserved last {_holdout_n:,} bars for promotion gate "
-                  f"(CV uses 0:{_cv_n:,})")
+            print(f"[Holdout] Reserved last {_holdout_n:,} bars for promotion gate (CV uses 0:{_cv_n:,})")
         if model_args.walk_forward_cv:
             splits, _cv_strategy = _build_cv_splits(model_args, _cv_n)
-            print(f"[CV] strategy={_cv_strategy} | {len(splits)} folds "
-                  f"| embargo={_embargo_bars(model_args)} purge={_purge_bars(model_args)}")
+            print(
+                f"[CV] strategy={_cv_strategy} | {len(splits)} folds "
+                f"| embargo={_embargo_bars(model_args)} purge={_purge_bars(model_args)}"
+            )
             cv_hist: list[dict] = []
             _start_fold = 0
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))
             _artifact_model_name = _slug_part(model_name, max_len=80)
             if getattr(model_args, "resume", False):
-                _resume_fold = _latest_resumable_fold(
-                    model_name, model_args.checkpoint_dir, len(splits)
-                )
+                _resume_fold = _latest_resumable_fold(model_name, model_args.checkpoint_dir, len(splits))
                 if _resume_fold is not None and _resume_fold > 0:
                     _start_fold = _resume_fold
                     cv_hist = _load_walk_forward_resume_history(
@@ -1345,9 +982,17 @@ def main():
                     continue
                 with _timer.stage(f"supervised_{model_name}_fold{fi}"):
                     history, best_val = supervised_train(
-                        model_name, cache_path, n_samples, n_features,
-                        model_args, device, n_gpus, run=wandb_run,
-                        train_idx=tr_i, val_idx=va_i, fold_id=fi,
+                        model_name,
+                        cache_path,
+                        n_samples,
+                        n_features,
+                        model_args,
+                        device,
+                        n_gpus,
+                        run=wandb_run,
+                        train_idx=tr_i,
+                        val_idx=va_i,
+                        fold_id=fi,
                         amp_dtype=amp_dtype,
                     )
                 cv_hist.append({"fold": fi, "best_metric": best_val, "history": history})
@@ -1356,22 +1001,26 @@ def main():
             _artifact_model_name = _slug_part(model_name, max_len=80)
 
             with open(log_dir / f"{_artifact_run_name}_{_artifact_model_name}_cv.json", "w", encoding="utf-8") as fp:
-                import json
                 json.dump(cv_hist, fp)
-            _promote_best_fold(model_name, model_args.checkpoint_dir, cv_hist,
-                               model_args.early_stop_metric, alerter=alerter)
+            _promote_best_fold(
+                model_name, model_args.checkpoint_dir, cv_hist, model_args.early_stop_metric, alerter=alerter
+            )
             _generate_model_card(model_name, model_args, cv_hist, model_args.checkpoint_dir, n_features)
-            _fold_metrics = [e.get("best_metric") for e in cv_hist
-                             if e.get("best_metric") is not None]
+            _fold_metrics = [e.get("best_metric") for e in cv_hist if e.get("best_metric") is not None]
         else:
             with _timer.stage(f"supervised_{model_name}"):
                 history, best_val = supervised_train(
-                    model_name, cache_path, n_samples, n_features,
-                    model_args, device, n_gpus, run=wandb_run,
+                    model_name,
+                    cache_path,
+                    n_samples,
+                    n_features,
+                    model_args,
+                    device,
+                    n_gpus,
+                    run=wandb_run,
                     amp_dtype=amp_dtype,
                 )
             with open(log_dir / f"{run_name}_{model_name}.json", "w", encoding="utf-8") as fp:
-                import json
                 json.dump(history, fp)
             _generate_model_card(model_name, model_args, history, model_args.checkpoint_dir, n_features)
 
@@ -1385,8 +1034,11 @@ def main():
                     _ckpt_data = torch.load(_best_ckpt, map_location=device, weights_only=True)
                     _eval_model = build_model(model_name, n_features, model_args).to(device)
                     _eval_model.load_state_dict(
-                        _ckpt_data["model_state_dict"] if isinstance(_ckpt_data, dict) and "model_state_dict" in _ckpt_data
-                        else _ckpt_data.get("state_dict", _ckpt_data) if isinstance(_ckpt_data, dict) else _ckpt_data
+                        _ckpt_data["model_state_dict"]
+                        if isinstance(_ckpt_data, dict) and "model_state_dict" in _ckpt_data
+                        else _ckpt_data.get("state_dict", _ckpt_data)
+                        if isinstance(_ckpt_data, dict)
+                        else _ckpt_data
                     )
                     _tune_eval_metrics = _evaluate_tune_split(
                         _eval_model, cache_path, _tune_eval_idx, model_args, device, amp_dtype
@@ -1417,24 +1069,25 @@ def main():
         _ts_path.parent.mkdir(parents=True, exist_ok=True)
         _ts_hist = _history_for_tune
         _ts_sharpe_curve = _ts_hist.get("val_sharpe", [])
-        _ts_vloss_curve  = _ts_hist.get("val_loss", [])
-        _ts_tloss_curve  = _ts_hist.get("train_loss", [])
+        _ts_vloss_curve = _ts_hist.get("val_loss", [])
+        _ts_tloss_curve = _ts_hist.get("train_loss", [])
         _ts_summary = {
-            "model_name":       model_name,
-            "run_name":         run_name,
-            "train_mode":       "walk_forward_cv" if model_args.walk_forward_cv else "single_split",
-            "n_folds":          len(cv_hist) if model_args.walk_forward_cv and 'cv_hist' in locals() else 1,
-            "n_samples":        int(n_samples),
-            "n_features":       int(n_features),
+            "model_name": model_name,
+            "run_name": run_name,
+            "train_mode": "walk_forward_cv" if model_args.walk_forward_cv else "single_split",
+            "n_folds": len(cv_hist) if model_args.walk_forward_cv and "cv_hist" in locals() else 1,
+            "n_samples": int(n_samples),
+            "n_features": int(n_features),
             "epochs_completed": len(_ts_tloss_curve),
-            "best_val_loss":    round(min(_ts_vloss_curve), 6) if _ts_vloss_curve else None,
-            "best_val_sharpe":  round(max(_ts_sharpe_curve), 6) if _ts_sharpe_curve else None,
-            "final_val_loss":   round(_ts_vloss_curve[-1], 6) if _ts_vloss_curve else None,
+            "best_val_loss": round(min(_ts_vloss_curve), 6) if _ts_vloss_curve else None,
+            "best_val_sharpe": round(max(_ts_sharpe_curve), 6) if _ts_sharpe_curve else None,
+            "final_val_loss": round(_ts_vloss_curve[-1], 6) if _ts_vloss_curve else None,
             "final_val_sharpe": round(_ts_sharpe_curve[-1], 6) if _ts_sharpe_curve else None,
-            "gen_gap_final":    round(_ts_vloss_curve[-1] - _ts_tloss_curve[-1], 6)
-                                if _ts_vloss_curve and _ts_tloss_curve else None,
+            "gen_gap_final": round(_ts_vloss_curve[-1] - _ts_tloss_curve[-1], 6)
+            if _ts_vloss_curve and _ts_tloss_curve
+            else None,
             "early_stop_metric": model_args.early_stop_metric,
-            "completed_at":     datetime.now(UTC).isoformat(),
+            "completed_at": datetime.now(UTC).isoformat(),
         }
         try:
             _safe_save_json(_ts_summary, _ts_path)
@@ -1444,15 +1097,19 @@ def main():
 
         # Pretrain Ablation & Report
         _pt_report_path = model_artifact_dir / "pretrain_report.json"
-        _pt_folds = cv_hist if model_args.walk_forward_cv else [{"fold": 0, "best_metric": best_val, "history": history}]
+        _pt_folds = (
+            cv_hist if model_args.walk_forward_cv else [{"fold": 0, "best_metric": best_val, "history": history}]
+        )
         _pt_summary = _fold_history_summary(_pt_folds, model_args.early_stop_metric)
         _pt_report = _read_json_dict(_pt_report_path)
-        _pt_report.update({
-            "model_name": model_name,
-            "pretrain_enabled": bool(getattr(model_args, "pretrain", False)),
-            "supervised_training_summary": _pt_summary,
-            "completed_at": datetime.now(UTC).isoformat(),
-        })
+        _pt_report.update(
+            {
+                "model_name": model_name,
+                "pretrain_enabled": bool(getattr(model_args, "pretrain", False)),
+                "supervised_training_summary": _pt_summary,
+                "completed_at": datetime.now(UTC).isoformat(),
+            }
+        )
         try:
             _safe_save_json(_pt_report, _pt_report_path)
         except Exception as _pre:
@@ -1474,15 +1131,18 @@ def main():
                 },
                 "baseline_folds": _baseline_cv_hist,
                 "pretrained_folds": _pt_folds,
-                "completed_at": datetime.now(UTC).isoformat()
+                "completed_at": datetime.now(UTC).isoformat(),
             }
             try:
                 _safe_save_json(_abl_summary, _abl_path)
-                _update_pretrain_report(model_args, {
-                    "downstream_metric_delta_vs_no_pretrain": _deltas,
-                    "ablation_verdict": _verdict,
-                    "ablation_report_path": str(_abl_path),
-                })
+                _update_pretrain_report(
+                    model_args,
+                    {
+                        "downstream_metric_delta_vs_no_pretrain": _deltas,
+                        "ablation_verdict": _verdict,
+                        "ablation_report_path": str(_abl_path),
+                    },
+                )
                 print(f"[Ablation] Comparison written -> {_abl_path}")
             except Exception as _ae:
                 print(f"[Ablation] Write failed: {_ae}")
@@ -1490,7 +1150,7 @@ def main():
         if alerter:
             _best_f = 0
             _best_v = 0.0
-            if model_args.walk_forward_cv and 'cv_hist' in locals():
+            if model_args.walk_forward_cv and "cv_hist" in locals():
                 _m_key = "best_metric"
                 valid_folds = [f for f in cv_hist if f.get(_m_key) is not None]
                 if valid_folds:
@@ -1505,15 +1165,10 @@ def main():
 
             try:
                 alerter.send_training_completed(
-                    model=model_name,
-                    fold=_best_f,
-                    metric=model_args.early_stop_metric,
-                    score=float(_best_v)
+                    model=model_name, fold=_best_f, metric=model_args.early_stop_metric, score=float(_best_v)
                 )
             except Exception as e:
                 print(f"[Discord] Failed to send training_completed: {e}")
-
-
 
         try:
             ckpt_base = Path(model_args.checkpoint_dir)
@@ -1535,8 +1190,13 @@ def main():
             if getattr(model_args, "promotion_gate", True):
                 try:
                     gate_result = _evaluate_forward_gate(
-                        model_name, cache_path, n_samples, n_features,
-                        model_args, device, fold_sharpes=_fold_metrics,
+                        model_name,
+                        cache_path,
+                        n_samples,
+                        n_features,
+                        model_args,
+                        device,
+                        fold_sharpes=_fold_metrics,
                     )
                 except Exception as _ge:
                     print(f"[PromotionGate] evaluation failed: {_ge}")
@@ -1574,13 +1234,10 @@ def main():
             except Exception as _pe:
                 print(f"[PromotionGate] could not write decision json: {_pe}")
             try:
-
                 _append_model_comparison_report(model_args, model_name, _ts_summary, gate_result)
 
             except Exception as _cmp_e:
-
                 print(f"[ModelComparison] update failed (non-fatal): {_cmp_e}")
-
 
             deploy_result = {"status": "skipped", "error": None, "failed_step": None}
             _prod = None
@@ -1607,8 +1264,6 @@ def main():
                 try:
                     from inference.onnx_inference import export_to_onnx
 
-
-
                     _onnx_tmp = _prod.with_suffix(".tmp.onnx")
 
                     _onnx_final = _prod.with_suffix(".onnx")
@@ -1621,60 +1276,40 @@ def main():
 
                     _schema_prev = _schema_final.with_name("production_prev.schema.json")
 
-
-
                     export_to_onnx(
-
                         checkpoint_path=str(ckpt_best),
-
                         model_name=model_name,
-
                         seq_len=int(getattr(model_args, "seq_len", 60)),
-
                         output_path=str(_onnx_tmp),
-
                         n_features=int(n_features),
-
                     )
 
                     _safe_save_json(_feature_schema_payload(model_args, n_features=n_features), _schema_tmp)
 
                     _deploy_verify = _verify_onnx_schema_deployment(
-
                         _onnx_tmp,
-
                         _schema_tmp,
-
                         model_args,
-
                         n_features=int(n_features),
-
                         seq_len=int(getattr(model_args, "seq_len", 60)),
-
                     )
 
                     deploy_result["verification"] = _deploy_verify
 
                     if _deploy_verify.get("status") != "pass":
-
                         deploy_result["failed_step"] = "onnx_schema_verification"
 
                         raise RuntimeError(f"ONNX/schema verification failed: {_deploy_verify.get('errors')}")
 
-
-
                     if _prod.exists():
-                        _atomic_copy(_prod, _prev)        # back up current prod -> prev
+                        _atomic_copy(_prod, _prev)  # back up current prod -> prev
                     if _onnx_final.exists():
-
                         _atomic_copy(_onnx_final, _onnx_prev)
 
                     if _schema_final.exists():
-
                         _atomic_copy(_schema_final, _schema_prev)
 
-
-                    _atomic_copy(ckpt_best, _prod)        # challenger -> prod (atomic)
+                    _atomic_copy(ckpt_best, _prod)  # challenger -> prod (atomic)
 
                     os.replace(str(_onnx_tmp), str(_onnx_final))
 
@@ -1682,10 +1317,10 @@ def main():
 
                     print(f"[Deploy] Atomically promoted checkpoint/ONNX/schema -> {_prod}")
 
-
                     # Signal the live engine to hot-reload the new production model.
                     try:
                         import tempfile
+
                         _reload_flag = _prod.parent / "reload_model.flag"
                         _fd, _tmp_flag = tempfile.mkstemp(prefix=".reload.", suffix=".tmp", dir=str(_prod.parent))
                         os.close(_fd)
@@ -1699,34 +1334,28 @@ def main():
                     deploy_result["status"] = "success"
                     _onnx_final = _onnx_final
 
-
                     if alerter:
                         try:
                             alerter.send_promotion_gate_passed(
-                                model=model_name,
-                                sharpe=float(gate_result.get("details", {}).get("sharpe", 0.0))
+                                model=model_name, sharpe=float(gate_result.get("details", {}).get("sharpe", 0.0))
                             )
                             alerter.send_production_deploy_completed(
                                 model=model_name,
-                                onnx_path=str(_prod.with_suffix('.onnx').name),
-                                schema_path=str(_prod.with_suffix('.schema.json').name)
+                                onnx_path=str(_prod.with_suffix(".onnx").name),
+                                schema_path=str(_prod.with_suffix(".schema.json").name),
                             )
                         except Exception as e:
                             print(f"[Discord] Failed to send promotion / deploy alerts: {e}")
 
                 except Exception as e_deploy:
                     for _tmp_art in ("_onnx_tmp", "_schema_tmp"):
-
                         try:
-
                             _tmp_path = locals().get(_tmp_art)
 
                             if _tmp_path is not None and Path(_tmp_path).exists():
-
                                 Path(_tmp_path).unlink()
 
                         except Exception:
-
                             pass
 
                     deploy_result["status"] = "failed"
@@ -1755,25 +1384,29 @@ def main():
             _dep_dir = model_artifact_dir
             _dep_dir.mkdir(parents=True, exist_ok=True)
             _dep_doc = {
-                "model_name":            model_name,
-                "run_name":              run_name,
-                "checkpoint_dir":         str(_dep_dir.resolve()),
-                "run_checkpoint_dir":     str(Path(args.checkpoint_dir).resolve()),
-                "gate_promoted":         gate_result.get("promoted", False),
-                "source_checkpoint":     str(ckpt_best) if ckpt_best.exists() else None,
-                "production_checkpoint": str(_prod) if _prod is not None and deploy_result.get("status") == "success" else None,
-                "previous_checkpoint":   str(_prev) if _prev is not None else None,
-                "onnx_status":           "exported" if _onnx_final is not None and Path(_onnx_final).exists() else "skipped",
-                "onnx_path":             str(_onnx_final) if _onnx_final is not None and Path(_onnx_final).exists() else None,
-                "schema_path":           str(_schema_final) if _schema_final is not None and Path(_schema_final).exists() else None,
-
+                "model_name": model_name,
+                "run_name": run_name,
+                "checkpoint_dir": str(_dep_dir.resolve()),
+                "run_checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
+                "gate_promoted": gate_result.get("promoted", False),
+                "source_checkpoint": str(ckpt_best) if ckpt_best.exists() else None,
+                "production_checkpoint": str(_prod)
+                if _prod is not None and deploy_result.get("status") == "success"
+                else None,
+                "previous_checkpoint": str(_prev) if _prev is not None else None,
+                "onnx_status": "exported" if _onnx_final is not None and Path(_onnx_final).exists() else "skipped",
+                "onnx_path": str(_onnx_final) if _onnx_final is not None and Path(_onnx_final).exists() else None,
+                "schema_path": str(_schema_final)
+                if _schema_final is not None and Path(_schema_final).exists()
+                else None,
                 "onnx_schema_verification": deploy_result.get("verification"),
-
-                "reload_flag_status":    "written" if _reload_flag is not None and Path(_reload_flag).exists() else "skipped",
-                "deploy_status":         deploy_result.get("status", "skipped"),
-                "deploy_error":          deploy_result.get("error"),
-                "failed_step":           deploy_result.get("failed_step"),
-                "deployed_at":           datetime.now(UTC).isoformat(),
+                "reload_flag_status": "written"
+                if _reload_flag is not None and Path(_reload_flag).exists()
+                else "skipped",
+                "deploy_status": deploy_result.get("status", "skipped"),
+                "deploy_error": deploy_result.get("error"),
+                "failed_step": deploy_result.get("failed_step"),
+                "deployed_at": datetime.now(UTC).isoformat(),
             }
             try:
                 _safe_save_json(_dep_doc, _dep_dir / "deployment.json")
@@ -1803,17 +1436,11 @@ def main():
             print(f"[MLflow] Training log skipped: {_ml_e}")
 
         _maybe_auto_tune_next_run(
-
             model_args,
-
             _history_for_tune,
-
             gate_result,
-
             phase="main",
-
             model_name=model_name,
-
         )
 
         # Write Run-level manifest for this model
@@ -1827,11 +1454,11 @@ def main():
             "fold_id": getattr(model_args, "walk_forward_folds", "single"),
             "start_time": run_start_time,
             "end_time": datetime.now(UTC).isoformat(),
-            "best_epoch": int(best_epoch) if 'best_epoch' in locals() and best_epoch is not None else None,
-            "best_metric": float(best_val) if 'best_val' in locals() and best_val is not None else None,
+            "best_epoch": int(best_epoch) if "best_epoch" in locals() and best_epoch is not None else None,
+            "best_metric": float(best_val) if "best_val" in locals() and best_val is not None else None,
             "checkpoint_paths": [str(ckpt_best)],
             "promotion_result": gate_result,
-            "deploy_result": deploy_result if 'deploy_result' in locals() else {"status": "skipped", "error": None},
+            "deploy_result": deploy_result if "deploy_result" in locals() else {"status": "skipped", "error": None},
         }
         if WANDB and wandb_run and "details" in gate_result:
             _deploy_logs = {}
@@ -1841,13 +1468,10 @@ def main():
             if _deploy_logs:
                 _safe_wandb_log(wandb_run, _deploy_logs)
 
-        manifest.update({
-            "config_path": getattr(args, "config", "config/run.yaml"),
-            "warnings": [],
-            "errors": []
-        })
+        manifest.update({"config_path": getattr(args, "config", "config/run.yaml"), "warnings": [], "errors": []})
         try:
             import subprocess
+
             manifest["git_hash"] = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("utf-8").strip()
         except Exception:
             manifest["git_hash"] = "unknown"
@@ -1858,138 +1482,110 @@ def main():
         if _train_memory is not None:
             try:
                 _tm_sharpe = None
-                _tm_vloss  = None
+                _tm_vloss = None
                 _hist_for_mem = _history_for_tune if isinstance(_history_for_tune, dict) else {}
 
-                _mem_best_epoch = int(best_epoch) if 'best_epoch' in locals() and best_epoch is not None else None
+                _mem_best_epoch = int(best_epoch) if "best_epoch" in locals() and best_epoch is not None else None
 
                 def _mem_hist_at(key: str, default=None):
 
-                    values = _hist_for_mem.get(key) or []
+                    values = _hist_for_mem.get(key) or []  # noqa: B023
 
-                    if _mem_best_epoch is not None and 0 <= _mem_best_epoch < len(values):
-
-                        return values[_mem_best_epoch]
+                    if _mem_best_epoch is not None and 0 <= _mem_best_epoch < len(values):  # noqa: B023
+                        return values[_mem_best_epoch]  # noqa: B023
 
                     return default
 
                 _mem_warnings = []
 
                 if _hist_for_mem.get("train_loss") and _hist_for_mem.get("val_loss"):
-
                     _mem_final_gap = float(_hist_for_mem["val_loss"][-1]) - float(_hist_for_mem["train_loss"][-1])
 
                     if _mem_final_gap > 0.05:
-
                         _mem_warnings.append(f"High train-val gap: {_mem_final_gap:.4f}")
 
                 else:
-
                     _mem_final_gap = None
 
                 if len(_hist_for_mem.get("val_sharpe", [])) > 5:
-
                     _mem_max_sh = max(_hist_for_mem["val_sharpe"])
 
                     _mem_final_sh = _hist_for_mem["val_sharpe"][-1]
 
                     if _mem_max_sh - _mem_final_sh > 0.3:
-
                         _mem_warnings.append(f"Sharpe collapsed by {_mem_max_sh - _mem_final_sh:.3f} from peak")
 
                 _mem_control_report = {
-
                     "final_train_val_gap": _mem_final_gap,
-
                     "early_stopped": False,
-
                     "curriculum_stalls": int(max(_hist_for_mem.get("curriculum_stalls", [0]) or [0])),
-
                     "final_seq_len": (_hist_for_mem.get("seq_len") or [None])[-1],
-
                     "final_difficulty_stage": (_hist_for_mem.get("difficulty_stage") or [None])[-1],
-
                     "overfitting_warnings": _mem_warnings,
-
                 }
 
                 _mem_metric_values = [
-
-                    float(v) for v in (_fold_metrics or [])
-
-                    if v is not None and np.isfinite(float(v))
-
+                    float(v) for v in (_fold_metrics or []) if v is not None and np.isfinite(float(v))
                 ]
 
                 if model_args.early_stop_metric == "sharpe":
-
                     if _mem_metric_values:
-
                         _tm_sharpe = max(_mem_metric_values)
 
                     elif best_val is not None:
-
                         _tm_sharpe = float(best_val)
 
                 elif best_val is not None:
                     _tm_vloss = min(_mem_metric_values) if _mem_metric_values else float(best_val)
 
-                _train_memory.update({
-                    "model_name":   model_name,
-                    "run_name":     run_name,
-                    "phase":        "main",
-                    "best_sharpe":  _tm_sharpe,
-                    "best_val_loss": _tm_vloss,
-                    "best_epoch":   _mem_best_epoch,
-
-                    "total_epochs": len(_hist_for_mem.get("train_loss", [])) or int(getattr(model_args, "epochs", 0)),
-                    "history":      _hist_for_mem,
-                    "best_epoch_state": {
-
-                        "train_loss": _mem_hist_at("train_loss"),
-
-                        "val_loss": _mem_hist_at("val_loss"),
-
-                        "val_sharpe": _mem_hist_at("val_sharpe"),
-
-                        "dir_acc": _mem_hist_at("dir_acc"),
-
-                        "lr": _mem_hist_at("lr"),
-
-                        "seq_len": _mem_hist_at("seq_len"),
-
-                        "difficulty_stage": _mem_hist_at("difficulty_stage"),
-
-                        "curriculum_stalls": _mem_hist_at("curriculum_stalls"),
-
-                    },
-
-                    "training_control_report": _mem_control_report,
-
-                    "gate_result":  gate_result if 'gate_result' in locals() else {},
-                    "args_snapshot": {
-                        "lr":       float(getattr(model_args, "lr", 5e-5)),
-                        "dropout":  float(getattr(model_args, "dropout", 0.25)),
-                        "patience": int(getattr(model_args, "patience", 6)),
-                        "epochs":   int(getattr(model_args, "epochs", 24)),
-                    },
-                })
+                _train_memory.update(
+                    {
+                        "model_name": model_name,
+                        "run_name": run_name,
+                        "phase": "main",
+                        "best_sharpe": _tm_sharpe,
+                        "best_val_loss": _tm_vloss,
+                        "best_epoch": _mem_best_epoch,
+                        "total_epochs": len(_hist_for_mem.get("train_loss", []))
+                        or int(getattr(model_args, "epochs", 0)),
+                        "history": _hist_for_mem,
+                        "best_epoch_state": {
+                            "train_loss": _mem_hist_at("train_loss"),
+                            "val_loss": _mem_hist_at("val_loss"),
+                            "val_sharpe": _mem_hist_at("val_sharpe"),
+                            "dir_acc": _mem_hist_at("dir_acc"),
+                            "lr": _mem_hist_at("lr"),
+                            "seq_len": _mem_hist_at("seq_len"),
+                            "difficulty_stage": _mem_hist_at("difficulty_stage"),
+                            "curriculum_stalls": _mem_hist_at("curriculum_stalls"),
+                        },
+                        "training_control_report": _mem_control_report,
+                        "gate_result": gate_result if "gate_result" in locals() else {},
+                        "args_snapshot": {
+                            "lr": float(getattr(model_args, "lr", 5e-5)),
+                            "dropout": float(getattr(model_args, "dropout", 0.25)),
+                            "patience": int(getattr(model_args, "patience", 6)),
+                            "epochs": int(getattr(model_args, "epochs", 24)),
+                        },
+                    }
+                )
                 _train_memory.save()
             except Exception as _tm_err:
                 print(f"[TrainingMemory] Update failed (non-fatal): {_tm_err}")
-
 
     # -- XGBoost baseline training ---------------------------------------------
     # Runs when xgboost.enabled: true in run.yaml (or --xgb-enabled CLI).
     # Shells out to training/train_xgboost.py with params from the YAML config.
     _tabular_baselines: list[str] = []
     if getattr(args, "xgb_enabled", False):
-        print(f"\n{'='*62}")
+        print(f"\n{'=' * 62}")
         print("  XGBoost Baseline Training")
-        print(f"{'='*62}")
+        print(f"{'=' * 62}")
         _xgb_cmd = [
-            sys.executable, str(Path(__file__).parent / "train_xgboost.py"),
-            "--config", str(getattr(args, "config", None) or "config/run.yaml"),
+            sys.executable,
+            str(Path(__file__).parent / "train_xgboost.py"),
+            "--config",
+            str(getattr(args, "config", None) or "config/run.yaml"),
         ]
         _xgb_task = str(getattr(args, "xgb_task", "classification"))
         _xgb_cmd.extend(["--task", _xgb_task])
@@ -2016,6 +1612,7 @@ def main():
         print(f"  Command: {' '.join(_xgb_cmd)}")
         try:
             import subprocess as _sp
+
             with _timer.stage("xgboost"):
                 _xgb_result = _sp.run(_xgb_cmd, cwd=str(Path(__file__).parent.parent), env=_xgb_env)
             if _xgb_result.returncode == 0:
@@ -2028,12 +1625,14 @@ def main():
 
     # -- CatBoost baseline training (mirror XGBoost shell) ---------------------
     if getattr(args, "cb_enabled", False):
-        print(f"\n{'='*62}")
+        print(f"\n{'=' * 62}")
         print("  CatBoost Baseline Training")
-        print(f"{'='*62}")
+        print(f"{'=' * 62}")
         _cb_cmd = [
-            sys.executable, str(Path(__file__).parent / "train_catboost.py"),
-            "--config", str(getattr(args, "config", None) or "config/run.yaml"),
+            sys.executable,
+            str(Path(__file__).parent / "train_catboost.py"),
+            "--config",
+            str(getattr(args, "config", None) or "config/run.yaml"),
         ]
         _cb_cmd.extend(["--task", str(getattr(args, "cb_task", "classification"))])
         _cb_cmd.extend(["--sequence-mode", str(getattr(args, "cb_sequence_mode", "temporal"))])
@@ -2056,6 +1655,7 @@ def main():
         print(f"  Command: {' '.join(_cb_cmd)}")
         try:
             import subprocess as _sp
+
             with _timer.stage("catboost"):
                 _cb_result = _sp.run(_cb_cmd, cwd=str(Path(__file__).parent.parent), env=_cb_env)
             if _cb_result.returncode == 0:
@@ -2066,31 +1666,32 @@ def main():
         except Exception as _cb_err:
             print(f"[CatBoost] Training failed: {_cb_err}")
 
-    # C: Diversity fine-tuning — deep models only (tabular baselines excluded).
+    # C: Diversity fine-tuning - deep models only (tabular baselines excluded).
     # Only runs when >=2 deep models were trained in this session (--all-models).
     _div_models = [m for m in models_to_train if m in MODEL_REGISTRY]
     if args.all_models and len(_div_models) >= 2:
         try:
             from config.settings import CURRICULUM as _CURR_DIV
+
             _div_cfg = _CURR_DIV  # reuse config namespace for div settings
         except ImportError:
             _div_cfg = {}
-        _div_w    = float(getattr(args, "div_weight",     0.10))
-        _same_r   = float(getattr(args, "same_role_mult", 2.0))
+        _div_w = float(getattr(args, "div_weight", 0.10))
+        _same_r = float(getattr(args, "same_role_mult", 2.0))
         # With per-model subfolders, pass the base checkpoint dir so
         # run_diversity_finetune can find each model at <base>/<model>/<model>_best.pt
         _base_ckpt = Path(args.checkpoint_dir)
         run_diversity_finetune(
-            checkpoint_dir = str(_base_ckpt),
-            model_names    = _div_models,
-            cache_path     = cache_path,
-            n_features     = n_features,
-            args           = args,
-            device         = device,
-            epochs         = 3,
-            lr             = 1e-5,
-            div_weight     = _div_w,
-            same_role_mult = _same_r,
+            checkpoint_dir=str(_base_ckpt),
+            model_names=_div_models,
+            cache_path=cache_path,
+            n_features=n_features,
+            args=args,
+            device=device,
+            epochs=3,
+            lr=1e-5,
+            div_weight=_div_w,
+            same_role_mult=_same_r,
         )
     models_to_train = list(models_to_train) + _tabular_baselines
 
@@ -2104,8 +1705,7 @@ def main():
         ensemble_args.model = "ensemble"
         try:
             ens_gate_result = _evaluate_forward_gate(
-                "ensemble", cache_path, n_samples, n_features, ensemble_args, device,
-                fold_sharpes=None
+                "ensemble", cache_path, n_samples, n_features, ensemble_args, device, fold_sharpes=None
             )
             print(f"[PromotionGate] ensemble: {ens_gate_result.get('summary', '?')}")
 
@@ -2121,8 +1721,12 @@ def main():
                 dep_json = _dep_dir / "deployment.json"
                 if dep_json.exists():
                     try:
-                        import json
-                        prod_sharpe = float(json.loads(dep_json.read_text()).get("gate_result", {}).get("details", {}).get("sharpe", -999.0))
+                        prod_sharpe = float(
+                            json.loads(dep_json.read_text())
+                            .get("gate_result", {})
+                            .get("details", {})
+                            .get("sharpe", -999.0)
+                        )
                     except Exception as e:
                         print(f"[Deploy] Corrupted deployment.json: {e}")
                         raise RuntimeError(f"Corrupted deployment.json prevents safe promotion: {e}")
@@ -2130,13 +1734,16 @@ def main():
                 ens_sharpe = float(ens_gate_result.get("details", {}).get("sharpe", -999.0))
 
                 if ens_sharpe > prod_sharpe:
-                    print(f"[Deploy] Ensemble Sharpe {ens_sharpe:.3f} > Base {prod_sharpe:.3f}. Overwriting production!")
+                    print(
+                        f"[Deploy] Ensemble Sharpe {ens_sharpe:.3f} > Base {prod_sharpe:.3f}. Overwriting production!"
+                    )
                     _final_prod = _dep_dir / "production_best.pt"
                     _atomic_copy(_prod, _final_prod)
                     print(f"[Deploy] Atomically promoted Ensemble -> {_final_prod}")
 
                     try:
                         from inference.onnx_inference import export_ensemble_to_onnx
+
                         _onnx_tmp = _final_prod.with_suffix(".tmp.onnx")
                         _onnx_final = _final_prod.with_suffix(".onnx")
                         export_ensemble_to_onnx(
@@ -2151,12 +1758,16 @@ def main():
                         print(f"[Deploy] Re-exported ONNX -> {_onnx_final}")
                     except Exception as oe:
                         import traceback
+
                         print(f"[Deploy] Ensemble ONNX export failed: {oe}")
                         traceback.print_exc()
                 else:
-                    print(f"[Deploy] Ensemble Sharpe {ens_sharpe:.3f} did not beat Base {prod_sharpe:.3f}. Skipping deploy.")
+                    print(
+                        f"[Deploy] Ensemble Sharpe {ens_sharpe:.3f} did not beat Base {prod_sharpe:.3f}. Skipping deploy."
+                    )
         except Exception as e:
             import traceback
+
             print(f"[Deploy] Ensemble integration failed: {e}")
             traceback.print_exc()
 
@@ -2173,15 +1784,15 @@ def main():
                     continue
                 print(f"\n[RL] Per-model pass: {_rl_m}")
                 with _timer.stage(f"rl_{_rl_m}"):
-                    run_rl(cache_path, n_features, _rl_args, device,
-                           n_samples=n_samples, run=wandb_run)
+                    run_rl(cache_path, n_features, _rl_args, device, n_samples=n_samples, run=wandb_run)
         else:
             with _timer.stage("rl"):
                 run_rl(cache_path, n_features, args, device, n_samples=n_samples, run=wandb_run)
 
-    if wandb_run: wandb_run.finish()
+    if wandb_run:
+        wandb_run.finish()
 
-    print(f"\n{'='*62}")
+    print(f"\n{'=' * 62}")
     print("  Training complete!")
     _base_ckpt_dir = Path(args.checkpoint_dir)
     print(f"  Checkpoints: {_base_ckpt_dir}/")
@@ -2206,10 +1817,11 @@ def main():
             f"| temp_max={_gpu_summary.get('gpu_temp_c_max')}°C "
             f"| mem_max={_gpu_summary.get('gpu_mem_mb_max')}MB"
         )
-    print(f"{'='*62}")
+    print(f"{'=' * 62}")
 
     try:
         import subprocess
+
         git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
     except Exception:
         git_hash = "unknown"
@@ -2222,7 +1834,7 @@ def main():
         "git_hash": git_hash,
         "stage_timings_s": _stage_summary,
         "gpu_stats": _gpu_summary,
-        "args": {k: str(v) for k, v in vars(args).items()}
+        "args": {k: str(v) for k, v in vars(args).items()},
     }
     if _base_ckpt_dir.exists():
         _safe_save_json(run_manifest, _base_ckpt_dir / "run_manifest.json")
@@ -2230,15 +1842,21 @@ def main():
             _logs = Path("logs")
             _logs.mkdir(parents=True, exist_ok=True)
             with (_logs / "stage_timings.jsonl").open("a", encoding="utf-8") as _fh:
-                import json as _json
-                _fh.write(_json.dumps({
-                    "event": "stage_timing",
-                    "run_name": run_manifest["run_name"],
-                    "run_end_time": run_manifest["run_end_time"],
-                    "stage_timings_s": _stage_summary,
-                    "gpu_stats": _gpu_summary,
-                }) + "\n")
+                _fh.write(
+                    json.dumps(
+                        {
+                            "event": "stage_timing",
+                            "run_name": run_manifest["run_name"],
+                            "run_end_time": run_manifest["run_end_time"],
+                            "stage_timings_s": _stage_summary,
+                            "gpu_stats": _gpu_summary,
+                        }
+                    )
+                    + "\n"
+                )
         except Exception as _te:
             print(f"[Timing] Could not append stage_timings.jsonl: {_te}")
+
+
 if __name__ == "__main__":
     main()

@@ -14,25 +14,26 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 try:
     import pytorch_lightning as pl
     from pytorch_lightning import Trainer
-    from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+
     LIGHTNING_AVAILABLE = True
 except ImportError:
     LIGHTNING_AVAILABLE = False
     pl = None
     Trainer = None
 
-from training.gpu_datasets import ZarrStreamDataset, wrap_loader_prefetch
-from training.model_factory import build_model as _build_training_model, _core_model
 from models.architectures import build_model as _build_arch_model
+from training.gpu_datasets import ZarrStreamDataset, wrap_loader_prefetch
+from training.model_factory import _core_model
+from training.model_factory import build_model as _build_training_model
 
 
 class ForexLightningModule(pl.LightningModule):
@@ -68,8 +69,10 @@ class ForexLightningModule(pl.LightningModule):
         self.multitask = multitask
 
         from training.supervised_loop import build_criterion
+
         self.criterion = build_criterion(
-            args, device,
+            args,
+            device,
             cache_path=cache_path if (classification or multitask) else None,
             train_idx=train_idx if (classification or multitask) else None,
         )
@@ -174,6 +177,7 @@ class ForexLightningModule(pl.LightningModule):
 
             def _warmup_cosine(step):
                 import math
+
                 if step < _warmup_steps:
                     return (step + 1) / max(1, _warmup_steps)
                 progress = min(1.0, (step - _warmup_steps) / _decay_steps)
@@ -184,7 +188,9 @@ class ForexLightningModule(pl.LightningModule):
         else:
             max_lr = float(getattr(self.args, "onecycle_max_lr_mult", 10.0)) * float(self.args.lr)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                opt, max_lr=max_lr, total_steps=_total_steps,
+                opt,
+                max_lr=max_lr,
+                total_steps=_total_steps,
                 pct_start=float(getattr(self.args, "onecycle_pct_start", 0.1)),
             )
 
@@ -240,17 +246,19 @@ class ForexDataModule(pl.LightningDataModule):
         self.val_dataset = None
         self._shuffle_buffer = int(getattr(args, "shuffle_buffer_size", 16384) or 16384)
 
-    def setup(self, stage: Optional[str] = None):
+    def setup(self, stage: str | None = None):
         if stage in (None, "fit"):
             self.train_dataset = ZarrStreamDataset(
-                self.cache_path, self.train_idx,
+                self.cache_path,
+                self.train_idx,
                 shuffle_chunks=True,
                 shuffle_buffer_size=self._shuffle_buffer,
                 multitask_targets=self.multitask,
                 return_indices=True,
             )
             self.val_dataset = ZarrStreamDataset(
-                self.cache_path, np.sort(self.val_idx),
+                self.cache_path,
+                np.sort(self.val_idx),
                 shuffle_chunks=False,
                 multitask_targets=self.multitask,
                 return_indices=False,
@@ -258,6 +266,7 @@ class ForexDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         from torch.utils.data import DataLoader
+
         nw = int(getattr(self.args, "num_workers", 4) or 4)
         pf = int(getattr(self.args, "prefetch_factor", 4) or 4)
         pin = bool(getattr(self.args, "pin_memory", True))
@@ -274,6 +283,7 @@ class ForexDataModule(pl.LightningDataModule):
 
     def val_dataloader(self):
         from torch.utils.data import DataLoader
+
         val_nw = max(0, int(getattr(self.args, "val_num_workers", 2) or 2))
         pin = bool(getattr(self.args, "pin_memory", True))
         dl = DataLoader(
@@ -310,9 +320,7 @@ def run_lightning_training(
     if not LIGHTNING_AVAILABLE:
         raise ImportError("PyTorch Lightning not installed. pip install pytorch-lightning")
 
-    from config.settings import TRAINING
     fold_suffix = f"_fold{fold_id}" if fold_id is not None else ""
-    classification = args.loss in ("cross_entropy", "multi_task", "asymmetric_directional")
     multitask = bool(getattr(args, "multitask", False))
 
     # Create DataModule
@@ -340,9 +348,11 @@ def run_lightning_training(
     # 1. Curriculum callback (if enabled)
     if getattr(args, "curriculum_manager", False):
         from training.curriculum_callbacks import PLCurriculumCallback
+
         _diff_arr = None
         try:
             from training.direction_control import _load_diff_array
+
             _diff = _load_diff_array(cache_path, n_samples)
             if _diff is not None and len(_diff) == n_samples and train_idx is not None:
                 _diff_arr = np.asarray(_diff[train_idx], dtype=float)
@@ -386,6 +396,7 @@ def run_lightning_training(
     # 4. SWA (if enabled)
     if getattr(args, "swa_enabled", False):
         from pytorch_lightning.callbacks import StochasticWeightAveraging
+
         swa_callback = StochasticWeightAveraging(
             swa_lrs=float(getattr(args, "swa_lr", 1e-5)),
             swa_epoch_start=max(1, int(args.epochs * float(getattr(args, "swa_start_frac", 0.75)))),
@@ -399,6 +410,8 @@ def run_lightning_training(
         precision = "16-mixed" if args.amp and device.type == "cuda" else "32-true"
     else:
         precision = "16" if args.amp and device.type == "cuda" else "32"
+    if Trainer is None:
+        raise ImportError("pytorch_lightning is required but not installed.")
     trainer = Trainer(
         max_epochs=int(args.epochs),
         accelerator="gpu" if device.type == "cuda" else "cpu",
@@ -434,24 +447,28 @@ def run_lightning_training(
     # Save config sidecar
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
     with open(cfg_path, "w") as f:
-        json.dump({
-            "model": model_name,
-            "n_features": n_features,
-            "seq_len": args.seq_len,
-            "d_model": getattr(args, "d_model", 256),
-            "nhead": getattr(args, "nhead", 8),
-            "hidden_size": getattr(args, "hidden_size", 256),
-            "num_layers": getattr(args, "num_layers", 3),
-            "dropout": getattr(args, "dropout", 0.1),
-            "best_val_loss": metrics.get("best_val_loss", float("inf")),
-            "best_val_sharpe_proxy": metrics.get("best_sharpe", 0.0),
-            "epoch": trainer.current_epoch,
-            "n_samples": n_samples,
-            "loss": args.loss,
-            "fold_id": fold_id,
-            "framework": "lightning",
-            "timestamp": datetime.now(UTC).isoformat(),
-        }, f, indent=2)
+        json.dump(
+            {
+                "model": model_name,
+                "n_features": n_features,
+                "seq_len": args.seq_len,
+                "d_model": getattr(args, "d_model", 256),
+                "nhead": getattr(args, "nhead", 8),
+                "hidden_size": getattr(args, "hidden_size", 256),
+                "num_layers": getattr(args, "num_layers", 3),
+                "dropout": getattr(args, "dropout", 0.1),
+                "best_val_loss": metrics.get("best_val_loss", float("inf")),
+                "best_val_sharpe_proxy": metrics.get("best_sharpe", 0.0),
+                "epoch": trainer.current_epoch,
+                "n_samples": n_samples,
+                "loss": args.loss,
+                "fold_id": fold_id,
+                "framework": "lightning",
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            f,
+            indent=2,
+        )
 
     print(f"[Lightning] Training complete in {elapsed:.1f}s")
     print(f"[Lightning] Best Sharpe: {metrics.get('best_sharpe', 0):.4f}")

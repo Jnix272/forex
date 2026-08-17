@@ -136,7 +136,10 @@ def build_queue(news: Path, queue: Path, *, force: bool) -> int:
     )
     os.replace(partial, queue)
     n = con.execute(f"SELECT count(*) FROM read_parquet('{queue.as_posix()}')").fetchone()[0]
-    print(f"[Sentiment] Queue SAVED: {n:,} unique headlines -> {queue} ({queue.stat().st_size / (1<<20):.1f}M)", flush=True)
+    print(
+        f"[Sentiment] Queue SAVED: {n:,} unique headlines -> {queue} ({queue.stat().st_size / (1 << 20):.1f}M)",
+        flush=True,
+    )
     con.close()
     return int(n)
 
@@ -299,7 +302,7 @@ def apply_scores(news: Path, map_dir: Path, *, paths: dict[str, Path]) -> int:
     ).fetchone()
     print(
         f"[Sentiment] merging rows={stats[0]:,} scored={stats[1]:,} unscored={stats[2]:,} "
-        f"size={merging.stat().st_size / (1<<30):.2f}G",
+        f"size={merging.stat().st_size / (1 << 30):.2f}G",
         flush=True,
     )
     if stats[0] < 20_000_000:
@@ -380,8 +383,7 @@ def score_historical_news(
     checkpoint_every = max(batch_size, int(checkpoint_every))
     target = remaining if limit is None else min(remaining, max(0, int(limit)))
     print(
-        f"[Sentiment] Scoring {target:,} headline(s) | batch={batch_size} | "
-        f"checkpoint_every={checkpoint_every}",
+        f"[Sentiment] Scoring {target:,} headline(s) | batch={batch_size} | checkpoint_every={checkpoint_every}",
         flush=True,
     )
 
@@ -420,8 +422,7 @@ def score_historical_news(
 
     elapsed = time.perf_counter() - t0
     print(
-        f"[Sentiment] Scored {done:,} headlines in {elapsed:.1f}s "
-        f"({done / max(elapsed, 0.1):.1f}/s)",
+        f"[Sentiment] Scored {done:,} headlines in {elapsed:.1f}s ({done / max(elapsed, 0.1):.1f}/s)",
         flush=True,
     )
 

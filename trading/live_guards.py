@@ -91,7 +91,9 @@ class EconomicCalendarGuard:
         flatten_before_event: bool = False,
     ):
         self.pair = pair
-        self.calendar_file = calendar_file or os.getenv("LIVE_ECONOMIC_CALENDAR_FILE") or os.getenv("ECONOMIC_CALENDAR_FILE")
+        self.calendar_file = (
+            calendar_file or os.getenv("LIVE_ECONOMIC_CALENDAR_FILE") or os.getenv("ECONOMIC_CALENDAR_FILE")
+        )
         self.block_before_min = int(block_before_min)
         self.block_after_min = int(block_after_min)
         self.special_before_min = int(special_before_min)
@@ -169,7 +171,9 @@ class SpreadVolatilityGuard:
         if bid and ask and bid > 0 and ask > bid:
             spread = max(spread, price_to_pips(float(ask) - float(bid), self.pair))
         if spread > self.max_spread_pips:
-            return GuardResult(True, "spread_too_wide", {"spread_pips": spread, "max_spread_pips": self.max_spread_pips})
+            return GuardResult(
+                True, "spread_too_wide", {"spread_pips": spread, "max_spread_pips": self.max_spread_pips}
+            )
 
         if "spread_pips" in features.columns and len(features) >= self.lookback:
             med = _tail_median(features, "spread_pips", self.lookback)
@@ -202,14 +206,28 @@ class RegimeRouter:
         now_ts = pd.Timestamp(now or pd.Timestamp.utcnow())
         hour = int(now_ts.hour)
         if calendar_blocked:
-            return GuardResult(True, "news_block", {"regime": "news_block"}, size_multiplier=0.0, confidence_threshold=1.0)
+            return GuardResult(
+                True, "news_block", {"regime": "news_block"}, size_multiplier=0.0, confidence_threshold=1.0
+            )
         in_rollover = hour >= self.rollover_start_utc or hour <= self.rollover_end_utc
         if in_rollover:
-            return GuardResult(True, "rollover", {"regime": "rollover", "hour_utc": hour}, size_multiplier=0.0, confidence_threshold=1.0)
+            return GuardResult(
+                True,
+                "rollover",
+                {"regime": "rollover", "hour_utc": hour},
+                size_multiplier=0.0,
+                confidence_threshold=1.0,
+            )
         if "regime_break_prob" in features.columns:
             rbp = _last_numeric(features, "regime_break_prob")
             if rbp >= 0.75:
-                return GuardResult(False, "high_vol", {"regime": "high_vol", "regime_break_prob": rbp}, size_multiplier=0.5, confidence_threshold=0.65)
+                return GuardResult(
+                    False,
+                    "high_vol",
+                    {"regime": "high_vol", "regime_break_prob": rbp},
+                    size_multiplier=0.5,
+                    confidence_threshold=0.65,
+                )
         return GuardResult(False, "normal", {"regime": "normal"}, size_multiplier=1.0, confidence_threshold=0.45)
 
 
@@ -225,9 +243,13 @@ class DisagreementGate:
         except Exception:
             return None
 
-    def check(self, action: int, obs, *, fast_model=None, slow_model=None, confidence: float | None = None) -> GuardResult:
+    def check(
+        self, action: int, obs, *, fast_model=None, slow_model=None, confidence: float | None = None
+    ) -> GuardResult:
         if confidence is not None and float(confidence) < self.min_confidence:
-            return GuardResult(True, "low_confidence", {"confidence": float(confidence), "min_confidence": self.min_confidence})
+            return GuardResult(
+                True, "low_confidence", {"confidence": float(confidence), "min_confidence": self.min_confidence}
+            )
         if not self.enabled or fast_model is None or slow_model is None:
             return GuardResult(False, details={"confidence": confidence})
         fast_action = self._safe_action(fast_model, obs)
@@ -235,8 +257,12 @@ class DisagreementGate:
         votes = [a for a in (int(action), fast_action, slow_action) if a is not None]
         disagreement = len(set(votes)) > 1
         if disagreement and int(action) != HOLD:
-            return GuardResult(True, "model_disagreement", {"action": int(action), "fast": fast_action, "slow": slow_action})
-        return GuardResult(False, details={"action": int(action), "fast": fast_action, "slow": slow_action, "confidence": confidence})
+            return GuardResult(
+                True, "model_disagreement", {"action": int(action), "fast": fast_action, "slow": slow_action}
+            )
+        return GuardResult(
+            False, details={"action": int(action), "fast": fast_action, "slow": slow_action, "confidence": confidence}
+        )
 
 
 class NoTradeZoneGate:
@@ -270,13 +296,20 @@ class NoTradeZoneGate:
         if score is None:
             return GuardResult(False, "no_trade_unavailable", {"score": None})
         if score >= self.threshold:
-            return GuardResult(True, "no_trade_zone", {"no_trade_score": float(score), "threshold": self.threshold}, size_multiplier=0.0, confidence_threshold=1.0)
+            return GuardResult(
+                True,
+                "no_trade_zone",
+                {"no_trade_score": float(score), "threshold": self.threshold},
+                size_multiplier=0.0,
+                confidence_threshold=1.0,
+            )
         return GuardResult(False, "no_trade_ok", {"no_trade_score": float(score)})
 
     @staticmethod
     def _heuristic(features: Any) -> float | None:
         try:
             from features.no_trade_zones import compute_heuristic_no_trade_score
+
             cols = ["atr_6", "spread_pips", "adx_14", "rsi_14"]
             if _is_polars_frame(features):
                 present = [c for c in cols if c in features.columns]

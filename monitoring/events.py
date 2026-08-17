@@ -8,24 +8,25 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Optional
+from datetime import UTC, datetime
+from enum import StrEnum
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Type of event - determines payload structure and handling."""
-    LOG = "log"                    # General log message
-    CHECK = "check"                # Validation check result
-    ALERT = "alert"                # Alert triggered
-    METRIC = "metric"              # Scalar metric value
-    CHECKPOINT = "checkpoint"      # Model checkpoint saved
-    HEARTBEAT = "heartbeat"        # Liveness signal
-    PROGRESS = "progress"          # Training progress update
+
+    LOG = "log"  # General log message
+    CHECK = "check"  # Validation check result
+    ALERT = "alert"  # Alert triggered
+    METRIC = "metric"  # Scalar metric value
+    CHECKPOINT = "checkpoint"  # Model checkpoint saved
+    HEARTBEAT = "heartbeat"  # Liveness signal
+    PROGRESS = "progress"  # Training progress update
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Event severity - maps to standard logging levels."""
+
     DEBUG = "debug"
     INFO = "info"
     WARNING = "warning"
@@ -33,8 +34,9 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
 
-class CheckPhase(str, Enum):
+class CheckPhase(StrEnum):
     """Training phase when check runs."""
+
     PREFLIGHT = "preflight"
     BATCH = "batch"
     EPOCH = "epoch"
@@ -49,7 +51,7 @@ class CheckPhase(str, Enum):
 class TrainingEvent:
     """
     Unified training event - all logging/checking/alerting goes through this.
-    
+
     Payload structure varies by event_type:
     - LOG: {"message": str, "logger": str}
     - CHECK: {"name": str, "passed": bool, "details": dict, "threshold": float}
@@ -59,42 +61,42 @@ class TrainingEvent:
     - HEARTBEAT: {"component": str, "status": str}
     - PROGRESS: {"phase": str, "current": int, "total": int, "eta_sec": float}
     """
-    
+
     # Core identifiers
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     event_type: EventType = EventType.LOG
     severity: Severity = Severity.INFO
-    
+
     # Source tracking
-    source: str = ""                    # module:function (e.g., "supervised_loop:train_epoch")
-    run_id: str = ""                    # unique run identifier
-    session_id: str = ""                # session identifier for live trading
-    
+    source: str = ""  # module:function (e.g., "supervised_loop:train_epoch")
+    run_id: str = ""  # unique run identifier
+    session_id: str = ""  # session identifier for live trading
+
     # Training context
-    epoch: Optional[int] = None
-    batch: Optional[int] = None
-    model_name: Optional[str] = None
-    fold: Optional[int] = None
-    
+    epoch: int | None = None
+    batch: int | None = None
+    model_name: str | None = None
+    fold: int | None = None
+
     # Payload - typed per event_type
     payload: dict = field(default_factory=dict)
-    
+
     # Filtering
     tags: list[str] = field(default_factory=list)
-    
+
     # Relationships
-    parent_event_id: Optional[str] = None
-    correlation_id: Optional[str] = None
-    
+    parent_event_id: str | None = None
+    correlation_id: str | None = None
+
     def __post_init__(self):
         if isinstance(self.event_type, str):
             self.event_type = EventType(self.event_type)
         if isinstance(self.severity, str):
             self.severity = Severity(self.severity)
         if self.timestamp is None:
-            self.timestamp = datetime.now(timezone.utc).isoformat()
-    
+            self.timestamp = datetime.now(UTC).isoformat()
+
     def to_dict(self) -> dict:
         """Serialize to dictionary for JSONL output."""
         return {
@@ -114,9 +116,9 @@ class TrainingEvent:
             "parent_event_id": self.parent_event_id,
             "correlation_id": self.correlation_id,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: dict) -> "TrainingEvent":
+    def from_dict(cls, data: dict) -> TrainingEvent:
         """Deserialize from dictionary."""
         # Convert string enums
         if "event_type" in data and isinstance(data["event_type"], str):
@@ -124,11 +126,12 @@ class TrainingEvent:
         if "severity" in data and isinstance(data["severity"], str):
             data["severity"] = Severity(data["severity"])
         return cls(**data)
-    
+
     # Factory methods for common event types
     @classmethod
-    def log(cls, message: str, source: str, severity: Severity = Severity.INFO,
-            run_id: str = "", **kwargs) -> "TrainingEvent":
+    def log(
+        cls, message: str, source: str, severity: Severity = Severity.INFO, run_id: str = "", **kwargs
+    ) -> TrainingEvent:
         return cls(
             event_type=EventType.LOG,
             severity=severity,
@@ -140,10 +143,18 @@ class TrainingEvent:
             batch=kwargs.get("batch"),
             model_name=kwargs.get("model_name"),
         )
-    
+
     @classmethod
-    def check(cls, name: str, passed: bool, source: str, details: dict = None,
-              threshold: float = None, run_id: str = "", **kwargs) -> "TrainingEvent":
+    def check(
+        cls,
+        name: str,
+        passed: bool,
+        source: str,
+        details: dict | None = None,
+        threshold: float | None = None,
+        run_id: str = "",
+        **kwargs,
+    ) -> TrainingEvent:
         return cls(
             event_type=EventType.CHECK,
             severity=Severity.INFO if passed else Severity.WARNING,
@@ -155,15 +166,16 @@ class TrainingEvent:
                 "details": details or {},
                 "threshold": threshold,
             },
-            tags=kwargs.get("tags", []) + ["check", name],
+            tags=[*kwargs.get("tags", []), "check", name],
             epoch=kwargs.get("epoch"),
             batch=kwargs.get("batch"),
             model_name=kwargs.get("model_name"),
         )
-    
+
     @classmethod
-    def alert(cls, rule: str, message: str, severity: Severity, source: str,
-              context: dict = None, run_id: str = "", **kwargs) -> "TrainingEvent":
+    def alert(
+        cls, rule: str, message: str, severity: Severity, source: str, context: dict | None = None, run_id: str = "", **kwargs
+    ) -> TrainingEvent:
         return cls(
             event_type=EventType.ALERT,
             severity=severity,
@@ -174,15 +186,14 @@ class TrainingEvent:
                 "message": message,
                 "context": context or {},
             },
-            tags=kwargs.get("tags", []) + ["alert", rule],
+            tags=[*kwargs.get("tags", []), "alert", rule],
             epoch=kwargs.get("epoch"),
             batch=kwargs.get("batch"),
             model_name=kwargs.get("model_name"),
         )
-    
+
     @classmethod
-    def metric(cls, name: str, value: float, source: str, unit: str = "",
-               run_id: str = "", **kwargs) -> "TrainingEvent":
+    def metric(cls, name: str, value: float, source: str, unit: str = "", run_id: str = "", **kwargs) -> TrainingEvent:
         return cls(
             event_type=EventType.METRIC,
             severity=Severity.INFO,
@@ -193,15 +204,14 @@ class TrainingEvent:
                 "value": value,
                 "unit": unit,
             },
-            tags=kwargs.get("tags", []) + ["metric", name],
+            tags=[*kwargs.get("tags", []), "metric", name],
             epoch=kwargs.get("epoch"),
             batch=kwargs.get("batch"),
             model_name=kwargs.get("model_name"),
         )
-    
+
     @classmethod
-    def checkpoint(cls, path: str, metrics: dict, epoch: int, source: str,
-                   run_id: str = "", **kwargs) -> "TrainingEvent":
+    def checkpoint(cls, path: str, metrics: dict, epoch: int, source: str, run_id: str = "", **kwargs) -> TrainingEvent:
         return cls(
             event_type=EventType.CHECKPOINT,
             severity=Severity.INFO,
@@ -213,13 +223,14 @@ class TrainingEvent:
                 "metrics": metrics,
                 "epoch": epoch,
             },
-            tags=kwargs.get("tags", []) + ["checkpoint"],
+            tags=[*kwargs.get("tags", []), "checkpoint"],
             model_name=kwargs.get("model_name"),
         )
-    
+
     @classmethod
-    def heartbeat(cls, component: str, status: str = "alive", source: str = "",
-                  run_id: str = "", **kwargs) -> "TrainingEvent":
+    def heartbeat(
+        cls, component: str, status: str = "alive", source: str = "", run_id: str = "", **kwargs
+    ) -> TrainingEvent:
         return cls(
             event_type=EventType.HEARTBEAT,
             severity=Severity.DEBUG,
@@ -229,12 +240,13 @@ class TrainingEvent:
                 "component": component,
                 "status": status,
             },
-            tags=kwargs.get("tags", []) + ["heartbeat", component],
+            tags=[*kwargs.get("tags", []), "heartbeat", component],
         )
-    
+
     @classmethod
-    def progress(cls, phase: str, current: int, total: int, eta_sec: float = 0,
-                 source: str = "", run_id: str = "", **kwargs) -> "TrainingEvent":
+    def progress(
+        cls, phase: str, current: int, total: int, eta_sec: float = 0, source: str = "", run_id: str = "", **kwargs
+    ) -> TrainingEvent:
         return cls(
             event_type=EventType.PROGRESS,
             severity=Severity.INFO,
@@ -247,7 +259,7 @@ class TrainingEvent:
                 "eta_sec": eta_sec,
                 "pct": (current / total * 100) if total > 0 else 0,
             },
-            tags=kwargs.get("tags", []) + ["progress", phase],
+            tags=[*kwargs.get("tags", []), "progress", phase],
         )
 
 

@@ -1,15 +1,18 @@
 """Per-model training profiles derived from architecture properties."""
 
-from dataclasses import dataclass, field
-from typing import Optional, Literal
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
+
+import torch.nn as nn
 
 # Import at module level to avoid circular import risk
 try:
-    from models.architectures import build_model
+    from models.architectures import build_model as _build_model
 except ImportError:
-    build_model = None
+    _build_model = None
 
-import torch.nn as nn
+build_model: Callable[..., nn.Module | None] | None = _build_model
 
 
 @dataclass
@@ -29,7 +32,7 @@ class ModelTrainingProfile:
 
     # Loss
     primary_loss: str = "sharpe_huber"
-    secondary_loss: Optional[str] = None
+    secondary_loss: str | None = None
     use_multitask: bool = True
 
     # Adversarial
@@ -64,7 +67,7 @@ class ModelTrainingProfile:
     ewc_lambda: float = 1000.0
     enable_si: bool = False
     si_lambda: float = 1.0
-    # Dynamic SI lambda — uses DynamicSILambdaConfig sigmoid schedule:
+    # Dynamic SI lambda - uses DynamicSILambdaConfig sigmoid schedule:
     # λ rises when loss is low (protect learned weights), falls when loss is
     # high (allow adaptation during regime shocks). See synaptic_intelligence.py.
     si_dynamic: bool = False
@@ -106,7 +109,7 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
-        forgetting_threshold=0.08,   # tighter: LSTM+attention catches drift early
+        forgetting_threshold=0.08,  # tighter: LSTM+attention catches drift early
         # SI: online path-integral tracking fits HAELT's walk-forward use;
         # dynamic lambda relaxes protection during regime shocks.
         enable_si=True,
@@ -132,7 +135,7 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
-        forgetting_threshold=0.10,   # high-cap attention: tighter than default
+        forgetting_threshold=0.10,  # high-cap attention: tighter than default
         # SI: no LSTM so continuity relies entirely on SI regularisation.
         enable_si=True,
         si_lambda=0.8,
@@ -156,7 +159,7 @@ MODEL_PROFILES = {
         curriculum_mode="combined",
         use_self_paced=True,
         miner_feedback=True,
-        forgetting_threshold=0.10,   # iTransformer: no positional encoding, needs anchor
+        forgetting_threshold=0.10,  # iTransformer: no positional encoding, needs anchor
         # SI: variate-token attention is prone to representation collapse;
         # SI anchors key token interactions across folds.
         enable_si=True,
@@ -181,7 +184,7 @@ MODEL_PROFILES = {
         curriculum_mode="difficulty",
         use_self_paced=False,
         miner_feedback=False,
-        forgetting_threshold=0.12,   # medium-cap: slightly looser than high-cap
+        forgetting_threshold=0.12,  # medium-cap: slightly looser than high-cap
         # SI only (no EWC): SSM/conv layers don't suit Fisher diagonal anchoring;
         # light SI stabilises the selective-state transitions across data windows.
         # Static lambda (no dynamic): Mamba is already fast; avoid extra overhead.
@@ -208,11 +211,11 @@ MODEL_PROFILES = {
         curriculum_mode="difficulty",
         use_self_paced=False,
         miner_feedback=False,
-        forgetting_threshold=0.12,   # relational: graph topology shifts between regimes
+        forgetting_threshold=0.12,  # relational: graph topology shifts between regimes
         # EWC (not SI): graph message-passing weights have a clear Fisher structure;
         # EWC anchors the inter-asset relationship weights learned on prior regimes.
         enable_ewc=True,
-        ewc_lambda=800.0,            # slightly below default 1000 to allow topology adaptation
+        ewc_lambda=800.0,  # slightly below default 1000 to allow topology adaptation
         pretrain_method="cluster",
         pretrain_framework="custom",
         rl_finetune=False,
@@ -233,7 +236,7 @@ MODEL_PROFILES = {
         use_self_paced=False,
         use_loss_weighting=False,
         miner_feedback=False,
-        forgetting_threshold=0.15,   # low-cap: keep default, less sensitive needed
+        forgetting_threshold=0.15,  # low-cap: keep default, less sensitive needed
         # Light SI: low-capacity model, just stabilise conv filters between folds;
         # very small lambda to avoid over-constraining a small parameter space.
         enable_si=True,
@@ -259,13 +262,17 @@ MODEL_PROFILES = {
         use_self_paced=False,
         use_loss_weighting=False,
         miner_feedback=False,
-        forgetting_threshold=0.15,   # linear baseline: default threshold
+        forgetting_threshold=0.15,  # linear baseline: default threshold
         # No EWC or SI: GLM is a linear baseline; regularisation is handled
         # entirely by weight decay. Adding SI/EWC would over-constrain a
         # model that has no meaningful parameter topology to protect.
         enable_si=False,
         enable_ewc=False,
-        pretrain_method="byol",
+        # No contrastive pretraining for a linear model - BYOL/SimCLR/CPC
+        # all require a deep encoder to learn useful representations.
+        # The previous "byol" value was a copy-paste from the deep profiles
+        # and would either no-op (no encoder to project) or crash.
+        pretrain_method="none",
         swa_enabled=False,
         rl_finetune=False,
     ),
@@ -295,27 +302,25 @@ def pretrain_method_for(model_name: str) -> str:
 
 def _auto_detect_profile(model_name: str) -> ModelTrainingProfile:
     """Auto-detect training profile from model architecture."""
-    
-    if build_model is None:
+
+    model_factory = build_model
+    if model_factory is None:
         raise ImportError("models.architectures.build_model not available for auto-detection")
 
     # Build dummy model to inspect architecture
-    model = build_model(model_name, input_size=64, seq_len=128)
+    model = model_factory(model_name, input_size=64, seq_len=128)
+    if not isinstance(model, nn.Module):
+        raise TypeError(f"Expected nn.Module from build_model for {model_name!r}, got {type(model).__name__}")
 
     profile = ModelTrainingProfile(model_name=model_name)
 
     # Detect architecture properties
     profile.has_attention = any(
-        isinstance(m, (nn.MultiheadAttention, nn.TransformerEncoderLayer))
-        for m in model.modules()
+        isinstance(m, (nn.MultiheadAttention, nn.TransformerEncoderLayer)) for m in model.modules()
     )
-    profile.has_lstm = any(
-        isinstance(m, nn.LSTM) for m in model.modules()
-    )
+    profile.has_lstm = any(isinstance(m, nn.LSTM) for m in model.modules())
     profile.has_graph = hasattr(model, "n_nodes") or "GNN" in type(model).__name__.upper()
-    profile.has_conv = any(
-        isinstance(m, (nn.Conv1d, nn.Conv2d)) for m in model.modules()
-    )
+    profile.has_conv = any(isinstance(m, (nn.Conv1d, nn.Conv2d)) for m in model.modules())
     profile.has_positional_encoding = not getattr(model, "no_pos_encoding", False)
 
     # Estimate capacity from parameter count

@@ -1,6 +1,7 @@
 """
 Tests for no-trade zones (Improvement #7): learned abstention, conformal prediction, heuristic score.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -22,21 +23,24 @@ from features.no_trade_zones import (
 # Heuristic No-Trade Score
 # ---------------------------------------------------------------------------
 
+
 def test_heuristic_no_trade_score():
     """Test heuristic no-trade score computation."""
     n = 500
     rng = np.random.default_rng(0)
-    close = 100 + np.cumsum(rng.normal(0, 0.5, n))
+    100 + np.cumsum(rng.normal(0, 0.5, n))
     atr = np.full(n, 0.5)
     # Make first 100 bars low volatility
     atr[:100] = 0.1
 
-    features = pd.DataFrame({
-        "atr_6": atr,
-        "spread_pips": rng.normal(1, 0.2, n),
-        "adx_14": rng.uniform(10, 40, n),
-        "rsi_14": rng.uniform(30, 70, n),
-    })
+    features = pd.DataFrame(
+        {
+            "atr_6": atr,
+            "spread_pips": rng.normal(1, 0.2, n),
+            "adx_14": rng.uniform(10, 40, n),
+            "rsi_14": rng.uniform(30, 70, n),
+        }
+    )
 
     score = compute_heuristic_no_trade_score(features, atr_col="atr_6")
     assert len(score) == n
@@ -56,12 +60,14 @@ def test_heuristic_no_trade_score_output_range():
     """Test score is always in [0, 1]."""
     rng = np.random.default_rng(1)
     n = 1000
-    features = pd.DataFrame({
-        "atr_6": np.abs(rng.normal(0.5, 0.3, n)),
-        "spread_pips": rng.normal(1, 0.5, n),
-        "adx_14": rng.uniform(0, 50, n),
-        "rsi_14": rng.uniform(0, 100, n),
-    })
+    features = pd.DataFrame(
+        {
+            "atr_6": np.abs(rng.normal(0.5, 0.3, n)),
+            "spread_pips": rng.normal(1, 0.5, n),
+            "adx_14": rng.uniform(0, 50, n),
+            "rsi_14": rng.uniform(0, 100, n),
+        }
+    )
     score = compute_heuristic_no_trade_score(features)
     assert (score >= 0).all() and (score <= 1).all()
 
@@ -70,17 +76,20 @@ def test_heuristic_no_trade_score_output_range():
 # Learned Abstention Model
 # ---------------------------------------------------------------------------
 
+
 def test_learned_abstention_fit_predict():
     """Test learned abstention model basic fit and predict."""
     rng = np.random.default_rng(0)
     n = 2000
 
     # Features
-    X = pd.DataFrame({
-        "feat1": rng.normal(size=n),
-        "feat2": rng.normal(size=n),
-        "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
-    })
+    X = pd.DataFrame(
+        {
+            "feat1": rng.normal(size=n),
+            "feat2": rng.normal(size=n),
+            "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
+        }
+    )
 
     # Primary predictions: mostly long/short
     primary = np.where(rng.random(n) > 0.3, rng.choice([-1, 1], n), 0)
@@ -144,6 +153,7 @@ def test_learned_abstention_insufficient_samples():
 # Conformal Prediction
 # ---------------------------------------------------------------------------
 
+
 def test_conformal_abstention_scores():
     """Test conformal prediction set computation."""
     rng = np.random.default_rng(0)
@@ -198,7 +208,7 @@ def test_conformal_abstain_no_ambiguity():
     logits[:, 2] = 5  # clear long
     labels = np.full(n, 2)
 
-    abstain, info = conformal_should_abstain(logits, labels, alpha=0.10)
+    _abstain, info = conformal_should_abstain(logits, labels, alpha=0.10)
     assert info["abstain_rate"] == 0
 
 
@@ -206,27 +216,32 @@ def test_conformal_abstain_no_ambiguity():
 # Unified No-Trade Decision
 # ---------------------------------------------------------------------------
 
+
 def test_apply_no_trade_zones():
     """Test one-shot no-trade zone application."""
     rng = np.random.default_rng(0)
     n = 1000
 
-    features = pd.DataFrame({
-        "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
-        "spread_pips": rng.normal(1, 0.3, n),
-        "adx_14": rng.uniform(10, 40, n),
-        "rsi_14": rng.uniform(30, 70, n),
-    })
+    features = pd.DataFrame(
+        {
+            "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
+            "spread_pips": rng.normal(1, 0.3, n),
+            "adx_14": rng.uniform(10, 40, n),
+            "rsi_14": rng.uniform(30, 70, n),
+        }
+    )
 
     primary = np.where(rng.random(n) > 0.2, rng.choice([-1, 1], n), 0)
 
     # Conformal calibration data
     val_logits = rng.normal(size=(200, 3))
-    val_labels = rng.choice([0, 1, 2], 200)
+    rng.choice([0, 1, 2], 200)
 
     out_features, mask, info = apply_no_trade_zones(
-        features, primary,
-        val_logits=val_logits, val_labels=np.zeros(200, dtype=int),
+        features,
+        primary,
+        val_logits=val_logits,
+        val_labels=np.zeros(200, dtype=int),
     )
 
     assert "no_trade_heuristic" in out_features.columns
@@ -246,10 +261,12 @@ def test_no_trade_zone_manager():
     rng = np.random.default_rng(0)
     n = 500
 
-    X = pd.DataFrame({
-        "feat1": rng.normal(size=n),
-        "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
-    })
+    X = pd.DataFrame(
+        {
+            "feat1": rng.normal(size=n),
+            "atr_6": np.abs(rng.normal(0.5, 0.2, n)),
+        }
+    )
     primary = rng.choice([-1, 1], n)
     labels = np.where(rng.random(n) > 0.3, primary, -primary)
 
@@ -277,6 +294,7 @@ def test_no_trade_zone_manager():
 # Edge Cases
 # ---------------------------------------------------------------------------
 
+
 def test_conformal_alpha_edge_cases():
     """Test conformal with extreme alpha values."""
     n = 100
@@ -285,7 +303,7 @@ def test_conformal_alpha_edge_cases():
     labels = np.full(n, 2)
 
     # Very small alpha -> large sets -> no ambiguity
-    abstain, info = conformal_should_abstain(logits, labels, alpha=0.01)
+    _abstain, info = conformal_should_abstain(logits, labels, alpha=0.01)
     assert info["abstain_rate"] == 0
 
     # Very large alpha -> small sets -> more ambiguity
@@ -295,11 +313,11 @@ def test_conformal_alpha_edge_cases():
 def test_no_trade_config_mode_and():
     """Test AND mode for no-trade decision."""
     n = 100
-    heuristic = np.full(n, 0.6)
-    learned = np.full(n, 0.6)
-    conformal = np.full(n, 0.4)
+    np.full(n, 0.6)
+    np.full(n, 0.6)
+    np.full(n, 0.4)
 
-    config = NoTradeConfig(
+    NoTradeConfig(
         heuristic_weight=0.3,
         learned_weight=0.4,
         conformal_weight=0.3,

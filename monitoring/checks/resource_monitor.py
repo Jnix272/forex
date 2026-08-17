@@ -6,7 +6,6 @@ Monitors GPU/CPU memory, temperature, disk I/O, and other resources.
 
 import psutil
 import torch
-from typing import Any
 
 from monitoring.checks import CheckContext, CheckResult, CheckStatus, register_check
 
@@ -20,34 +19,38 @@ def check_gpu_memory(context: CheckContext) -> CheckResult:
             passed=True,
             message="CUDA not available",
         )
-    
+
     config = context.config
     warn_frac = config.get("gpu_mem_warn_frac", 0.85)
     crit_frac = config.get("gpu_mem_crit_frac", 0.95)
-    
+
     issues = []
     max_frac = 0.0
-    
+
     for i in range(torch.cuda.device_count()):
         try:
             allocated = torch.cuda.memory_allocated(i)
             reserved = torch.cuda.memory_reserved(i)
             total = torch.cuda.get_device_properties(i).total_memory
-            
+
             alloc_frac = allocated / total
             reserv_frac = reserved / total
             max_frac = max(max_frac, alloc_frac, reserv_frac)
-            
+
             if alloc_frac > crit_frac:
-                issues.append(f"GPU {i} CRITICAL: {alloc_frac:.1%} allocated ({allocated/1e9:.1f}GB/{total/1e9:.1f}GB)")
+                issues.append(
+                    f"GPU {i} CRITICAL: {alloc_frac:.1%} allocated ({allocated / 1e9:.1f}GB/{total / 1e9:.1f}GB)"
+                )
             elif alloc_frac > warn_frac:
-                issues.append(f"GPU {i} WARNING: {alloc_frac:.1%} allocated ({allocated/1e9:.1f}GB/{total/1e9:.1f}GB)")
-            
+                issues.append(
+                    f"GPU {i} WARNING: {alloc_frac:.1%} allocated ({allocated / 1e9:.1f}GB/{total / 1e9:.1f}GB)"
+                )
+
             if reserved > total * 0.98:
-                issues.append(f"GPU {i} reserved near limit: {reserved/1e9:.1f}GB/{total/1e9:.1f}GB")
+                issues.append(f"GPU {i} reserved near limit: {reserved / 1e9:.1f}GB/{total / 1e9:.1f}GB")
         except Exception as e:
             issues.append(f"GPU {i} check error: {e}")
-    
+
     if not issues:
         return CheckResult(
             name="gpu_memory",
@@ -57,11 +60,11 @@ def check_gpu_memory(context: CheckContext) -> CheckResult:
             message=f"GPU memory OK: max {max_frac:.1%} allocated",
             details={"max_alloc_frac": max_frac},
         )
-    
+
     has_critical = any("CRITICAL" in i for i in issues)
     return CheckResult(
         name="gpu_memory",
-        status=CheckStatus.FAILED if has_critical else CheckStatus.FAILED,
+        status=CheckStatus.FAILED if has_critical else CheckStatus.FAILED,  # noqa: RUF034
         passed=False,
         value=max_frac,
         threshold=crit_frac,
@@ -74,6 +77,7 @@ def check_gpu_temperature(context: CheckContext) -> CheckResult:
     """Check GPU temperature."""
     try:
         import pynvml
+
         pynvml.nvmlInit()
     except Exception:
         return CheckResult(
@@ -82,28 +86,28 @@ def check_gpu_temperature(context: CheckContext) -> CheckResult:
             passed=True,
             message="pynvml not available",
         )
-    
+
     config = context.config
     warn_temp = config.get("gpu_temp_warn", 80)
     crit_temp = config.get("gpu_temp_crit", 85)
-    
+
     issues = []
     max_temp = 0
-    
+
     try:
         device_count = pynvml.nvmlDeviceGetCount()
         for i in range(device_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
             max_temp = max(max_temp, temp)
-            
+
             if temp >= crit_temp:
                 issues.append(f"GPU {i} CRITICAL: {temp}°C")
             elif temp >= warn_temp:
                 issues.append(f"GPU {i} WARNING: {temp}°C")
     except Exception as e:
         issues.append(f"Temperature check error: {e}")
-    
+
     if not issues:
         return CheckResult(
             name="gpu_temperature",
@@ -112,8 +116,8 @@ def check_gpu_temperature(context: CheckContext) -> CheckResult:
             message=f"GPU temps OK: max {max_temp}°C",
             value=max_temp,
         )
-    
-    has_critical = any("CRITICAL" in i for i in issues)
+
+    any("CRITICAL" in i for i in issues)
     return CheckResult(
         name="gpu_temperature",
         status=CheckStatus.FAILED,
@@ -130,13 +134,12 @@ def check_cpu_memory(context: CheckContext) -> CheckResult:
     config = context.config
     warn_frac = config.get("cpu_mem_warn_frac", 0.85)
     crit_frac = config.get("cpu_mem_crit_frac", 0.95)
-    
+
     mem = psutil.virtual_memory()
     frac = mem.percent / 100.0
     used_gb = mem.used / 1e9
     total_gb = mem.total / 1e9
-    
-    issues = []
+
     if frac >= crit_frac:
         return CheckResult(
             name="cpu_memory",
@@ -157,7 +160,7 @@ def check_cpu_memory(context: CheckContext) -> CheckResult:
             message=f"WARNING CPU memory: {frac:.1%} ({used_gb:.1f}GB/{total_gb:.1f}GB)",
             details={"used_gb": used_gb, "total_gb": total_gb, "frac": frac},
         )
-    
+
     return CheckResult(
         name="cpu_memory",
         status=CheckStatus.PASSED,
@@ -173,23 +176,23 @@ def check_disk_space(context: CheckContext) -> CheckResult:
     warn_frac = config.get("disk_warn_frac", 0.85)
     crit_frac = config.get("disk_crit_frac", 0.95)
     paths = config.get("disk_paths", ["logs", "checkpoints", "data"])
-    
+
     issues = []
     worst_frac = 0.0
-    
+
     for path in paths:
         try:
             usage = psutil.disk_usage(path)
             frac = usage.used / usage.total
             worst_frac = max(worst_frac, usage.used / usage.total)
-            
+
             if frac >= crit_frac:
-                issues.append(f"CRITICAL disk {path}: {usage.used/1e9:.1f}GB/{usage.total/1e9:.1f}GB ({frac:.1%})")
+                issues.append(f"CRITICAL disk {path}: {usage.used / 1e9:.1f}GB/{usage.total / 1e9:.1f}GB ({frac:.1%})")
             elif frac >= warn_frac:
-                issues.append(f"WARNING disk {path}: {usage.used/1e9:.1f}GB/{usage.total/1e9:.1f}GB ({frac:.1%})")
+                issues.append(f"WARNING disk {path}: {usage.used / 1e9:.1f}GB/{usage.total / 1e9:.1f}GB ({frac:.1%})")
         except Exception:
             pass  # Path might not exist
-    
+
     if not issues:
         return CheckResult(
             name="disk_space",
@@ -197,8 +200,8 @@ def check_disk_space(context: CheckContext) -> CheckResult:
             passed=True,
             message="Disk space OK",
         )
-    
-    has_critical = any("CRITICAL" in i for i in issues)
+
+    any("CRITICAL" in i for i in issues)
     return CheckResult(
         name="disk_space",
         status=CheckStatus.FAILED,
@@ -213,7 +216,7 @@ def check_dataloader_latency(context: CheckContext) -> CheckResult:
     config = context.config
     warn_ms = config.get("dataloader_warn_ms", 1000)
     crit_ms = config.get("dataloader_crit_ms", 5000)
-    
+
     # Get timing from context extra
     elapsed_ms = context.extra.get("dataloader_elapsed_ms")
     if elapsed_ms is None:
@@ -223,7 +226,7 @@ def check_dataloader_latency(context: CheckContext) -> CheckResult:
             passed=True,
             message="No timing data",
         )
-    
+
     if elapsed_ms >= crit_ms:
         return CheckResult(
             name="dataloader_latency",
@@ -244,7 +247,7 @@ def check_dataloader_latency(context: CheckContext) -> CheckResult:
             message=f"WARNING DataLoader latency: {elapsed_ms:.0f}ms",
             details={"elapsed_ms": elapsed_ms},
         )
-    
+
     return CheckResult(
         name="dataloader_latency",
         status=CheckStatus.PASSED,
@@ -255,7 +258,6 @@ def check_dataloader_latency(context: CheckContext) -> CheckResult:
 
 
 # Register resource checks
-from monitoring.checks import register_check
 
 register_check(
     name="gpu_memory",

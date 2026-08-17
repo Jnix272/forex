@@ -1,14 +1,14 @@
 """
-monitoring/alerting.py — multi-channel alerting + escalation + runbooks
+monitoring/alerting.py - multi-channel alerting + escalation + runbooks
 (Improvement #7)
 
 Sinks:
-  * ConsoleChannel        — stdout/console
-  * FileChannel           — append to a log file
-  * InMemoryChannel       — test mode (records alerts, sends nothing real)
-  * DiscordWebhookChannel — reuses monitoring.discord_alerts.DiscordAlerter
-  * SlackWebhookChannel   — POST to a Slack incoming webhook (requests/urllib)
-  * SMTPChannel           — email via smtplib (SMTP_HOST/port/user/pass env)
+  * ConsoleChannel        - stdout/console
+  * FileChannel           - append to a log file
+  * InMemoryChannel       - test mode (records alerts, sends nothing real)
+  * DiscordWebhookChannel - reuses monitoring.discord_alerts.DiscordAlerter
+  * SlackWebhookChannel   - POST to a Slack incoming webhook (requests/urllib)
+  * SMTPChannel           - email via smtplib (SMTP_HOST/port/user/pass env)
 
 Behaviour:
   * Severity levels: info < warning < critical; each channel declares the
@@ -44,10 +44,12 @@ _SEVERITY_RANK = {INFO: 0, WARNING: 1, CRITICAL: 2}
 
 try:
     import requests
+
     _REQUESTS = True
 except ImportError:  # pragma: no cover
     import urllib.error
     import urllib.request
+
     _REQUESTS = False
 
 
@@ -62,6 +64,7 @@ def _timestamp() -> float:
 # ═════════════════════════════════════════════════════════════════════════════
 # Runbooks
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class Runbook:
@@ -83,8 +86,10 @@ class Runbook:
 
 RUNBOOKS: dict[str, Runbook] = {
     "risk_violation": Runbook(
-        alert_type="risk_violation", title="Risk limit breached",
-        severity=CRITICAL, channels=["discord", "slack", "email", "console", "file"],
+        alert_type="risk_violation",
+        title="Risk limit breached",
+        severity=CRITICAL,
+        channels=["discord", "slack", "email", "console", "file"],
         remediation=[
             "Verify the breached rule and value in the risk audit log.",
             "Confirm the engine flattened positions / entered standby if required.",
@@ -92,8 +97,10 @@ RUNBOOKS: dict[str, Runbook] = {
         ],
     ),
     "drift_detected": Runbook(
-        alert_type="drift_detected", title="Data / model drift detected",
-        severity=WARNING, channels=["discord", "console", "file"],
+        alert_type="drift_detected",
+        title="Data / model drift detected",
+        severity=WARNING,
+        channels=["discord", "console", "file"],
         remediation=[
             "Inspect drifted features / SHAP attribution vs reference window.",
             "Trigger a retrain if streaming drift score persists above threshold.",
@@ -101,8 +108,10 @@ RUNBOOKS: dict[str, Runbook] = {
         ],
     ),
     "model_drift": Runbook(
-        alert_type="model_drift", title="Challenger underperforming champion",
-        severity=WARNING, channels=["discord", "console", "file"],
+        alert_type="model_drift",
+        title="Challenger underperforming champion",
+        severity=WARNING,
+        channels=["discord", "console", "file"],
         remediation=[
             "Halt canary escalation for the underperforming challenger.",
             "Review the champion-challenger comparison report.",
@@ -110,8 +119,10 @@ RUNBOOKS: dict[str, Runbook] = {
         ],
     ),
     "circuit_breaker": Runbook(
-        alert_type="circuit_breaker", title="Circuit breaker triggered",
-        severity=CRITICAL, channels=["discord", "slack", "email", "console", "file"],
+        alert_type="circuit_breaker",
+        title="Circuit breaker triggered",
+        severity=CRITICAL,
+        channels=["discord", "slack", "email", "console", "file"],
         remediation=[
             "Confirm all positions were flattened.",
             "Check the triggering drawdown / VaR limit and equity.",
@@ -119,8 +130,10 @@ RUNBOOKS: dict[str, Runbook] = {
         ],
     ),
     "demotion": Runbook(
-        alert_type="demotion", title="Model demoted / rollback",
-        severity=CRITICAL, channels=["discord", "slack", "console", "file"],
+        alert_type="demotion",
+        title="Model demoted / rollback",
+        severity=CRITICAL,
+        channels=["discord", "slack", "console", "file"],
         remediation=[
             "Verify production_prev.pt was restored.",
             "Check the retrain flag was set for train_gpu.py.",
@@ -128,13 +141,17 @@ RUNBOOKS: dict[str, Runbook] = {
         ],
     ),
     "promotion": Runbook(
-        alert_type="promotion", title="Model promoted",
-        severity=INFO, channels=["console", "file"],
+        alert_type="promotion",
+        title="Model promoted",
+        severity=INFO,
+        channels=["console", "file"],
         remediation=["Record the promotion in the audit trail."],
     ),
     "system": Runbook(
-        alert_type="system", title="System alert",
-        severity=WARNING, channels=["console", "file"],
+        alert_type="system",
+        title="System alert",
+        severity=WARNING,
+        channels=["console", "file"],
         remediation=["Check the system log and component health."],
     ),
 }
@@ -147,6 +164,7 @@ def register_runbook(runbook: Runbook) -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 # Channels
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class Channel:
     name = "base"
@@ -181,6 +199,7 @@ class FileChannel(Channel):
 
     def send(self, alert: dict[str, Any]) -> bool:
         import json
+
         try:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(alert, default=str, sort_keys=True) + "\n")
@@ -191,6 +210,7 @@ class FileChannel(Channel):
 
 class InMemoryChannel(Channel):
     """Test-mode channel: records alerts, never sends anything real."""
+
     name = "in_memory"
     severity_min = INFO
 
@@ -219,6 +239,7 @@ class DiscordWebhookChannel(Channel):
     def __init__(self) -> None:
         try:
             from monitoring.discord_alerts import DiscordAlerter
+
             self._alerter = DiscordAlerter()
         except Exception:  # pragma: no cover
             self._alerter = None
@@ -249,7 +270,8 @@ class SlackWebhookChannel(Channel):
                 resp = requests.post(self.webhook_url, json=payload, timeout=5)
                 return resp.status_code < 300
             req = urllib.request.Request(
-                self.webhook_url, data=json.dumps(payload).encode(),
+                self.webhook_url,
+                data=json.dumps(payload).encode(),
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=5):  # type: ignore[attr-defined]
@@ -262,14 +284,21 @@ class SMTPChannel(Channel):
     name = "email"
     severity_min = CRITICAL
 
-    def __init__(self, host: str | None = None, port: int | None = None,
-                 sender: str | None = None, recipients: Sequence[str] | None = None,
-                 username: str | None = None, password: str | None = None):
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        sender: str | None = None,
+        recipients: Sequence[str] | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ):
         self.host = host or os.getenv("SMTP_HOST", "")
         self.port = int(port or os.getenv("SMTP_PORT", "587"))
         self.sender = sender or os.getenv("SMTP_SENDER", "")
-        self.recipients = list(recipients) if recipients else \
-            [r for r in os.getenv("SMTP_RECIPIENTS", "").split(",") if r]
+        self.recipients = (
+            list(recipients) if recipients else [r for r in os.getenv("SMTP_RECIPIENTS", "").split(",") if r]
+        )
         self.username = username if username is not None else os.getenv("SMTP_USERNAME", "")
         self.password = password if password is not None else os.getenv("SMTP_PASSWORD", "")
 
@@ -278,8 +307,7 @@ class SMTPChannel(Channel):
             return False
         try:
             msg = MIMEText(
-                f"{alert['title']}: {alert['message']}\n\n"
-                + "\n".join(alert.get("runbook", {}).get("remediation", []))
+                f"{alert['title']}: {alert['message']}\n\n" + "\n".join(alert.get("runbook", {}).get("remediation", []))
             )
             msg["Subject"] = f"[{alert['severity'].upper()}] {alert['title']}"
             msg["From"] = self.sender
@@ -298,6 +326,7 @@ class SMTPChannel(Channel):
 # Alert manager
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class AlertManager:
     def __init__(
         self,
@@ -306,9 +335,7 @@ class AlertManager:
         rate_limit_per_min: int = 30,
         escalation_minutes: float = 5.0,
     ):
-        self.channels: list[Channel] = (
-            list(channels) if channels is not None else [ConsoleChannel(), FileChannel()]
-        )
+        self.channels: list[Channel] = list(channels) if channels is not None else [ConsoleChannel(), FileChannel()]
         self.dedup_window_seconds = dedup_window_seconds
         self.rate_limit_per_min = rate_limit_per_min
         self.escalation_minutes = escalation_minutes
@@ -393,7 +420,8 @@ class AlertManager:
         if severity == CRITICAL:
             with self._lock:
                 self._pending_escalation[alert["alert_id"]] = {
-                    "alert": alert, "sent_at": _timestamp(),
+                    "alert": alert,
+                    "sent_at": _timestamp(),
                     "escalated": False,
                 }
 
@@ -419,7 +447,7 @@ class AlertManager:
         escalated = []
         now = _timestamp()
         with self._lock:
-            for alert_id, entry in list(self._pending_escalation.items()):
+            for _alert_id, entry in list(self._pending_escalation.items()):
                 age_min = (now - entry["sent_at"]) / 60.0
                 if age_min < self.escalation_minutes:
                     continue
@@ -440,8 +468,9 @@ class AlertManager:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Integration helpers — wire drift events (item 4/5) + risk violations (item 1)
+# Integration helpers - wire drift events (item 4/5) + risk violations (item 1)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def notify_drift_event(manager: AlertManager, event: dict[str, Any]) -> dict[str, Any]:
     """Map a structured drift event (drift.data_drift / drift.model_drift) to an alert."""
@@ -467,7 +496,9 @@ def notify_risk_violation(manager: AlertManager, violation: dict[str, Any]) -> d
     action = violation.get("action", "reject")
     message = f"Risk rule '{rule}' = {value} → action: {action}"
     return manager.alert(
-        "risk_violation", message, severity=CRITICAL,
+        "risk_violation",
+        message,
+        severity=CRITICAL,
         details=violation,
     )
 

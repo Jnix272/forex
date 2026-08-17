@@ -1,5 +1,14 @@
-"""Contrastive / multi-task pretraining runner.\n\nSee docs/CONTINUE.md."""
+"""Contrastive / multi-task pretraining runner.
+
+See docs/CONTINUE.md."""
+
 from __future__ import annotations
+
+_PRETRAIN_MULTI_BLOCK = ("vicreg", "simclr", "barlow")
+_PRETRAIN_STD_QUALITY = ("vicreg", "simclr", "barlow")
+_VALID_PRETRAIN_METHODS = ("byol", "simclr", "vicreg", "barlow", "tscl", "vae", "mae", "mask", "mask_reconstruct")
+_PRETRAIN_SINGLE_PASS = ("byol", "vae", "mae", "mask", "mask_reconstruct")
+
 
 import json
 import math
@@ -12,7 +21,6 @@ import torch
 import torch.nn as nn
 
 from config.settings import PRETRAIN
-from training.direction_control import _coerce_auto_int
 from pretrain.contrastive import (
     BYOLTrainer,
     MaskedReconstructionTrainer,
@@ -28,83 +36,23 @@ from pretrain.extended_trainers import (
     VAESeqTrainer,
 )
 from pretrain.hard_example_mining import PretrainHardExampleMiner
-
-_HOST = None
-_BOUND = False
-_HOST_DEPS = (
-'_log_error',
-    '_log_warn',
-    '_log_info',
-    '_log_nan',
-    '_log_oom',
-    '_crop_to_seq_len',
-    '_core_model',
-    '_strict_load_report',
-    '_on_disk_sequence_count',
-    '_clamp_n_samples_to_disk',
-    '_x_path',
-    '_y_path',
-    '_zarr_open_group',
-    'ZARR',
-    'ZarrStreamDataset',
-    '_ThreadPrefetchLoader',
-    'build_model',
-    '_model_build_args',
-    '_apply_model_profile',
-    '_embargo_bars',
-    '_purge_bars',
-    '_slug_part',
-    '_safe_wandb_log',
-    '_safe_save',
-    '_safe_save_json',
-    'WANDB',
-    'PATHS',
-    'LABELING',
-    'FEATURES',
-    '_TRAIN_LOGGER',
-    '_sharpe_ann_factor',
-    '_pbar',
-    '_trainable_max_index',
-    '_load_diff_array',
-    '_promotion_holdout_n',
-    '_multitask_head_in',
-    'TimeSeriesAugmenter',
-    'BYOLTrainer',
-    'MaskedReconstructionTrainer',
-    'RegimeAwareTSCLTrainer',
-    'TSCLTrainer',
-    'VAESeqTrainer',
-    'ForecastPretextTrainer',
-    'ClusterContrastiveTrainer',
-    'DriftContrastiveTrainer',
-    'RepresentationCollapseError',
-    'pretrain_multi_task',
-    'create_multi_task_pretrainer'
+from training.cache_integrity import _promotion_holdout_n, _trainable_max_index
+from training.core import (
+    _TRAIN_LOGGER,
+    _crop_to_seq_len,
+    _safe_wandb_log,
 )
-
-
-def bind_host(host_mod) -> None:
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
-
-
-def _ensure_bound() -> None:
-    import training.train_gpu as tg
-    bind_host(tg)
-
-_PRETRAIN_SINGLE_PASS = frozenset({"byol", "masked", "vae", "forecast", "drift"})
-_PRETRAIN_MULTI_BLOCK = _PRETRAIN_SINGLE_PASS
-_PRETRAIN_STD_QUALITY = _PRETRAIN_SINGLE_PASS
-_VALID_PRETRAIN_METHODS = _PRETRAIN_SINGLE_PASS | {"tscl", "cluster"}
+from training.cv_splits import _embargo_bars
+from training.dataset_builder import _safe_save_json, _x_path, _y_path, _zarr_open_group
+from training.direction_control import (
+    _coerce_auto_int,
+    _load_diff_array,
+)
+from training.gpu_cache_io import ZARR
+from training.model_factory import _multitask_head_in, _strict_load_report, build_model
 
 
 def _normalize_pretrain_method(method: str) -> str:
-    _ensure_bound()
     aliases = {
         "autoencoder": "vae",
         "regime_cluster": "cluster",
@@ -115,6 +63,7 @@ def _normalize_pretrain_method(method: str) -> str:
         "byol_or_tscl": "byol",
     }
     return aliases.get(str(method or "byol").lower(), str(method or "byol").lower())
+
 
 def _pretrain_channel_chunk(args, n_features: int) -> int | None:
     """Per-pair feature block size for channel-shuffle augmentation."""
@@ -127,9 +76,9 @@ def _pretrain_channel_chunk(args, n_features: int) -> int | None:
         return int(fpp)
     return None
 
+
 def _make_pretrain_augmenter(args, n_features: int) -> TimeSeriesAugmenter:
     """Build augmenter from PRETRAIN defaults + optional YAML overrides."""
-    _ensure_bound()
     aug_cfg = getattr(args, "pretrain_augmentations", None) or PRETRAIN.get("augmentations") or {}
     scale_rng = aug_cfg.get("scaling_range", (0.8, 1.2))
     if isinstance(scale_rng, list):
@@ -145,6 +94,7 @@ def _make_pretrain_augmenter(args, n_features: int) -> TimeSeriesAugmenter:
         seed=getattr(args, "seed", None),
         channel_chunk=_pretrain_channel_chunk(args, n_features),
     )
+
 
 def _make_pretrain_span_plan(
     n_total: int,
@@ -167,7 +117,7 @@ def _make_pretrain_span_plan(
         return []
     rng = rng or np.random.default_rng()
     max_spans = max(1, min(int(max_spans), n_windows, n_total))
-    span_len = max(1, int(math.ceil(n_windows / max_spans)))
+    span_len = max(1, math.ceil(n_windows / max_spans))
 
     starts: list[int] = []
     if diff is not None:
@@ -212,6 +162,7 @@ def _make_pretrain_span_plan(
 
     return sorted(spans, key=lambda x: x[0])
 
+
 def _read_pretrain_spans(
     x_reader,
     y_reader,
@@ -226,6 +177,7 @@ def _read_pretrain_spans(
     y_out = np.zeros(total, dtype=np.float32)
     pos = 0
     read_step = max(1, int(PRETRAIN.get("read_windows", 64)))
+    from training.supervised_loop import _pbar
     with _pbar(total=total, desc=progress_desc, unit="win") as pb:
         for start, length in spans:
             span_end = start + length
@@ -235,10 +187,10 @@ def _read_pretrain_spans(
                 chunk_len = end - cursor
                 w_chunk = _crop_to_seq_len(np.asarray(x_reader[cursor:end]), seq_len).copy()
                 np.nan_to_num(w_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-                w_out[pos:pos + chunk_len] = w_chunk
+                w_out[pos : pos + chunk_len] = w_chunk
                 y_chunk = np.asarray(y_reader[cursor:end], dtype=np.float32).copy()
                 np.nan_to_num(y_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-                y_out[pos:pos + chunk_len] = y_chunk
+                y_out[pos : pos + chunk_len] = y_chunk
                 pos += chunk_len
                 cursor = end
                 pb.update(chunk_len)
@@ -246,8 +198,12 @@ def _read_pretrain_spans(
                     _TRAIN_LOGGER.heartbeat()
     return w_out, y_out
 
+
 def _select_pretrain_trainer_class(method: str, regime_aware: bool):
     method = _normalize_pretrain_method(method)
+    if method == "none" or not method:
+        # Explicit opt-out - the model has no deep encoder to pretrain.
+        return None
     if method == "masked":
         return MaskedReconstructionTrainer
     if method == "tscl":
@@ -262,39 +218,36 @@ def _select_pretrain_trainer_class(method: str, regime_aware: bool):
         return DriftContrastiveTrainer
     return BYOLTrainer
 
-def _parse_pretrain_ablation_models(value) -> set[str]:
 
+def _parse_pretrain_ablation_models(value) -> set[str]:
     """Return model names that should run no-pretrain proof when ablation=auto."""
 
     default = {"tft", "transformer", "haelt"}
 
     if value is None:
-
         return default
 
     if isinstance(value, str):
-
         raw = value.strip()
 
         if not raw:
-
             return default
 
         if raw.lower() in {"none", "false", "off", "disabled"}:
-
             return set()
 
         return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
     if isinstance(value, (list, tuple, set)):
-
         return {str(part).strip().lower() for part in value if str(part).strip()}
 
     return default
 
+
 # -----------------------------------------------------------------------------
 # CONTRASTIVE PRE-TRAINING
 # -----------------------------------------------------------------------------
+
 
 def _pretrain_report_path(args) -> Path:
     return Path(getattr(args, "checkpoint_dir", ".")) / "pretrain_report.json"
@@ -311,7 +264,6 @@ def _read_json_dict(path: Path) -> dict:
 
 
 def _update_pretrain_report(args, updates: dict) -> None:
-    _ensure_bound()
     path = _pretrain_report_path(args)
     report = _read_json_dict(path)
     report.update(updates or {})
@@ -399,9 +351,11 @@ def _pretrain_ablation_verdict(baseline: dict, pretrained: dict) -> tuple[str, d
     gap_delta = deltas.get("final_train_val_gap")
     if sharpe_delta is None and loss_delta is None:
         verdict = "unknown"
-    elif (sharpe_delta is not None and sharpe_delta > 0.0) and (
-        loss_delta is None or loss_delta <= 0.0
-    ) and (gap_delta is None or gap_delta <= 0.02):
+    elif (
+        (sharpe_delta is not None and sharpe_delta > 0.0)
+        and (loss_delta is None or loss_delta <= 0.0)
+        and (gap_delta is None or gap_delta <= 0.02)
+    ):
         verdict = "pretrain_helped"
     elif (sharpe_delta is not None and sharpe_delta < 0.0) or (
         loss_delta is not None and loss_delta > 0.0 and (sharpe_delta is None or sharpe_delta <= 0.0)
@@ -422,14 +376,12 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
     backbone, and saves a ``model_state`` checkpoint at ``ckpt`` so the standard
     supervised-transfer path can load it.
     """
-    _ensure_bound()
     from pretrain.multi_task import pretrain_multi_task
 
     _epochs = max(1, int(getattr(args, "pretrain_epochs", 30) or 30))
     _bs = max(4, min(int(getattr(args, "pretrain_batch", 256) or 256), int(n_features) * args.seq_len, 2048))
     _bs = max(4, _bs // 8 * 8) if _bs > 8 else _bs
-    print(f"[Pretrain] Multi-task pretrainer (Improvement #3) | epochs={_epochs} "
-          f"batch={_bs} windows={len(windows)}")
+    print(f"[Pretrain] Multi-task pretrainer (Improvement #3) | epochs={_epochs} batch={_bs} windows={len(windows)}")
 
     try:
         trainer, history = pretrain_multi_task(
@@ -442,8 +394,7 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
             silent=False,
         )
     except Exception as exc:
-        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to "
-              f"built-in pretrain.")
+        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to built-in pretrain.")
         return None
 
     target = model.backbone if hasattr(model, "backbone") else model
@@ -453,8 +404,10 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
     try:
         _missing, _unexpected = target.load_state_dict(_enc_state, strict=False)
         _frac = 1.0 - (len(_missing) / max(1, len(_enc_state)))
-        print(f"[Pretrain] Multi-task encoder → backbone | loaded={_frac:.0%} "
-              f"missing={len(_missing)} unexpected={len(_unexpected)}")
+        print(
+            f"[Pretrain] Multi-task encoder → backbone | loaded={_frac:.0%} "
+            f"missing={len(_missing)} unexpected={len(_unexpected)}"
+        )
     except Exception as exc:
         print(f"[Pretrain] Encoder copy skipped ({exc}).")
 
@@ -463,20 +416,22 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
     print(f"[Pretrain] Saved multi-task encoder checkpoint → {ckpt}")
 
     try:
-        _update_pretrain_report(args, {
-            "status": "completed",
-            "method": "multi_task",
-            "epochs": int(_epochs),
-            "checkpoint_path": str(ckpt),
-            "final_loss": float(history.get("loss", 0.0)) if isinstance(history, dict) else 0.0,
-        })
+        _update_pretrain_report(
+            args,
+            {
+                "status": "completed",
+                "method": "multi_task",
+                "epochs": int(_epochs),
+                "checkpoint_path": str(ckpt),
+                "final_loss": float(history.get("loss", 0.0)) if isinstance(history, dict) else 0.0,
+            },
+        )
     except Exception as exc:
         print(f"[Pretrain] WARN: failed to update multi_task pretrain report: {exc}")
     return model
 
 
-def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
-                              framework="lightly", run=None):
+def _run_pretrain_via_adapter(model, cache_path, n_features, args, device, framework="lightly", run=None):
     """Opt-in pretraining fast path: route through ``create_pretrain_adapter``.
 
     Used only when ``--pretrain-framework`` is explicitly non-"custom". The
@@ -484,8 +439,8 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
     window and returns a metrics dict; the supervised ``model`` is returned
     unchanged (external frameworks do not consume the in-house encoder).
     """
-    from training.pretrain_adapter import PretrainConfig, create_pretrain_adapter, run_pretrain_with_adapter
     from training.cache_integrity import _zarr_open_group
+    from training.pretrain_adapter import PretrainConfig, create_pretrain_adapter, run_pretrain_with_adapter
 
     _method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
     print(f"\n[Pretrain] framework={framework} | method={_method} | model={getattr(args, 'model', None)}")
@@ -530,7 +485,9 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
 
     try:
         results = run_pretrain_with_adapter(
-            adapter, cache_path, train_indices,
+            adapter,
+            cache_path,
+            train_indices,
             method=_method,
             seq_len=seq_len,
             n_features=int(n_features),
@@ -547,20 +504,23 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
             print(f"[Pretrain] Adapter encoder save skipped: {_save_exc}")
 
     try:
-        _update_pretrain_report(args, {
-            "model_name": getattr(args, "model", None),
-            "pretrain_enabled": True,
-            "status": "completed",
-            "method_requested": getattr(args, "_raw_pretrain_method", _method),
-            "method_actual": _method,
-            "framework": framework,
-            "cache_path": str(cache_path),
-            "source_windows": int(_source_n_total),
-            "trainable_windows_used_by_pretrain": int(n_total),
-            "adapter_metrics": results,
-            "checkpoint_path": str(cfg.save_path),
-            "loads_into_supervised_model": False,
-        })
+        _update_pretrain_report(
+            args,
+            {
+                "model_name": getattr(args, "model", None),
+                "pretrain_enabled": True,
+                "status": "completed",
+                "method_requested": getattr(args, "_raw_pretrain_method", _method),
+                "method_actual": _method,
+                "framework": framework,
+                "cache_path": str(cache_path),
+                "source_windows": int(_source_n_total),
+                "trainable_windows_used_by_pretrain": int(n_total),
+                "adapter_metrics": results,
+                "checkpoint_path": str(cfg.save_path),
+                "loads_into_supervised_model": False,
+            },
+        )
     except Exception as _rp_err:
         print(f"[Pretrain] WARN: failed to update pretrain report: {_rp_err}")
     print(f"[Pretrain] Adapter run complete | framework={framework} method={_method} | windows={n_total:,}")
@@ -568,28 +528,43 @@ def _run_pretrain_via_adapter(model, cache_path, n_features, args, device,
 
 
 def run_pretrain(model, cache_path, n_features, args, device, run=None):
-    _ensure_bound()
-    
+
     _pf = str(getattr(args, "pretrain_framework", "custom") or "custom").lower()
     _raw_method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
     _method = _normalize_pretrain_method(_raw_method)
-    
+
+    if _method == "none":
+        # Linear baselines (e.g. GLM) or any other model without a deep
+        # encoder cannot meaningfully run contrastive pretraining.  Skip
+        # the whole pipeline rather than fall back to BYOL, which would
+        # either no-op on a linear encoder or crash on missing dims.
+        print(
+            f"[Pretrain] method='none' - skipping pretraining for {args.model if hasattr(args, 'model') else 'this model'}."
+        )
+        return None
+
     if _method not in _VALID_PRETRAIN_METHODS:
-        print(f"\n[Pretrain] [!!!] WARNING: Requested method={_raw_method!r} collapsed to unknown method={_method!r}; falling back to 'byol'")
+        print(
+            f"\n[Pretrain] [!!!] WARNING: Requested method={_raw_method!r} collapsed to unknown method={_method!r}; falling back to 'byol'"
+        )
         _method = "byol"
-        
+
     args.pretrain_method = _method
     args._raw_pretrain_method = _raw_method
 
     if _pf != "custom":
         try:
             return _run_pretrain_via_adapter(
-                model, cache_path, n_features, args, device,
-                framework=_pf, run=run,
+                model,
+                cache_path,
+                n_features,
+                args,
+                device,
+                framework=_pf,
+                run=run,
             )
         except Exception as _pf_exc:
             print(f"[Pretrain] Adapter path unavailable ({_pf_exc}); falling back to built-in trainer.")
-    _ensure_bound()
 
     use_regime = getattr(args, "pretrain_regime", False) and _method == "tscl"
     _mode_labels = {
@@ -611,8 +586,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     handoff_min_delta = float(getattr(args, "pretrain_handoff_min_delta", 0.0))
     handoff_loss = float(getattr(args, "pretrain_handoff_loss", float("-inf")))
     handoff_enabled = handoff_patience > 0 or handoff_loss > float("-inf")
-    print(f"\n[Pretrain] {mode_str} | target_epochs={target_epochs}"
-          f"{' (handoff enabled)' if handoff_enabled else ''}")
+    print(f"\n[Pretrain] {mode_str} | target_epochs={target_epochs}{' (handoff enabled)' if handoff_enabled else ''}")
 
     # Reduce VRAM fragmentation (recommended by PyTorch OOM diagnostics)
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -636,10 +610,11 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     _bytes_per_window = int(n_features) * args.seq_len * 4
     try:
         import psutil as _psutil
+
         _free = _psutil.virtual_memory().available
     except Exception:
-        _free = 4 * 1024 ** 3                  # conservative fallback: 4 GiB
-    _ram_budget = max(1 * 1024 ** 3, int(_free * 0.75))  # use 75% of free RAM
+        _free = 4 * 1024**3  # conservative fallback: 4 GiB
+    _ram_budget = max(1 * 1024**3, int(_free * 0.75))  # use 75% of free RAM
     auto_windows = min(100_000, max(512, _ram_budget // _bytes_per_window))
     n_windows = _coerce_auto_int(
         getattr(args, "pretrain_sample_windows", "auto"),
@@ -650,12 +625,12 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     _rng = np.random.default_rng(_seed)
 
     if ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir():
-        _z      = _zarr_open_group(cache_path, mode="r")
+        _z = _zarr_open_group(cache_path, mode="r")
         n_total = min(int(_z["X"].shape[0]), int(_z["y"].shape[0]))
         X_reader, y_reader = _z["X"], _z["y"]
     else:
-        X_mmap   = np.load(_x_path(cache_path), mmap_mode="r")
-        y_mmap   = np.load(_y_path(cache_path), mmap_mode="r")
+        X_mmap = np.load(_x_path(cache_path), mmap_mode="r")
+        y_mmap = np.load(_y_path(cache_path), mmap_mode="r")
         n_total = min(len(X_mmap), len(y_mmap))
         X_reader, y_reader = X_mmap, y_mmap
 
@@ -682,6 +657,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         # Hard-example mining integration
         try:
             import json
+
             _he_path = Path("logs/hard_examples.json")
             if _he_path.exists():
                 _he_data = json.loads(_he_path.read_text(encoding="utf-8"))
@@ -692,17 +668,23 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                     _trainable_end = int(n_total)  # n_total already capped by _trainable_max_index
                     _valid_he = [i for i in _he_indices if 0 <= i < _trainable_end]
                     if len(_valid_he) < len(_he_indices):
-                        print(f"[Pretrain] Discarded {len(_he_indices) - len(_valid_he)} hard examples outside trainable window (leakage prevention)")
-                    _he_spans = [(i, i+1) for i in _valid_he[:int(n_windows * 0.2)]]  # max 20% hard examples
+                        print(
+                            f"[Pretrain] Discarded {len(_he_indices) - len(_valid_he)} hard examples outside trainable window (leakage prevention)"
+                        )
+                    _he_spans = [(i, i + 1) for i in _valid_he[: int(n_windows * 0.2)]]  # max 20% hard examples
                     if _he_spans:
-                        print(f"[Pretrain] Injected {len(_he_spans):,} hard examples from {len(_he_indices):,} total ({len(_valid_he)} valid).")
+                        print(
+                            f"[Pretrain] Injected {len(_he_spans):,} hard examples from {len(_he_indices):,} total ({len(_valid_he)} valid)."
+                        )
                         _hard_examples_injected += len(_he_spans)
                         spans.extend(_he_spans)
         except Exception as _he_e:
             print(f"[Pretrain] Hard example reuse failed: {_he_e}")
 
         return _read_pretrain_spans(
-            X_reader, y_reader, spans,
+            X_reader,
+            y_reader,
+            spans,
             seq_len=args.seq_len,
             n_features=n_features,
             progress_desc=desc,
@@ -718,43 +700,52 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             print(f"[Pretrain] Resume: loading existing multi-task encoder {Path(_ckpt_path).name}")
             return model
         _mt_model = _run_multi_task_pretrain(
-            model, windows, _ckpt_path, n_features, args, device,
+            model,
+            windows,
+            _ckpt_path,
+            n_features,
+            args,
+            device,
         )
         if _mt_model is not None:
             return _mt_model
         print("[Pretrain] Multi-task pretrainer unavailable; continuing with built-in trainer.")
 
-    ckpt   = str(Path(args.checkpoint_dir) / f"contrastive_encoder{'_regime' if use_regime else ''}.pt")
+    ckpt = str(Path(args.checkpoint_dir) / f"contrastive_encoder{'_regime' if use_regime else ''}.pt")
     _holdout_n = _promotion_holdout_n(_source_n_total, args)
     _embargo_n = _embargo_bars(args)
-    _update_pretrain_report(args, {
-        "model_name": getattr(args, "model", None),
-        "pretrain_enabled": True,
-        "status": "started",
-        "method_requested": getattr(args, "_raw_pretrain_method", _method),
-        "method_actual": _method,
-        "recommended_method_for_model": pretrain_method_for(getattr(args, "model", "")),
-        "regime_aware": bool(use_regime),
-        "cache_path": str(cache_path),
-        "source_windows": int(_source_n_total),
-        "trainable_windows_used_by_pretrain": int(n_total),
-        "pretrain_window": {"start_index": 0, "end_index_exclusive": int(n_total)},
-        "supervised_window": {
-            "start_index": 0,
-            "end_index_exclusive": int(max(0, _source_n_total - _holdout_n)),
-            "embargo_bars": int(_embargo_n),
+    _update_pretrain_report(
+        args,
+        {
+            "model_name": getattr(args, "model", None),
+            "pretrain_enabled": True,
+            "status": "started",
+            "method_requested": getattr(args, "_raw_pretrain_method", _method),
+            "method_actual": _method,
+            "recommended_method_for_model": pretrain_method_for(getattr(args, "model", "")),
+            "regime_aware": bool(use_regime),
+            "cache_path": str(cache_path),
+            "source_windows": int(_source_n_total),
+            "trainable_windows_used_by_pretrain": int(n_total),
+            "pretrain_window": {"start_index": 0, "end_index_exclusive": int(n_total)},
+            "supervised_window": {
+                "start_index": 0,
+                "end_index_exclusive": int(max(0, _source_n_total - _holdout_n)),
+                "embargo_bars": int(_embargo_n),
+            },
+            "promotion_holdout_window": {
+                "start_index": int(max(0, _source_n_total - _holdout_n)),
+                "end_index_exclusive": int(_source_n_total),
+                "reserved_windows": int(_holdout_n),
+            },
+            "holdout_safe": bool(n_total <= max(0, _source_n_total - _holdout_n)),
+            "sample_windows_per_block": int(n_windows),
+            "loaded_into_supervised_training": False,
         },
-        "promotion_holdout_window": {
-            "start_index": int(max(0, _source_n_total - _holdout_n)),
-            "end_index_exclusive": int(_source_n_total),
-            "reserved_windows": int(_holdout_n),
-        },
-        "holdout_safe": bool(n_total <= max(0, _source_n_total - _holdout_n)),
-        "sample_windows_per_block": int(n_windows),
-        "loaded_into_supervised_training": False,
-    })
+    )
     try:
         from pretrain.guardrails import PretrainGuardrails
+
         PretrainGuardrails().enforce_no_holdout_leakage(
             (0, int(n_total)),
             (int(max(0, _source_n_total - _holdout_n)), int(_source_n_total)),
@@ -778,11 +769,14 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         except Exception:
             _state = torch.load(ckpt, map_location=device, weights_only=True)
         _strict_load_report(_enc, _state, "PretrainResume", min_frac_loaded=0.6)
-        _update_pretrain_report(args, {
-            "status": "resume_loaded_existing",
-            "checkpoint_path": str(ckpt),
-            "quality_gate_result": "loaded_existing_checkpoint",
-        })
+        _update_pretrain_report(
+            args,
+            {
+                "status": "resume_loaded_existing",
+                "checkpoint_path": str(ckpt),
+                "quality_gate_result": "loaded_existing_checkpoint",
+            },
+        )
         return model
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     # Compute a VRAM-safe batch size for the contrastive trainer.
@@ -791,14 +785,15 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     # input_size ├ù hidden_size ├ù seq_len, so we budget conservatively.
     try:
         import torch as _torch
+
         _torch.cuda.synchronize(device)
-        torch.cuda.empty_cache()   # reclaim any fragmented VRAM before pretraining
+        torch.cuda.empty_cache()  # reclaim any fragmented VRAM before pretraining
         _vram_total = _torch.cuda.get_device_properties(device).total_memory
         _vram_free = _vram_total - _torch.cuda.memory_allocated(device)
     except Exception:
-        _vram_total = 8 * 1024 ** 3
-        _vram_free = 4 * 1024 ** 3
-    _bytes_per_sample = args.seq_len * n_features * 4     # FP32 input tensors
+        _vram_total = 8 * 1024**3
+        _vram_free = 4 * 1024**3
+    _bytes_per_sample = args.seq_len * n_features * 4  # FP32 input tensors
     # Single-pass methods: 1 grad pass. Cluster: 2. TSCL: 2ΓÇô3.
     if _method in _PRETRAIN_SINGLE_PASS:
         _n_passes = 1
@@ -811,7 +806,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         _safety_factor = 30 if use_regime else 20
     _pt_bs_vram = max(16, int(_vram_free * 0.25) // (_bytes_per_sample * _n_passes * _safety_factor))
     _pt_bs_vram = (_pt_bs_vram // 8) * 8
-    _vram_gb = _vram_total / (1024 ** 3)
+    _vram_gb = _vram_total / (1024**3)
     if _vram_gb <= 10:
         _max_bs = 256 if _method in _PRETRAIN_SINGLE_PASS else (128 if not use_regime else 64)
     elif _vram_gb <= 16:
@@ -850,7 +845,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     try:
         with torch.no_grad():
             _dummy = torch.zeros(2, args.seq_len, n_features, device=device)
-            _out   = encoder(_dummy)
+            _out = encoder(_dummy)
             if _out.ndim == 2:
                 encoder_dim = int(_out.shape[-1])
             elif _out.ndim >= 3:
@@ -869,33 +864,28 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         backbone_input = n_pairs * (f_per_pair + embed_dim) + _n_interaction
                     else:
                         backbone_input = n_features
-                    encoder_dim = _multitask_head_in(
-                        str(args.model).lower(), args, backbone_input
-                    )
+                    encoder_dim = _multitask_head_in(str(args.model).lower(), args, backbone_input)
                 else:
                     raise RuntimeError(
                         f"[Pretrain] Encoder output is 1D {_out.shape} with head=Identity; "
                         "cannot infer representation width."
                     )
             else:
-                raise RuntimeError(
-                    f"[Pretrain] Unexpected encoder output ndim={_out.ndim} "
-                    f"shape={tuple(_out.shape)}"
-                )
+                raise RuntimeError(f"[Pretrain] Unexpected encoder output ndim={_out.ndim} shape={tuple(_out.shape)}")
     finally:
         if _saved_head is not None:
             encoder.head = _saved_head
 
     _pt_aug = _make_pretrain_augmenter(args, n_features)
-    common = dict(
-        d_model     = encoder_dim,
-        proj_dim    = int(getattr(args, "pretrain_projection_dim", PRETRAIN.get("projection_dim", 256))),
-        temperature = float(getattr(args, "pretrain_temperature", PRETRAIN.get("temperature", 0.5))),
-        lr          = float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4))),
-        device      = str(device),
-        seed        = _seed,
-        aug         = _pt_aug,
-    )
+    common = {
+        "d_model": encoder_dim,
+        "proj_dim": int(getattr(args, "pretrain_projection_dim", PRETRAIN.get("projection_dim", 256))),
+        "temperature": float(getattr(args, "pretrain_temperature", PRETRAIN.get("temperature", 0.5))),
+        "lr": float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4))),
+        "device": str(device),
+        "seed": _seed,
+        "aug": _pt_aug,
+    }
 
     def _fresh_windows():
         """Sample a fresh multi-span block for pretraining."""
@@ -914,17 +904,20 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
 
     # Build trainer
     trainer_cls = _select_pretrain_trainer_class(_method, use_regime)
+    if trainer_cls is None:
+        # Pretraining was explicitly disabled (e.g. linear baseline GLM).
+        return None
     if trainer_cls is BYOLTrainer:
         trainer = BYOLTrainer(
-            encoder    = encoder,
-            d_model    = encoder_dim,
-            proj_dim   = int(getattr(args, "pretrain_projection_dim", PRETRAIN.get("projection_dim", 256))),
-            pred_dim   = int(getattr(args, "pretrain_pred_dim", 128)),
-            ema_decay  = float(getattr(args, "pretrain_ema_decay", PRETRAIN.get("ema_decay", 0.996))),
-            lr         = float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4))),
-            device     = str(device),
-            seed       = _seed,
-            aug        = _pt_aug,
+            encoder=encoder,
+            d_model=encoder_dim,
+            proj_dim=int(getattr(args, "pretrain_projection_dim", PRETRAIN.get("projection_dim", 256))),
+            pred_dim=int(getattr(args, "pretrain_pred_dim", 128)),
+            ema_decay=float(getattr(args, "pretrain_ema_decay", PRETRAIN.get("ema_decay", 0.996))),
+            lr=float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4))),
+            device=str(device),
+            seed=_seed,
+            aug=_pt_aug,
         )
     elif trainer_cls is MaskedReconstructionTrainer:
         trainer = MaskedReconstructionTrainer(
@@ -1002,11 +995,15 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     # With n_windowsΓëê2270 (RAM limit on 16 GB), 3 blocks gives ~6,800 windows and
     # ~26 batches per epoch ΓÇö enough gradient signal to actually move the loss.
     auto_blocks = max(1, 6_000 // max(1, n_windows)) if _method in _PRETRAIN_MULTI_BLOCK else 1
-    _n_blocks = _coerce_auto_int(
-        getattr(args, "pretrain_blocks_per_epoch", "auto"),
-        auto_blocks,
-        minimum=1,
-    ) if _method in _PRETRAIN_MULTI_BLOCK else 1
+    _n_blocks = (
+        _coerce_auto_int(
+            getattr(args, "pretrain_blocks_per_epoch", "auto"),
+            auto_blocks,
+            minimum=1,
+        )
+        if _method in _PRETRAIN_MULTI_BLOCK
+        else 1
+    )
     effective_windows = int(_n_blocks * n_windows)
     print(
         f"[Pretrain] windows_per_block={n_windows:,} | blocks_per_epoch={_n_blocks} "
@@ -1031,9 +1028,11 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 for _blk in range(_n_blocks):
                     _w, _y = _fresh_windows()
                     _last_w = _w
-                    _is_last_block = (_blk == _n_blocks - 1)
+                    _is_last_block = _blk == _n_blocks - 1
                     _h = trainer.pretrain(
-                        _w, epochs=1, batch_size=pt_bs,
+                        _w,
+                        epochs=1,
+                        batch_size=pt_bs,
                         checkpoint_path=ckpt,
                         silent=not _is_last_block,
                     )
@@ -1055,8 +1054,10 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                             _w = np.concatenate([_w, _w[_ext_idx]], axis=0)
                             _y = np.concatenate([_y, _y[_ext_idx]], axis=0)
                             rl = np.concatenate([rl, rl[_ext_idx]], axis=0)
-                            print(f"[Pretrain] Regime oversample capped at {_max_extra:,} windows "
-                                  f"(base={len(extreme_mask):,}, extreme={int(extreme_mask.sum()):,})")
+                            print(
+                                f"[Pretrain] Regime oversample capped at {_max_extra:,} windows "
+                                f"(base={len(extreme_mask):,}, extreme={int(extreme_mask.sum()):,})"
+                            )
                     trainer.regime_labels = rl
                 _h = trainer.pretrain(_w, epochs=1, batch_size=pt_bs, checkpoint_path=ckpt)
                 ls = _h["loss"][0]
@@ -1077,24 +1078,20 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 _extra = ""
                 if _diag:
                     if "align" in _diag:
-                        _extra = (
-                            f" | align={_diag.get('align', 0):.3f} "
-                            f"unif={_diag.get('unif', 0):.3f}"
-                        )
+                        _extra = f" | align={_diag.get('align', 0):.3f} unif={_diag.get('unif', 0):.3f}"
                     elif "masked_mse" in _diag:
                         _extra = f" | masked_mse={_diag.get('masked_mse', 0):.4f}"
                     elif "recon_loss" in _diag:
-                        _extra = (
-                            f" | recon={_diag.get('recon_loss', 0):.4f} "
-                            f"kl={_diag.get('kl', 0):.4f}"
-                        )
+                        _extra = f" | recon={_diag.get('recon_loss', 0):.4f} kl={_diag.get('kl', 0):.4f}"
                     elif "forecast_mse" in _diag:
                         _extra = f" | forecast_mse={_diag.get('forecast_mse', 0):.4f}"
                     elif "drift_margin" in _diag:
                         _extra = f" | drift_dist={_diag.get('drift_margin', 0):.4f}"
-                print(f"[Pretrain] Ep {_ep+1:2d}/{target_epochs} | loss={ls:.4f}"
-                      f"  ({_n_blocks} blocks ├ù {n_windows:,} windows = "
-                      f"{_n_blocks * n_windows:,} total){_extra}")
+                print(
+                    f"[Pretrain] Ep {_ep + 1:2d}/{target_epochs} | loss={ls:.4f}"
+                    f"  ({_n_blocks} blocks ├ù {n_windows:,} windows = "
+                    f"{_n_blocks * n_windows:,} total){_extra}"
+                )
                 if run and hasattr(run, "log"):
                     _log = {
                         "pt_loss": ls,
@@ -1104,25 +1101,42 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         "pt_lr": float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4))),
                     }
                     if _diag:
-                        _log.update({f"pt_{k}": v for k, v in _diag.items()
-                                     if k in (
-                                         "align", "unif", "embed_std", "masked_mse",
-                                         "recon_loss", "kl", "forecast_mse", "drift_margin",
-                                     )})
+                        _log.update(
+                            {
+                                f"pt_{k}": v
+                                for k, v in _diag.items()
+                                if k
+                                in (
+                                    "align",
+                                    "unif",
+                                    "embed_std",
+                                    "masked_mse",
+                                    "recon_loss",
+                                    "kl",
+                                    "forecast_mse",
+                                    "drift_margin",
+                                )
+                            }
+                        )
                     _safe_wandb_log(run, _log)
             else:
                 al = _h.get("align", [0.0])[-1]
-                un = _h.get("unif",  [0.0])[-1]
+                un = _h.get("unif", [0.0])[-1]
                 std = _h.get("embed_std", [0.0])[-1] if "embed_std" in _h else 0.0
                 final_align = float(al)
                 final_unif = float(un)
                 final_embed_std = float(std)
                 _latest_diag = {"align": final_align, "unif": final_unif, "embed_std": final_embed_std}
-                print(f"[Pretrain] Ep {_ep+1:2d}/{target_epochs} | loss={ls:.3f} | align={al:.3f} | unif={un:.3f}")
-                _safe_wandb_log(run, {
-                    "pt_loss": ls, "pt_align": al, "pt_unif": un,
-                    "pt_temp": trainer.temp.item(),
-                })
+                print(f"[Pretrain] Ep {_ep + 1:2d}/{target_epochs} | loss={ls:.3f} | align={al:.3f} | unif={un:.3f}")
+                _safe_wandb_log(
+                    run,
+                    {
+                        "pt_loss": ls,
+                        "pt_align": al,
+                        "pt_unif": un,
+                        "pt_temp": trainer.temp.item(),
+                    },
+                )
 
             _improved = ls < (_best_loss - handoff_min_delta)
             if _improved:
@@ -1130,7 +1144,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 _stale_epochs = 0
                 if hasattr(trainer, "save_encoder"):
                     chk_path = Path(ckpt)
-                    ep_ckpt = chk_path.with_name(f"{chk_path.stem}_ep{_ep+1}{chk_path.suffix}")
+                    ep_ckpt = chk_path.with_name(f"{chk_path.stem}_ep{_ep + 1}{chk_path.suffix}")
                     trainer.save_encoder(str(ep_ckpt))
             else:
                 _stale_epochs += 1
@@ -1144,45 +1158,58 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
 
                 if handoff_patience > 0 and _stale_epochs >= handoff_patience:
                     # Resolve metrics for handoff logic
-                    cur_std = _diag.get("embed_std", 0.0) if _method in _PRETRAIN_MULTI_BLOCK and _diag else (std if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
-                    cur_unif = _diag.get("unif", 0.0) if _method in _PRETRAIN_MULTI_BLOCK and _diag else (un if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
+                    cur_std = (
+                        _diag.get("embed_std", 0.0)
+                        if _method in _PRETRAIN_MULTI_BLOCK and _diag
+                        else (std if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
+                    )
+                    cur_unif = (
+                        _diag.get("unif", 0.0)
+                        if _method in _PRETRAIN_MULTI_BLOCK and _diag
+                        else (un if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
+                    )
 
                     from pretrain.handoff_logic import PretrainHandoffGate
+
                     # Match runner discard cutoffs (stricter than class defaults).
                     _handoff_gate = PretrainHandoffGate(std_threshold=0.015, max_uniformity=-0.1)
                     # uniformity here is negative for good TSCL; gate treats high as bad.
                     # For plateau handoff we only require std diversity when available.
-                    quality_ok = (cur_std > 0.015 or cur_std == 0.0) and (
-                        cur_unif < -0.5 or cur_unif == 0.0
-                    )
-                    if quality_ok and (
-                        cur_std == 0.0 or _handoff_gate.evaluate_representation_quality(cur_std, None)
-                    ):
-                        print(f"[Pretrain] Handoff: plateau ({_stale_epochs} stale epochs). Quality met (std={cur_std:.4f}, unif={cur_unif:.2f}).")
+                    quality_ok = (cur_std > 0.015 or cur_std == 0.0) and (cur_unif < -0.5 or cur_unif == 0.0)
+                    if quality_ok and (cur_std == 0.0 or _handoff_gate.evaluate_representation_quality(cur_std, None)):
+                        print(
+                            f"[Pretrain] Handoff: plateau ({_stale_epochs} stale epochs). Quality met (std={cur_std:.4f}, unif={cur_unif:.2f})."
+                        )
                         _stopped_early = True
                         break
                     else:
-                        print(f"[Pretrain] Handoff skipped: plateau reached but quality not met (std={cur_std:.4f}, unif={cur_unif:.2f}).")
+                        print(
+                            f"[Pretrain] Handoff skipped: plateau reached but quality not met (std={cur_std:.4f}, unif={cur_unif:.2f})."
+                        )
 
     except RepresentationCollapseError as e:
         print(f"\n[Pretrain] ABORTED: {e}")
         print("[Pretrain] Falling back to random initialization.")
-        _update_pretrain_report(args, {
-            "status": "aborted",
-            "quality_gate_result": "representation_collapse",
-            "error": str(e),
-            "epochs_completed": len(all_losses),
-            "loss_history": [float(x) for x in all_losses],
-            "checkpoint_path": str(ckpt),
-        })
+        _update_pretrain_report(
+            args,
+            {
+                "status": "aborted",
+                "quality_gate_result": "representation_collapse",
+                "error": str(e),
+                "epochs_completed": len(all_losses),
+                "loss_history": [float(x) for x in all_losses],
+                "checkpoint_path": str(ckpt),
+            },
+        )
         model = build_model(args.model, n_features, args).to(device)
         return model
 
-    # Quality gate — embedding spread for reconstruction-style methods; uniformity for contrastive
+    # Quality gate - embedding spread for reconstruction-style methods; uniformity for contrastive
     _quality_gate = "passed"
     _handoff_gate = None
     try:
         from pretrain.handoff_logic import PretrainHandoffGate
+
         _handoff_gate = PretrainHandoffGate(std_threshold=0.015, max_uniformity=-0.1)
     except Exception:
         _handoff_gate = None
@@ -1197,15 +1224,18 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 f"\n[Pretrain] Quality Gate Failed: {_method.upper()} embeddings collapsed "
                 f"(std={_std:.6f}). Discarding pretrain weights."
             )
-            _update_pretrain_report(args, {
-                "status": "discarded",
-                "quality_gate_result": "failed_embedding_collapse",
-                "epochs_completed": len(all_losses),
-                "average_pretrain_loss": float(sum(all_losses) / max(len(all_losses), 1)),
-                "final_embedding_std": final_embed_std,
-                "diagnostics": _latest_diag,
-                "checkpoint_path": str(ckpt),
-            })
+            _update_pretrain_report(
+                args,
+                {
+                    "status": "discarded",
+                    "quality_gate_result": "failed_embedding_collapse",
+                    "epochs_completed": len(all_losses),
+                    "average_pretrain_loss": float(sum(all_losses) / max(len(all_losses), 1)),
+                    "final_embedding_std": final_embed_std,
+                    "diagnostics": _latest_diag,
+                    "checkpoint_path": str(ckpt),
+                },
+            )
             model = build_model(args.model, n_features, args).to(device)
             return model
         if _handoff_gate is not None:
@@ -1221,21 +1251,23 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         _unif = float(final_unif or 0.0)
         if _unif > -0.5:
             _quality_gate = "warning_low_uniformity"
-            print(f"\n[Pretrain] WARNING: Low uniformity ({_unif:.2f}). "
-                  "Embeddings are clustered.")
+            print(f"\n[Pretrain] WARNING: Low uniformity ({_unif:.2f}). Embeddings are clustered.")
             if _unif > -0.1:
                 print("[Pretrain] Quality Gate Failed. Discarding pretrain weights.")
-                _update_pretrain_report(args, {
-                    "status": "discarded",
-                    "quality_gate_result": "failed_low_uniformity",
-                    "epochs_completed": len(all_losses),
-                    "average_pretrain_loss": float(sum(all_losses) / max(len(all_losses), 1)),
-                    "alignment": final_align,
-                    "uniformity": final_unif,
-                    "final_embedding_std": final_embed_std,
-                    "diagnostics": _latest_diag,
-                    "checkpoint_path": str(ckpt),
-                })
+                _update_pretrain_report(
+                    args,
+                    {
+                        "status": "discarded",
+                        "quality_gate_result": "failed_low_uniformity",
+                        "epochs_completed": len(all_losses),
+                        "average_pretrain_loss": float(sum(all_losses) / max(len(all_losses), 1)),
+                        "alignment": final_align,
+                        "uniformity": final_unif,
+                        "final_embedding_std": final_embed_std,
+                        "diagnostics": _latest_diag,
+                        "checkpoint_path": str(ckpt),
+                    },
+                )
                 model = build_model(args.model, n_features, args).to(device)
                 return model
 
@@ -1250,44 +1282,51 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         _he_path = Path("logs/hard_examples.json")
         if _he_path.exists():
             import json
+
             _he_data = json.loads(_he_path.read_text(encoding="utf-8"))
             _he_indices = _he_data.get("indices", [])
             if _he_indices:
                 # Load full training data to compute vulnerability
                 # Use the same data reader as pretraining
+                x_reader = getattr(trainer, "train_loader", type("", (), {"dataset": []})).dataset
                 _X_full = np.asarray(x_reader[:n_total])  # (n_total, seq_len, n_features)
                 _miner = PretrainHardExampleMiner()
                 _vuln = _miner.compute_feature_vulnerability(_X_full, _he_indices, method="gradient_norm")
                 _miner.save_vulnerability_scores(_vuln)
-                print(f"[Pretrain] Computed feature vulnerability for {len(_vuln)} features -> logs/hard_feature_dims.json")
+                print(
+                    f"[Pretrain] Computed feature vulnerability for {len(_vuln)} features -> logs/hard_feature_dims.json"
+                )
     except Exception as _vuln_e:
         print(f"[Pretrain] Feature vulnerability computation failed: {_vuln_e}")
 
-    _update_pretrain_report(args, {
-        "status": "completed",
-        "method": _method,
-        "regime_aware": bool(use_regime),
-        "epochs_requested": int(target_epochs),
-        "epochs_completed": len(all_losses),
-        "stopped_early_for_handoff": bool(_stopped_early),
-        "handoff": {
-            "enabled": bool(handoff_enabled),
-            "patience": int(handoff_patience),
-            "min_delta": float(handoff_min_delta),
-            "loss_threshold": None if handoff_loss == float("-inf") else float(handoff_loss),
+    _update_pretrain_report(
+        args,
+        {
+            "status": "completed",
+            "method": _method,
+            "regime_aware": bool(use_regime),
+            "epochs_requested": int(target_epochs),
+            "epochs_completed": len(all_losses),
+            "stopped_early_for_handoff": bool(_stopped_early),
+            "handoff": {
+                "enabled": bool(handoff_enabled),
+                "patience": int(handoff_patience),
+                "min_delta": float(handoff_min_delta),
+                "loss_threshold": None if handoff_loss == float("-inf") else float(handoff_loss),
+            },
+            "average_pretrain_loss": float(avg_loss),
+            "final_pretrain_loss": float(all_losses[-1]) if all_losses else None,
+            "loss_history": [float(x) for x in all_losses],
+            "alignment": final_align,
+            "uniformity": final_unif,
+            "final_embedding_std": final_embed_std,
+            "diagnostics": _latest_diag,
+            "quality_gate_result": _quality_gate,
+            "checkpoint_path": str(ckpt),
+            "batch_size": int(pt_bs),
+            "blocks_per_epoch": int(_n_blocks),
+            "effective_windows_per_epoch": int(effective_windows),
+            "hard_examples_injected": int(_hard_examples_injected),
         },
-        "average_pretrain_loss": float(avg_loss),
-        "final_pretrain_loss": float(all_losses[-1]) if all_losses else None,
-        "loss_history": [float(x) for x in all_losses],
-        "alignment": final_align,
-        "uniformity": final_unif,
-        "final_embedding_std": final_embed_std,
-        "diagnostics": _latest_diag,
-        "quality_gate_result": _quality_gate,
-        "checkpoint_path": str(ckpt),
-        "batch_size": int(pt_bs),
-        "blocks_per_epoch": int(_n_blocks),
-        "effective_windows_per_epoch": int(effective_windows),
-        "hard_examples_injected": int(_hard_examples_injected),
-    })
+    )
     return model

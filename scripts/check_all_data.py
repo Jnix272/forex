@@ -3,9 +3,9 @@ from pathlib import Path
 
 import polars as pl
 
-print("\n" + "="*50)
+print("\n" + "=" * 50)
 print("  DATASET AUDIT ")
-print("="*50)
+print("=" * 50)
 
 # 1. Historical News
 news_file = Path("data/raw/news/historical_news_combined.parquet")
@@ -45,7 +45,7 @@ ca_dir = Path("data/raw/cross_asset")
 if ca_dir.exists():
     ca_files = list(ca_dir.glob("*.parquet"))
     print(f"\n[CROSS ASSET] {len(ca_files)} symbols")
-    for f in sorted(ca_files)[:3]: # just sample a few
+    for f in sorted(ca_files)[:3]:  # just sample a few
         df = pl.read_parquet(f)
         print(f"  {f.stem}: {len(df):,} rows ({df['timestamp_utc'].min()} -> {df['timestamp_utc'].max()})")
     if len(ca_files) > 3:
@@ -70,4 +70,4 @@ if duk_dir.exists():
 else:
     print("  Not found")
 
-print("\n" + "="*50)
+print("\n" + "=" * 50)

@@ -32,11 +32,12 @@ DEFAULT_CONFIG = _ROOT / "config" / "run.yaml"
 
 def get_python_exe():
     from scripts._python_env import python_exe as _resolve
+
     return _resolve()
 
 
 def _label_horizon_bars() -> int:
-    """Base LH × max LABEL_REGIME horizon mults + delay (matches cv_splits floor)."""
+    """Base LH x max LABEL_REGIME horizon mults + delay (matches cv_splits floor)."""
     try:
         from config.settings import LABELING
         from labeling.rl_reward_labeling import max_label_horizon_mult
@@ -70,9 +71,7 @@ def _assert_price_data_fresh(pair: str, window_end: datetime, max_stale_days: in
         session_only=False,
     )
     if df is None or len(df) == 0:
-        raise RuntimeError(
-            f"No price data for {pair} in {probe_start}..{probe_end} after download"
-        )
+        raise RuntimeError(f"No price data for {pair} in {probe_start}..{probe_end} after download")
     ts_col = "timestamp_utc" if "timestamp_utc" in df.columns else None
     if ts_col:
         last_ts = pd.Timestamp(df[ts_col].max()).tz_convert("UTC")
@@ -84,8 +83,7 @@ def _assert_price_data_fresh(pair: str, window_end: datetime, max_stale_days: in
             f"Stale price data for {pair}: last tick {last_ts.isoformat()} "
             f"< required {min_ok.isoformat()} (window end {window_end.isoformat()})"
         )
-    print(f"[Freshness] {pair} last tick {last_ts.isoformat()} (ok for window end "
-          f"{window_end.date()})")
+    print(f"[Freshness] {pair} last tick {last_ts.isoformat()} (ok for window end {window_end.date()})")
 
 
 def write_temp_finetune_config(
@@ -103,8 +101,11 @@ def write_temp_finetune_config(
     config["training"]["resume"] = False
     config["training"]["val_split"] = 0.05
     config.setdefault("walk_forward", {})["enabled"] = False
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix="_finetune.yaml", delete=False, dir=str(_ROOT / "config"),
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        mode="w",
+        suffix="_finetune.yaml",
+        delete=False,
+        dir=str(_ROOT / "config"),
     )
     yaml.dump(config, tmp, sort_keys=False)
     tmp.close()
@@ -125,15 +126,21 @@ def run_pipeline(pair: str, lookback_days: int):
     python_exe = get_python_exe()
 
     print(f"\n[{now_utc.isoformat()}] Starting Continuous Fine-Tuning Pipeline")
-    print(f"Target Window: {start_str} -> {end_str} for pair {pair} "
-          f"(end trimmed by label_horizon={horizon} + embargo={embargo} bars)\n")
+    print(
+        f"Target Window: {start_str} -> {end_str} for pair {pair} "
+        f"(end trimmed by label_horizon={horizon} + embargo={embargo} bars)\n"
+    )
 
     print(">>> 1. Fetching Price Data (OHLCV) ...")
     cmd_price = [
-        python_exe, "scripts/download_data.py",
-        "--pairs", pair,
-        "--start", start_str,
-        "--end", end_str,
+        python_exe,
+        "scripts/download_data.py",
+        "--pairs",
+        pair,
+        "--start",
+        start_str,
+        "--end",
+        end_str,
         "--no-cross-asset",
     ]
     subprocess.run(cmd_price, cwd=str(_ROOT), check=True)
@@ -141,10 +148,14 @@ def run_pipeline(pair: str, lookback_days: int):
 
     print("\n>>> 2. Fetching Macroeconomic News ...")
     cmd_news = [
-        python_exe, "scripts/download_historical_news.py",
-        "--pairs", pair,
-        "--start", start_str,
-        "--end", end_str,
+        python_exe,
+        "scripts/download_historical_news.py",
+        "--pairs",
+        pair,
+        "--start",
+        start_str,
+        "--end",
+        end_str,
         "--append",
     ]
     subprocess.run(cmd_news, cwd=str(_ROOT), check=True)
@@ -153,8 +164,10 @@ def run_pipeline(pair: str, lookback_days: int):
     tmp_cfg = write_temp_finetune_config(DEFAULT_CONFIG, start_str, end_str, epochs=1)
     try:
         cmd_train = [
-            python_exe, "training/train_gpu.py",
-            "--config", str(tmp_cfg),
+            python_exe,
+            "training/train_gpu.py",
+            "--config",
+            str(tmp_cfg),
             "--finetune-warm-start",
         ]
         flag = active_checkpoint_dir(DEFAULT_CONFIG) / "needs_retrain.flag"
@@ -198,8 +211,9 @@ def main():
             target_time += timedelta(days=1)
 
         sleep_seconds = (target_time - now_utc).total_seconds()
-        print(f"[{now_utc.isoformat()}] Sleeping for {sleep_seconds/3600:.2f} hours until "
-              f"{target_time.isoformat()} ...")
+        print(
+            f"[{now_utc.isoformat()}] Sleeping for {sleep_seconds / 3600:.2f} hours until {target_time.isoformat()} ..."
+        )
         time.sleep(sleep_seconds)
 
         try:

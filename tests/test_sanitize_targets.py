@@ -1,4 +1,5 @@
 """Sanitize / match_target_shape must not silently zero non-finite targets."""
+
 from __future__ import annotations
 
 import torch
@@ -13,7 +14,7 @@ from training.supervised_loop import (
 
 def test_sanitize_drops_bad_targets_with_counter_and_warning(capsys):
     reset_sanitize_stats()
-    xb = torch.tensor([[[float("nan"), 1.0], [2.0, 3.0]]])  # (1, 2, 2) — one bad feature
+    xb = torch.tensor([[[float("nan"), 1.0], [2.0, 3.0]]])  # (1, 2, 2) - one bad feature
     # batch of 2: first target NaN, second fine
     xb = torch.stack(
         [
@@ -25,7 +26,7 @@ def test_sanitize_drops_bad_targets_with_counter_and_warning(capsys):
     y_cls = torch.tensor([0.0, 1.0])
     y_conf = torch.tensor([0.5, 0.5])
 
-    xb_o, yb_o, y_cls_o, y_conf_o, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
+    _xb_o, yb_o, _y_cls_o, _y_conf_o, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
 
     assert keep is not None
     assert keep.tolist() == [False, True]

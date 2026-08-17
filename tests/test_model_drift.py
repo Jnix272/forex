@@ -2,6 +2,7 @@
 Tests for drift.model_drift (Improvement #5): champion-challenger harness,
 canary rollout, automated rollback, and the orchestrator.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -32,6 +33,7 @@ def bad_trades():
 # ═════════════════════════════════════════════════════════════════════════════
 # ModelStats
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_model_stats_rolls_window():
     s = ModelStats("m", maxlen=10)
@@ -72,6 +74,7 @@ def test_model_stats_psr_bounds():
 # ═════════════════════════════════════════════════════════════════════════════
 # Champion-challenger harness
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_harness_challenger_wins(good_trades, bad_trades):
     h = ChampionChallengerHarness("champ", ["chal"])
@@ -128,6 +131,7 @@ def test_harness_errors_tracked():
 # Canary rollout
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_canary_starts_at_min_fraction():
     c = CanaryRollout("champ", "chal")
     assert c.fraction == pytest.approx(0.05)
@@ -144,10 +148,10 @@ def test_canary_escalate_and_deescalate():
     c = CanaryRollout("champ", "chal", min_fraction=0.1, max_fraction=0.8, step=0.1)
     for _ in range(10):
         c.escalate()
-    assert c.fraction == pytest.approx(0.8)   # clamped at max
+    assert c.fraction == pytest.approx(0.8)  # clamped at max
     for _ in range(10):
         c.deescalate()
-    assert c.fraction == pytest.approx(0.1)   # clamped at min
+    assert c.fraction == pytest.approx(0.1)  # clamped at min
 
 
 def test_canary_full_route():
@@ -172,14 +176,13 @@ def test_canary_status_shape():
 # Automated rollback
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_rollback_fires_on_drawdown():
-    mon = AutomatedRollbackMonitor(
-        "model", config=RollbackConfig(max_drawdown_pct=0.05, min_trades=10)
-    )
+    mon = AutomatedRollbackMonitor("model", config=RollbackConfig(max_drawdown_pct=0.05, min_trades=10))
     mon.set_baseline(error_rate=0.1)
     alert = None
     eq = 1000.0
-    for i in range(30):
+    for _i in range(30):
         pnl = -50.0  # steady losses -> deep drawdown
         eq = max(eq + pnl, 1.0)
         alert = mon.on_trade_closed(pnl, equity=eq) or alert
@@ -189,12 +192,10 @@ def test_rollback_fires_on_drawdown():
 
 
 def test_rollback_fires_once():
-    mon = AutomatedRollbackMonitor(
-        "model", config=RollbackConfig(max_drawdown_pct=0.01, min_trades=5)
-    )
+    mon = AutomatedRollbackMonitor("model", config=RollbackConfig(max_drawdown_pct=0.01, min_trades=5))
     eq = 1000.0
     alerts = []
-    for i in range(50):
+    for _i in range(50):
         eq = max(eq - 50, 1.0)
         a = mon.on_trade_closed(-50.0, equity=eq)
         if a:
@@ -204,26 +205,31 @@ def test_rollback_fires_once():
 
 def test_rollback_not_enough_trades():
     mon = AutomatedRollbackMonitor("model", config=RollbackConfig(min_trades=100))
-    for i in range(10):
+    for _i in range(10):
         assert mon.on_trade_closed(-1.0, equity=1000.0) is None
 
 
 def test_rollback_error_spike():
     mon = AutomatedRollbackMonitor(
-        "model", config=RollbackConfig(
-            max_drawdown_pct=0.99, min_psr=0.0, min_sharpe=-99.0,
-            error_spike_ratio=2.0, min_baseline_errors=5, min_trades=10,
-        )
+        "model",
+        config=RollbackConfig(
+            max_drawdown_pct=0.99,
+            min_psr=0.0,
+            min_sharpe=-99.0,
+            error_spike_ratio=2.0,
+            min_baseline_errors=5,
+            min_trades=10,
+        ),
     )
     mon.set_baseline(error_rate=0.10)
     # good trades to keep drawdown/psr/sharpe quiet
-    for i in range(10):
+    for i in range(10):  # noqa: B007
         mon.on_trade_closed(50.0, equity=5000.0)
     for i in range(20):
-        mon.on_prediction_error(i % 5 == 0)  # 20% error rate = 2× baseline
+        mon.on_prediction_error(i % 5 == 0)  # 20% error rate = 2x baseline
     alert = mon._check() if len(mon._live.errors) >= 5 else None
     # 20% vs 10% baseline exactly at ratio → boundary; force clearly above
-    for i in range(10):
+    for i in range(10):  # noqa: B007
         mon.on_prediction_error(True)
     alert = mon._check()
     assert alert is not None
@@ -233,11 +239,12 @@ def test_rollback_error_spike():
 def test_rollback_callback_invoked():
     calls = []
     mon = AutomatedRollbackMonitor(
-        "model", config=RollbackConfig(max_drawdown_pct=0.01, min_trades=5),
+        "model",
+        config=RollbackConfig(max_drawdown_pct=0.01, min_trades=5),
         rollback_callback=lambda a: calls.append(a["model_id"]),
     )
     eq = 1000.0
-    for i in range(20):
+    for _i in range(20):
         eq = max(eq - 40, 1.0)
         mon.on_trade_closed(-40.0, equity=eq)
     assert calls == ["model"]
@@ -245,11 +252,12 @@ def test_rollback_callback_invoked():
 
 def test_rollback_healthy_no_fire():
     mon = AutomatedRollbackMonitor(
-        "model", config=RollbackConfig(max_drawdown_pct=0.2, min_psr=0.0, min_sharpe=-99.0),
+        "model",
+        config=RollbackConfig(max_drawdown_pct=0.2, min_psr=0.0, min_sharpe=-99.0),
     )
     mon.set_baseline(error_rate=0.1)
     eq = 1000.0
-    for i in range(50):
+    for _i in range(50):
         eq += 20.0
         mon.on_prediction_error(False)
         assert mon.on_trade_closed(20.0, equity=eq) is None
@@ -258,6 +266,7 @@ def test_rollback_healthy_no_fire():
 # ═════════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_run_model_drift_check_alert(good_trades, bad_trades):
     res = run_model_drift_check(

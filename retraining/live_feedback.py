@@ -92,8 +92,7 @@ class LiveFeedbackStore:
         """Return timestamps of hard examples for priority sampling."""
         return [ex.get("ts", "") for ex in self._hard_examples]
 
-    def get_priority_weights(self, n_samples: int, base_timestamps: np.ndarray,
-                             hard_boost: float = 3.0) -> np.ndarray:
+    def get_priority_weights(self, n_samples: int, base_timestamps: np.ndarray, hard_boost: float = 3.0) -> np.ndarray:
         """Generate sampling weights that oversample hard examples.
 
         Args:

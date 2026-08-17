@@ -63,9 +63,17 @@ DEFAULT_ABLATION_PLAN: list[dict[str, Any]] = [
     {"name": "full_features", "drop_groups": [], "purpose": "Reference run."},
     {"name": "no_sentiment", "drop_groups": ["sentiment", "news"], "purpose": "Verify news/sentiment edge."},
     {"name": "no_cross_asset", "drop_groups": ["cross_asset", "intermarket"], "purpose": "Verify external asset edge."},
-    {"name": "no_orderbook_proxy", "drop_groups": ["orderbook", "microstructure"], "purpose": "Verify synthetic/orderbook proxy value."},
+    {
+        "name": "no_orderbook_proxy",
+        "drop_groups": ["orderbook", "microstructure"],
+        "purpose": "Verify synthetic/orderbook proxy value.",
+    },
     {"name": "no_macro", "drop_groups": ["macro", "calendar", "fred"], "purpose": "Verify macro feature value."},
-    {"name": "price_only", "keep_groups": ["price", "returns", "volatility"], "purpose": "Baseline against simple price dynamics."},
+    {
+        "name": "price_only",
+        "keep_groups": ["price", "returns", "volatility"],
+        "purpose": "Baseline against simple price dynamics.",
+    },
 ]
 
 
@@ -144,16 +152,13 @@ def classification_calibration_metrics(
         }
 
     n_classes = max(len(p) for p in probs)
-    bins = [
-        {"lo": i / n_bins, "hi": (i + 1) / n_bins, "n": 0, "conf_sum": 0.0, "correct": 0}
-        for i in range(n_bins)
-    ]
+    bins = [{"lo": i / n_bins, "hi": (i + 1) / n_bins, "n": 0, "conf_sum": 0.0, "correct": 0} for i in range(n_bins)]
     correct = 0
     conf_sum = 0.0
     brier_sum = 0.0
     nll_sum = 0.0
 
-    for label, row in zip(labels, probs):
+    for label, row in zip(labels, probs, strict=False):
         pred = max(range(len(row)), key=lambda i: row[i])
         conf = float(row[pred])
         hit = int(pred == label)
@@ -231,15 +236,7 @@ def live_use_score(row: Mapping[str, Any]) -> float:
     ece = abs(float(row.get("ece", 0.25) or 0.0))
     disagreement = abs(float(row.get("disagreement", 0.0) or 0.0))
     promoted = 1.0 if row.get("promoted") else 0.0
-    return (
-        3.0 * sharpe
-        - 2.0 * drawdown
-        - 0.02 * turnover
-        - 0.001 * latency
-        - 2.0 * ece
-        - 0.5 * disagreement
-        + promoted
-    )
+    return 3.0 * sharpe - 2.0 * drawdown - 0.02 * turnover - 0.001 * latency - 2.0 * ece - 0.5 * disagreement + promoted
 
 
 def model_leaderboard(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:

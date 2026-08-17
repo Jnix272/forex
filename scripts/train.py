@@ -1,7 +1,7 @@
 """
 scripts/train.py
 ================
-Simple entry point for GPU training — wraps training/train_gpu.py.
+Simple entry point for GPU training - wraps training/train_gpu.py.
 
 Usage (PowerShell):
   .\\.venv-gpu\\Scripts\\python.exe scripts\\train.py
@@ -32,6 +32,7 @@ PRICE_ROOT = _ROOT / "data" / "raw" / "dukascopy"
 
 def _python_exe() -> str:
     from scripts._python_env import python_exe as _resolve
+
     return _resolve()
 
 
@@ -82,18 +83,12 @@ def warn_optional_data(cfg: dict) -> list[str]:
         )
     if not ECO_CSV.is_file():
         warnings.append(
-            f"Economic calendar not found: {ECO_CSV}\n"
-            "  Eco features (eco_act/eco_fc/eco_surprise) will be empty."
+            f"Economic calendar not found: {ECO_CSV}\n  Eco features (eco_act/eco_fc/eco_surprise) will be empty."
         )
     if not COT_PARQUET.is_file():
-        warnings.append(
-            f"COT parquet not found: {COT_PARQUET}\n"
-            "  COT positioning features will be unavailable."
-        )
+        warnings.append(f"COT parquet not found: {COT_PARQUET}\n  COT positioning features will be unavailable.")
     if news_mode == "full" and (not NEWS_CSV.is_file() or not ECO_CSV.is_file()):
-        warnings.append(
-            f"config news.historical_mode is '{news_mode}' but news/calendar files are missing."
-        )
+        warnings.append(f"config news.historical_mode is '{news_mode}' but news/calendar files are missing.")
     return warnings
 
 
@@ -123,7 +118,7 @@ def print_run_summary(cfg: dict, args: argparse.Namespace, train_cmd: list[str])
         extras.append("no-model-profile")
 
     print("\n" + "=" * 66)
-    print("  Forex Scaling Model — Training")
+    print("  Forex Scaling Model - Training")
     print("=" * 66)
     print(f"  config : {args.config}")
     print(f"  mode   : {mode}" + (f" + {', '.join(extras)}" if extras else ""))
@@ -142,43 +137,59 @@ def parse_args() -> argparse.Namespace:
         description="Train the forex scaling model (wrapper around training/train_gpu.py).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
-                   help="YAML run config passed to train_gpu.py")
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="YAML run config passed to train_gpu.py")
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--quick", action="store_true",
-                      help="Smoke run: <=8 epochs, <=2 folds, no ensemble/RL")
-    mode.add_argument("--full", action="store_true",
-                      help="Use config as-is (default behaviour)")
+    mode.add_argument("--quick", action="store_true", help="Smoke run: <=8 epochs, <=2 folds, no ensemble/RL")
+    mode.add_argument("--full", action="store_true", help="Use config as-is (default behaviour)")
     p.add_argument("--pretrain", action="store_true", help="Enable contrastive pre-training")
     p.add_argument("--ablate-pretrain", action="store_true", help="Run ablation test on pretraining")
     p.add_argument("--rl", action="store_true", help="Enable RL training after supervised")
-    p.add_argument("--resume", action="store_true",
-                   help="Resume interrupted run from *_last.pt (optimizer + epoch state)")
-    p.add_argument("--warm-start", action="store_true",
-                   help="Load production/best weights and continue training (fine-tune)")
-    p.add_argument("--rebuild-cache", action="store_true",
-                   help="Force dataset cache rebuild (passes --force-rebuild to train_gpu.py)")
-    p.add_argument("--build-only", action="store_true",
-                   help="Only build the dataset pipeline and exit without training")
+    p.add_argument(
+        "--resume", action="store_true", help="Resume interrupted run from *_last.pt (optimizer + epoch state)"
+    )
+    p.add_argument(
+        "--warm-start", action="store_true", help="Load production/best weights and continue training (fine-tune)"
+    )
+    p.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="Force dataset cache rebuild (passes --force-rebuild to train_gpu.py)",
+    )
+    p.add_argument(
+        "--build-only", action="store_true", help="Only build the dataset pipeline and exit without training"
+    )
     p.add_argument("--skip-news", action="store_true", help="Skip news data")
     p.add_argument("--skip-cot", action="store_true", help="Skip COT data")
     p.add_argument("--skip-eco", action="store_true", help="Skip Eco Calendar")
-    p.add_argument("--skip-data-check", action="store_true",
-                   help="Skip pre-flight data path checks")
-    p.add_argument("--fair-sweep", action="store_true",
-                   help="Fair architecture bake-off: pass --no-model-profile to train_gpu")
-    p.add_argument("--model-profile", dest="model_profile", action="store_const", const=True,
-                   default=None, help="Force per-architecture profiles on (train_gpu default: on)")
-    p.add_argument("--no-model-profile", dest="model_profile", action="store_const", const=False,
-                   help="Disable per-architecture profiles (shared run.yaml hyperparams)")
-    p.add_argument("--teacher-model", type=str, default=None,
-                   help="Name of teacher model to distill from (e.g., haelt, ensemble)")
-    p.add_argument("--distill-weight", type=float, default=0.5,
-                   help="Weight of distillation loss relative to supervised loss")
-    p.add_argument("--distill-temperature", type=float, default=2.0,
-                   help="Temperature for distillation (if applicable)")
-    p.add_argument("extra", nargs=argparse.REMAINDER,
-                   help="Extra flags forwarded to train_gpu.py (prefix with --)")
+    p.add_argument("--skip-data-check", action="store_true", help="Skip pre-flight data path checks")
+    p.add_argument(
+        "--fair-sweep", action="store_true", help="Fair architecture bake-off: pass --no-model-profile to train_gpu"
+    )
+    p.add_argument(
+        "--model-profile",
+        dest="model_profile",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Force per-architecture profiles on (train_gpu default: on)",
+    )
+    p.add_argument(
+        "--no-model-profile",
+        dest="model_profile",
+        action="store_const",
+        const=False,
+        help="Disable per-architecture profiles (shared run.yaml hyperparams)",
+    )
+    p.add_argument(
+        "--teacher-model", type=str, default=None, help="Name of teacher model to distill from (e.g., haelt, ensemble)"
+    )
+    p.add_argument(
+        "--distill-weight", type=float, default=0.5, help="Weight of distillation loss relative to supervised loss"
+    )
+    p.add_argument(
+        "--distill-temperature", type=float, default=2.0, help="Temperature for distillation (if applicable)"
+    )
+    p.add_argument("extra", nargs=argparse.REMAINDER, help="Extra flags forwarded to train_gpu.py (prefix with --)")
     return p.parse_args()
 
 
@@ -189,7 +200,7 @@ def main() -> int:
     if not args.skip_data_check:
         fatal = check_data_paths(cfg)
         if fatal:
-            print("\n[train] Cannot start — required data is missing:\n", flush=True)
+            print("\n[train] Cannot start - required data is missing:\n", flush=True)
             for msg in fatal:
                 print(f"  • {msg}\n", flush=True)
             return 1
@@ -298,7 +309,7 @@ def main() -> int:
                 "val_sharpe_diff": val_sharpe_diff,
                 "val_loss_diff": val_loss_diff,
                 "gen_gap_diff": gen_gap_diff,
-            }
+            },
         }
 
         ablation_file = ckpt_dir / model_name / "pretrain_ablation.json"
@@ -310,6 +321,7 @@ def main() -> int:
     else:
         result = subprocess.run(train_cmd, cwd=str(_ROOT))
         return int(result.returncode)
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

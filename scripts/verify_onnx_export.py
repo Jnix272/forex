@@ -9,11 +9,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from inference.pytorch_inference import load_pytorch_model
 
 
-def generate_test_data(checkpoint_path: str, model_name: str, batch_size: int = 1, seq_len: int = 60, n_features: int = 64):
+def generate_test_data(
+    checkpoint_path: str, model_name: str, batch_size: int = 1, seq_len: int = 60, n_features: int = 64
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load PyTorch model
-    model, out_features, out_seq, arch, _scaler = load_pytorch_model(
+    model, _out_features, _out_seq, _arch, _scaler = load_pytorch_model(
         checkpoint_path, model_name, seq_len=seq_len, n_features=n_features, device=device
     )
     model.eval()
@@ -29,7 +31,7 @@ def generate_test_data(checkpoint_path: str, model_name: str, batch_size: int = 
         output = model(input_tensor)
 
     if isinstance(output, tuple):
-        output = output[0] # Take logits/continuous output
+        output = output[0]  # Take logits/continuous output
 
     # Convert to numpy
     input_np = input_tensor.cpu().numpy().astype(np.float32)
@@ -44,6 +46,7 @@ def generate_test_data(checkpoint_path: str, model_name: str, batch_size: int = 
 
     print(f"Saved test_input.bin ({input_np.shape})")
     print(f"Saved test_output.bin ({output_np.shape})")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

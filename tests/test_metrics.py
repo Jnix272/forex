@@ -2,6 +2,7 @@
 Tests for evaluation.metrics (Improvement #2): PSR, DSR, Calmar, Omega, Tail,
 Sortino, downside deviation, and minimum backtest length.
 """
+
 from __future__ import annotations
 
 import math
@@ -41,6 +42,7 @@ def pos_trend_returns():
 # Sharpe
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_sharpe_zero_variance():
     assert sharpe_ratio(np.zeros(100)) == 0.0
 
@@ -60,6 +62,7 @@ def test_sharpe_positive_trend(pos_trend_returns):
 # ═════════════════════════════════════════════════════════════════════════════
 # PSR
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_psr_bounds(returns):
     psr = probabilistic_sharpe_ratio(returns)
@@ -95,6 +98,7 @@ def test_psr_skew_kurtosis_explicit():
 # DSR
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_dsr_single_trial_equals_psr_zero(pos_trend_returns):
     dsr = deflated_sharpe_ratio(pos_trend_returns, n_trials=1)
     psr = probabilistic_sharpe_ratio(pos_trend_returns, benchmark_sharpe=0.0)
@@ -116,10 +120,11 @@ def test_dsr_bounds(returns):
 # Calmar / drawdown / Sortino / downside
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_max_drawdown_known():
     # steady decline -> drawdown approaches ~1
     r = np.full(100, -0.02)
-    assert max_drawdown(r) == pytest.approx(1.0 - 0.98 ** 100, abs=1e-6)
+    assert max_drawdown(r) == pytest.approx(1.0 - 0.98**100, abs=1e-6)
 
 
 def test_max_drawdown_zero_for_flat():
@@ -155,6 +160,7 @@ def test_sortino_high_for_low_downside():
 # Omega / tail
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_omega_symmetric_zero():
     r = np.array([1.0, -1.0, 2.0, -2.0, 0.5, -0.5])
     assert omega_ratio(r, threshold=0.0) == pytest.approx(3.5 / 3.5)
@@ -180,6 +186,7 @@ def test_tail_ratio_symmetric():
 # Min backtest length
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_min_backtest_length_monotonic():
     l1 = minimum_backtest_length(target_sharpe=0.5)
     l2 = minimum_backtest_length(target_sharpe=1.0)
@@ -196,11 +203,24 @@ def test_min_backtest_length_known_bounds():
 # backtest_metrics integration
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_backtest_metrics_dict(pos_trend_returns):
     res = backtest_metrics(pos_trend_returns)
-    for key in ["sharpe", "psr", "dsr", "calmar", "omega", "tail_ratio",
-                "sortino", "downside_dev", "max_drawdown", "skewness",
-                "kurtosis", "min_backtest_bars", "n_obs"]:
+    for key in [
+        "sharpe",
+        "psr",
+        "dsr",
+        "calmar",
+        "omega",
+        "tail_ratio",
+        "sortino",
+        "downside_dev",
+        "max_drawdown",
+        "skewness",
+        "kurtosis",
+        "min_backtest_bars",
+        "n_obs",
+    ]:
         assert key in res
     assert res["n_obs"] == 1000
 

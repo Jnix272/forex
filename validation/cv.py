@@ -8,7 +8,7 @@ Cross-validation strategies for time-series financial data:
   - NestedCV: Nested CV for hyperparameter optimization
 
 All CV strategies respect temporal ordering and prevent data leakage
-through purging (removing samples near test boundaries) and 
+through purging (removing samples near test boundaries) and
 embargo (excluding samples after test set).
 """
 
@@ -26,9 +26,11 @@ from sklearn.model_selection import BaseCrossValidator
 # 1. Base Classes & Utilities
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class CVSplit:
     """Single CV split with metadata."""
+
     train_idx: np.ndarray
     val_idx: np.ndarray
     fold: int
@@ -63,7 +65,7 @@ def _embargo_indices(
 ) -> np.ndarray:
     """Apply embargo after a given index.
 
-    Removes values in ``(after_idx, after_idx + embargo]`` — the ``embargo``
+    Removes values in ``(after_idx, after_idx + embargo]`` - the ``embargo``
     samples that immediately follow ``after_idx``.
     """
     if embargo <= 0 or len(indices) == 0:
@@ -78,13 +80,14 @@ def _embargo_indices(
 # 2. Walk-Forward CV with Purging/Embargo
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class WalkForwardCV:
     """
     Walk-forward cross-validation with purging and embargo.
-    
+
     Expanding or rolling window with configurable purge/embargo to prevent
     data leakage from temporal dependencies.
-    
+
     Parameters:
         n_splits: Number of CV folds
         initial_train_size: Initial training window size (or fraction)
@@ -98,7 +101,7 @@ class WalkForwardCV:
         self,
         n_splits: int = 5,
         initial_train_size: int | float = 0.6,
-        step_size: int | float = None,
+        step_size: int | float | None = None,
         purge: int = 0,
         embargo: int = 0,
         expanding: bool = True,
@@ -193,14 +196,15 @@ class WalkForwardCV:
 # 3. CombCV: Combinatorial Purged Cross-Validation
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class CombCV:
     """
     Combinatorial Purged Cross-Validation (López de Prado, 2018).
-    
+
     Generates all combinations of N groups taken K at a time for validation,
     with purging between train and test sets. Provides N choose K total paths
     for robust performance estimation.
-    
+
     Parameters:
         n_groups: Number of groups to partition data into
         test_groups: Number of groups to hold out for testing (K)
@@ -285,6 +289,7 @@ class CombCV:
 
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         from math import comb
+
         return comb(self.n_groups, self.test_groups)
 
 
@@ -292,13 +297,14 @@ class CombCV:
 # 4. Online CV (Rolling/Expanding with Purging)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class OnlineCV:
     """
     Online cross-validation for streaming/sequential evaluation.
-    
+
     Continuously updates model with new data, evaluates on recent window.
     Uses expanding or rolling window with optional purging.
-    
+
     Parameters:
         initial_train: Initial training window size
         window: Validation window size
@@ -311,7 +317,7 @@ class OnlineCV:
         self,
         initial_train: int | float,
         window: int | float,
-        step: int | float = None,
+        step: int | float | None = None,
         purge: int = 0,
         expanding: bool = True,
     ):
@@ -361,14 +367,13 @@ class OnlineCV:
 # ════════════════════════════════════════════════════════════════════════════
 
 
-
 class NestedCV:
     """
     Nested cross-validation for unbiased hyperparameter optimization.
-    
+
     Outer CV: Performance estimation
     Inner CV: Hyperparameter selection
-    
+
     Parameters:
         outer_cv: Outer CV splitter
         inner_cv: Inner CV splitter
@@ -381,7 +386,7 @@ class NestedCV:
         inner_cv: BaseCrossValidator,
         estimator_factory: Callable,
         param_grid: dict[str, list[Any]],
-        scoring: Callable = None,
+        scoring: Callable | None = None,
     ):
         self.outer_cv = outer_cv
         self.inner_cv = inner_cv
@@ -395,7 +400,7 @@ class NestedCV:
         outer_scores = []
         best_params_per_fold = []
 
-        for fold, (train_idx, test_idx) in enumerate(self.outer_cv.split(X, y)):
+        for _fold, (train_idx, test_idx) in enumerate(self.outer_cv.split(X, y)):
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
@@ -405,7 +410,7 @@ class NestedCV:
 
             for params in ParameterGrid(self.param_grid):
                 inner_scores = []
-                for inner_fold, (inner_train, inner_val) in enumerate(self.inner_cv.split(X_train, y_train)):
+                for _inner_fold, (inner_train, inner_val) in enumerate(self.inner_cv.split(X_train, y_train)):
                     X_inner_train, X_inner_val = X_train[inner_train], X_train[inner_val]
                     y_inner_train, y_inner_val = y_train[inner_train], y_train[inner_val]
 
@@ -441,13 +446,14 @@ class NestedCV:
 # 7. Purged K-Fold (Simplified CombCV)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class PurgedKFold:
     """
     Purged K-Fold cross-validation for time series.
-    
+
     Standard K-Fold with purging between folds to prevent leakage.
     Faster than CombCV but less comprehensive.
-    
+
     Parameters:
         n_splits: Number of folds
         purge: Samples to purge between folds
@@ -471,7 +477,7 @@ class PurgedKFold:
         groups: np.ndarray = None,
     ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         n = len(X)
-        indices = np.arange(n)
+        np.arange(n)
         fold_size = n // self.n_splits
 
         for i in range(self.n_splits):
@@ -502,21 +508,23 @@ class PurgedKFold:
 # 7. CV Utilities & Diagnostics
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def evaluate_cv(
     estimator,
     X: np.ndarray,
     y: np.ndarray,
     cv: BaseCrossValidator,
-    scoring: Callable = None,
+    scoring: Callable | None = None,
 ) -> dict[str, Any]:
     """Evaluate estimator with CV, return scores and stats."""
     if scoring is None:
-        scoring = lambda y_true, y_pred: np.mean(y_true == y_pred)
+        def scoring(y_true, y_pred):
+            return np.mean(y_true == y_pred)
 
     scores = []
     for train_idx, val_idx in cv.split(X, y):
         estimator.fit(X[train_idx], y[train_idx])
-        y_pred = estimator.predict(X[val_idx])
+        estimator.predict(X[val_idx])
         score = scoring(y[val_idx], estimator.predict(X[val_idx]))
         scores.append(score)
 
@@ -544,8 +552,8 @@ def cv_diagnostics(
 
     # Check for overlap
     overlap_count = 0
-    for i, (train_i, val_i) in enumerate(splits):
-        for j, (train_j, val_j) in enumerate(splits):
+    for i, (_train_i, _val_i) in enumerate(splits):
+        for j, (_train_j, _val_j) in enumerate(splits):
             if i < j:
                 train_overlap = len(set(splits[i][0]) & set(splits[j][0]))
                 val_overlap = len(set(splits[i][1]) & set(splits[j][1]))
@@ -568,39 +576,42 @@ def plot_cv_indices(cv, X, y=None, ax=None):
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        warnings.warn("matplotlib required for plot_cv_indices")
+        warnings.warn("matplotlib required for plot_cv_indices", stacklevel=2)
         return
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
+        _fig, ax = plt.subplots(figsize=(10, 6))
 
     splits = list(cv.split(X))
-    n_splits = len(splits)
+    len(splits)
 
     for i, (train_idx, val_idx) in enumerate(splits):
-        color_train = 'steelblue'
-        color_val = 'coral'
-        ax.barh(i, len(X), left=0, height=0.8, color='lightgray', alpha=0.3)
+        color_train = "steelblue"
+        color_val = "coral"
+        ax.barh(i, len(X), left=0, height=0.8, color="lightgray", alpha=0.3)
         if len(train_idx) > 0:
             ax.barh(i, len(X), left=0, height=0.8, color=color_train, alpha=0.5)
             for idx in np.where(np.isin(np.arange(len(X)), train_idx))[0]:
-                ax.axvspan(idx - 0.5, idx + 0.5, ymin=i/len(splits), ymax=(i+1)/len(splits),
-                          color=color_train, alpha=0.3)
+                ax.axvspan(
+                    idx - 0.5, idx + 0.5, ymin=i / len(splits), ymax=(i + 1) / len(splits), color=color_train, alpha=0.3
+                )
         if len(val_idx) > 0:
             for idx in val_idx:
-                ax.axvspan(idx - 0.5, idx + 0.5, ymin=i/len(splits), ymax=(i+1)/len(splits),
-                          color=color_val, alpha=0.5)
+                ax.axvspan(
+                    idx - 0.5, idx + 0.5, ymin=i / len(splits), ymax=(i + 1) / len(splits), color=color_val, alpha=0.5
+                )
 
     ax.set_yticks(range(len(splits)))
-    ax.set_yticklabels([f'Fold {i+1}' for i in range(len(splits))])
-    ax.set_xlabel('Sample Index')
-    ax.set_title('CV Split Indices')
+    ax.set_yticklabels([f"Fold {i + 1}" for i in range(len(splits))])
+    ax.set_xlabel("Sample Index")
+    ax.set_title("CV Split Indices")
     return ax
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 8. Factory Functions
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def create_cv(
     cv_type: str,
@@ -611,10 +622,12 @@ def create_cv(
     if cv_type == "walk_forward":
         return WalkForwardCV(n_splits=n_splits, **kwargs)
     elif cv_type == "comb":
-        return CombCV(n_groups=kwargs.get("n_groups", 10),
-                      test_groups=kwargs.get("test_groups", 2),
-                      purge=kwargs.get("purge", 0),
-                      embargo=kwargs.get("embargo", 0))
+        return CombCV(
+            n_groups=kwargs.get("n_groups", 10),
+            test_groups=kwargs.get("test_groups", 2),
+            purge=kwargs.get("purge", 0),
+            embargo=kwargs.get("embargo", 0),
+        )
     elif cv_type == "online":
         return OnlineCV(**kwargs)
     elif cv_type == "purged_kfold":
@@ -631,17 +644,18 @@ def create_cv(
 # 8. Export
 # ═════════════════════════════════════════════════════════════════════════════
 
-from dataclasses import dataclass, field
-from itertools import combinations
+from dataclasses import dataclass, field  # noqa: E402
+from itertools import combinations  # noqa: E402
 
-from sklearn.model_selection import ParameterGrid
+from sklearn.model_selection import ParameterGrid  # noqa: E402
 
 __all__ = [
     "CVSplit",
     "CombCV",
     "NestedCV",
     "OnlineCV",
-    "PurgedKFold","WalkForwardCV",
+    "PurgedKFold",
+    "WalkForwardCV",
     "_embargo_indices",
     "_purge_indices",
     "create_cv",
@@ -665,8 +679,6 @@ if __name__ == "__main__":
     cv = PurgedKFold(n_splits=5, purge=10, embargo=5)
     splits = list(cv.split(np.zeros(1000)))
     print(f"PurgedKFold: {len(splits)} splits")
-
-
 
     # Diagnostics
     diag = cv_diagnostics(cv)

@@ -34,7 +34,7 @@ class TestRLReport(unittest.TestCase):
             action_distribution={"Buy": 0.3, "Sell": 0.3, "Hold": 0.4},
             reward_component_breakdown={"pnl": 0.9, "spread_penalty": -0.05, "hold_penalty": -0.05},
             rl_best_updated=True,
-            comparison_vs_supervised={"delta_sharpe": 0.3, "delta_return": 0.05}
+            comparison_vs_supervised={"delta_sharpe": 0.3, "delta_return": 0.05},
         )
 
         report_path = Path(self.temp_dir) / "rl_report.json"
@@ -72,7 +72,7 @@ class TestRLReport(unittest.TestCase):
             action_distribution={"Buy": 0.1, "Sell": 0.1, "Hold": 0.8},
             reward_component_breakdown={"pnl": -0.5, "spread_penalty": -0.2, "hold_penalty": -0.1},
             rl_best_updated=False,
-            comparison_vs_supervised={"delta_sharpe": -2.0, "delta_return": -0.15}
+            comparison_vs_supervised={"delta_sharpe": -2.0, "delta_return": -0.15},
         )
 
         report_path = Path(self.temp_dir) / "rl_report.json"
@@ -82,5 +82,6 @@ class TestRLReport(unittest.TestCase):
         self.assertFalse(data["promotion_status"]["rl_best_updated"])
         self.assertEqual(data["configuration"]["algorithm"], "DQN")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

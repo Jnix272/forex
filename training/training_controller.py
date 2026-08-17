@@ -73,21 +73,10 @@ class TrainingController:
         }
 
         if len(self.train_loss_history) >= 3:
-            train_improving = (
-                self.train_loss_history[-1]
-                < self.train_loss_history[-2]
-                < self.train_loss_history[-3]
-            )
-            val_rising = (
-                self.val_loss_history[-1]
-                > self.val_loss_history[-2]
-                > self.val_loss_history[-3]
-            )
+            train_improving = self.train_loss_history[-1] < self.train_loss_history[-2] < self.train_loss_history[-3]
+            val_rising = self.val_loss_history[-1] > self.val_loss_history[-2] > self.val_loss_history[-3]
             if train_improving and val_rising:
-                msg = (
-                    f"Epoch {epoch}: Overfitting detected "
-                    "(Train loss dropping, Val loss rising)."
-                )
+                msg = f"Epoch {epoch}: Overfitting detected (Train loss dropping, Val loss rising)."
                 self.logger.warning(msg)
                 self.report_data["overfitting_signals_detected"].append(msg)
                 responses["increase_dropout"] = True
@@ -98,8 +87,7 @@ class TrainingController:
             current_sharpe = self.val_sharpe_history[-1]
             if peak_sharpe > 0.5 and current_sharpe < (peak_sharpe * 0.5):
                 msg = (
-                    f"Epoch {epoch}: Sharpe collapse detected "
-                    f"(Peak {peak_sharpe:.2f} -> Current {current_sharpe:.2f})."
+                    f"Epoch {epoch}: Sharpe collapse detected (Peak {peak_sharpe:.2f} -> Current {current_sharpe:.2f})."
                 )
                 self.logger.warning(msg)
                 self.report_data["overfitting_signals_detected"].append(msg)
@@ -147,12 +135,13 @@ class TrainingController:
                     if isinstance(vals, list):
                         setattr(scheduler, attr, [v * lr_mult for v in vals])
             applied["lower_lr"] = True
-            msg = f"Epoch {ep}: LR ×{lr_mult} → {applied['new_lr']}"
+            msg = f"Epoch {ep}: LR x{lr_mult} → {applied['new_lr']}"
             self.log_lr_change(msg)
             self.logger.info("[TrainingController] %s", msg)
 
         if responses.get("increase_dropout") and model is not None:
             import torch.nn as nn
+
             bumped = 0
             for mod in model.modules():
                 if isinstance(mod, nn.Dropout):
@@ -177,9 +166,7 @@ class TrainingController:
             msg = f"Epoch {ep}: early-stop recommended after Sharpe collapse"
             self.report_data["actions_applied"].append(msg)
 
-        self.report_data["actions_applied"].append(
-            {k: v for k, v in applied.items() if v not in (False, 0, None)}
-        )
+        self.report_data["actions_applied"].append({k: v for k, v in applied.items() if v not in (False, 0, None)})
         return applied
 
     def finalize_training(
@@ -197,9 +184,7 @@ class TrainingController:
         """
         self.report_data["best_epoch"] = best_epoch
         self.report_data["restore_decision"] = bool(restored_best)
-        self.report_data["final_promotion_recommendation"] = (
-            "promoted" if promoted else "demoted"
-        )
+        self.report_data["final_promotion_recommendation"] = "promoted" if promoted else "demoted"
         self._save_report()
 
     def _save_report(self) -> None:

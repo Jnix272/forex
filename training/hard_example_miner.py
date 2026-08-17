@@ -1,7 +1,7 @@
 """
 training/hard_example_miner.py
 ================================
-Identifies and persists "hard examples" from validation — samples where the
+Identifies and persists "hard examples" from validation - samples where the
 model was confident but wrong, or missed large reward opportunities.
 
 On the next training run these indices are lightly oversampled so the model
@@ -29,22 +29,21 @@ aug_idx  = miner.get_oversampled_indices(base_idx)
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import numpy as np
 
 _DEFAULT_LOG_DIR = Path("logs/hard_examples")
-_MAX_OVERSAMPLE_RATIO = 2.0   # hard examples can at most double their share
+_MAX_OVERSAMPLE_RATIO = 2.0  # hard examples can at most double their share
 _CONFIDENCE_THRESHOLD = 0.65  # min predicted probability to count as "confident"
-_WRONG_FRAC_CAP = 0.15        # cap hard examples at 15% of val set
-_BOUNDARY_THRESHOLD = 0.60    # max confidence to be considered "uncertain"
+_WRONG_FRAC_CAP = 0.15  # cap hard examples at 15% of val set
+_BOUNDARY_THRESHOLD = 0.60  # max confidence to be considered "uncertain"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FORGETTING TRACKER
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class ForgettingTracker:
     """Tracks per-sample loss trajectory to detect forgetting and decay.
@@ -59,7 +58,7 @@ class ForgettingTracker:
     """
 
     def __init__(self, n_samples: int, max_history: int = 10):
-        self.n_samples   = n_samples
+        self.n_samples = n_samples
         self.max_history = max_history
         self._history: list[np.ndarray] = []  # each entry: array of shape (n_samples,)
 
@@ -75,7 +74,7 @@ class ForgettingTracker:
         losses = np.asarray(per_sample_losses, dtype=np.float32).ravel()
         if len(losses) < self.n_samples:
             full = np.full(self.n_samples, np.nan, dtype=np.float32)
-            full[:len(losses)] = losses
+            full[: len(losses)] = losses
             losses = full
         self._history.append(losses)
         if len(self._history) > self.max_history:
@@ -140,6 +139,7 @@ class ForgettingTracker:
 # ONLINE HARD-EXAMPLE MINER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class OnlineHardExampleMiner:
     """Tracks per-sample loss over epochs and identifies hard/forgotten samples
     during training, enabling online data augmentation.
@@ -170,13 +170,13 @@ class OnlineHardExampleMiner:
         boost_factor: float = 2.0,
         decay_factor: float = 0.90,
     ):
-        self.n_samples     = n_samples
-        self.window_size   = max(2, window_size)
+        self.n_samples = n_samples
+        self.window_size = max(2, window_size)
         self.hard_quantile = min(max(float(hard_quantile), 0.5), 1.0)
         self.forget_window = max(2, forget_window)
         self.easy_quantile = min(max(float(easy_quantile), 0.0), 0.5)
-        self.boost_factor  = max(1.0, float(boost_factor))
-        self.decay_factor  = min(max(float(decay_factor), 0.0), 1.0)
+        self.boost_factor = max(1.0, float(boost_factor))
+        self.decay_factor = min(max(float(decay_factor), 0.0), 1.0)
 
         # Rolling per-sample loss buffer: shape (window_size, n_samples)
         # NaN = no data for that epoch/sample
@@ -196,7 +196,7 @@ class OnlineHardExampleMiner:
     def update_batch(self, sample_indices: np.ndarray, per_sample_losses: np.ndarray) -> None:
         """Accumulate per-sample losses from one training batch."""
         indices = np.asarray(sample_indices, dtype=np.int64).ravel()
-        losses  = np.asarray(per_sample_losses, dtype=np.float32).ravel()
+        losses = np.asarray(per_sample_losses, dtype=np.float32).ravel()
         if len(indices) == 0 or len(losses) == 0:
             return
         valid = (indices >= 0) & (indices < self.n_samples)
@@ -216,7 +216,7 @@ class OnlineHardExampleMiner:
         if self._epoch < 2:
             return np.zeros(self.n_samples, dtype=bool)
 
-        recent = self._loss_buffer[-min(self._epoch, self.window_size):, :]
+        recent = self._loss_buffer[-min(self._epoch, self.window_size) :, :]
         mean_recent = np.nanmean(recent, axis=0)
         threshold = np.nanquantile(mean_recent, self.hard_quantile)
         return (mean_recent >= threshold) & ~np.isnan(mean_recent)

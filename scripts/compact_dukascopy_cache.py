@@ -20,32 +20,29 @@ from data.sources import ForexDataManager
 
 def main():
     parser = argparse.ArgumentParser(description="Compact Dukascopy cache")
-    parser.add_argument("--pairs", nargs="+", 
-                        default=["EURUSD", "GBPUSD", "USDJPY"],
-                        help="Pairs to compact")
-    parser.add_argument("--granularity", choices=["daily", "monthly"], default="daily",
-                        help="Partition granularity (default: daily)")
+    parser.add_argument("--pairs", nargs="+", default=["EURUSD", "GBPUSD", "USDJPY"], help="Pairs to compact")
+    parser.add_argument(
+        "--granularity", choices=["daily", "monthly"], default="daily", help="Partition granularity (default: daily)"
+    )
     parser.add_argument("--start", default="2008-01-01", help="Start date")
     parser.add_argument("--end", default="2024-12-31", help="End date")
-    parser.add_argument("--overwrite", action="store_true", default=True,
-                        help="Overwrite existing partitions")
-    parser.add_argument("--no-overwrite", action="store_false", dest="overwrite",
-                        help="Skip existing partitions")
+    parser.add_argument("--overwrite", action="store_true", default=True, help="Overwrite existing partitions")
+    parser.add_argument("--no-overwrite", action="store_false", dest="overwrite", help="Skip existing partitions")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress")
-    
+
     args = parser.parse_args()
-    
-    print(f"{'='*60}")
-    print(f"COMPACT DUKASCOPY CACHE")
-    print(f"{'='*60}")
+
+    print(f"{'=' * 60}")
+    print("COMPACT DUKASCOPY CACHE")
+    print(f"{'=' * 60}")
     print(f"Pairs:        {', '.join(args.pairs)}")
     print(f"Granularity:  {args.granularity}")
     print(f"Date range:   {args.start} to {args.end}")
     print(f"Overwrite:    {args.overwrite}")
-    print(f"{'='*60}\n")
-    
+    print(f"{'=' * 60}\n")
+
     mgr = ForexDataManager(verbose=not args.quiet)
-    
+
     try:
         summary = mgr.compact_dukascopy_cache(
             pairs=args.pairs,
@@ -54,53 +51,53 @@ def main():
             end=args.end,
             overwrite=args.overwrite,
         )
-        
-        print(f"\n{'='*60}")
-        print(f"COMPACTION SUMMARY")
-        print(f"{'='*60}")
-        
+
+        print(f"\n{'=' * 60}")
+        print("COMPACTION SUMMARY")
+        print(f"{'=' * 60}")
+
         total_partitions = 0
         total_ticks = 0
-        
+
         for pair, stats in summary.items():
-            partitions = stats.get('partitions_written', 0)
-            ticks = stats.get('ticks_written', 0)
-            hour_files = stats.get('hour_files', 0)
-            
+            partitions = stats.get("partitions_written", 0)
+            ticks = stats.get("ticks_written", 0)
+            hour_files = stats.get("hour_files", 0)
+
             total_partitions += partitions
             total_ticks += ticks
-            
+
             print(f"\n{pair}:")
             print(f"  Hourly files:   {hour_files}")
             print(f"  {args.granularity.capitalize()} partitions: {partitions}")
             print(f"  Ticks written:  {ticks:,}")
-            
-            if not args.quiet and stats.get('outputs'):
-                print(f"  Output paths:")
-                for out in stats['outputs'][:5]:
+
+            if not args.quiet and stats.get("outputs"):
+                print("  Output paths:")
+                for out in stats["outputs"][:5]:
                     print(f"    {out}")
-                if len(stats['outputs']) > 5:
+                if len(stats["outputs"]) > 5:
                     print(f"    ... and {len(stats['outputs']) - 5} more")
-        
-        print(f"\n{'='*60}")
+
+        print(f"\n{'=' * 60}")
         print(f"TOTAL: {total_partitions} {args.granularity} partitions | {total_ticks:,} ticks")
-        print(f"{'='*60}")
-        
+        print(f"{'=' * 60}")
+
         # Show storage savings
         import subprocess
-        raw_size = subprocess.run(
-            ["du", "-sh", "data/raw/dukascopy"], capture_output=True, text=True
-        ).stdout.strip()
+
+        raw_size = subprocess.run(["du", "-sh", "data/raw/dukascopy"], capture_output=True, text=True).stdout.strip()
         compact_size = subprocess.run(
             ["du", "-sh", "data/compact/dukascopy"], capture_output=True, text=True
         ).stdout.strip()
-        print(f"\nStorage:")
+        print("\nStorage:")
         print(f"  Raw (hourly):    {raw_size}")
         print(f"  Compact ({args.granularity}): {compact_size}")
-        
+
     except Exception as e:
         print(f"\n❌ ERROR: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

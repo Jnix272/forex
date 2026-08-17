@@ -1,22 +1,21 @@
-import pytest
 import torch
 import torch.nn as nn
+
 from training.synaptic_intelligence import (
     DynamicSILambdaConfig,
     SynapticIntelligence,
     compute_dynamic_si_lambda,
 )
 
+
 def test_synaptic_intelligence_tracking():
     # Simple model
-    model = nn.Sequential(
-        nn.Linear(2, 2, bias=False)
-    )
+    model = nn.Sequential(nn.Linear(2, 2, bias=False))
     # Init weights to ones
     model[0].weight.data.fill_(1.0)
-    
+
     si = SynapticIntelligence(model, epsilon=1e-3)
-    
+
     # Simulate step 1: backward() has filled grads; pre_step snapshots the RAW
     # gradient, so it must be set before pre_step.
     model[0].weight.grad = torch.tensor([[-0.1, -0.1], [-0.1, -0.1]])
@@ -24,29 +23,29 @@ def test_synaptic_intelligence_tracking():
     # Simulate optimizer moving weight by 0.5
     model[0].weight.data.fill_(1.5)
     si.post_step()
-    
+
     # Path integral = -grad * delta = -(-0.1) * 0.5 = +0.05
-    path_int = getattr(si, "path_integral_0_weight")
+    path_int = si.path_integral_0_weight
     assert torch.allclose(path_int, torch.tensor(0.05)), f"Path integral was {path_int}"
-    
+
     # Simulate step 2
     model[0].weight.grad = torch.tensor([[0.2, 0.2], [0.2, 0.2]])
     si.pre_step()
-    model[0].weight.data.fill_(1.0) # moving back
+    model[0].weight.data.fill_(1.0)  # moving back
     si.post_step()
-    
+
     # Path integral addition = -0.2 * -0.5 = +0.10. Total = 0.15
-    path_int = getattr(si, "path_integral_0_weight")
+    path_int = si.path_integral_0_weight
     assert torch.allclose(path_int, torch.tensor(0.15)), f"Path integral was {path_int}"
-    
+
     # Update omega
     si.update_omega()
-    omega = getattr(si, "omega_0_weight")
-    
-    # Delta total from initial (1.0) to current (1.0) is 0. 
+    omega = si.omega_0_weight
+
+    # Delta total from initial (1.0) to current (1.0) is 0.
     # omega should be abs(path_int) / (0 + 1e-3) = 0.15 / 1e-3 = 150
     assert torch.allclose(omega, torch.tensor(150.0)), f"Omega was {omega}"
-    
+
     # Simulate some drift to get a penalty
     model[0].weight.data.fill_(2.0)
     # Penalty = sum(omega * (2.0 - 1.0)^2) = 150 * 1 * 4 elements = 600
@@ -69,7 +68,7 @@ def test_si_uses_raw_gradients_not_clipped_or_centralized():
     si.post_step()
 
     # -raw_grad * delta = -0.2 * 0.1 = -0.02 (NOT -5.0 * 0.1 = -0.5)
-    path_int = getattr(si, "path_integral_0_weight")
+    path_int = si.path_integral_0_weight
     assert torch.allclose(path_int, torch.tensor(-0.02)), f"Path integral was {path_int}"
 
 

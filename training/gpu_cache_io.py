@@ -1,4 +1,5 @@
 """Zarr / NPY cache path helpers and open utilities for GPU training."""
+
 from __future__ import annotations
 
 import os
@@ -64,16 +65,16 @@ except ImportError:
     _ZARR_V3 = False
     _Blosc = None  # type: ignore[misc, assignment]
 
-    def _zarr_open_group(path: str, mode: str):  # type: ignore[misc]
+    def _zarr_open_group(path: str, mode: str):  # type: ignore[misc] # pyright: ignore[reportRedeclaration]
         raise ImportError("zarr not installed")
 
-    def _zarr_create(group, name: str, *, dtype: Any = ZARR_LABEL_DTYPE, **kwargs):  # type: ignore[misc]
+    def _zarr_create(group, name: str, *, dtype: Any = ZARR_LABEL_DTYPE, **kwargs):  # type: ignore[misc] # pyright: ignore[reportRedeclaration]
         raise ImportError("zarr not installed")
 
 
 # Default training-cache compressor.
 # Linux local FS (ext4/xfs/btrfs on NVMe/SSD) is usually not I/O-bound for
-# sequential Zarr reads — Blosc+lz4@1 maximizes decompress throughput.
+# sequential Zarr reads - Blosc+lz4@1 maximizes decompress throughput.
 # Other platforms keep zstd@3 for a better ratio on slower/external storage.
 _DEFAULT_ZARR_CNAME = "auto"
 _DEFAULT_ZARR_CLEVEL: int | None = None
@@ -86,8 +87,8 @@ _FALLBACK_ZARR_CLEVEL = 3
 def default_zarr_compression() -> tuple[str, int]:
     """Platform-tuned (cname, clevel) for training-cache Zarr writes.
 
-    Linux: ``lz4`` @ ``1`` — fast decompress on local filesystems.
-    Else: ``zstd`` @ ``3`` — stronger ratio when disk/USB I/O dominates.
+    Linux: ``lz4`` @ ``1`` - fast decompress on local filesystems.
+    Else: ``zstd`` @ ``3`` - stronger ratio when disk/USB I/O dominates.
     """
     if os.name == "posix" and sys.platform.startswith("linux"):
         return _LINUX_ZARR_CNAME, _LINUX_ZARR_CLEVEL

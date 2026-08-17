@@ -25,6 +25,7 @@ def _cfg_float(key: str, default: float) -> float:
     """Read a float from config.settings.MACRO_DATA with a safe fallback."""
     try:
         from config.settings import MACRO_DATA
+
         return float(MACRO_DATA.get(key, default))
     except Exception:
         return float(default)
@@ -34,6 +35,7 @@ def _cfg_str(key: str, default: str) -> str:
     """Read a string from config.settings.MACRO_DATA with a safe fallback."""
     try:
         from config.settings import MACRO_DATA
+
         val = MACRO_DATA.get(key, default)
         return str(val) if val is not None else default
     except Exception:
@@ -43,6 +45,7 @@ def _cfg_str(key: str, default: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # SYNTHETIC DATA GENERATOR  (use when real broker data is unavailable)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def generate_synthetic_tick_data(
     n_rows: int = 100_000,
@@ -80,15 +83,17 @@ def generate_synthetic_tick_data(
     )
     volume = np.round(np.exp(rng.normal(3.5, 0.8, n_rows)) * session_multiplier).astype(int)
 
-    df = pl.DataFrame({
-        "timestamp_utc": timestamps,
-        "bid": np.round(bid, 5),
-        "ask": np.round(ask, 5),
-        "mid": np.round(mid_prices, 5),
-        "volume": volume,
-        "spread": np.round(ask - bid, 5),
-        "pair": pair,
-    })
+    df = pl.DataFrame(
+        {
+            "timestamp_utc": timestamps,
+            "bid": np.round(bid, 5),
+            "ask": np.round(ask, 5),
+            "mid": np.round(mid_prices, 5),
+            "volume": volume,
+            "spread": np.round(ask - bid, 5),
+            "pair": pair,
+        }
+    )
 
     # Ensure UTC timezone
     df = df.with_columns(pl.col("timestamp_utc").dt.replace_time_zone("UTC"))
@@ -98,6 +103,7 @@ def generate_synthetic_tick_data(
 # ─────────────────────────────────────────────────────────────────────────────
 # FILE LOADERS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def load_tick_data(
     filepath: str,
@@ -149,7 +155,7 @@ def _load_tick_data_frame(
 def _filter_lazy_by_time(lf, start: str | None = None, end: str | None = None):
     """Apply a UTC date-range filter on a lazy frame's timestamp column."""
     ts_col = None
-    # Use collect_schema().names() on a LazyFrame — it does not trigger IO
+    # Use collect_schema().names() on a LazyFrame - it does not trigger IO
     # (resolving the .columns attribute on a LazyFrame does, hence the warning).
     cols = lf.collect_schema().names() if hasattr(lf, "collect_schema") else lf.columns
     for col in cols:
@@ -198,11 +204,13 @@ def clean_bad_ticks(
     # ~2*window, and null spread_outlier short-circuited True | null → null).
     min_ref = max(1, window // 2)
     min_spread = max(1, spread_window // 2)
-    df = df.with_columns([
-        pl.col("mid").shift(1).rolling_mean(window_size=window, min_samples=min_ref).alias("rolling_mean"),
-        pl.col("mid").shift(1).rolling_std(window_size=window, min_samples=min_ref).alias("rolling_std"),
-        pl.col("mid").shift(1).rolling_median(window_size=window, min_samples=min_ref).alias("rolling_median"),
-    ])
+    df = df.with_columns(
+        [
+            pl.col("mid").shift(1).rolling_mean(window_size=window, min_samples=min_ref).alias("rolling_mean"),
+            pl.col("mid").shift(1).rolling_std(window_size=window, min_samples=min_ref).alias("rolling_std"),
+            pl.col("mid").shift(1).rolling_median(window_size=window, min_samples=min_ref).alias("rolling_median"),
+        ]
+    )
 
     # Z-score vs lag-1 window
     df = df.with_columns(
@@ -212,7 +220,8 @@ def clean_bad_ticks(
     # MAD z-score: z = 0.6745 * (x - median) / MAD  (MAD ~ 0.6745*sigma for Gaussian)
     # Scale from historical |mid - median| (shifted) so the spike itself is not in MAD.
     df = df.with_columns(
-        (pl.col("mid").shift(1) - pl.col("rolling_median")).abs()
+        (pl.col("mid").shift(1) - pl.col("rolling_median"))
+        .abs()
         .rolling_median(window_size=window, min_samples=min_ref)
         .alias("mad_scale")
     )
@@ -222,43 +231,54 @@ def clean_bad_ticks(
 
     # Spread sanity: flag ticks whose spread exceeds N x rolling median spread
     df = df.with_columns(
-        pl.col("spread").shift(1).rolling_median(window_size=spread_window, min_samples=min_spread)
+        pl.col("spread")
+        .shift(1)
+        .rolling_median(window_size=spread_window, min_samples=min_spread)
         .alias("rolling_med_spread")
     )
     df = df.with_columns(
-        (pl.col("spread") > pl.col("rolling_med_spread") * spread_ratio)
-        .fill_null(False)
-        .alias("spread_outlier")
+        (pl.col("spread") > pl.col("rolling_med_spread") * spread_ratio).fill_null(False).alias("spread_outlier")
     )
 
     outliers_cond = (
-        (
-            (pl.col("z_score") > z_thresh).fill_null(False)
-            | (pl.col("mad_z_score") > mad_z_thresh).fill_null(False)
-        )
+        ((pl.col("z_score") > z_thresh).fill_null(False) | (pl.col("mad_z_score") > mad_z_thresh).fill_null(False))
         & ~pl.col("spread_outlier")  # don't replace legit wide-spread (news) ticks
     )
     outlier_count = df.filter(outliers_cond).shape[0]
 
     if outlier_count > 0:
-        print(f"[DataIngestion] Cleaning {outlier_count} bad ticks "
-              f"(z>{z_thresh} or MAD z>{mad_z_thresh})")
+        print(f"[DataIngestion] Cleaning {outlier_count} bad ticks (z>{z_thresh} or MAD z>{mad_z_thresh})")
         # Replace outliers with median
         df = df.with_columns(
             pl.when(outliers_cond).then(pl.col("rolling_median")).otherwise(pl.col("mid")).alias("mid")
         )
         # Re-derive bid/ask
         df = df.with_columns(((pl.col("ask") - pl.col("bid")) / 2).alias("half_spread"))
-        df = df.with_columns([
-            pl.when(outliers_cond).then(pl.col("mid") - pl.col("half_spread")).otherwise(pl.col("bid")).alias("bid"),
-            pl.when(outliers_cond).then(pl.col("mid") + pl.col("half_spread")).otherwise(pl.col("ask")).alias("ask"),
-        ])
+        df = df.with_columns(
+            [
+                pl.when(outliers_cond)
+                .then(pl.col("mid") - pl.col("half_spread"))
+                .otherwise(pl.col("bid"))
+                .alias("bid"),
+                pl.when(outliers_cond)
+                .then(pl.col("mid") + pl.col("half_spread"))
+                .otherwise(pl.col("ask"))
+                .alias("ask"),
+            ]
+        )
 
-    df = df.drop([
-        "rolling_mean", "rolling_std", "z_score",
-        "rolling_median", "mad_scale", "mad_z_score",
-        "rolling_med_spread", "spread_outlier",
-    ])
+    df = df.drop(
+        [
+            "rolling_mean",
+            "rolling_std",
+            "z_score",
+            "rolling_median",
+            "mad_scale",
+            "mad_z_score",
+            "rolling_med_spread",
+            "spread_outlier",
+        ]
+    )
     if "spread" not in df.columns:
         df = df.with_columns((pl.col("ask") - pl.col("bid")).alias("spread"))
     return df
@@ -277,7 +297,17 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     # Databento's ts_event in addition to the conventional names. Without this,
     # raw Dukascopy parquet exports raise "No timestamp column found".
     time_col = None
-    for col in ["timestamp", "timestamp_utc", "datetime", "ts_event", "time", "__index_level_0__", "Date", "date", "DATE"]:
+    for col in [
+        "timestamp",
+        "timestamp_utc",
+        "datetime",
+        "ts_event",
+        "time",
+        "__index_level_0__",
+        "Date",
+        "date",
+        "DATE",
+    ]:
         if col in df.columns:
             time_col = col
             break
@@ -318,8 +348,7 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     bad_count = df.filter(pl.col("spread") <= 0).shape[0]
     if bad_count > 0:
         warnings.warn(
-            f"⚠️  {bad_count} rows have zero or negative spread. "
-            "Filtering these out — always include real bid/ask data!"
+            f"⚠️  {bad_count} rows have zero or negative spread. Filtering these out - always include real bid/ask data!", stacklevel=2
         )
         df = df.filter(pl.col("spread") > 0)
 
@@ -330,10 +359,13 @@ def _standardize_dataframe(df: pl.DataFrame) -> pl.DataFrame:
 # RESAMPLING (tick -> OHLCV bars)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def resample_to_bars(df: pl.DataFrame, freq: str = "1min", pair: str = None, spread_cap_multiplier: float = 3.0) -> pl.DataFrame:
+
+def resample_to_bars(
+    df: pl.DataFrame, freq: str = "1min", pair: str | None = None, spread_cap_multiplier: float = 3.0
+) -> pl.DataFrame:
     """
     Resample tick data to OHLCV bars using Polars group_by_dynamic.
-    
+
     Args:
         df: Tick data DataFrame
         freq: Bar frequency (e.g., "1min", "5min")
@@ -343,7 +375,7 @@ def resample_to_bars(df: pl.DataFrame, freq: str = "1min", pair: str = None, spr
     if isinstance(df, pd.DataFrame):
         df = pl.from_pandas(df)
 
-    if (len(df) == 0):
+    if len(df) == 0:
         return pl.DataFrame()
 
     every = _pandas_freq_to_polars(freq)
@@ -359,30 +391,31 @@ def resample_to_bars(df: pl.DataFrame, freq: str = "1min", pair: str = None, spr
         median_spread = df["spread"].median()
         if median_spread is not None and median_spread > 0:
             cap = median_spread * spread_cap_multiplier
-            df = df.with_columns(
-                pl.col("spread").clip(upper_bound=cap).alias("spread")
-            )
+            df = df.with_columns(pl.col("spread").clip(upper_bound=cap).alias("spread"))
             # Recalculate mid based on capped spread
-            df = df.with_columns([
-                ((pl.col("bid") + pl.col("ask")) / 2).alias("mid"),
-                pl.col("ask") - pl.col("bid").alias("spread_check"),  # verify
-            ])
+            df = df.with_columns(
+                [
+                    ((pl.col("bid") + pl.col("ask")) / 2).alias("mid"),
+                    pl.col("ask") - pl.col("bid").alias("spread_check"),  # verify
+                ]
+            )
             print(f"[Resample] {pair}: Applied spread cap of {cap:.5f} ({spread_cap_multiplier}x median)")
 
     bars = (
-        df
-        .sort("timestamp_utc")
+        df.sort("timestamp_utc")
         .group_by_dynamic("timestamp_utc", every=every, label="left", closed="left")
-        .agg([
-            pl.col("mid").first().alias("open"),
-            pl.col("mid").max().alias("high"),
-            pl.col("mid").min().alias("low"),
-            pl.col("mid").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
-            pl.col("spread").mean().alias("spread_avg"),
-            pl.col("bid").last().alias("bid_close"),
-            pl.col("ask").last().alias("ask_close"),
-        ])
+        .agg(
+            [
+                pl.col("mid").first().alias("open"),
+                pl.col("mid").max().alias("high"),
+                pl.col("mid").min().alias("low"),
+                pl.col("mid").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+                pl.col("spread").mean().alias("spread_avg"),
+                pl.col("bid").last().alias("bid_close"),
+                pl.col("ask").last().alias("ask_close"),
+            ]
+        )
         .drop_nulls(subset=["open"])
         .sort("timestamp_utc")
     )
@@ -411,6 +444,7 @@ def _pandas_freq_to_polars(freq: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # INFORMATION BARS  (López de Prado: tick / volume / dollar bars)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def resample_to_tick_bars(df: pl.DataFrame, n_ticks: int = 500) -> pl.DataFrame:
     """Build bars of exactly ``n_ticks`` ticks each (fixed-size tick bars)."""
@@ -461,25 +495,25 @@ def _resample_information_bars(
         raise ValueError(f"Unknown bar_type: {bar_type} (tick|volume|dollar)")
 
     df = df.with_columns(event)
-    df = df.with_columns(
-        (pl.col("_event").cum_sum() / threshold).floor().cast(pl.Int64).alias("_bar_id")
-    )
+    df = df.with_columns((pl.col("_event").cum_sum() / threshold).floor().cast(pl.Int64).alias("_bar_id"))
 
     # Any bar-id from the first, always-positive bucket onwards is valid; the
     # remainder after the last full bar is dropped so bars are homogeneous.
     bars = (
         df.group_by("_bar_id")
-        .agg([
-            pl.col("timestamp_utc").first().alias("timestamp_utc"),
-            pl.col("mid").first().alias("open"),
-            pl.col("mid").max().alias("high"),
-            pl.col("mid").min().alias("low"),
-            pl.col("mid").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
-            pl.col("spread").mean().alias("spread_avg"),
-            pl.col("bid").last().alias("bid_close"),
-            pl.col("ask").last().alias("ask_close"),
-        ])
+        .agg(
+            [
+                pl.col("timestamp_utc").first().alias("timestamp_utc"),
+                pl.col("mid").first().alias("open"),
+                pl.col("mid").max().alias("high"),
+                pl.col("mid").min().alias("low"),
+                pl.col("mid").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+                pl.col("spread").mean().alias("spread_avg"),
+                pl.col("bid").last().alias("bid_close"),
+                pl.col("ask").last().alias("ask_close"),
+            ]
+        )
         .filter(pl.col("_bar_id") > 0)
         .sort("timestamp_utc")
         .drop("_bar_id")
@@ -498,9 +532,11 @@ def _apply_market_filters(bars: pl.DataFrame) -> pl.DataFrame:
 
     # 1. Strict Weekend Filter
     bars = bars.filter(
-        ~((pl.col("timestamp_utc").dt.weekday() == 6) |
-          ((pl.col("timestamp_utc").dt.weekday() == 5) & (pl.col("timestamp_utc").dt.hour() >= 22)) |
-          ((pl.col("timestamp_utc").dt.weekday() == 7) & (pl.col("timestamp_utc").dt.hour() < 22)))
+        ~(
+            (pl.col("timestamp_utc").dt.weekday() == 6)
+            | ((pl.col("timestamp_utc").dt.weekday() == 5) & (pl.col("timestamp_utc").dt.hour() >= 22))
+            | ((pl.col("timestamp_utc").dt.weekday() == 7) & (pl.col("timestamp_utc").dt.hour() < 22))
+        )
     )
 
     # 2. Holiday filter (exchange calendar + fixed-date fallback)
@@ -508,23 +544,19 @@ def _apply_market_filters(bars: pl.DataFrame) -> pl.DataFrame:
 
     # 3. Thin-liquidity day filter via volume threshold
     if "volume" in bars.columns:
-        _daily_vol = bars.with_columns(
-            pl.col("timestamp_utc").dt.date().alias("_date")
-        ).group_by("_date").agg(pl.col("volume").sum().alias("_day_vol"))
+        _daily_vol = (
+            bars.with_columns(pl.col("timestamp_utc").dt.date().alias("_date"))
+            .group_by("_date")
+            .agg(pl.col("volume").sum().alias("_day_vol"))
+        )
         _median_vol = _daily_vol["_day_vol"].median()
         if _median_vol is not None and _median_vol > 0:
-            _thin_days = _daily_vol.filter(
-                pl.col("_day_vol") < _median_vol * 0.2
-            )["_date"]
+            _thin_days = _daily_vol.filter(pl.col("_day_vol") < _median_vol * 0.2)["_date"]
             if len(_thin_days) > 0:
-                bars = bars.filter(
-                    ~pl.col("timestamp_utc").dt.date().is_in(_thin_days.to_list())
-                )
+                bars = bars.filter(~pl.col("timestamp_utc").dt.date().is_in(_thin_days.to_list()))
 
     # 4. Dead Bars Filter
-    bars = bars.filter(
-        ~((pl.col("high") == pl.col("low")) & (pl.col("volume") < 1e-6))
-    )
+    bars = bars.filter(~((pl.col("high") == pl.col("low")) & (pl.col("volume") < 1e-6)))
 
     return bars
 
@@ -540,12 +572,14 @@ def _filter_market_holidays(bars: pl.DataFrame) -> pl.DataFrame:
     """
     try:
         import pandas_market_calendars as mcal
+
         cal = mcal.get_calendar("FOREX")
         start = bars["timestamp_utc"].min()
         end = bars["timestamp_utc"].max()
         if start is not None and end is not None:
             valid = cal.valid_days(
-                start_date=start.date(), end_date=end.date(),
+                start_date=start.date(),
+                end_date=end.date(),
             )
             valid_tz = pl.Series("_valid_day", valid).dt.replace_time_zone("UTC")
             valid_days = valid_tz.dt.date().to_list()
@@ -555,12 +589,12 @@ def _filter_market_holidays(bars: pl.DataFrame) -> pl.DataFrame:
 
     # Fallback: fixed-date mask (universal + US/EUR/GBP).
     _holiday_filter = (
-        ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 25)) |
-        ((pl.col("timestamp_utc").dt.month() == 1) & (pl.col("timestamp_utc").dt.day() == 1)) |
-        ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 26)) |
-        ((pl.col("timestamp_utc").dt.month() == 7) & (pl.col("timestamp_utc").dt.day() == 4)) |
-        ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 24)) |
-        ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 31))
+        ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 25))
+        | ((pl.col("timestamp_utc").dt.month() == 1) & (pl.col("timestamp_utc").dt.day() == 1))
+        | ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 26))
+        | ((pl.col("timestamp_utc").dt.month() == 7) & (pl.col("timestamp_utc").dt.day() == 4))
+        | ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 24))
+        | ((pl.col("timestamp_utc").dt.month() == 12) & (pl.col("timestamp_utc").dt.day() == 31))
     )
     return bars.filter(~_holiday_filter)
 
@@ -580,6 +614,7 @@ KNOWN_DATA_GAPS = {
     ],
 }
 
+
 def filter_embargo_gaps(df: pl.DataFrame, pair: str) -> pl.DataFrame:
     """
     Filter out bars that fall within known data gaps for a given pair.
@@ -587,27 +622,28 @@ def filter_embargo_gaps(df: pl.DataFrame, pair: str) -> pl.DataFrame:
     """
     if df.is_empty() or pair not in KNOWN_DATA_GAPS:
         return df
-    
+
     for start_str, end_str, reason in KNOWN_DATA_GAPS[pair]:
         start_dt = pl.lit(pd.Timestamp(start_str, tz="UTC"))
         end_dt = pl.lit(pd.Timestamp(end_str, tz="UTC"))
-        
+
         # Filter out bars in the gap range
         before_count = len(df)
-        df = df.filter(
-            ~((pl.col("timestamp_utc") >= start_dt) & (pl.col("timestamp_utc") <= end_dt))
-        )
+        df = df.filter(~((pl.col("timestamp_utc") >= start_dt) & (pl.col("timestamp_utc") <= end_dt)))
         after_count = len(df)
         if before_count != after_count:
-            print(f"[Embargo] {pair}: Dropped {before_count - after_count} bars in known gap "
-                  f"{start_str} to {end_str} ({reason})")
-    
+            print(
+                f"[Embargo] {pair}: Dropped {before_count - after_count} bars in known gap "
+                f"{start_str} to {end_str} ({reason})"
+            )
+
     return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GAP DETECTION & INTERPOLATION
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def detect_bar_gaps(df: pl.DataFrame, freq_minutes: int = 1) -> dict:
     """
@@ -622,19 +658,23 @@ def detect_bar_gaps(df: pl.DataFrame, freq_minutes: int = 1) -> dict:
     s = df.sort("timestamp_utc")["timestamp_utc"]
     diff = s.diff().dt.total_seconds().alias("_dt")
     idx = pl.Series(range(len(s)))
-    d = df.select([
-        idx.alias("_i"),
-        s.alias("timestamp_utc"),
-        diff,
-    ]).filter(pl.col("_dt") > freq_minutes * 60)
+    d = df.select(
+        [
+            idx.alias("_i"),
+            s.alias("timestamp_utc"),
+            diff,
+        ]
+    ).filter(pl.col("_dt") > freq_minutes * 60)
 
     gaps = []
     for row in d.iter_rows(named=True):
         gap_min = int(row["_dt"] // 60)
-        gaps.append({
-            "after": row["timestamp_utc"],
-            "duration_minutes": gap_min,
-        })
+        gaps.append(
+            {
+                "after": row["timestamp_utc"],
+                "duration_minutes": gap_min,
+            }
+        )
 
     n_missing = sum(int(g["duration_minutes"]) - 1 for g in gaps)
     return {
@@ -664,58 +704,67 @@ def fill_gaps(df: pl.DataFrame, policy: str = "drop", freq_minutes: int = 1) -> 
     # Build a full regular grid and reindex.
     df = df.sort("timestamp_utc")
     s = df["timestamp_utc"]
-    grid = pl.DataFrame({
-        "timestamp_utc": pl.datetime_range(
-            start=s.min(),
-            end=s.max(),
-            interval=f"{freq_minutes}m",
-            time_zone="UTC",
-            eager=True,
-        )
-    }).sort("timestamp_utc")
+    grid = pl.DataFrame(
+        {
+            "timestamp_utc": pl.datetime_range(
+                start=s.min(),
+                end=s.max(),
+                interval=f"{freq_minutes}m",
+                time_zone="UTC",
+                eager=True,
+            )
+        }
+    ).sort("timestamp_utc")
 
     # Keep grid points whose distance to the most recent real bar is within
     # gap_max_minutes. This fills small gaps but never bridges weekends/holidays
     # (a Mon 07:00 bar anchors to the Fri close, far beyond the max gap).
     max_gap = int(_cfg_float("gap_max_minutes", 5))
     anchors = df.select(s.alias("timestamp_utc"))
-    grid = grid.join_asof(
-        anchors,
-        on="timestamp_utc",
-        strategy="backward",
-        coalesce=False,
-    ).with_columns(
-        (pl.col("timestamp_utc").cast(pl.Int64)
-         - pl.col("timestamp_utc_right").cast(pl.Int64)).alias("_since_bar")
-    ).filter(
-        (pl.col("_since_bar").is_null())
-        | (pl.col("_since_bar") <= max_gap * 60 * 1_000_000)  # µs since last bar
-    ).drop(["_since_bar", "timestamp_utc_right"])
+    grid = (
+        grid.join_asof(
+            anchors,
+            on="timestamp_utc",
+            strategy="backward",
+            coalesce=False,
+        )
+        .with_columns(
+            (pl.col("timestamp_utc").cast(pl.Int64) - pl.col("timestamp_utc_right").cast(pl.Int64)).alias("_since_bar")
+        )
+        .filter(
+            (pl.col("_since_bar").is_null()) | (pl.col("_since_bar") <= max_gap * 60 * 1_000_000)  # µs since last bar
+        )
+        .drop(["_since_bar", "timestamp_utc_right"])
+    )
 
     joined = grid.join(df, on="timestamp_utc", how="left")
 
     if policy == "ffill":
-        joined = joined.with_columns([
-            pl.col("open").forward_fill(),
-            pl.col("high").forward_fill(),
-            pl.col("low").forward_fill(),
-            pl.col("close").forward_fill(),
-            pl.col("volume").fill_null(0.0),
-            pl.col("spread_avg").forward_fill(),
-            pl.col("bid_close").forward_fill(),
-            pl.col("ask_close").forward_fill(),
-        ])
+        joined = joined.with_columns(
+            [
+                pl.col("open").forward_fill(),
+                pl.col("high").forward_fill(),
+                pl.col("low").forward_fill(),
+                pl.col("close").forward_fill(),
+                pl.col("volume").fill_null(0.0),
+                pl.col("spread_avg").forward_fill(),
+                pl.col("bid_close").forward_fill(),
+                pl.col("ask_close").forward_fill(),
+            ]
+        )
     else:  # interpolate
-        joined = joined.with_columns([
-            pl.col("open").interpolate(),
-            pl.col("high").interpolate(),
-            pl.col("low").interpolate(),
-            pl.col("close").interpolate(),
-            pl.col("volume").fill_null(0.0),
-            pl.col("spread_avg").interpolate(),
-            pl.col("bid_close").interpolate(),
-            pl.col("ask_close").interpolate(),
-        ])
+        joined = joined.with_columns(
+            [
+                pl.col("open").interpolate(),
+                pl.col("high").interpolate(),
+                pl.col("low").interpolate(),
+                pl.col("close").interpolate(),
+                pl.col("volume").fill_null(0.0),
+                pl.col("spread_avg").interpolate(),
+                pl.col("bid_close").interpolate(),
+                pl.col("ask_close").interpolate(),
+            ]
+        )
 
     return joined.drop_nulls(subset=["open"]).sort("timestamp_utc")
 
@@ -723,6 +772,7 @@ def fill_gaps(df: pl.DataFrame, policy: str = "drop", freq_minutes: int = 1) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 # TICK SAMPLING ANALYSIS  (Lomb-Scargle)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def detect_tick_sampling(df: pl.DataFrame, min_periods: int = 20) -> dict:
     """
@@ -758,6 +808,7 @@ def detect_tick_sampling(df: pl.DataFrame, min_periods: int = 20) -> dict:
     power = None
     try:
         from scipy.signal import lombscargle
+
         t = np.arange(len(iat), dtype=float)
         # Normalise iat to give a well-scaled periodogram.
         y = iat - iat.mean()
@@ -787,6 +838,7 @@ def detect_tick_sampling(df: pl.DataFrame, min_periods: int = 20) -> dict:
 # FRACTIONAL DIFFERENTIATION
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _get_weights_ffd(d: float, thres: float = 1e-5) -> np.ndarray:
     w = [1.0]
     k = 1
@@ -810,7 +862,7 @@ def fracDiff_FFD(series: pl.Series, d: float = 0.4, thres: float = 1e-5) -> pl.S
     if width >= len(series):
         return pl.Series(series.name, [None] * len(series), dtype=pl.Float64)
 
-    res_values = np.convolve(series.to_numpy(), w, mode='valid')
+    res_values = np.convolve(series.to_numpy(), w, mode="valid")
     # Pad with NaNs at the beginning to maintain original length
     padded = np.concatenate([np.full(width, np.nan), res_values])
     return pl.Series(series.name, padded)
@@ -819,6 +871,7 @@ def fracDiff_FFD(series: pl.Series, d: float = 0.4, thres: float = 1e-5) -> pl.S
 # ─────────────────────────────────────────────────────────────────────────────
 # PREPROCESSING PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class ForexDataPipeline:
     def __init__(
@@ -830,11 +883,11 @@ class ForexDataPipeline:
         session_start_utc: str = "07:00",
         session_end_utc: str = "21:00",
         *,
-        bar_type: str = "time",          # "time" | "tick" | "volume" | "dollar"
+        bar_type: str = "time",  # "time" | "tick" | "volume" | "dollar"
         info_bar_threshold: float = 500.0,
-        session_mode: str = "fixed",     # "fixed" | "dst"
+        session_mode: str = "fixed",  # "fixed" | "dst"
         add_session_label: bool = False,
-        gap_policy: str = "drop",        # "drop" | "ffill" | "interpolate"
+        gap_policy: str = "drop",  # "drop" | "ffill" | "interpolate"
         spread_cap_multiplier: float = 3.0,
     ):
         self.bar_freq = bar_freq
@@ -858,15 +911,17 @@ class ForexDataPipeline:
             # Load DST-aware session windows from the shared config.
             try:
                 from config.settings import LIVE_RISK as _LR
+
                 self._sessions = _LR["session_limits"]
             except Exception:
                 self._sessions = None
 
-    def run(self, df, pair: str = None) -> pl.DataFrame:
+    def run(self, df, pair: str | None = None) -> pl.DataFrame:
         print(f"[Pipeline] Raw tick rows: {len(df):,}")
 
-        import polars as pl
         import pandas as pd
+        import polars as pl
+
         if isinstance(df, pd.DataFrame):
             df = pl.from_pandas(df)
 
@@ -884,9 +939,7 @@ class ForexDataPipeline:
             }
             bars = _resamplers[self.bar_type](df)
         else:
-            raise ValueError(
-                f"Unknown bar_type: {self.bar_type} (time|tick|volume|dollar)"
-            )
+            raise ValueError(f"Unknown bar_type: {self.bar_type} (time|tick|volume|dollar)")
         print(f"[Pipeline] Bars after resampling ({self.bar_type}): {len(bars):,}")
 
         # Apply known data gap embargoes BEFORE gap detection/interpolation
@@ -898,33 +951,35 @@ class ForexDataPipeline:
         if self.gap_policy != "drop" and len(bars) > 0:
             report = detect_bar_gaps(bars)
             if report["n_gaps"] > 0:
-                print(f"[Pipeline] Detected {report['n_gaps']} gaps "
-                      f"({report['n_missing_rows']} missing rows, "
-                      f"longest {report['longest_gap_minutes']} min). "
-                      f"Policy: {self.gap_policy}")
+                print(
+                    f"[Pipeline] Detected {report['n_gaps']} gaps "
+                    f"({report['n_missing_rows']} missing rows, "
+                    f"longest {report['longest_gap_minutes']} min). "
+                    f"Policy: {self.gap_policy}"
+                )
             bars = fill_gaps(bars, policy=self.gap_policy)
 
-        if self.session_filter and not (len(bars) == 0):
+        if self.session_filter and len(bars) != 0:
             if self.session_mode == "dst" and self._sessions:
                 bars = self._apply_dst_sessions(bars)
                 if self.add_session_label:
                     # _apply_dst_sessions already attaches session_label + overlaps.
                     pass
                 else:
-                    _drop = [c for c in ("session_label", "asia_london", "london_ny")
-                             if c in bars.columns]
+                    _drop = [c for c in ("session_label", "asia_london", "london_ny") if c in bars.columns]
                     if _drop:
                         bars = bars.drop(_drop)
             else:
                 # Fixed-UTC window (legacy behavior).
                 bars = bars.with_columns(
-                    ((pl.col("timestamp_utc").dt.hour() * 3600) +
-                     (pl.col("timestamp_utc").dt.minute() * 60)).alias("_time_sec")
+                    ((pl.col("timestamp_utc").dt.hour() * 3600) + (pl.col("timestamp_utc").dt.minute() * 60)).alias(
+                        "_time_sec"
+                    )
                 )
                 bars = bars.filter(
-                    (pl.col("_time_sec") >= self.session_start) &
-                    (pl.col("_time_sec") <= self.session_end) &
-                    (pl.col("timestamp_utc").dt.weekday() <= 5)
+                    (pl.col("_time_sec") >= self.session_start)
+                    & (pl.col("_time_sec") <= self.session_end)
+                    & (pl.col("timestamp_utc").dt.weekday() <= 5)
                 ).drop("_time_sec")
             print(f"[Pipeline] Bars after session filter: {len(bars):,}")
         elif self.add_session_label and len(bars) > 0:
@@ -935,25 +990,28 @@ class ForexDataPipeline:
             else:
                 hour = pl.col("timestamp_utc").dt.hour()
                 # Crude fixed-UTC overlaps (prefer DST path above when available).
-                bars = bars.with_columns([
-                    pl.when((hour >= 0) & (hour < 7)).then(pl.lit("asia"))
-                    .when((hour >= 7) & (hour < 13)).then(pl.lit("london"))
-                    .when((hour >= 13) & (hour < 21)).then(pl.lit("ny"))
-                    .otherwise(pl.lit("off"))
-                    .alias("session_label"),
-                    # Asia/London handoff ~07-08 UTC; London/NY ~13-17 UTC.
-                    (((hour >= 7) & (hour < 8)).cast(pl.Float64)).alias("asia_london"),
-                    (((hour >= 13) & (hour <= 17)).cast(pl.Float64)).alias("london_ny"),
-                ])
+                bars = bars.with_columns(
+                    [
+                        pl.when((hour >= 0) & (hour < 7))
+                        .then(pl.lit("asia"))
+                        .when((hour >= 7) & (hour < 13))
+                        .then(pl.lit("london"))
+                        .when((hour >= 13) & (hour < 21))
+                        .then(pl.lit("ny"))
+                        .otherwise(pl.lit("off"))
+                        .alias("session_label"),
+                        # Asia/London handoff ~07-08 UTC; London/NY ~13-17 UTC.
+                        (((hour >= 7) & (hour < 8)).cast(pl.Float64)).alias("asia_london"),
+                        (((hour >= 13) & (hour <= 17)).cast(pl.Float64)).alias("london_ny"),
+                    ]
+                )
 
-        if (len(bars) == 0):
+        if len(bars) == 0:
             print("[Pipeline] Warning: No bars left after filtering. Returning empty DataFrame.")
             return bars
 
         if self.apply_frac_diff:
-            bars = bars.with_columns(
-                fracDiff_FFD(bars["close"], d=self.frac_diff_order).alias("close_ffd")
-            )
+            bars = bars.with_columns(fracDiff_FFD(bars["close"], d=self.frac_diff_order).alias("close_ffd"))
             print(f"[Pipeline] Fractional diff applied (d={self.frac_diff_order})")
 
         bars = bars.drop_nulls()
@@ -975,11 +1033,13 @@ class ForexDataPipeline:
         """
         sessions = self._sessions or {}
         if not sessions:
-            return bars.with_columns([
-                pl.lit("off").alias("session_label"),
-                pl.lit(0.0).alias("asia_london"),
-                pl.lit(0.0).alias("london_ny"),
-            ])
+            return bars.with_columns(
+                [
+                    pl.lit("off").alias("session_label"),
+                    pl.lit(0.0).alias("asia_london"),
+                    pl.lit(0.0).alias("london_ny"),
+                ]
+            )
 
         ts = bars["timestamp_utc"]
 
@@ -1008,14 +1068,11 @@ class ForexDataPipeline:
             start_h, start_m = sessions[name]["hours_local"][0].hour, sessions[name]["hours_local"][0].minute
             end_h, end_m = sessions[name]["hours_local"][1].hour, sessions[name]["hours_local"][1].minute
             lt = pl.col(f"_local_{name}")
-            in_window = (
-                ((lt.dt.hour() > start_h) | ((lt.dt.hour() == start_h) & (lt.dt.minute() >= start_m))) &
-                ((lt.dt.hour() < end_h) | ((lt.dt.hour() == end_h) & (lt.dt.minute() <= end_m)))
+            in_window = ((lt.dt.hour() > start_h) | ((lt.dt.hour() == start_h) & (lt.dt.minute() >= start_m))) & (
+                (lt.dt.hour() < end_h) | ((lt.dt.hour() == end_h) & (lt.dt.minute() <= end_m))
             )
             in_masks[name] = in_window
-            base = base.with_columns(
-                pl.when(in_window).then(pl.lit(name)).otherwise(pl.col(col_name)).alias(col_name)
-            )
+            base = base.with_columns(pl.when(in_window).then(pl.lit(name)).otherwise(pl.col(col_name)).alias(col_name))
 
         # DST-aware overlap binaries (float 0/1 for numeric joins / labeling).
         asia_london = (
@@ -1028,13 +1085,15 @@ class ForexDataPipeline:
             if "london" in in_masks and "ny" in in_masks
             else pl.lit(0.0)
         )
-        base = base.with_columns([
-            asia_london.alias("asia_london"),
-            london_ny.alias("london_ny"),
-        ])
+        base = base.with_columns(
+            [
+                asia_london.alias("asia_london"),
+                london_ny.alias("london_ny"),
+            ]
+        )
 
         drop_cols = [f"_local_{n}" for n in local_cols]
-        result = base.drop(["_ts"] + drop_cols).rename({col_name: "session_label"})
+        result = base.drop(["_ts", *drop_cols]).rename({col_name: "session_label"})
 
         if self.add_session_label:
             return result
@@ -1053,6 +1112,7 @@ class ForexDataPipeline:
 # QUICK-START HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def load_or_generate(
     filepath: str | None = None,
     n_rows: int = 50_000,
@@ -1068,6 +1128,7 @@ def load_or_generate(
     """
     if source is not None or (pair is not None and start is not None):
         from data.sources import ForexDataManager
+
         _pair = (pair or "EURUSD").upper().replace("/", "")
         _source = source or "dukascopy"
         try:
@@ -1077,33 +1138,40 @@ def load_or_generate(
             # from DuckDB when the consolidated store is present, otherwise a
             # Polars scan+collect over the per-day parquet files). The shape
             # already has `timestamp_utc` / `bid` / `ask` / `mid` / `spread`
-            # / `volume` / `pair` / `source` — no pandas round-trip needed.
+            # / `volume` / `pair` / `source` - no pandas round-trip needed.
             if isinstance(df, pl.DataFrame):
                 if df.height > 0:
                     if "timestamp" in df.columns and "timestamp_utc" not in df.columns:
                         df = df.rename({"timestamp": "timestamp_utc"})
                     return df
-            elif isinstance(df, pd.DataFrame):
-                if not df.empty:
-                    df_pl = pl.from_pandas(df.reset_index() if df.index.name else df)
-                    if "timestamp" in df_pl.columns:
-                        df_pl = df_pl.rename({"timestamp": "timestamp_utc"})
-                    return df_pl
+            elif isinstance(df, pd.DataFrame) and not df.empty:
+                df_pl = pl.from_pandas(df.reset_index() if df.index.name else df)
+                if "timestamp" in df_pl.columns:
+                    df_pl = df_pl.rename({"timestamp": "timestamp_utc"})
+                return df_pl
         except Exception as e:
-            print(f"[DataLoader] {_source} failed for {_pair}: {e} — falling back to synthetic data")
+            print(f"[DataLoader] {_source} failed for {_pair}: {e} - falling back to synthetic data")
 
         base_prices = {
-            "EURUSD": 1.0850, "GBPUSD": 1.2700, "USDJPY": 148.50,
-            "AUDUSD": 0.6550, "USDCAD": 1.3600, "USDCHF": 0.8950,
-            "EURGBP": 0.8540, "NZDUSD": 0.6100, "EURJPY": 161.00,
+            "EURUSD": 1.0850,
+            "GBPUSD": 1.2700,
+            "USDJPY": 148.50,
+            "AUDUSD": 0.6550,
+            "USDCAD": 1.3600,
+            "USDCHF": 0.8950,
+            "EURGBP": 0.8540,
+            "NZDUSD": 0.6100,
+            "EURJPY": 161.00,
             "GBPJPY": 188.00,
         }
         base_price = base_prices.get(_pair, 1.0850)
         spread_pips = 0.02 if _pair.endswith("JPY") else 0.5
         print(f"[DataLoader] Generating synthetic ticks for {_pair}")
         return generate_synthetic_tick_data(
-            n_rows=n_rows, pair=_pair,
-            base_price=base_price, spread_pips=spread_pips,
+            n_rows=n_rows,
+            pair=_pair,
+            base_price=base_price,
+            spread_pips=spread_pips,
         )
 
     if filepath and Path(filepath).exists():
@@ -1147,27 +1215,27 @@ if __name__ == "__main__":
     print(f"Tick sampling: {sampling}")
 
     # Gap detection on a full-day bar set
-    full_day = ForexDataPipeline(bar_freq="1min", session_filter=False,
-                                 apply_frac_diff=False).run(ticks)
+    full_day = ForexDataPipeline(bar_freq="1min", session_filter=False, apply_frac_diff=False).run(ticks)
     gaps = detect_bar_gaps(full_day)
     print(f"Gaps: {gaps['n_gaps']} | missing rows: {gaps['n_missing_rows']}")
 
     # DST-aware session labelling
     dst_ticks = load_or_generate(n_rows=100_000)  # ~27h of 1s ticks
-    dst_pipeline = ForexDataPipeline(bar_freq="5min", session_filter=True,
-                                     session_mode="dst", add_session_label=True,
-                                     apply_frac_diff=False)
+    dst_pipeline = ForexDataPipeline(
+        bar_freq="5min", session_filter=True, session_mode="dst", add_session_label=True, apply_frac_diff=False
+    )
     dst_bars = dst_pipeline.run(dst_ticks)
     if "session_label" in dst_bars.columns:
         print(f"Session labels: {dst_bars['session_label'].value_counts().to_dict()}")
     else:
-        print("(session_label column not present — no recognised session windows)")
+        print("(session_label column not present - no recognised session windows)")
 
     # Real Dukascopy fixture (verifies __index_level_0__ handling)
     import glob
+
     real = sorted(glob.glob("data/raw/dukascopy/EURUSD/2024/01/*.parquet"))
     if real:
         df = load_tick_data(real[0])
         print(f"Loaded real Dukascopy tick file: {len(df):,} rows, cols={df.columns[:4]}")
     else:
-        print("No real Dukascopy fixture found — skipping.")
+        print("No real Dukascopy fixture found - skipping.")

@@ -36,6 +36,7 @@ from training.train_gpu import build_model
 def log(m: str) -> None:
     print(m, flush=True)
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="True Walk-Forward Out-Of-Sample Backtester")
     p.add_argument("--strategy-mode", default="scalping", choices=sorted(STRATEGY_PROFILES.keys()))
@@ -71,6 +72,7 @@ def parse_args():
             args.min_confidence = float(prof["min_confidence"])
     return args
 
+
 def get_fold_checkpoint(model: str, fold: int, checkpoint_dir: str) -> Path | None:
     search_dirs = [Path(checkpoint_dir), active_checkpoint_dir(), Path("checkpoints")]
     for base in search_dirs:
@@ -80,12 +82,13 @@ def get_fold_checkpoint(model: str, fold: int, checkpoint_dir: str) -> Path | No
             base / f"{model}_fold{fold}_best.pt",
             base / model / f"{model}_fold{fold}_best.pt",
             base / f"{model}_fold{fold}_ep10.pt",
-            base / f"{model}_fold{fold}_ep5.pt"
+            base / f"{model}_fold{fold}_ep5.pt",
         ]
         for p in candidates:
             if p.exists():
                 return p
     return None
+
 
 def run_true_walkforward():
     args = parse_args()
@@ -103,7 +106,9 @@ def run_true_walkforward():
 
     log(f"Loading FULL dataset {args.start} -> {args.end}...")
     pipeline = ForexDataPipeline(bar_freq=args.bar_freq)
-    fe = FeatureEngineer(atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20]))
+    fe = FeatureEngineer(
+        atr_window=FEATURES.get("atr_window", 14), lag_windows=FEATURES.get("lag_windows", [5, 10, 20])
+    )
     afb = AdvancedFeatureBuilder()
 
     ticks = load_or_generate(source=args.source, pair=args.pair, start=args.start, end=args.end, n_rows=1000000)
@@ -153,12 +158,7 @@ def run_true_walkforward():
         fold_bars = base_bars.iloc[:val_end_idx]
         f_base_fold = fe.build(fold_bars)
         f_adv_fold = afb.build(fold_bars, base_features=f_base_fold)
-        features_df = (
-            pd.concat([f_base_fold, f_adv_fold], axis=1)
-            .reindex(fold_bars.index)
-            .ffill()
-            .fillna(0.0)
-        )
+        features_df = pd.concat([f_base_fold, f_adv_fold], axis=1).reindex(fold_bars.index).ffill().fillna(0.0)
 
         model_kwargs = {
             "d_model": cfg.get("d_model", 256),
@@ -166,7 +166,7 @@ def run_true_walkforward():
             "num_layers": cfg.get("num_layers", 3),
             "hidden_size": cfg.get("hidden_size", 256),
             "dropout": cfg.get("dropout", 0.0),
-            "multitask": cfg.get("multitask", False)
+            "multitask": cfg.get("multitask", False),
         }
         if "expert" in args.model.lower():
             model_kwargs["n_experts"] = cfg.get("n_experts", 4)
@@ -178,20 +178,20 @@ def run_true_walkforward():
         class Cfg:
             def __init__(self):
                 self.model = args.model
-                self.hidden_size = model_kwargs["hidden_size"]
-                self.d_model = model_kwargs["d_model"]
-                self.nhead = model_kwargs["nhead"]
-                self.num_layers = model_kwargs["num_layers"]
-                self.dropout = model_kwargs["dropout"]
+                self.hidden_size = model_kwargs["hidden_size"]  # noqa: B023
+                self.d_model = model_kwargs["d_model"]  # noqa: B023
+                self.nhead = model_kwargs["nhead"]  # noqa: B023
+                self.num_layers = model_kwargs["num_layers"]  # noqa: B023
+                self.dropout = model_kwargs["dropout"]  # noqa: B023
                 self.seq_len = args.seq_len
-                self.multitask = model_kwargs["multitask"]
+                self.multitask = model_kwargs["multitask"]  # noqa: B023
                 self.pair_embed_dim = 0
-                self.loss = str(cfg.get("loss", "cross_entropy"))
+                self.loss = str(cfg.get("loss", "cross_entropy"))  # noqa: B023
                 self.corr_window = 20
                 self.corr_window_long = 60
                 self.momentum_window = 20
-                self._n_pairs = n_pairs
-                self._f_per_pair = f_per_pair
+                self._n_pairs = n_pairs  # noqa: B023
+                self._f_per_pair = f_per_pair  # noqa: B023
 
         model = build_model(args.model, n_features, Cfg()).to(device)
         state = torch.load(str(ckpt_path), map_location=device, weights_only=True)
@@ -202,17 +202,23 @@ def run_true_walkforward():
 
         if sent is not None and "finbert_sentiment" not in X_slice.columns:
             try:
-                X_slice["finbert_sentiment"] = float(sent.score_headlines(get_latest_headlines(limit=12) or ["Market update"]))
+                X_slice["finbert_sentiment"] = float(
+                    sent.score_headlines(get_latest_headlines(limit=12) or ["Market update"])
+                )
             except Exception:
                 X_slice["finbert_sentiment"] = 0.0
 
         if X_slice.shape[1] < n_features:
-            pad_cols = pd.DataFrame(0.0, index=X_slice.index, columns=[f"xpad_{i}" for i in range(n_features - X_slice.shape[1])])
+            pad_cols = pd.DataFrame(
+                0.0, index=X_slice.index, columns=[f"xpad_{i}" for i in range(n_features - X_slice.shape[1])]
+            )
             X_slice = pd.concat([X_slice, pad_cols], axis=1)
         elif X_slice.shape[1] > n_features:
             X_slice = X_slice.iloc[:, :n_features]
 
-        x_t = torch.tensor(np.nan_to_num(X_slice.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
+        x_t = torch.tensor(
+            np.nan_to_num(X_slice.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device
+        )
 
         with torch.no_grad():
             logits = _batched_logits(model, x_t, args.seq_len, args.inference_batch_size)
@@ -221,7 +227,7 @@ def run_true_walkforward():
         cls, conf = probs.argmax(axis=1), probs.max(axis=1)
 
         pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
-        last_signal_i = -10**9
+        last_signal_i = -(10**9)
         fold_signals = []
 
         regime_vals = X_slice["regime_label"].values if "regime_label" in X_slice.columns else None
@@ -276,15 +282,17 @@ def run_true_walkforward():
                 dynamic_lots = args.lots * max(0.0, kelly_k * kelly_frac)
                 dynamic_lots = max(0.01, dynamic_lots)
 
-                fold_signals.append({
-                    "timestamp": ts_vals[i],
-                    "action": act,
-                    "lots": dynamic_lots,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "confidence": win_prob,
-                    "fold": k
-                })
+                fold_signals.append(
+                    {
+                        "timestamp": ts_vals[i],
+                        "action": act,
+                        "lots": dynamic_lots,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "confidence": win_prob,
+                        "fold": k,
+                    }
+                )
 
         all_signals.extend(fold_signals)
         log(f"Fold {k} generated {len(fold_signals)} trades.")
@@ -295,7 +303,7 @@ def run_true_walkforward():
 
     log(f"\nTotal trades stitched: {len(all_signals)}")
     sig_df = pd.DataFrame(all_signals).set_index("timestamp")
-    sig_df = sig_df[~sig_df.index.duplicated(keep='first')].sort_index()
+    sig_df = sig_df[~sig_df.index.duplicated(keep="first")].sort_index()
 
     # FIX W5: clamp bars lower bound so the backtest never gets an empty frame
     # when sig_df.index[0] precedes the first bar (e.g. due to execution delay)
@@ -311,7 +319,7 @@ def run_true_walkforward():
         bars_per_year=_bars_per_year_from_freq(args.bar_freq),
     )
     # FIX W8: assign run() result (was discarded, which is misleading)
-    results = bt.run()
+    bt.run()
     metrics = bt.performance_metrics()
     norm_metrics = _normalize_backtest_metrics(metrics)
 
@@ -319,18 +327,22 @@ def run_true_walkforward():
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # FIX W4: use _write_df() — bt output is now pl.DataFrame after Polars migration
+    # FIX W4: use _write_df() - bt output is now pl.DataFrame after Polars migration
     _write_df(bt.get_trade_log(), out_dir / f"{args.model}_OOS_{stamp}_trades.csv")
     _write_df(bt.results_df, out_dir / f"{args.model}_OOS_{stamp}_equity.csv")
     (out_dir / f"{args.model}_OOS_{stamp}_summary.json").write_text(
-        json.dumps({
-            "model": args.model,
-            "start": args.start,
-            "end": args.end,
-            "folds_stitched": args.n_folds,
-            "metrics": metrics
-        }, indent=2, default=str),
-        encoding="utf-8"
+        json.dumps(
+            {
+                "model": args.model,
+                "start": args.start,
+                "end": args.end,
+                "folds_stitched": args.n_folds,
+                "metrics": metrics,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
     )
 
     log("\n=== TRUE OOS BACKTEST SUMMARY ===")
@@ -341,6 +353,7 @@ def run_true_walkforward():
     log(f"Net PnL:      ${norm_metrics['net_pnl']:,.2f}")
     log(f"Return:       {norm_metrics['total_return_pct']:.2f}%")
     log(f"Results saved to {out_dir}")
+
 
 if __name__ == "__main__":
     run_true_walkforward()

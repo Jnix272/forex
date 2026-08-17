@@ -1,34 +1,15 @@
 """Train/val split helpers (embargo, walk-forward, CV strategies).\n\nSee docs/CONTINUE.md."""
+
 from __future__ import annotations
 
 import numpy as np
 
 from config.settings import LABELING, TRAINING
 
-_HOST = None
-_BOUND = False
-_HOST_DEPS = (
-
-)
-
-
-def bind_host(host_mod) -> None:
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
-
-
-def _ensure_bound() -> None:
-    import training.train_gpu as tg
-    bind_host(tg)
-
 # -----------------------------------------------------------------------------
 # SPLITS + LABEL UTILITIES
 # -----------------------------------------------------------------------------
+
 
 def _embargo_bars(args) -> int:
     """A-H3: embargo gap (in samples) that must separate train from val so a
@@ -36,15 +17,15 @@ def _embargo_bars(args) -> int:
 
     Dynamic floor is ``seq_len + effective_LH + execution_delay_bars``, where
     effective_LH = base_LH * max(LABEL_REGIME barrier/session horizon_mults)
-    (trending barrier_scale can reach 1.5×; asia/off session stretch further).
+    (trending barrier_scale can reach 1.5x; asia/off session stretch further).
     If ``validation.embargo_bars`` is set, use ``max(yaml, dynamic)`` so a short
     static YAML value cannot under-gap label horizons.
     """
     from labeling.rl_reward_labeling import max_label_horizon_mult
 
-    seq_len   = int(getattr(args, "seq_len", 60) or 60)
+    seq_len = int(getattr(args, "seq_len", 60) or 60)
     lookahead = int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30)))
-    delay     = int(getattr(args, "execution_delay_bars", 1) or 0)
+    delay = int(getattr(args, "execution_delay_bars", 1) or 0)
     # Clamp to longest regime/session-scaled horizon, not bare base LH.
     effective_lh = max(1, int(lookahead * max_label_horizon_mult()))
     dynamic = max(1, seq_len + effective_lh + delay)
@@ -92,9 +73,7 @@ def embargo_purge_from_config(cfg: dict | None = None) -> tuple[int, int, str]:
             )
             or LABELING.get("lookahead_bars", 30)
         ),
-        execution_delay_bars=int(
-            execution.get("delay_bars", execution.get("execution_delay_bars", 1)) or 0
-        ),
+        execution_delay_bars=int(execution.get("delay_bars", execution.get("execution_delay_bars", 1)) or 0),
         validation_embargo_bars=validation.get("embargo_bars"),
         validation_purge_bars=validation.get("purge_bars"),
         validation_method=validation.get("method", "purged_embargo"),
@@ -102,8 +81,9 @@ def embargo_purge_from_config(cfg: dict | None = None) -> tuple[int, int, str]:
     return _embargo_bars(ns), _purge_bars(ns), _validation_method(ns)
 
 
-def _embargo_split(n_samples: int, val_split: float, embargo: int, purge: int = 0,
-                   method: str = "purged_embargo") -> tuple[np.ndarray, np.ndarray]:
+def _embargo_split(
+    n_samples: int, val_split: float, embargo: int, purge: int = 0, method: str = "purged_embargo"
+) -> tuple[np.ndarray, np.ndarray]:
     """A-H3: chronological train/val split with embargo and optional purge gap.
 
     Val is the most-recent `val_split` fraction; the `embargo` samples immediately
@@ -111,22 +91,21 @@ def _embargo_split(n_samples: int, val_split: float, embargo: int, purge: int = 
     If method == "purged_embargo", an additional `purge` samples are dropped to
     prevent feature-window overlap (rolling features extending into val period).
     """
-    _ensure_bound()
     val_split = min(max(float(val_split), 0.0), 0.9)
-    val_n     = int(n_samples * val_split)
+    val_n = int(n_samples * val_split)
     val_start = max(0, n_samples - val_n)
     if method == "purged_embargo":
         train_end = max(0, val_start - int(embargo) - int(purge))
     else:
         train_end = max(0, val_start - int(embargo))
     train_idx = np.arange(0, train_end, dtype=np.int64)
-    val_idx   = np.arange(val_start, n_samples, dtype=np.int64)
+    val_idx = np.arange(val_start, n_samples, dtype=np.int64)
     return train_idx, val_idx
 
 
-def _three_way_split(n_samples: int, val_split: float, tune_split: float,
-                     embargo: int, purge: int = 0,
-                     method: str = "purged_embargo") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _three_way_split(
+    n_samples: int, val_split: float, tune_split: float, embargo: int, purge: int = 0, method: str = "purged_embargo"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Three-way chronological split: train | embargo | val (early stop) | embargo | tune_eval.
 
     Prevents data leakage between:
@@ -135,7 +114,6 @@ def _three_way_split(n_samples: int, val_split: float, tune_split: float,
 
     Returns (train_idx, val_idx, tune_idx).
     """
-    _ensure_bound()
     val_split = min(max(float(val_split), 0.0), 0.5)
     tune_split = min(max(float(tune_split), 0.0), 0.3)
 
@@ -159,13 +137,13 @@ def _three_way_split(n_samples: int, val_split: float, tune_split: float,
     return train_idx, val_idx, tune_idx
 
 
-def walk_forward_splits(n_samples: int, n_folds: int, embargo: int, purge: int = 0,
-                        method: str = "purged_embargo") -> list[tuple[np.ndarray, np.ndarray]]:
+def walk_forward_splits(
+    n_samples: int, n_folds: int, embargo: int, purge: int = 0, method: str = "purged_embargo"
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """
     Expanding-window walk-forward: each fold trains on [0, val_start - embargo - purge),
     validates on [val_start, val_end). Prevents overlap leakage via embargo + purge.
     """
-    _ensure_bound()
     if n_samples < max(embargo + purge + n_folds * 2, 500):
         # A-H3: small-data fallback must still embargo+purge the train/val boundary
         return [_embargo_split(n_samples, float(TRAINING.get("val_split", 0.2)), embargo, purge, method)]
@@ -201,7 +179,6 @@ def _build_cv_splits(model_args, n_samples: int) -> tuple[list[tuple[np.ndarray,
     Returns (splits, strategy_label) where each split is (train_idx, val_idx).
     Any failure falls back to the legacy walk-forward splits.
     """
-    _ensure_bound()
     strategy = str(getattr(model_args, "cv_strategy", "legacy") or "legacy").lower()
     _embargo = _embargo_bars(model_args)
     _purge = _purge_bars(model_args)
@@ -216,6 +193,7 @@ def _build_cv_splits(model_args, n_samples: int) -> tuple[list[tuple[np.ndarray,
 
     try:
         from validation.cv import CombCV, OnlineCV, WalkForwardCV
+
         X = np.zeros((max(n_samples, 1), 1))
         if strategy == "walk_forward":
             cv = WalkForwardCV(

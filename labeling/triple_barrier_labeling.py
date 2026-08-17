@@ -20,16 +20,28 @@ import pandas as pd
 # ── Optional Numba (required for fast path on large series) ─────────────────
 try:
     from numba import njit, prange
+
     _NUMBA_IMPORT_OK = True
 except ImportError:
     _NUMBA_IMPORT_OK = False
-    njit = None  # type: ignore
-    prange = range  # type: ignore
+
+    def _identity_njit(*args, **kwargs):
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    njit = _identity_njit  # type: ignore[assignment]
+    prange = range  # type: ignore[assignment]
 
 
 def _default_labeling() -> dict[str, Any]:
     try:
         from config.settings import LABELING as L
+
         return L
     except Exception:
         return {}
@@ -109,17 +121,17 @@ if _NUMBA_IMPORT_OK:
 
     @njit(cache=True, fastmath=True, parallel=True)
     def _scan_outcomes_numba(
-        exit_long_path,
-        exit_short_path,
-        entry_long,
-        entry_short,
-        atr,
-        profit_mult,
-        stop_mult,
-        vertical_bars,
-        n_valid,
-        execution_delay_bars,
-    ):
+        exit_long_path: np.ndarray,
+        exit_short_path: np.ndarray,
+        entry_long: np.ndarray,
+        entry_short: np.ndarray,
+        atr: np.ndarray,
+        profit_mult: float,
+        stop_mult: float,
+        vertical_bars: int,
+        n_valid: int,
+        execution_delay_bars: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """DS-001: exit_long_path=bid (long exits at bid), exit_short_path=ask (short exits at ask)."""
         lo_o = np.zeros(n_valid, dtype=np.int8)
         tl_o = np.zeros(n_valid, dtype=np.int32)
@@ -170,17 +182,17 @@ if _NUMBA_IMPORT_OK:
 
     @njit(cache=True, fastmath=True)
     def _scan_outcomes_numba_serial(
-        exit_long_path,
-        exit_short_path,
-        entry_long,
-        entry_short,
-        atr,
-        profit_mult,
-        stop_mult,
-        vertical_bars,
-        n_valid,
-        execution_delay_bars,
-    ):
+        exit_long_path: np.ndarray,
+        exit_short_path: np.ndarray,
+        entry_long: np.ndarray,
+        entry_short: np.ndarray,
+        atr: np.ndarray,
+        profit_mult: float,
+        stop_mult: float,
+        vertical_bars: int,
+        n_valid: int,
+        execution_delay_bars: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """DS-001: uses bid path for long exits, ask path for short exits."""
         lo_o = np.zeros(n_valid, dtype=np.int8)
         tl_o = np.zeros(n_valid, dtype=np.int32)
@@ -259,8 +271,8 @@ def _run_barrier_scan(
     use_numba: bool,
     parallel: bool,
     execution_delay_bars: int = 0,
-    bid: np.ndarray = None,
-    ask: np.ndarray = None,
+    bid: np.ndarray | None = None,
+    ask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     """
     Returns (lo, tl, so, ts) each length n_valid, and backend tag for logging.
@@ -306,7 +318,7 @@ def _run_barrier_scan(
             )
             return lo, tl, so, ts, "numba_serial"
         except Exception as ex:
-            warnings.warn(f"[TBM] Numba scan failed ({ex}); using sequential scan.")
+            warnings.warn(f"[TBM] Numba scan failed ({ex}); using sequential scan.", stacklevel=2)
             return (
                 *_scan_outcomes_sequential(
                     exit_long_path,
@@ -379,7 +391,7 @@ def compute_triple_barrier_labels(
     if len(bars) < vertical_bars + 2:
         warnings.warn(
             f"[TBMLabeling] Only {len(bars)} bars but vertical_bars={vertical_bars}. "
-            "Need at least vertical_bars + 2 rows. Returning empty DataFrame."
+            "Need at least vertical_bars + 2 rows. Returning empty DataFrame.", stacklevel=2
         )
         empty_idx = features.index[:0]
         return pd.DataFrame(
@@ -387,18 +399,18 @@ def compute_triple_barrier_labels(
             index=empty_idx,
         )
 
-    close = bars["close"].reindex(features.index).ffill().values.astype(np.float64)
+    close = np.asarray(bars["close"].reindex(features.index).ffill(), dtype=np.float64)
 
     # DS-001: Extract bid/ask for realistic exit pricing
-    bid = None
-    ask = None
+    bid: np.ndarray | None = None
+    ask: np.ndarray | None = None
     if "bid_close" in bars.columns and "ask_close" in bars.columns:
-        bid = bars["bid_close"].reindex(features.index).ffill().values.astype(np.float64)
-        ask = bars["ask_close"].reindex(features.index).ffill().values.astype(np.float64)
-        entry_long = ask.copy()   # enter long at ask
+        bid = np.asarray(bars["bid_close"].reindex(features.index).ffill(), dtype=np.float64)
+        ask = np.asarray(bars["ask_close"].reindex(features.index).ffill(), dtype=np.float64)
+        entry_long = ask.copy()  # enter long at ask
         entry_short = bid.copy()  # enter short at bid
     elif "spread_pips" in features.columns:
-        spread_half = features["spread_pips"].values.astype(np.float64) * pip_size / 2
+        spread_half = np.asarray(features["spread_pips"], dtype=np.float64) * pip_size / 2.0
         entry_long = close + spread_half
         entry_short = close - spread_half
         bid = close - spread_half  # approximate bid from spread
@@ -408,7 +420,7 @@ def compute_triple_barrier_labels(
         entry_short = close.copy()
 
     atr = (
-        features[atr_col].values.astype(np.float64)
+        np.asarray(features[atr_col], dtype=np.float64)
         if atr_col in features.columns
         else np.full(len(close), 0.0005, dtype=np.float64)
     )

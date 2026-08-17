@@ -92,7 +92,13 @@ Verified against living docs + spot-checks (`SessionLimitsEnforcer` wired in `li
 |----|-----|
 | **BUG-001** | **`gradient_norm` avg_norm calculation fixed** (`monitoring/checks/gradient_norm.py:51`): Changed from meaningless `total_norm / param_count` to mean of individual parameter gradient norms. Updated threshold keys from `warn`/`crit`/`vanish` to `grad_norm_warn`/`grad_norm_crit`/`grad_norm_vanish` for config consistency. |
 | **BUG-002** | **`data_drift` scipy import moved to module level** (`monitoring/checks/data_drift.py:14-19`): Moved `from scipy import stats` from inside `ks_statistic()` function to module level with `try/except` and `SCIPY_AVAILABLE` flag for graceful fallback. |
-| **BUG-003** | **`checkpoint_load` optimizer state check fixed** (`monitoring/checks/checkpoint_load.py:156-169`): Added optimizer-type-aware validation (Adam → `exp_avg`/`exp_avg_sq`, SGD → `momentum_buffer`, RMSprop → `square_avg`/`momentum_buffer`). Eliminates false positives where SGD was flagged for missing `exp_avg`. | |
+| **BUG-003** | **`checkpoint_load` optimizer state check fixed** (`monitoring/checks/checkpoint_load.py:156-169`): Added optimizer-type-aware validation (Adam → `exp_avg`/`exp_avg_sq`, SGD → `momentum_buffer`, RMSprop → `square_avg`/`momentum_buffer`). Eliminates false positives where SGD was flagged for missing `exp_avg`. |
+
+### P3-14 — Checkpoint load report contract fix (2026-08-17)
+
+| ID | Fix |
+|----|-----|
+| **BUG-004** | **`_strict_load_report` now returns a dict summary instead of a raw `(missing, unexpected)` tuple** (`training/model_factory.py`): fix preserves per-key counts (`frac_loaded`, `n_loaded`, `n_target`, `missing`, `unexpected`, `shape_mismatch`) expected by the pretrained/supervised warm-start callers in `training/supervised_loop.py`. This removes the Pyright error where callers attempted `.get(...)` on a tuple and resolves the mismatch between load-report consumers and the helper contract. Verified via `python -m pyright training/supervised_loop.py training/model_factory.py`: **0 errors**. |
 
 ### P1 — Unwired / mismatch remediations (2026-08-06)
 

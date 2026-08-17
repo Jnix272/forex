@@ -5,6 +5,7 @@ YAML is authoritative when loaded via --config. Shared-key value drift is
 normally a warning (documentation / fallback smell). A small critical set
 fails closed when settings stubs are meant to mirror the active YAML.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,30 +28,34 @@ SECTION_MAP: dict[str, str] = {
 
 # Shared keys that must stay synced (settings used as no-YAML fallback / docs).
 # Curriculum schedule fields are owned by audit_settings_yaml_curriculum_drift.
-CRITICAL_SHARED_KEYS: frozenset[str] = frozenset({
-    "backtest.atr_stop_mult",
-    "rl.reward.overtrade",
-    "training.seq_len",
-    "training.loss",
-    "training.sharpe_annualization_factor",
-    "training.lr_warmup_epochs",
-    "validation.embargo_bars",
-    "validation.purge_bars",
-    "pretrain.epochs",
-    "distillation.temperature",
-})
+CRITICAL_SHARED_KEYS: frozenset[str] = frozenset(
+    {
+        "backtest.atr_stop_mult",
+        "rl.reward.overtrade",
+        "training.seq_len",
+        "training.loss",
+        "training.sharpe_annualization_factor",
+        "training.lr_warmup_epochs",
+        "validation.embargo_bars",
+        "validation.purge_bars",
+        "pretrain.epochs",
+        "distillation.temperature",
+    }
+)
 
 # Hardware / duration knobs: intentional drift on profile YAMLs (e.g. run_ubuntu.yaml).
 # Still fail-closed when auditing the canonical run.yaml against settings stubs.
-PROFILE_SCALE_KEYS: frozenset[str] = frozenset({
-    "pretrain.epochs",
-    "pretrain.min_epochs",
-    "pretrain.pretrain_epochs",
-    "training.epochs",
-    "training.batch_size",
-    "training.patience",
-    "data.chunk_size",
-})
+PROFILE_SCALE_KEYS: frozenset[str] = frozenset(
+    {
+        "pretrain.epochs",
+        "pretrain.min_epochs",
+        "pretrain.pretrain_epochs",
+        "training.epochs",
+        "training.batch_size",
+        "training.patience",
+        "data.chunk_size",
+    }
+)
 
 _CANONICAL_YAML_NAMES: frozenset[str] = frozenset({"run.yaml"})
 
@@ -61,13 +66,15 @@ _STRATEGY_LABELING_MAP: dict[str, str] = {
     "stop_loss_atr": "stop_loss_atr",
 }
 
-# Path / machine-local / order-only keys — never fail, optionally skip entirely.
-IGNORE_KEYS: frozenset[str] = frozenset({
-    "training.checkpoint_dir",
-    "distillation.teacher_ckpt",
-    "pretrain.checkpoint",
-    "data.pairs",  # order-only; same membership is fine
-})
+# Path / machine-local / order-only keys - never fail, optionally skip entirely.
+IGNORE_KEYS: frozenset[str] = frozenset(
+    {
+        "training.checkpoint_dir",
+        "distillation.teacher_ckpt",
+        "pretrain.checkpoint",
+        "data.pairs",  # order-only; same membership is fine
+    }
+)
 
 # Nested curriculum feature lists are audited elsewhere.
 _SKIP_PREFIXES: tuple[str, ...] = (
@@ -119,9 +126,7 @@ def _key_is_critical(key: str, yaml_path: str, critical: frozenset[str]) -> bool
     if key not in critical:
         return False
     # Profile YAMLs may scale epochs/batch/chunk without updating settings stubs.
-    if key in PROFILE_SCALE_KEYS and not _is_canonical_yaml(yaml_path):
-        return False
-    return True
+    return not (key in PROFILE_SCALE_KEYS and not _is_canonical_yaml(yaml_path))
 
 
 def audit_strategy_vs_labeling(
@@ -137,7 +142,7 @@ def audit_strategy_vs_labeling(
     strat = raw.get("strategy") if isinstance(raw.get("strategy"), dict) else {}
     lbl = _load_settings_section("LABELING") or {}
     if not strat:
-        warnings.append(f"{yaml_path}: strategy block missing — skip LABELING cross-check")
+        warnings.append(f"{yaml_path}: strategy block missing - skip LABELING cross-check")
         return {
             "yaml_path": yaml_path,
             "mismatches": mismatches,
@@ -148,16 +153,15 @@ def audit_strategy_vs_labeling(
         if y_key not in strat or s_key not in lbl:
             continue
         if not _values_equal(strat[y_key], lbl[s_key]):
-            msg = (
-                f"strategy.{y_key}={strat[y_key]!r} != LABELING.{s_key}={lbl[s_key]!r} "
-                f"({yaml_path})"
+            msg = f"strategy.{y_key}={strat[y_key]!r} != LABELING.{s_key}={lbl[s_key]!r} ({yaml_path})"
+            mismatches.append(
+                {
+                    "key": f"strategy.{y_key}",
+                    "settings": lbl[s_key],
+                    "yaml": strat[y_key],
+                    "critical": True,
+                }
             )
-            mismatches.append({
-                "key": f"strategy.{y_key}",
-                "settings": lbl[s_key],
-                "yaml": strat[y_key],
-                "critical": True,
-            })
             errors.append(msg)
     return {
         "yaml_path": yaml_path,
@@ -211,9 +215,7 @@ def audit_settings_yaml_section_mismatches(
         }
         if not isinstance(y_sec, dict) or not isinstance(s_sec, dict):
             if isinstance(y_sec, dict) and not isinstance(s_sec, dict):
-                warnings.append(
-                    f"{yaml_path}:{yaml_key} has no settings.{settings_attr} counterpart"
-                )
+                warnings.append(f"{yaml_path}:{yaml_key} has no settings.{settings_attr} counterpart")
             parts[yaml_key] = part
             continue
 
@@ -224,7 +226,7 @@ def audit_settings_yaml_section_mismatches(
         yk = {k for k in yf if not _should_skip(k)}
 
         # For curriculum, only compare non-feature-list leaves (schedules already
-        # covered by curriculum drift audit) — still report scalar/list drift here.
+        # covered by curriculum drift audit) - still report scalar/list drift here.
         only_s = sorted(sk - yk)
         only_y = sorted(yk - sk)
         part["only_settings"] = only_s[:40]
@@ -241,9 +243,7 @@ def audit_settings_yaml_section_mismatches(
                 }
                 part["mismatches"].append(entry)
                 mismatches.append(entry)
-                msg = (
-                    f"{key}: settings={sf[key]!r} != {yaml_path}={yf[key]!r}"
-                )
+                msg = f"{key}: settings={sf[key]!r} != {yaml_path}={yf[key]!r}"
                 if is_crit:
                     errors.append(msg)
                 else:
@@ -312,7 +312,6 @@ def audit_args_vs_yaml_mismatches(
             # Special case for time-anchored seq_len: args.seq_len is an int (resolved), y_val is a str (unresolved)
             if dest == "seq_len" and isinstance(arg_val, int) and isinstance(y_val, str):
                 try:
-                    import pandas as pd
                     # we don't have bar_freq readily available here, but we can assume if it's seq_len, it was intentionally resolved
                     continue
                 except Exception:
@@ -331,7 +330,7 @@ def audit_args_vs_yaml_mismatches(
             )
             # Soft: CLI flags and strategy profiles intentionally override YAML.
             # Hard errors for silent load failure belong in settings↔YAML critical
-            # keys and the strategy-block presence check — not every args drift.
+            # keys and the strategy-block presence check - not every args drift.
             warnings.append(msg)
 
     return {

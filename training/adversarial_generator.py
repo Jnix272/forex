@@ -6,16 +6,16 @@ adversarial robustness methods.
 
 Usage:
     from training.adversarial_generator import PGDAttack, FGSMAttack, FreeLBAttack
-    
+
     # PGD (Projected Gradient Descent) - strongest, multi-step
     adv_attack = PGDAttack(eps=0.3, alpha=0.01, steps=7)
-    
+
     # FGSM (Fast Gradient Sign Method) - single step, fast
     adv_attack = FGSMAttack(eps=0.3)
-    
+
     # FreeLB (Free Large-Batch) - accumulates gradients over multiple steps
     adv_attack = FreeLBAttack(eps=0.3, alpha=0.01, steps=3)
-    
+
     # In training loop:
     for xb, yb in train_loader:
         xb_adv = adv_attack(model, xb, yb, criterion)
@@ -23,40 +23,41 @@ Usage:
         loss.backward()
         ...
 """
+
 from __future__ import annotations
 
+import random
+from collections.abc import Callable
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from typing import Optional, Callable, Union
-import random
 
 
 class AdversarialAttack(nn.Module):
     """Base class for adversarial attacks."""
-    
+
     def __init__(
         self,
         eps: float = 0.3,
         probability: float = 1.0,
-        feature_names: Optional[list[str]] = None,
+        feature_names: list[str] | None = None,
     ):
         super().__init__()
         self.eps = eps
         self.probability = probability
         self.feature_names = list(feature_names) if feature_names else []
         # Per-dimension epsilon multipliers (for Task 2: pretrain vulnerability)
-        self.feature_eps_multipliers: Optional[torch.Tensor] = None
-    
+        self.feature_eps_multipliers: torch.Tensor | None = None
+
     def set_feature_names(self, feature_names: list[str] | None) -> None:
         self.feature_names = list(feature_names) if feature_names else []
-    
+
     def set_eps(self, eps: float) -> None:
         """Update epsilon (used for curriculum-scaled adversarial)."""
         self.eps = eps
-    
-    def set_feature_eps_multipliers(self, multipliers: Optional[Union[np.ndarray, torch.Tensor]]) -> None:
+
+    def set_feature_eps_multipliers(self, multipliers: np.ndarray | torch.Tensor | None) -> None:
         """Set per-dimension epsilon multipliers from pretrain vulnerability scores."""
         if multipliers is not None:
             if isinstance(multipliers, np.ndarray):
@@ -64,7 +65,7 @@ class AdversarialAttack(nn.Module):
             self.feature_eps_multipliers = multipliers
         else:
             self.feature_eps_multipliers = None
-    
+
     def _get_effective_eps(self, x: torch.Tensor) -> torch.Tensor:
         """Compute effective epsilon with per-dimension multipliers if available."""
         base_eps = self.eps
@@ -76,14 +77,14 @@ class AdversarialAttack(nn.Module):
                 mult = mult.view(*([1] * (x.dim() - 1)), -1)
             base_eps = base_eps * mult
         return base_eps
-    
+
     def forward(
         self,
         model: nn.Module,
         x: torch.Tensor,
         y: torch.Tensor,
         criterion: Callable,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Generate adversarial examples. To be implemented by subclasses."""
         raise NotImplementedError
@@ -94,32 +95,32 @@ class FGSMAttack(AdversarialAttack):
     Fast Gradient Sign Method (Goodfellow et al., 2014).
     Single-step attack: x_adv = x + eps * sign(grad_x loss)
     """
-    
+
     def forward(
         self,
         model: nn.Module,
         x: torch.Tensor,
         y: torch.Tensor,
         criterion: Callable,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.training or random.random() > self.probability:
             return x
-        
+
         x_adv = x.clone().detach().requires_grad_(True)
         output = model(x_adv)
         if isinstance(output, (tuple, list)):
             output = output[0]
-        
+
         loss = criterion(output, y)
         if mask is not None:
             loss = loss * mask
             loss = loss.mean()
-        
+
         grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
         x_adv = x_adv + self.eps * grad.sign()
         x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
-        
+
         return x_adv.detach()
 
 
@@ -128,18 +129,18 @@ class PGDAttack(AdversarialAttack):
     Projected Gradient Descent (Madry et al., 2017).
     Multi-step iterative attack with projection to L-infinity ball.
     """
-    
+
     def __init__(
         self,
         eps: float = 0.3,
         alpha: float = 0.01,
         steps: int = 7,
         probability: float = 1.0,
-        feature_names: Optional[list[str]] = None,
+        feature_names: list[str] | None = None,
         random_start: bool = True,
         normalize_grad: bool = False,  # L2 gradient normalization (Madry best practice)
         warmup_steps: int = 0,  # Gradually increase attack steps over training
-        feature_eps_multipliers: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        feature_eps_multipliers: np.ndarray | torch.Tensor | None = None,
     ):
         super().__init__(eps, probability, feature_names)
         self.alpha = alpha
@@ -150,21 +151,21 @@ class PGDAttack(AdversarialAttack):
         self._current_warmup_step = 0
         if feature_eps_multipliers is not None:
             self.set_feature_eps_multipliers(feature_eps_multipliers)
-    
+
     def set_eps(self, eps: float) -> None:
         """Update epsilon (used for curriculum-scaled adversarial)."""
         super().set_eps(eps)
-    
+
     def set_warmup_step(self, step: int) -> None:
         """Update warmup step for gradual attack strength increase."""
         self._current_warmup_step = step
-    
+
     def _effective_steps(self) -> int:
         """Compute effective steps considering warmup."""
         if self.warmup_steps > 0 and self._current_warmup_step < self.warmup_steps:
             return max(1, int(self.steps * (self._current_warmup_step / self.warmup_steps)))
         return self.steps
-    
+
     def _normalize_gradient(self, grad: torch.Tensor) -> torch.Tensor:
         """L2 normalize gradient per sample (Madry et al. best practice)."""
         # Flatten all but batch dim, normalize, then reshape
@@ -172,52 +173,52 @@ class PGDAttack(AdversarialAttack):
         grad_norm = grad_flat.norm(p=2, dim=1, keepdim=True).clamp_min(1e-12)
         grad_normalized = grad_flat / grad_norm
         return grad_normalized.view_as(grad)
-    
+
     def forward(
         self,
         model: nn.Module,
         x: torch.Tensor,
         y: torch.Tensor,
         criterion: Callable,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.training or random.random() > self.probability:
             return x
-        
+
         x_adv = x.clone().detach()
-        
+
         # Get effective epsilon with per-dimension multipliers
         effective_eps = self._get_effective_eps(x)
-        
+
         if self.random_start:
             # Random initialization within eps-ball
             x_adv = x_adv + torch.empty_like(x_adv).uniform_(-effective_eps, effective_eps)
             x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
-        
+
         effective_steps = self._effective_steps()
-        
+
         for _ in range(effective_steps):
             x_adv.requires_grad_(True)
             output = model(x_adv)
             if isinstance(output, (tuple, list)):
                 output = output[0]
-            
+
             loss = criterion(output, y)
             if mask is not None:
                 loss = loss * mask
                 loss = loss.mean()
-            
+
             grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
-            
+
             # Optional L2 gradient normalization
             if self.normalize_grad:
                 grad = self._normalize_gradient(grad)
             else:
                 grad = grad.sign()
-            
+
             x_adv = x_adv + self.alpha * grad
             x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
-        
+
         return x_adv.detach()
 
 
@@ -227,36 +228,36 @@ class FreeLBAttack(AdversarialAttack):
     Accumulates gradients over multiple steps within a single batch,
     more efficient than PGD for large-batch training.
     """
-    
+
     def __init__(
         self,
         eps: float = 0.3,
         alpha: float = 0.01,
         steps: int = 3,
         probability: float = 1.0,
-        feature_names: Optional[list[str]] = None,
+        feature_names: list[str] | None = None,
     ):
         super().__init__(eps, probability, feature_names)
         self.alpha = alpha
         self.steps = steps
-    
+
     def forward(
         self,
         model: nn.Module,
         x: torch.Tensor,
         y: torch.Tensor,
         criterion: Callable,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.training or random.random() > self.probability:
             return x
-        
-        batch_size = x.size(0)
+
+        x.size(0)
         # Initialize perturbation
         delta = torch.zeros_like(x, requires_grad=True)
-        
+
         # Accumulate adversarial steps
-        for i in range(self.steps):
+        for _i in range(self.steps):
             # Forward with perturbed input
             x_adv = x + delta
             output = model(x_adv)
@@ -267,16 +268,16 @@ class FreeLBAttack(AdversarialAttack):
                 loss = loss * mask
                 loss = loss.mean()
             loss.backward()
-            
+
             # Update perturbation
             delta.data = delta.data + self.alpha * delta.grad.sign()
             delta.data = torch.clamp(delta.data, -self.eps, self.eps)
             delta.grad.zero_()
-        
+
         # Final adversarial example
         x_adv = x + delta.detach()
         x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
-        
+
         return x_adv
 
 
@@ -286,7 +287,7 @@ class MarketShockGenerator(nn.Module):
     Kept for backward compatibility but NOT adversarial training.
     Use PGDAttack/FGSMAttack/FreeLBAttack for actual adversarial robustness.
     """
-    
+
     def __init__(
         self,
         whipsaw_prob: float = 0.05,
@@ -364,29 +365,29 @@ class MarketShockGenerator(nn.Module):
 class GraphAdversarialAttack(AdversarialAttack):
     """
     Graph-aware adversarial attack for GNN models.
-    
+
     GNN models receive input as (B, n_nodes, node_features) after temporal pooling.
     This attack perturbs the node features and/or the adjacency structure.
-    
+
     Supports two modes:
     - "node_features": Perturb node feature vectors directly
     - "edge_dropout": Randomly drop edges in the adjacency matrix
     - "combined": Both node feature perturbation and edge dropout
     """
-    
+
     def __init__(
         self,
         eps: float = 0.3,
         alpha: float = 0.01,
         steps: int = 7,
         probability: float = 1.0,
-        feature_names: Optional[list[str]] = None,
+        feature_names: list[str] | None = None,
         attack_mode: str = "node_features",
         edge_dropout_rate: float = 0.1,
         random_start: bool = True,
         normalize_grad: bool = False,
         warmup_steps: int = 0,
-        feature_eps_multipliers: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        feature_eps_multipliers: np.ndarray | torch.Tensor | None = None,
     ):
         super().__init__(eps, probability, feature_names)
         self.alpha = alpha
@@ -399,44 +400,44 @@ class GraphAdversarialAttack(AdversarialAttack):
         self._current_warmup_step = 0
         if feature_eps_multipliers is not None:
             self.set_feature_eps_multipliers(feature_eps_multipliers)
-    
+
     def set_eps(self, eps: float) -> None:
         """Update epsilon (used for curriculum-scaled adversarial)."""
         super().set_eps(eps)
-    
+
     def set_edge_eps(self, eps: float) -> None:
         """Update edge dropout rate (conceptually different from feature eps)."""
         self.edge_dropout_rate = eps
-    
+
     def set_warmup_step(self, step: int) -> None:
         """Update warmup step for gradual attack strength increase."""
         self._current_warmup_step = step
-    
+
     def _effective_steps(self) -> int:
         """Compute effective steps considering warmup."""
         if self.warmup_steps > 0 and self._current_warmup_step < self.warmup_steps:
             return max(1, int(self.steps * (self._current_warmup_step / self.warmup_steps)))
         return self.steps
-    
+
     def _normalize_gradient(self, grad: torch.Tensor) -> torch.Tensor:
         """L2 normalize gradient per sample."""
         grad_flat = grad.view(grad.shape[0], -1)
         grad_norm = grad_flat.norm(p=2, dim=1, keepdim=True).clamp_min(1e-12)
         grad_normalized = grad_flat / grad_norm
         return grad_normalized.view_as(grad)
-    
+
     def forward(
         self,
         model: nn.Module,
         x: torch.Tensor,
         y: torch.Tensor,
         criterion: Callable,
-        mask: Optional[torch.Tensor] = None,
-        adj: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        mask: torch.Tensor | None = None,
+        adj: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Generate adversarial examples for GNN.
-        
+
         Args:
             model: GNN model (expects forward(x, adj))
             x: Node features (B, n_nodes, node_features)
@@ -444,53 +445,49 @@ class GraphAdversarialAttack(AdversarialAttack):
             criterion: Loss function
             mask: Optional sample mask
             adj: Optional adjacency matrix (B, n_nodes, n_nodes)
-        
+
         Returns:
             Tuple of (perturbed_x, perturbed_adj)
         """
         if not self.training or random.random() > self.probability:
             return x, adj
-        
-        B, N, F = x.shape
-        device = x.device
-        
+
+        _B, _N, _F = x.shape
+
         # Initialize perturbed features
         x_adv = x.clone().detach()
-        
+
         # Get effective epsilon with per-dimension multipliers
         effective_eps = self._get_effective_eps(x)
-        
+
         if self.random_start and "node_features" in self.attack_mode:
             # Random initialization within eps-ball
             x_adv = x_adv + torch.empty_like(x_adv).uniform_(-effective_eps, effective_eps)
             x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
-        
+
         # Initialize perturbed adjacency
         adj_adv = adj.clone().detach() if adj is not None else None
-        
+
         effective_steps = self._effective_steps()
-        
+
         for _ in range(effective_steps):
             x_adv.requires_grad_(True)
             if adj_adv is not None:
                 adj_adv.requires_grad_(True)
-            
+
             output = model(x_adv, adj_adv)
             if isinstance(output, (tuple, list)):
                 output = output[0]
-            
+
             loss = criterion(output, y)
             if mask is not None:
                 loss = loss * mask
                 loss = loss.mean()
-            
+
             grads = torch.autograd.grad(
-                loss, 
-                [x_adv] + ([adj_adv] if adj_adv is not None else []),
-                retain_graph=False, 
-                create_graph=False
+                loss, [x_adv] + ([adj_adv] if adj_adv is not None else []), retain_graph=False, create_graph=False
             )
-            
+
             # Perturb node features
             if "node_features" in self.attack_mode:
                 grad_x = grads[0]
@@ -500,7 +497,7 @@ class GraphAdversarialAttack(AdversarialAttack):
                     grad_x = grad_x.sign()
                 x_adv = x_adv + self.alpha * grad_x
                 x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
-            
+
             # Perturb adjacency (edge dropout - not gradient based, structural)
             if "edge_dropout" in self.attack_mode and adj_adv is not None:
                 # Randomly drop edges during training
@@ -509,7 +506,7 @@ class GraphAdversarialAttack(AdversarialAttack):
                 # Re-normalize rows
                 row_sum = adj_adv.sum(dim=-1, keepdim=True).clamp_min(1e-8)
                 adj_adv = adj_adv / row_sum
-        
+
         return x_adv.detach(), adj_adv.detach() if adj_adv is not None else None
 
 
@@ -519,16 +516,16 @@ def create_adversarial_attack(
     alpha: float = 0.01,
     steps: int = 7,
     probability: float = 1.0,
-    feature_names: Optional[list[str]] = None,
+    feature_names: list[str] | None = None,
     attack_mode: str = "node_features",
     edge_dropout_rate: float = 0.1,
     normalize_grad: bool = False,
     warmup_steps: int = 0,
-    feature_eps_multipliers: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    feature_eps_multipliers: np.ndarray | torch.Tensor | None = None,
 ) -> AdversarialAttack:
     """
     Create an adversarial attack instance.
-    
+
     Args:
         method: "pgd" | "fgsm" | "freelb" | "market_shock" | "graph_pgd"
         eps: L-infinity perturbation budget
@@ -545,9 +542,14 @@ def create_adversarial_attack(
     method = method.lower()
     if method == "pgd":
         return PGDAttack(
-            eps=eps, alpha=alpha, steps=steps, probability=probability, 
-            feature_names=feature_names, normalize_grad=normalize_grad,
-            warmup_steps=warmup_steps, feature_eps_multipliers=feature_eps_multipliers
+            eps=eps,
+            alpha=alpha,
+            steps=steps,
+            probability=probability,
+            feature_names=feature_names,
+            normalize_grad=normalize_grad,
+            warmup_steps=warmup_steps,
+            feature_eps_multipliers=feature_eps_multipliers,
         )
     elif method == "fgsm":
         return FGSMAttack(eps=eps, probability=probability, feature_names=feature_names)
@@ -557,10 +559,18 @@ def create_adversarial_attack(
         return MarketShockGenerator(probability=probability, feature_names=feature_names)
     elif method == "graph_pgd":
         return GraphAdversarialAttack(
-            eps=eps, alpha=alpha, steps=steps, probability=probability,
-            feature_names=feature_names, attack_mode=attack_mode,
-            edge_dropout_rate=edge_dropout_rate, normalize_grad=normalize_grad,
-            warmup_steps=warmup_steps, feature_eps_multipliers=feature_eps_multipliers
+            eps=eps,
+            alpha=alpha,
+            steps=steps,
+            probability=probability,
+            feature_names=feature_names,
+            attack_mode=attack_mode,
+            edge_dropout_rate=edge_dropout_rate,
+            normalize_grad=normalize_grad,
+            warmup_steps=warmup_steps,
+            feature_eps_multipliers=feature_eps_multipliers,
         )
     else:
-        raise ValueError(f"Unknown adversarial method: {method}. Choose from: pgd, fgsm, freelb, market_shock, graph_pgd")
+        raise ValueError(
+            f"Unknown adversarial method: {method}. Choose from: pgd, fgsm, freelb, market_shock, graph_pgd"
+        )

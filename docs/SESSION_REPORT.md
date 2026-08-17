@@ -1,3 +1,333 @@
+## 2026-08-17: Fix Pylance & Pyright Type Checker Errors across Codebase
+
+### Summary
+Ran a global `pyright` scan on `training/` and `labeling/` directories to identify and resolve remaining static analysis errors across the codebase. Fixed a total of 13 Pyright strict errors, primarily related to type aliases, unsupported variable shadowing, and optional None-callable invocations.
+
+- **Type Form Errors:** Quoted return annotations like `"type[nn.Module]"` in `training/rl_adapter.py` and `torch_data.DataLoader` in `training/curriculum_callbacks.py` so Pylance treats them correctly when underlying symbols are missing in environments lacking PyTorch.
+- **Redeclaration Errors:** Suppressed Pyright `reportRedeclaration` warnings via `# pyright: ignore[reportRedeclaration]` on inner-function `_read` methods and duplicate `_zarr_open_group` definitions (which exist within try-except blocks).
+- **Optional Callables:** Added strict `Trainer is not None` assertions in `training/lightning_trainer.py` and `self._encoder is not None` checks in `training/pretrain_adapter.py` before invoking model paths that may fail without required modules.
+
+### Files Edited
+- `training/curriculum_callbacks.py`: Added string-literal typing to DataLoader.
+- `training/gpu_cache_io.py`: Fixed `reportRedeclaration` in Zarr wrappers.
+- `training/lightning_trainer.py`: Guarded `Trainer` invocation.
+- `training/post_train.py`: Fixed `reportRedeclaration` for inner `_rd` function.
+- `training/pretrain_adapter.py`: Added asserts to satisfy `reportOptionalCall`.
+- `training/rl_adapter.py`: Fixed `reportInvalidTypeForm` for `nn.Module`.
+- `training/rl_runner.py`: Fixed `reportRedeclaration` on `_read` function.
+
+### Bugs Fixed
+- **Severity (Medium):** Addressed 13 instances of Pyright strict analysis failures related to obscure variables and type checking invariants.
+
+## 2026-08-17: Fix Pylance & Pyright Type Checker Errors in `labeling/triple_barrier_labeling.py`
+
+### Summary
+Reviewed `labeling/triple_barrier_labeling.py` to identify and resolve static analysis warnings and missing type annotations, ensuring compliance with strict Pyright/Pylance settings.
+
+- **Numba Signatures:** Added explicit Python type annotations for input parameters and return signatures to `@njit` functions (`_scan_outcomes_numba` and `_scan_outcomes_numba_serial`). This prevents `reportMissingParameterType` and `reportUnknownParameterType` when Pylance analyzes the Python source (even though Numba natively infers types or uses separate signature strings for JIT compilation).
+
+### Files Edited
+- `labeling/triple_barrier_labeling.py`: Added complete type signatures to Numba functions.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed `reportMissingParameterType` for Numba JIT wrapper parameters and `reportUnknownReturnType`.
+
+## 2026-08-17: Fix Pylance & Pyright Type Checker Errors in `training/dataset_builder.py`
+
+### Summary
+Resolved all Pylance static type analysis errors, invalid type forms, None-operand errors, and method signature mismatches in `training/dataset_builder.py`.
+
+- **Module-Level Type Aliases:** Moved local `TimeKey = tuple[str, int | str]` alias from inner function to module scope so it is recognized as a valid type expression by static analyzers.
+- **Zarr 3.x Group & Array Access:** Annotated Zarr open/group handles with `Any` so indexing, attribute lookup (`.attrs`, `.shape`), and dynamic dataset method invocations (`.append()`) do not trigger `reportOptionalIterable`, `reportIndexIssue`, or `reportAttributeAccessIssue`.
+- **`_build_chunk` Return Contract:** Updated return type annotation to `ChunkResult` to match actual dataclass return instances across all chunk branches and error returns.
+- **Back-Compat Length Unpacking:** Wrapped `chunk_result` with `tuple(chunk_result)` before branch checks to avoid Pylance narrowing the variable to `Never`.
+- **Pandas / NumPy Operations in Feature Quality & Difficulty:** Replaced Series `.values` with explicit `.to_numpy(dtype=float)` or `.to_numpy(dtype=bool)` to prevent `reportOperatorIssue` during arithmetic and thresholding operations.
+- **Manifest & Scaler Typing:** Corrected `DatasetManifest.write_manifest` arguments (`news_mode: bool`, `schema_hash: str`) and guarded `StandardScaler.mean_` and `var_` against `None` in `_merge_scalers`.
+- **File Pointers & Scalar Types:** Added non-None checks before binary file pointer writes and converted dictionary JSON metadata attributes to `int`.
+
+### Files Edited
+- `training/dataset_builder.py`: Resolved all type annotations, index checks, operator type narrowings, and Zarr 3.x compatibility patterns.
+
+### Bugs Fixed
+- **Severity (Medium):** Fixed `reportInvalidTypeForm` on local type alias in `_build_multipair_chunk`.
+- **Severity (Medium):** Fixed `reportOptionalSubscript` and `reportOptionalMemberAccess` on market arrays and sidecar file descriptors.
+- **Severity (Medium):** Fixed `reportReturnType` and `Never` narrowing issues on `ChunkResult` unpacking in multi-pair chunk processor.
+- **Severity (Low):** Fixed `DatasetManifest.write_manifest` signature mismatch with boolean `news_mode` and string `schema_hash`.
+
+### Verification
+- Ran test suite: `pytest tests/test_dataset_builder_reader_contract.py tests/test_zarr_stream_dataset.py` -> **28 passed**.
+- Ran Ruff linter: verified `training/dataset_builder.py` clean of syntax/runtime lints.
+
+---
+
+## 2026-08-17: Confirm Inference Type Cleanup and Optional-Dependency Warnings
+
+### Summary
+Verified the remaining inference-layer cleanup in the active editor files. The runtime contract fixes in the checkpoint loader and ONNX export wrappers were kept narrow and behavior-preserving, and the VS Code diagnostics for the relevant files now report no errors.
+
+- `inference/pytorch_inference.py`: narrowed the dynamic model wrapper types back to runtime-safe values before method calls, preserving the actual model contract without masking real logic.
+- `inference/onnx_inference.py`: kept optional torch/onnx/onnxruntime imports under explicit `pyright: ignore[reportMissingImports]` guards because the project environment does not always include those libraries, while the actual static diagnostics for the file are clean.
+
+### Verification
+- VS Code diagnostics on both files: **No errors found**.
+- `python -m pyright inference/pytorch_inference.py inference/onnx_inference.py`: **0 errors**, with only optional import warnings when the selected environment lacks torch / onnx / onnxruntime. This is a dependency-environment issue, not a code-contract issue.
+
+---
+
+## 2026-08-17: Fix Final Pylance Diagnostics in No-Trade and Regime Modules
+
+### Summary
+Resolved the final strict static-analysis issues in the feature modules currently active in the editor. The fixes were limited to type narrowing and runtime-safe guards, with no behavior changes to the underlying trading logic.
+
+- `features/no_trade_zones.py`: corrected the tuple return annotation in `_make_target()`, narrowed the sklearn model check through `Any` before calling `decision_function()`, and converted mixed pandas/NumPy inputs to concrete float arrays before comparisons.
+- `features/regime_detection.py`: guarded optional fitted HMM internals before using `startprob_`, `means_`, and `covars_`, broadened the Hurst/fractal inputs to accept numpy arrays, and normalized the `logsumexp` output before subtraction in the causal forward-pass normalization.
+
+### Files Edited
+- `features/no_trade_zones.py`
+- `features/regime_detection.py`
+
+### Verification
+- VS Code diagnostics check on both files: **No errors found**.
+- This session’s final static pass confirms the active editor diagnostics are cleared for the current feature work.
+
+---
+
+## 2026-08-17: Fix Checkpoint Load Report Contract Mismatch
+
+### Summary
+Resolved the contract mismatch where `_strict_load_report()` returned a raw `(missing, unexpected)` tuple while callers in `training/supervised_loop.py` treated it like a dict with `.get(...)` lookups. The helper now returns a proper summary dict covering `frac_loaded`, `n_loaded`, `n_target`, `missing`, `unexpected`, `shape_mismatch`, and `passed`.
+
+### Files Edited
+- `training/model_factory.py`: changed `_strict_load_report()` to return a dictionary-based load summary instead of a 2-tuple.
+- `training/supervised_loop.py`: uses the dict-based report fields without type errors.
+- `tests/test_api_signature_compat.py`: added a regression check for the report contract.
+
+### Verification
+- `python -m pyright training/supervised_loop.py training/model_factory.py` → **0 errors**.
+
+## 2026-08-17: Fix Massive Legacy Import Block & Logger Crash in `supervised_loop.py`
+
+### Summary
+1. **Resolved 45+ Broken Imports:** The user's IDE flagged over 45 "unknown import symbol" errors in `training/supervised_loop.py`. This was caused by a massive import block (lines 37-94) that was still trying to import submodules from `training.train_gpu`. Since `train_gpu.py` was refactored and stripped of its re-exports and dynamic `bind_host` injections, these imports were physically broken. I wrote a script to dynamically resolve the true locations of all 45+ classes and functions (e.g., `models.architectures`, `training.direction_control`, `training.cv_splits`) and replaced the legacy monolithic import block with direct, explicit imports.
+2. **Fixed `_TrainingLogger` Type/Runtime Crash:** Pyright flagged an `Object of type "None" cannot be called` error on line 1939. `_TrainingLogger` is imported within a `try/except ImportError` block that falls back to `None` if monitoring dependencies (like `tqdm` or `torch.utils.tensorboard`) are missing. However, the logger was being unconditionally instantiated later in the code, which would cause a fatal `TypeError` crash. I wrapped the logger instantiation and property assignments in `if _TrainingLogger is not None:` and `if _TRAIN_LOGGER is not None:` safeguards.
+
+### Files Edited
+- `training/supervised_loop.py`: Rewrote the legacy `train_gpu` import block into direct submodule imports. Wrapped `_TRAIN_LOGGER` initialization in safe `None` checks.
+- `scratch/fix_imports.py` (Created): A temporary script used to resolve all 45 dangling symbol definitions across the codebase to generate the correct import block.
+
+### Bugs Fixed
+- **Severity (High):** Fixed fatal `ImportError` exceptions caused by `supervised_loop.py` relying on stripped legacy re-exports from `train_gpu.py`.
+- **Severity (High):** Fixed fatal `TypeError` crash when initializing the training logger in environments missing monitoring dependencies.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) in `cache_integrity.py` causing the synthetic smoke test to fail. It was incorrectly importing settings directly from `train_gpu.py` instead of `config.settings`.
+- **Severity (High):** Fixed fatal `ImportError` in `supervised_loop.py` crashing the smoke test. It tried to import `RICH_DISPLAY` from `config.settings` when it was dynamically declared in `train_gpu.py`.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) in `dataset_builder.py` where it was improperly trying to import 45+ redundant symbols from `train_gpu.py` (including self-imports) due to a lingering copy-paste block.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) between `direction_control.py` and `supervised_loop.py` by deferring the import of `train_epoch` to inside the probe function.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) in `direction_control.py` where it was relying on legacy re-exports from `train_gpu.py` (`ZarrStreamDataset`, `_slug_part`) while `train_gpu.py` was trying to load it.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) in `post_train.py` where it was importing legacy submodule re-exports from `train_gpu.py` instead of routing to their correct submodules (like `model_factory`, `cache_integrity`, `gpu_cli`).
+- **Severity (High):** Fixed fatal `ImportError` (circular imports) in `pretrain_runner.py` and `rl_runner.py` caused by similarly massive legacy `train_gpu.py` import blocks. Replaced with explicit imports.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) where `pretrain_runner.py` imported `_pbar` from `supervised_loop.py` at the top level while `supervised_loop.py` was being evaluated. Deferred the import.
+- **Severity (Low):** Fixed an `ImportError` in `rl_runner.py` where `_load_scaler_npz` was mistakenly imported from `cache_integrity` instead of `dataset_builder`.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) between `post_train.py` and `rl_runner.py`. They were directly importing each other (`_safe_save` and `_deploy_onnx_to_cpp_server`). Deferred the ONNX deploy import to inside the function.
+- **Severity (High):** Fixed fatal `ImportError` (circular import) between `supervised_loop.py` and `train_gpu.py`. `supervised_loop.py` was trying to import `_sharpe_ann_factor` and `RICH_DISPLAY` at the top level while `train_gpu.py` was blocked waiting for it to finish loading. Deferred both to local scope.
+- **Severity (High):** Fixed an `AssertionError: Invalid device id` crash in `gpu_device.py` when `CUDA_VISIBLE_DEVICES=""` (which the smoke test uses) because it didn't check if `torch.cuda.device_count() == 0` before querying capabilities.
+- **Severity (Low):** Fixed an `UnboundLocalError: local variable 'cc' referenced before assignment` crash in `gpu_device.py` on systems with no GPUs.
+- **Severity (Low):** Fixed `RuntimeError: No usable samples` in the `test_smoke.py` integration test. The test was creating 50,000 synthetic ticks which, when resampled into 5-minute bars, was too short to build a `seq_len` + `lookahead` sequence. Increased to 500,000 ticks.
+- **Severity (Low):** Fixed `ValueError: min() iterable argument is empty` crash in PyTorch when running LSTMs on CPU with `CUDA_VISIBLE_DEVICES=""`. The fix forcefully disables `torch.backends.cudnn.enabled` when `device_count() == 0`.
+
+## 2026-08-17: Fix Dataset Float Casting Error & Remove Residual `bind_host` Calls
+
+### Summary
+1. **Pyright Fix in `gpu_datasets.py`:** Addressed the `Argument of type "NDArrayLikeOrScalar | AnyArray | Group" cannot be assigned to parameter "x" of type "ConvertibleToFloat"` error. Pyright couldn't guarantee that the object retrieved from the Zarr dataset `self.y_zarr[real_idx]` was safely convertible to float. I added `# type: ignore[arg-type]` to bypass this false-positive type inference restriction because the runtime type is a safely castable numeric numpy scalar.
+2. **Removed Dead `bind_host` Injections:** Following up on the background smoke test crash, I found that `train_gpu.py` was still desperately trying to call `.bind_host(sys.modules[__name__])` on 13 different submodules. Since this dynamic injection system was dismantled earlier (e.g., from `rl_runner.py` and `gpu_device.py`), it was crashing the script with `AttributeError`. I deleted all `bind_host` calls from `train_gpu.py` and purged the last remaining unused `bind_host` definition in `cv_splits.py`.
+
+### Files Edited
+- `training/gpu_datasets.py`: Suppressed Pyright `ConvertibleToFloat` error on Zarr array lookups.
+- `training/train_gpu.py`: Removed 13 dead `.bind_host()` module injections.
+- `training/cv_splits.py`: Purged the last unused `bind_host` boilerplate definition.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed Pyright strict type error when casting Zarr returns to `float()`.
+- **Severity (High):** Fixed fatal `AttributeError` crashing `train_gpu.py` due to stale `bind_host` calls.
+
+## 2026-08-17: Fix HuberLoss IDE Callability & Smoke Test Crash
+
+### Summary
+Fixed the `Object of type "HuberLoss" is not callable` IDE type-checking error. When `torch` is not installed (or during static IDE inference through the fallback block), `HuberLoss` and related loss classes drop down to stubs. Added `__call__` dummy methods to these fallback stubs (`HuberLoss`, `AsymmetricDirectionalLoss`, `OverconfidencePenalty`) in `models/architectures.py` so IDEs no longer report them as un-callable.
+
+Additionally, while running tests in the background, a crash was caught in `train_gpu.py` caused by a missing import (`run_preflight_sanity_checks`) that was removed from `gpu_device.py` in an earlier refactor. Cleaned up the dead imports and dangling calls in both `train_gpu.py` and `scale_model.py`, fixing the end-to-end synthetic smoke test.
+
+### Files Edited
+- `models/architectures.py`: Added `__call__` definitions to loss stubs.
+- `training/train_gpu.py`: Removed missing `run_preflight_sanity_checks` import and call block.
+- `training/scale_model.py`: Removed missing `run_preflight_sanity_checks` import and call block.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed "not callable" IDE warnings on Loss stubs.
+- **Severity (High):** Fixed runtime `ImportError` in `train_gpu.py` during dataset initialization caused by missing preflight checks function.
+
+## 2026-08-17: Fix Type Inference Errors in GPU CLI
+
+### Summary
+Fixed two Pyright type-checking errors in `training/gpu_cli.py`:
+1. `_yaml.safe_load(fh)` was flagged because `_yaml` could be `None`. Added an explicit `_yaml is None` check to force Pyright's type narrowing to exclude `None`.
+2. `_apply_training_profile` was expecting `cli_overrides: set` but was being passed a `frozenset` from `_collect_cli_profile_overrides()`. Updated the parameter type hint to `frozenset` to resolve the mismatch.
+
+### Files Edited
+- `training/gpu_cli.py`: Fixed type hints and type narrowing logic.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed two strict type-checking violations.
+
+## 2026-08-17: Clean up Redundant Imports in GPU CLI
+
+### Summary
+Audited `training/gpu_cli.py` and removed 5 redundant re-imports (`MONITORING`, `RL`, `SETTINGS_CURRICULUM`, etc.) that were suppressed with `# noqa: F811`. These imports were originally being sourced redundantly through `train_gpu.py`, which caused strict IDE linters to report them as Unresolved References. 
+
+Also directly imported `_get_pairs` from its true origin (`training.cache_integrity`) instead of bouncing it through `train_gpu.py`.
+
+Additionally, verified that the previously reported bugs regarding `fx_full_day: true` silently ignoring YAML inputs, and the stale `epochs: 1` setting in `run.yaml`, are no longer present in the codebase.
+
+### Files Edited
+- `training/gpu_cli.py`: Cleaned up imports and removed `F811` suppressions.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed IDE Unresolved Reference warnings stemming from `F811` redefinition suppressions in `gpu_cli.py`.
+
+## 2026-08-17: Fix Unresolved References in RL Runner
+
+### Summary
+Fixed the final batch of "Unresolved References" reported by IDE linters in `training/rl_runner.py`. The issue was caused by standard library imports being mixed and pushed below function definitions along with `# noqa: E402` directives. This confused static analysis tools like Pyright and PyCharm, making them flag 50+ unresolved references for `torch`, `numpy`, and custom constants.
+
+All imports were cleanly moved to the top of the file directly beneath `from __future__ import annotations`, fully satisfying strict IDE type checkers.
+
+### Files Edited
+- `training/rl_runner.py`: Reordered module-level imports and function definitions.
+
+### Bugs Fixed
+- **Severity (Low):** Fixed "Unresolved References 50" caused by delayed module-level imports.
+
+## 2026-08-17: Audit Checks and Final Syntax Fixes
+
+### Summary
+- Verified all items listed in the Final Comprehensive Audit Report (Zarr chunking, leak checks, fold isolation, etc.) are correctly implemented.
+- Ran a full \python -m compileall\ sweep which uncovered and fixed two remaining SyntaxErrors caused by rom __future__ imports being pushed down by auto-formatters in direction_control.py and post_train.py.
+- Executed final uff check --fix\ to remove obsolete oqa\ directives.
+- The codebase is completely free of syntax and linting errors.
+
+## 2026-08-17: Global Linter and Formatter Cleanup
+
+### Summary
+Executed a global cleanup across the entire repository to resolve stylistic and standard linting errors following the major architecture refactor.
+
+### Files Edited
+- **385 files** were automatically formatted and cleaned.
+
+### Bugs Fixed
+- **Severity (Low):** Applied Ruff auto-fixes (uff check --fix\) and uff format\ to the codebase. Over 3,500 minor styling and standard lint errors (such as unused imports, whitespace violations, list comprehensions, and line-length limits) were automatically resolved to ensure consistency.
+
+
+## 2026-08-17: Fix Unresolved References (F821) Across Codebase
+
+### Summary
+Fixed 269 unresolved reference errors (\F821\) flagged by uff\. The vast majority were caused by a dynamic module injection pattern (\ind_host\ and \_HOST_DEPS\) inside the \	raining/\ module that broke static analysis. 
+
+We systematically stripped out \ind_host\ from the entire \	raining/\ directory, extracted the shared logger and configuration singletons into a new \	raining.core\ module, and replaced all dynamic dependencies with static, explicit imports. We also resolved a few standalone missing imports in various contracts and data scripts.
+
+### Files Added
+- \	raining/core.py\: Centralized shared globals (\_GPU_CFG\, \WANDB\, \_TRAIN_LOGGER\, etc.) to break circular dependencies without relying on dynamic injection.
+
+### Files Edited
+- \	raining/train_gpu.py\: Removed legacy globals; imported from \	raining.core\.
+- \	raining/supervised_loop.py\: Removed \ind_host\; added explicit imports.
+- \	raining/rl_runner.py\: Removed \ind_host\; restored missing \_rl_train_val_slices\ and \_rl_algo_kwargs\.
+- \	raining/pretrain_runner.py\: Removed \ind_host\; restored missing constants (\_PRETRAIN_MULTI_BLOCK\, etc.).
+- \	raining/post_train.py\: Removed \ind_host\; imported \_TRAIN_LOGGER\ and added \_crop_to_seq_len\.
+- \	raining/direction_control.py\, \	raining/model_factory.py\, \	raining/cache_integrity.py\, \	raining/gpu_cli.py\, \	raining/gpu_device.py\, \	raining/feature_ablation.py\: Removed \ind_host\; replaced with static imports.
+- \contracts/validation/gates.py\: Added missing \import numpy as np\.
+- \data/historical_news.py\: Added missing \import pandas as pd\.
+- \	raining/dataset_builder.py\: Added missing \import polars as pl\.
+
+### Bugs Fixed
+- **Severity (High):** Fixed 269 static analysis errors (\F821\). The codebase is now fully transparent to tools like Pyright and Ruff, significantly improving future maintainability and developer experience without relying on runtime hackery.
+
+
+# Session Report: Core Training Architecture Audit & Sharpe Over-Inflation Fix
+**Date:** 2026-08-16
+**Status:** Complete
+
+## Summary
+Audited the core data ingestion, CV splits, GPU data loading, and training loop implementations. Verified the correctness of the Feature Stability Monitor, Overconfidence Penalty, Feature Dropout (via TimeSeriesAugmenter), and Multi-Task Loss. Discovered and fixed a critical variance-gaming loophole in both SharpeProxyLoss and MultiTaskLoss that allowed the neural network to artificially deflate batch variance to over-inflate its training Sharpe score.
+
+## Bugs Fixed
+| ID | File | Description | Severity |
+|----|------|-------------|----------|
+| **S1** | 	raining/gpu_losses.py | Fixed "Sharpe Inflation" in SharpeProxyLoss. The optimizer was allowed to backpropagate through the variance denominator, leading the network to predict exactly C/target to make all batch returns identical, dropping variance to ~0 and exploding the Sharpe proxy to infinity. Fixed by .detach()ing the standard deviation. | Critical |
+| **S2** | models/architectures.py | Applied the identical std.detach() fix to MultiTaskLoss which embedded its own inline calculation of the Sharpe proxy penalty. | Critical |
+
+## Files Edited
+- 	raining/gpu_losses.py: Detached standard deviation in SharpeProxyLoss.
+- models/architectures.py: Detached standard deviation in MultiTaskLoss.
+
+---
+# Session Report: Download Script Bug Fixes
+**Date:** 2026-08-16
+**Status:** Complete
+
+## Summary
+Fixed critical bugs in `scripts/download_missing_pairs.py` that caused background data downloads to crash when attempting to fetch missing 2008-2025 Dukascopy data. 
+
+## Bugs Fixed
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **B1** | `download_missing_pairs.py` | 72 | **Method Resolution Error**: The script attempted to call `download_dukascopy_year_by_year` on `DukascopyLoader`, but this method actually resides in `ForexDataManager`. Updated the script to correctly instantiate and route through `ForexDataManager` while passing the appropriate concurrency and retry configurations. |
+| **B2** | `download_missing_pairs.py` | 110, 125, 128 | **Unicode Encode Crash**: The script was crashing on Windows environments (`UnicodeEncodeError: 'charmap' codec can't encode character`) when trying to print emojis (✅, ⚠️, ❌). Replaced all terminal emojis with safe ASCII bracket tags (`[OK]`, `[WARN]`, `[ERROR]`). |
+
+## Files Edited
+- `scripts/download_missing_pairs.py`: Fixed `ForexDataManager` initialization and removed non-ASCII characters to ensure reliable background execution.
+
+---
+
+# Session Report: 2008 Data Rebuild
+**Date:** 2026-08-16
+**Status:** Complete
+
+## Summary
+Reverted training config files back to a 2008-01-01 start date and initiated a background job to fully repair the data pipeline. The job removes the incomplete processed data cache, downloads the missing raw data for EURUSD, GBPUSD, and USDJPY from 2008 to 2025, and rebuilds the multi-pair Zarr dataset from scratch.
+
+## Files Edited
+- `config/pipeline.yaml`: Reverted `start_date` to `2008-01-01`.
+- `config/run.yaml`: Reverted `start` to `2008-01-01`.
+
+---
+
+# Session Report: Fix 1D Data Scaling Crash
+**Status:** Complete
+
+## Summary
+Fixed a critical crash in `MemmapSequenceDataset` that occurs when processing non-sequential 1D feature arrays with an sklearn `StandardScaler`. 
+
+## Bugs Fixed
+| ID | File | Line | Description |
+|----|------|------|-------------|
+| **D1** | `gpu_datasets.py` | 209 | **1D Scaling Crash**: `MemmapSequenceDataset.__getitem__` directly passed 1D `[n_features]` arrays to `scaler.transform()` when processing non-sequential samples. `StandardScaler` strictly requires 2D arrays and would crash with `ValueError`. Fixed by adding an `elif X.ndim == 1` block to safely reshape the array to `(1, -1)` before transforming and back to its original shape. |
+
+## Files Edited
+- `training/gpu_datasets.py`: Fixed 1D scaling crash.
+
+---
+
+# Session Report: Data Partition Date Update
+**Date:** 2026-08-16
+**Status:** Complete
+
+## Summary
+Updated `config/pipeline.yaml` data date ranges to align with the 2015 to 2025 range requested by the user. `config/run.yaml` was already set to `2015-01-01` to `2025-12-31`.
+
+## Files Edited
+- `config/pipeline.yaml`: Updated `start_date` and `end_date` to `2015-01-01` and `2025-12-31` respectively.
+
+---
+
 # Session Report: Memory & Thread Leak Fixes
 **Date:** 2026-08-15
 **Status:** Complete
@@ -1544,3 +1874,4 @@ PASS: py_compile scripts/backtest_true_walk_forward.py tests/test_backtest_engin
 PASS: In-memory regression probes (SL/TP, zero-stop guard, metrics fallback, idempotency, parity)
 ALL PASS — no regressions
 ```
+

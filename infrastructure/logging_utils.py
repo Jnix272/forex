@@ -4,7 +4,7 @@ Structured logging utilities for data pipeline.
 Replaces bare print() with grep-able, structured log lines.
 Usage:
     from infrastructure.logging_utils import log_data_load
-    
+
     log_data_load("dukascopy", "data/raw/dukascopy/EURUSD/2024/", n_rows=1500000, status="success", t0=start_time)
     log_data_load("news_parquet", "data/raw/news/historical_news_combined.parquet", n_rows=8400000, status="success", t0=start_time)
     log_data_load("fred_yield", "FRED:US10Y", n_rows=0, status="fallback_synthetic", t0=start_time, exc=e)
@@ -13,16 +13,13 @@ Usage:
 import logging
 import time
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
 # Configure module logger
 logger = logging.getLogger("forex.data")
 if not logger.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "[%(asctime)s] %(name)s %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    formatter = logging.Formatter("[%(asctime)s] %(name)s %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
@@ -34,14 +31,14 @@ def log_data_load(
     path: str,
     n_rows: int,
     status: str,
-    t0: Optional[float] = None,
-    exc: Optional[Exception] = None,
+    t0: float | None = None,
+    exc: Exception | None = None,
     note: str = "",
     **extra: Any,
 ) -> None:
     """
     Log a data load event with consistent structure.
-    
+
     Args:
         source: Source identifier (dukascopy, news_parquet, fred, cross_asset, cot, etc.)
         path: File/URL/path being loaded
@@ -53,7 +50,7 @@ def log_data_load(
         **extra: Additional key=value pairs for structured logging
     """
     duration_ms = int((time.perf_counter() - t0) * 1000) if t0 is not None else -1
-    
+
     parts = [
         f"source={source}",
         f"path={path}",
@@ -67,9 +64,9 @@ def log_data_load(
         parts.append(f"{k}={v}")
     if exc:
         parts.append(f"error={type(exc).__name__}: {exc}")
-    
+
     msg = " | ".join(parts)
-    
+
     if status == "error":
         logger.error(msg)
     elif status in ("fallback_synthetic", "skip_empty", "empty", "partial"):
@@ -82,7 +79,7 @@ def log_data_load(
 def timed_load(source: str, path: str, note: str = "", **extra: Any):
     """
     Context manager for timing and logging a data load.
-    
+
     Usage:
         with timed_load("dukascopy", "data/raw/dukascopy/EURUSD/", pair="EURUSD") as ctx:
             df = load_data()
@@ -116,8 +113,8 @@ def log_feature_build(
     n_rows: int,
     n_cols: int,
     status: str,
-    t0: Optional[float] = None,
-    exc: Optional[Exception] = None,
+    t0: float | None = None,
+    exc: Exception | None = None,
     note: str = "",
 ) -> None:
     """Log feature engineering step."""
@@ -133,7 +130,7 @@ def log_feature_build(
         parts.append(f"note={note}")
     if exc:
         parts.append(f"error={type(exc).__name__}: {exc}")
-    
+
     msg = " | ".join(parts)
     if status == "error":
         logger.error(msg)
@@ -145,11 +142,11 @@ def log_feature_build(
 
 def log_training_step(
     step: str,
-    epoch: Optional[int] = None,
-    batch: Optional[int] = None,
-    metrics: Optional[dict] = None,
+    epoch: int | None = None,
+    batch: int | None = None,
+    metrics: dict | None = None,
     status: str = "progress",
-    t0: Optional[float] = None,
+    t0: float | None = None,
 ) -> None:
     """Log training step with optional metrics."""
     duration_ms = int((time.perf_counter() - t0) * 1000) if t0 is not None else -1

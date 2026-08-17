@@ -49,4 +49,4 @@ def test_build_download_command_is_resumable_and_schema_compatible():
     assert "--resume" in cmd
     assert cmd[cmd.index("--source") + 1] == "free"
     assert cmd[cmd.index("--news-out") + 1] == "data/raw/news/historical_news_combined.parquet"
-    assert cmd[cmd.index("--pairs") + 1: cmd.index("--source")] == ["EURUSD", "GBPUSD"]
+    assert cmd[cmd.index("--pairs") + 1 : cmd.index("--source")] == ["EURUSD", "GBPUSD"]

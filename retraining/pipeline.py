@@ -39,20 +39,28 @@ from retraining.orchestrator import (
 # Pipeline Configuration
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class PipelineConfig:
     """Top-level pipeline configuration."""
+
     # Feature Store
     feature_store_root: str = "data/feature_store"
-    feature_names: list[str] = field(default_factory=lambda: [
-        # Names MUST match exact aliases from HAELTFeatureBuilder.build()
-        "close", "ret_5", "ret_20",   # lag_returns() -> ret_{w}, NOT log_ret_{w}
-        "atr_6", "atr_20",
-        "vol_20",                      # rolling_volatility(20) -> vol_20, NOT rolling_vol_20
-        "ofi",                         # order_flow_imbalance() -> ofi, NOT ofi_20
-        "obi_proxy",
-        "time_sin", "time_cos",        # HAELTFeatureBuilder temporal -> time_sin/time_cos
-    ])
+    feature_names: list[str] = field(
+        default_factory=lambda: [
+            # Names MUST match exact aliases from HAELTFeatureBuilder.build()
+            "close",
+            "ret_5",
+            "ret_20",  # lag_returns() -> ret_{w}, NOT log_ret_{w}
+            "atr_6",
+            "atr_20",
+            "vol_20",  # rolling_volatility(20) -> vol_20, NOT rolling_vol_20
+            "ofi",  # order_flow_imbalance() -> ofi, NOT ofi_20
+            "obi_proxy",
+            "time_sin",
+            "time_cos",  # HAELTFeatureBuilder temporal -> time_sin/time_cos
+        ]
+    )
 
     # Drift Detection
     drift_baseline_days: int = 90
@@ -64,10 +72,15 @@ class PipelineConfig:
     # Retrain Orchestrator
     retrain_enabled: bool = True
     retrain_model_family: str = "haelt"
-    retrain_dry_run: bool = False  # Production mode — retraining will execute
-    retrain_extras: list[str] = field(default_factory=lambda: [
-        "--epochs", "40", "--batch-size", "128",
-    ])
+    retrain_dry_run: bool = False  # Production mode - retraining will execute
+    retrain_extras: list[str] = field(
+        default_factory=lambda: [
+            "--epochs",
+            "40",
+            "--batch-size",
+            "128",
+        ]
+    )
 
     # Materialization
     auto_materialize: bool = True
@@ -80,6 +93,7 @@ class PipelineConfig:
 # ════════════════════════════════════════════════════════════════════════════
 # Full Pipeline
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class FullPipeline:
     """
@@ -114,15 +128,17 @@ class FullPipeline:
     # Step 1: Materialize Features
     # ──────────────────────────────────────────────────────────────────────
 
-    def materialize(
-        self, bars: pl.DataFrame, start: datetime, end: datetime
-    ) -> dict[str, pl.DataFrame]:
+    def materialize(self, bars: pl.DataFrame, start: datetime, end: datetime) -> dict[str, pl.DataFrame]:
         """Materialize configured features from raw bars."""
         if not self.config.auto_materialize:
             return {}
         self._log(f"Materializing {len(self.config.feature_names)} features...")
         result = materialize_feature_set(
-            self.store, self.config.feature_names, bars, start, end,
+            self.store,
+            self.config.feature_names,
+            bars,
+            start,
+            end,
         )
         self._log(f"  Materialized {len(result)} features")
         return result
@@ -131,7 +147,7 @@ class FullPipeline:
     # Step 2: Check Drift
     # ──────────────────────────────────────────────────────────────────────
 
-    def check_drift(self, as_of: datetime = None) -> DriftReport:
+    def check_drift(self, as_of: datetime | None = None) -> DriftReport:
         """Run scheduled drift check using FeatureStore data."""
         self._log("Running drift check...")
         report = schedule_drift_check(
@@ -141,19 +157,14 @@ class FullPipeline:
             live_window_days=self.config.drift_live_days,
             as_of=as_of,
         )
-        self._log(
-            f"  Drift: {report.n_drifted}/{report.n_features} features "
-            f"(PSI max={report.psi_max:.4f})"
-        )
+        self._log(f"  Drift: {report.n_drifted}/{report.n_features} features (PSI max={report.psi_max:.4f})")
         return report
 
     # ──────────────────────────────────────────────────────────────────────
     # Step 3: Evaluate Triggers & Retrain
     # ──────────────────────────────────────────────────────────────────────
 
-    def evaluate_and_retrain(
-        self, drift_report: DriftReport
-    ) -> dict[str, Any]:
+    def evaluate_and_retrain(self, drift_report: DriftReport) -> dict[str, Any]:
         """Evaluate all triggers and conditionally retrain."""
         if not self.config.retrain_enabled:
             return {"retrain_skipped": True, "reason": "retrain disabled in config"}
@@ -190,8 +201,8 @@ class FullPipeline:
     def run(
         self,
         bars: pl.DataFrame = None,
-        start: datetime = None,
-        end: datetime = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
         skip_materialize: bool = False,
     ) -> dict[str, Any]:
         """
@@ -244,10 +255,18 @@ class FullPipeline:
         # Step 3: Retrain
         try:
             retrain_result = self.evaluate_and_retrain(
-                drift_report or DriftReport(
-                    feature_results=[], psi_max=0.0, ks_min_pvalue=1.0, ks_max_stat=0.0,
-                    n_drifted=0, n_features=0, overall_severity=DriftSeverity.NONE,
-                    drift_detected=False, baseline_time="", live_time="",
+                drift_report
+                or DriftReport(
+                    feature_results=[],
+                    psi_max=0.0,
+                    ks_min_pvalue=1.0,
+                    ks_max_stat=0.0,
+                    n_drifted=0,
+                    n_features=0,
+                    overall_severity=DriftSeverity.NONE,
+                    drift_detected=False,
+                    baseline_time="",
+                    live_time="",
                 )
             )
             result["retrain_result"] = retrain_result
@@ -283,6 +302,7 @@ class FullPipeline:
 # Convenience: one-shot pipeline run
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def run_pipeline(
     config: PipelineConfig = None,
     bars: pl.DataFrame = None,
@@ -297,10 +317,12 @@ def run_pipeline(
 # Config loader from run.yaml
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def load_config_from_yaml(yaml_path: str = "config/run.yaml") -> PipelineConfig:
     """Load pipeline config from YAML, merging with defaults."""
     try:
         import yaml
+
         with open(yaml_path) as f:
             data = yaml.safe_load(f) or {}
     except Exception:

@@ -65,7 +65,7 @@ mismatches (e.g. string vs float columns) surface only at runtime (see §3.1).
 `infrastructure/numerics.py:42`
 ```python
 def sanitize_array(arr, *, fill_value=0.0, context="array", clip_range=(-20.0, 20.0)):
-    clean = np.asarray(arr, dtype=np.float32).copy()   # ValueError on ''
+    clean = np.asarray(arr, dtype=np.float32).copy()  # ValueError on ''
     bad_mask = ~np.isfinite(clean)
     ...
 ```

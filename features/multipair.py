@@ -3,7 +3,7 @@ Multi-Pair Interaction Features (Improvement #6)
 ================================================
 Cross-pair features B7–B11 and VPIN, realized moments, Asia-London gap.
 Extracted from advanced_features.py for modular use.
-"""
+"""  # noqa: RUF002
 
 from __future__ import annotations
 
@@ -15,25 +15,25 @@ import polars as pl
 # VPIN (Volume-Synchronized Probability of Informed Trading)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def compute_vpin(bars: pl.DataFrame, bucket_size: int = 50, n_buckets: int = 50) -> pl.Series:
     """Compute VPIN from OHLCV bars using buy/sell volume classification."""
     buy_vol = pl.when(pl.col("close") > pl.col("open")).then(pl.col("volume")).otherwise(0.0)
     sell_vol = pl.when(pl.col("close") <= pl.col("open")).then(pl.col("volume")).otherwise(0.0)
 
-    df = bars.with_columns([
-        buy_vol.alias("buy_vol"),
-        sell_vol.alias("sell_vol")
-    ])
+    df = bars.with_columns([buy_vol.alias("buy_vol"), sell_vol.alias("sell_vol")])
 
-    df = df.with_columns([
-        pl.col("buy_vol").rolling_sum(window_size=bucket_size).alias("buy_bucket"),
-        pl.col("sell_vol").rolling_sum(window_size=bucket_size).alias("sell_bucket"),
-        pl.col("volume").rolling_sum(window_size=bucket_size).alias("total_bucket")
-    ])
+    df = df.with_columns(
+        [
+            pl.col("buy_vol").rolling_sum(window_size=bucket_size).alias("buy_bucket"),
+            pl.col("sell_vol").rolling_sum(window_size=bucket_size).alias("sell_bucket"),
+            pl.col("volume").rolling_sum(window_size=bucket_size).alias("total_bucket"),
+        ]
+    )
 
-    vpin = (
-        (df["buy_bucket"] - df["sell_bucket"]).abs() / (df["total_bucket"] + 1e-9)
-    ).rolling_mean(window_size=n_buckets)
+    vpin = ((df["buy_bucket"] - df["sell_bucket"]).abs() / (df["total_bucket"] + 1e-9)).rolling_mean(
+        window_size=n_buckets
+    )
 
     return vpin.fill_null(0.0).fill_nan(0.0).alias("vpin")
 
@@ -41,6 +41,7 @@ def compute_vpin(bars: pl.DataFrame, bucket_size: int = 50, n_buckets: int = 50)
 # ════════════════════════════════════════════════════════════════════════════
 # Realized Moments (Skewness, Kurtosis, Up/Down Vol Ratio)
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def compute_realized_moments(close: pl.Series, window: int = 20) -> pl.DataFrame:
     """Compute realized higher moments and up/down volatility ratio."""
@@ -51,33 +52,42 @@ def compute_realized_moments(close: pl.Series, window: int = 20) -> pl.DataFrame
 
     df = pl.DataFrame({"ret": ret, "up_ret": up_ret, "dn_ret": dn_ret})
 
-    df = df.with_columns([
-        pl.col("ret").rolling_skew(window_size=window).alias(f"rolling_skew_{window}"),
-        pl.col("ret").rolling_mean(window_size=window).alias("mu"),
-        (pl.col("ret")**2).rolling_mean(window_size=window).alias("mu2"),
-        (pl.col("ret")**3).rolling_mean(window_size=window).alias("mu3"),
-        (pl.col("ret")**4).rolling_mean(window_size=window).alias("mu4"),
-        pl.col("up_ret").rolling_std(window_size=window).alias("up_std"),
-        pl.col("dn_ret").rolling_std(window_size=window).alias("dn_std"),
-    ])
+    df = df.with_columns(
+        [
+            pl.col("ret").rolling_skew(window_size=window).alias(f"rolling_skew_{window}"),
+            pl.col("ret").rolling_mean(window_size=window).alias("mu"),
+            (pl.col("ret") ** 2).rolling_mean(window_size=window).alias("mu2"),
+            (pl.col("ret") ** 3).rolling_mean(window_size=window).alias("mu3"),
+            (pl.col("ret") ** 4).rolling_mean(window_size=window).alias("mu4"),
+            pl.col("up_ret").rolling_std(window_size=window).alias("up_std"),
+            pl.col("dn_ret").rolling_std(window_size=window).alias("dn_std"),
+        ]
+    )
 
-    df = df.with_columns([
-        (pl.col("mu2") - pl.col("mu")**2).alias("var")
-    ])
+    df = df.with_columns([(pl.col("mu2") - pl.col("mu") ** 2).alias("var")])
 
-    df = df.with_columns([
-        (
-            (pl.col("mu4") - 4*pl.col("mu3")*pl.col("mu") + 6*pl.col("mu2")*(pl.col("mu")**2) - 3*(pl.col("mu")**4))
-            / (pl.col("var")**2 + 1e-9)
-        ).alias(f"rolling_kurt_{window}"),
-        (pl.col("up_std") / (pl.col("dn_std") + 1e-9)).alias("rvol_ratio")
-    ])
+    df = df.with_columns(
+        [
+            (
+                (
+                    pl.col("mu4")
+                    - 4 * pl.col("mu3") * pl.col("mu")
+                    + 6 * pl.col("mu2") * (pl.col("mu") ** 2)
+                    - 3 * (pl.col("mu") ** 4)
+                )
+                / (pl.col("var") ** 2 + 1e-9)
+            ).alias(f"rolling_kurt_{window}"),
+            (pl.col("up_std") / (pl.col("dn_std") + 1e-9)).alias("rvol_ratio"),
+        ]
+    )
 
-    res = df.select([
-        pl.col(f"rolling_skew_{window}").fill_nan(0.0).fill_null(0.0),
-        pl.col(f"rolling_kurt_{window}").fill_nan(0.0).fill_null(0.0),
-        pl.col("rvol_ratio").fill_nan(0.0).fill_null(0.0)
-    ])
+    res = df.select(
+        [
+            pl.col(f"rolling_skew_{window}").fill_nan(0.0).fill_null(0.0),
+            pl.col(f"rolling_kurt_{window}").fill_nan(0.0).fill_null(0.0),
+            pl.col("rvol_ratio").fill_nan(0.0).fill_null(0.0),
+        ]
+    )
     return res
 
 
@@ -85,52 +95,55 @@ def compute_realized_moments(close: pl.Series, window: int = 20) -> pl.DataFrame
 # Asia-London Gap
 # ════════════════════════════════════════════════════════════════════════════
 
-def compute_asia_london_gap(bars: pl.DataFrame, atr: pl.Series = None) -> pl.Series:
+
+def compute_asia_london_gap(
+    bars: pl.DataFrame | pd.DataFrame,
+    atr: pl.Series | pd.Series | None = None,
+) -> pl.Series:
     """Compute Asia session close to London open gap, normalized by ATR."""
-    time_col = 'timestamp_utc' if 'timestamp_utc' in bars.columns else 'timestamp' if 'timestamp' in bars.columns else 'datetime'
+    data = bars.to_pandas() if isinstance(bars, pl.DataFrame) else bars.copy()
 
-    df = bars.select([pl.col(time_col), pl.col('close')])
-    df = df.with_columns([
-        pl.col(time_col).dt.date().alias('date'),
-        pl.col(time_col).dt.time().alias('time')
-    ])
+    time_col = (
+        "timestamp_utc"
+        if "timestamp_utc" in data.columns
+        else "timestamp"
+        if "timestamp" in data.columns
+        else "datetime"
+    )
 
-    df = df.with_columns([
-        (pl.col('time') < pl.time(7, 0)).alias('is_asia'),
-        (pl.col('time') >= pl.time(7, 0)).alias('is_london')
-    ])
+    if time_col in data.columns:
+        data[time_col] = pd.to_datetime(data[time_col], utc=True, errors="coerce")
+
+    data = data.dropna(subset=[time_col]).copy()
+    data["date"] = data[time_col].dt.date
+    data["time"] = data[time_col].dt.time
+
+    data["is_asia"] = data["time"].map(lambda t: t < pd.Timestamp("1970-01-01 07:00:00").time())
+    data["is_london"] = data["time"].map(lambda t: t >= pd.Timestamp("1970-01-01 07:00:00").time())
 
     london_open_times = (
-        df.filter(pl.col('is_london'))
-          .group_by('date')
-          .agg(pl.col(time_col).first().alias('london_open_time'))
+        data.loc[data["is_london"], ["date", time_col]].groupby("date", as_index=False).first().rename(columns={time_col: "london_open_time"})
     )
+    asia_close_vals = data.loc[data["is_asia"], ["date", "close"]].groupby("date", as_index=False).last().rename(columns={"close": "asia_close"})
+    daily_gaps = london_open_times.merge(asia_close_vals, on="date", how="inner")
 
-    asia_close_vals = (
-        df.filter(pl.col('is_asia'))
-          .group_by('date')
-          .agg(pl.col('close').last().alias('asia_close'))
-    )
-
-    daily_gaps = london_open_times.join(asia_close_vals, on='date', how='inner')
-
-    df = df.join(daily_gaps, left_on=time_col, right_on='london_open_time', how='left')
-
-    df = df.with_columns([
-        (pl.col('close') - pl.col('asia_close')).alias('gap')
-    ])
-
-    gap_series = df['gap'].forward_fill()
+    data = data.merge(daily_gaps, on="date", how="left")
+    data["gap"] = data["close"] - data["asia_close"]
+    gap_series = data["gap"].ffill().fillna(0.0).replace([np.inf, -np.inf], 0.0)
 
     if atr is not None:
-        gap_series = gap_series / (atr + 1e-9)
+        atr_values = atr.to_numpy() if hasattr(atr, "to_numpy") else np.asarray(atr, dtype=float)
+        atr_series = pd.Series(atr_values, index=data.index, dtype=float)
+        gap_series = gap_series / (atr_series + 1e-9)
 
-    return gap_series.fill_null(0.0).fill_nan(0.0).alias('asia_london_gap')
+    gap_series = gap_series.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+    return pl.Series("asia_london_gap", gap_series.to_numpy(dtype=float))
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Multi-Pair Features (B7–B11)
+# Multi-Pair Features (B7–B11)  # noqa: RUF003
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def compute_multipair_features(
     pair_bars: dict[str, pl.DataFrame | pd.DataFrame],
@@ -153,7 +166,7 @@ def compute_multipair_features(
       B11 no_trade_score      : 1 if low-vol + neutral OFI + choppy trend
 
     All features respect temporal causality: only past data is used.
-    """
+    """  # noqa: RUF002
     if not pair_bars:
         return pl.DataFrame()
 
@@ -172,7 +185,7 @@ def compute_multipair_features(
 
     # Compute log returns and ATR for each pair, aligned to primary index
     returns = {}
-    atrs    = {}
+    atrs = {}
     for pair, bars in pair_bars.items():
         if isinstance(bars, pl.DataFrame):
             b_pd = bars.to_pandas()
@@ -182,14 +195,17 @@ def compute_multipair_features(
 
         bars_aligned = bars.reindex(idx, method="ffill")
         ret = np.log(bars_aligned["close"] / bars_aligned["close"].shift(1))
-        returns[pair] = ret.fillna(0.0)
+        returns[pair] = pd.Series(ret, index=bars_aligned.index).fillna(0.0)
         # ATR proxy: rolling true-range mean
         prev_c = bars_aligned["close"].shift(1)
-        tr = pd.concat([
-            bars_aligned["high"] - bars_aligned["low"],
-            (bars_aligned["high"] - prev_c).abs(),
-            (bars_aligned["low"] - prev_c).abs(),
-        ], axis=1).max(axis=1)
+        tr = pd.concat(
+            [
+                bars_aligned["high"] - bars_aligned["low"],
+                (bars_aligned["high"] - prev_c).abs(),
+                (bars_aligned["low"] - prev_c).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
         atrs[pair] = tr.rolling(atr_window, min_periods=2).mean().fillna(1e-6)
 
     F = pd.DataFrame(index=idx)
@@ -197,7 +213,7 @@ def compute_multipair_features(
     # B7. Relative momentum: r_i(window) - r_j(window) for all i<j pairs
     cum_rets = {p: returns[p].rolling(momentum_window, min_periods=2).sum() for p in pairs}
     for i, pi in enumerate(pairs):
-        for pj in pairs[i + 1:]:
+        for pj in pairs[i + 1 :]:
             col = f"rel_mom_{pi}_{pj}"
             F[col] = (cum_rets[pi] - cum_rets[pj]).fillna(0.0)
 
@@ -207,23 +223,24 @@ def compute_multipair_features(
         F[f"vol_share_{pair}"] = (atrs[pair] / atr_basket).fillna(0.0)
 
     # B9. Cross-pair dispersion: StdDev of short-window returns across pairs
-    ret_matrix = pd.DataFrame({p: returns[p].rolling(dispersion_window, min_periods=2).sum()
-                                for p in pairs})
+    ret_matrix = pd.DataFrame({p: returns[p].rolling(dispersion_window, min_periods=2).sum() for p in pairs})
     F["cross_dispersion"] = ret_matrix.std(axis=1).fillna(0.0)
 
-    # B10. Time-to-barrier estimate: ATR_20 / |ΔP_5| — short = momentum, long = drift
-    primary_ret5   = returns[primary].rolling(dispersion_window, min_periods=2).sum().abs() + 1e-8
-    primary_atr20  = atrs[primary].rolling(20, min_periods=5).mean().fillna(1e-6)
+    # B10. Time-to-barrier estimate: ATR_20 / |ΔP_5| - short = momentum, long = drift
+    primary_ret5 = returns[primary].rolling(dispersion_window, min_periods=2).sum().abs() + 1e-8
+    primary_atr20 = atrs[primary].rolling(20, min_periods=5).mean().fillna(1e-6)
     F["time_to_barrier_est"] = (primary_atr20 / primary_ret5).clip(0.1, 20.0).fillna(5.0)
 
     # B11. No-trade zone score
     # Conditions: low vol + neutral OFI-Z + choppy trend
     # Vol condition: rolling ATR below 25th percentile
     atr_pct25 = atrs[primary].rolling(200, min_periods=50).quantile(0.25)
-    low_vol   = (atrs[primary] < atr_pct25).astype(float)
+    low_vol = (atrs[primary] < atr_pct25).astype(float)
 
     # OFI-Z neutral band: approximate with cross-pair dispersion being very low
-    neutral_ofi = (F["cross_dispersion"] < F["cross_dispersion"].rolling(200, min_periods=50).quantile(0.3)).astype(float)
+    neutral_ofi = (F["cross_dispersion"] < F["cross_dispersion"].rolling(200, min_periods=50).quantile(0.3)).astype(
+        float
+    )
 
     # Trend stability: low dispersion of returns across window -> choppy
     trend_unstable = (F["cross_dispersion"] < 1e-5).astype(float)
@@ -238,10 +255,8 @@ def compute_multipair_features(
 # Convenience: Build all multi-pair features in one call
 # ════════════════════════════════════════════════════════════════════════════
 
-def build_multipair_features(
-    pair_bars: dict[str, pl.DataFrame | pd.DataFrame],
-    **kwargs
-) -> pl.DataFrame:
+
+def build_multipair_features(pair_bars: dict[str, pl.DataFrame | pd.DataFrame], **kwargs) -> pl.DataFrame:
     """
     Compute all multi-pair features (B7-B11) + VPIN + realized moments + Asia-London gap.
     """
@@ -249,7 +264,7 @@ def build_multipair_features(
     mp = compute_multipair_features(pair_bars, **kwargs)
 
     # Add VPIN for primary pair
-    primary = list(pair_bars.keys())[0]
+    primary = next(iter(pair_bars.keys()))
     primary_bars = pair_bars[primary]
     if isinstance(primary_bars, pl.DataFrame):
         vpin = compute_vpin(primary_bars)

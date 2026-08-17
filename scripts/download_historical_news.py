@@ -103,8 +103,7 @@ try:
     from tqdm import tqdm as _tqdm
 
     def _progress(iterable, *, desc: str = "", total: int | None = None, leave: bool = True):
-        return _tqdm(iterable, desc=desc, total=total, leave=leave, unit="chunk",
-                     dynamic_ncols=True)
+        return _tqdm(iterable, desc=desc, total=total, leave=leave, unit="chunk", dynamic_ncols=True)
 
     HAS_TQDM = True
 except ImportError:  # pragma: no cover
@@ -125,7 +124,7 @@ except ImportError:  # pragma: no cover
         def __next__(self):
             val = next(self._it)
             self._n += 1
-            pct = f"{100*self._n/self._total:.0f}%" if self._total else str(self._n)
+            pct = f"{100 * self._n / self._total:.0f}%" if self._total else str(self._n)
             print(f"\r[progress] {self._desc} {pct}", end="", flush=True)
             return val
 
@@ -203,17 +202,26 @@ CSV_FIELDS = [
 # normalize economic surprises. Kept separate from the shared news CSV_FIELDS so
 # the (large) news file schema is untouched; events.csv is rewritten in full by
 # write_rows, so adding the column here is safe/backward-compatible.
-CAL_FIELDS = CSV_FIELDS + ["prior"]
+CAL_FIELDS = [*CSV_FIELDS, "prior"]
 FAILURE_FIELDS = ["source", "pair", "start_utc", "end_utc", "reason"]
 
 # Map EODHD country codes (and a few aliases) to ISO currency codes. The loader's
 # relevance filter matches ISO currencies (USD/EUR/...), so calendar rows that
 # only expose a country must be translated here.
 _COUNTRY_TO_CCY = {
-    "US": "USD", "USA": "USD",
-    "EU": "EUR", "EZ": "EUR", "EA": "EUR", "EMU": "EUR",
-    "DE": "EUR", "FR": "EUR", "IT": "EUR", "ES": "EUR", "NL": "EUR",
-    "GB": "GBP", "UK": "GBP",
+    "US": "USD",
+    "USA": "USD",
+    "EU": "EUR",
+    "EZ": "EUR",
+    "EA": "EUR",
+    "EMU": "EUR",
+    "DE": "EUR",
+    "FR": "EUR",
+    "IT": "EUR",
+    "ES": "EUR",
+    "NL": "EUR",
+    "GB": "GBP",
+    "UK": "GBP",
     "JP": "JPY",
     "AU": "AUD",
     "NZ": "NZD",
@@ -236,6 +244,7 @@ def _calendar_currency(event: dict, title: str) -> str:
             return token
     return _event_currency_from_text(title, "GLOBAL")
 
+
 PAIR_KEYWORDS: dict[str, list[str]] = {
     "EUR": ['"European Central Bank"', "ECB", "euro", "Eurozone"],
     "USD": ['"Federal Reserve"', "Fed", "FOMC", "CPI", "NFP", '"nonfarm payrolls"', "inflation"],
@@ -250,13 +259,12 @@ PAIR_KEYWORDS: dict[str, list[str]] = {
 
 # ── Date helpers ----------------------------------------------------------------──────────────
 
+
 def _parse_date(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
 
 
-def _daterange(
-    start: datetime, end: datetime, step_days: int
-) -> Iterable[tuple[datetime, datetime]]:
+def _daterange(start: datetime, end: datetime, step_days: int) -> Iterable[tuple[datetime, datetime]]:
     cur = start
     step = timedelta(days=max(1, int(step_days)))
     while cur <= end:
@@ -280,6 +288,7 @@ def _chunk_dates(start: datetime, end: datetime) -> set[str]:
 
 # ── HTTP helpers ------------------------------------------------------------------------------
 
+
 def _parse_json_response(raw: str, url: str) -> object:
     text = raw.lstrip("\ufeff").strip()
     try:
@@ -289,22 +298,17 @@ def _parse_json_response(raw: str, url: str) -> object:
         try:
             payload, idx = decoder.raw_decode(text)
         except json.JSONDecodeError:
-            snippet = text.replace("\n", " ")[:240].encode('ascii', 'replace').decode('ascii')
+            snippet = text.replace("\n", " ")[:240].encode("ascii", "replace").decode("ascii")
             raise ValueError(f"Non-JSON response from {url}: {snippet}") from strict_exc
         trailing = text[idx:].strip()
         if trailing:
-            snippet = trailing.replace("\n", " ")[:120].encode('ascii', 'replace').decode('ascii')
-            raise ValueError(
-                f"JSON response from {url} has trailing data: {snippet}"
-            ) from strict_exc
+            snippet = trailing.replace("\n", " ")[:120].encode("ascii", "replace").decode("ascii")
+            raise ValueError(f"JSON response from {url} has trailing data: {snippet}") from strict_exc
         return payload
 
 
 def _http_json(url: str, params: dict, timeout: int = 45) -> object:
-    headers = {
-        "User-Agent": "forex-scaling-model/2.0",
-        "Accept-Encoding": "gzip, deflate"
-    }
+    headers = {"User-Agent": "forex-scaling-model/2.0", "Accept-Encoding": "gzip, deflate"}
     response = _SESSION.get(url, params=params, headers=headers, timeout=timeout)
     response.raise_for_status()
     raw = response.text
@@ -329,6 +333,7 @@ def _retry_sleep_seconds(exc: Exception, sleep_s: float, attempt: int) -> float:
 
 
 # ── Pair / text helpers ----------------------------------------------------------------───────
+
 
 def _pair_currencies(pair: str) -> list[str]:
     clean = str(pair).replace("/", "").replace("_", "").upper()
@@ -368,30 +373,88 @@ EVENT_CATEGORIES = [
 
 # Keyword groups for the five non-default categories, in precedence order.
 _CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("central_bank", (
-        "fomc", "ecb", "boe", "boj", "rba", "rbnz", "boc", "snb",
-        "fed", "federal reserve", "central bank",
-        "rate decision", "interest rate", "interest rates", "monetary policy",
-        "rate hike", "rate cut", "rate hikes", "rate cuts",
-        "raises rates", "cuts rates", "hikes rates", "rate rises",
-    )),
-    ("inflation", (
-        "cpi", "ppi", "pce", "inflation", "core prices", "deflation",
-        "consumer prices", "producer prices",
-    )),
-    ("labor", (
-        "nfp", "nonfarm payrolls", "non-farm payrolls", "payrolls",
-        "jobs report", "unemployment", "jobless claims", "employment change",
-        "labor market", "labour market",
-    )),
-    ("growth", (
-        "gdp", "pmi", "ism", "industrial production", "retail sales",
-        "manufacturing",
-    )),
-    ("geopolitical", (
-        "war", "sanctions", "conflict", "election", "crisis", "tariff",
-        "tariffs", "geopolitical", "opec", "attack",
-    )),
+    (
+        "central_bank",
+        (
+            "fomc",
+            "ecb",
+            "boe",
+            "boj",
+            "rba",
+            "rbnz",
+            "boc",
+            "snb",
+            "fed",
+            "federal reserve",
+            "central bank",
+            "rate decision",
+            "interest rate",
+            "interest rates",
+            "monetary policy",
+            "rate hike",
+            "rate cut",
+            "rate hikes",
+            "rate cuts",
+            "raises rates",
+            "cuts rates",
+            "hikes rates",
+            "rate rises",
+        ),
+    ),
+    (
+        "inflation",
+        (
+            "cpi",
+            "ppi",
+            "pce",
+            "inflation",
+            "core prices",
+            "deflation",
+            "consumer prices",
+            "producer prices",
+        ),
+    ),
+    (
+        "labor",
+        (
+            "nfp",
+            "nonfarm payrolls",
+            "non-farm payrolls",
+            "payrolls",
+            "jobs report",
+            "unemployment",
+            "jobless claims",
+            "employment change",
+            "labor market",
+            "labour market",
+        ),
+    ),
+    (
+        "growth",
+        (
+            "gdp",
+            "pmi",
+            "ism",
+            "industrial production",
+            "retail sales",
+            "manufacturing",
+        ),
+    ),
+    (
+        "geopolitical",
+        (
+            "war",
+            "sanctions",
+            "conflict",
+            "election",
+            "crisis",
+            "tariff",
+            "tariffs",
+            "geopolitical",
+            "opec",
+            "attack",
+        ),
+    ),
 ]
 
 # Precompile one word-boundary-anchored alternation per category.
@@ -513,6 +576,7 @@ def _dedupe_news_rows(rows: list[dict]) -> list[dict]:
 
 # ── Timestamp coercion ----------------------------------------------------------------────────
 
+
 def _coerce_timestamp(value: str) -> datetime | None:
     raw = str(value).strip()
     if not raw:
@@ -577,10 +641,7 @@ def _parse_official_feed_items(raw_xml: str, feed_name: str, currency: str, url:
     except ET.ParseError as exc:
         raise ValueError(f"invalid XML from {feed_name}: {exc}") from exc
 
-    nodes = [
-        node for node in root.iter()
-        if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}
-    ]
+    nodes = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
     rows: list[dict] = []
     for node in nodes:
         title = _xml_text(node, ("title",))
@@ -589,18 +650,20 @@ def _parse_official_feed_items(raw_xml: str, feed_name: str, currency: str, url:
         if not title or ts is None:
             continue
         category = _event_category_from_text(title)
-        rows.append({
-            "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
-            "event_type": "official_feed",
-            "currency": currency,
-            "impact": _impact_from_category(category, "high"),
-            "headline": title,
-            "actual": "",
-            "forecast": "",
-            "source": f"official_{feed_name.lower()}",
-            "url": _xml_link(node) or url,
-            "event_category": category,
-        })
+        rows.append(
+            {
+                "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
+                "event_type": "official_feed",
+                "currency": currency,
+                "impact": _impact_from_category(category, "high"),
+                "headline": title,
+                "actual": "",
+                "forecast": "",
+                "source": f"official_{feed_name.lower()}",
+                "url": _xml_link(node) or url,
+                "event_category": category,
+            }
+        )
     return rows
 
 
@@ -643,25 +706,25 @@ def fetch_official_feeds(
             )
             payload.raise_for_status()
             feed_rows = _parse_official_feed_items(payload.text, name, currency, url)
-            feed_rows = [
-                row for row in feed_rows
-                if start <= (_coerce_timestamp(row["timestamp_utc"]) or start) <= end
-            ]
+            feed_rows = [row for row in feed_rows if start <= (_coerce_timestamp(row["timestamp_utc"]) or start) <= end]
             rows.extend(feed_rows)
             print(f"  [Official] {name:<4} {currency} | {len(feed_rows)} rows", flush=True)
         except Exception as exc:
             print(f"  [Official] WARN {name} failed: {exc}", flush=True)
-            failures.append({
-                "source": f"official_{name.lower()}",
-                "pair": ",".join(pairs),
-                "start_utc": start.isoformat().replace("+00:00", "Z"),
-                "end_utc": end.isoformat().replace("+00:00", "Z"),
-                "reason": str(exc),
-            })
+            failures.append(
+                {
+                    "source": f"official_{name.lower()}",
+                    "pair": ",".join(pairs),
+                    "start_utc": start.isoformat().replace("+00:00", "Z"),
+                    "end_utc": end.isoformat().replace("+00:00", "Z"),
+                    "reason": str(exc),
+                }
+            )
     return _dedupe_news_rows(rows), failures
 
 
 # ── Thread-safe incremental CSV writer ────────────────────────────────────────
+
 
 class _IncrementalCSVWriter:
     """
@@ -687,11 +750,13 @@ class _IncrementalCSVWriter:
     def _row_hash(self, row_tuple: tuple) -> bytes:
         """Compact hash of a row tuple for memory-efficient deduplication."""
         import hashlib
+
         return hashlib.md5("|".join(str(v) for v in row_tuple).encode()).digest()
 
     def _load_existing_hashes(self) -> None:
         """Load hashes of existing rows in batches to avoid OOM."""
         import csv as _csv
+
         try:
             with self.path.open("r", encoding="utf-8", newline="") as fh:
                 reader = _csv.DictReader(fh)
@@ -771,9 +836,7 @@ class _IncrementalCSVWriter:
                 continue
             seen.add(key)
             deduped.append(normalized)
-        deduped.sort(
-            key=lambda r: (r["timestamp_utc"], r["event_type"], r["currency"], r["headline"])
-        )
+        deduped.sort(key=lambda r: (r["timestamp_utc"], r["event_type"], r["currency"], r["headline"]))
         with self._lock, self.path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=self.fields)
             writer.writeheader()
@@ -782,6 +845,7 @@ class _IncrementalCSVWriter:
 
 
 # ── Per-(pair, date) progress manifest for accurate resume ────────────────────
+
 
 class _ProgressManifest:
     """
@@ -850,6 +914,7 @@ class _ProgressManifest:
 
 # ── Legacy write helpers (for calendar / failures, which are less frequent) ──
 
+
 def _read_existing(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -888,9 +953,7 @@ def write_rows(path: Path, rows: list[dict], *, append: bool, fields: list[str] 
             continue
         seen.add(key)
         deduped.append(normalized)
-    deduped.sort(
-        key=lambda r: (r["timestamp_utc"], r["event_type"], r["currency"], r["headline"])
-    )
+    deduped.sort(key=lambda r: (r["timestamp_utc"], r["event_type"], r["currency"], r["headline"]))
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
@@ -903,10 +966,7 @@ def append_failures(path: Path, rows: list[dict]) -> int:
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_existing(path)
-    seen = {
-        (r.get("source", ""), r.get("pair", ""), r.get("start_utc", ""), r.get("end_utc", ""))
-        for r in existing
-    }
+    seen = {(r.get("source", ""), r.get("pair", ""), r.get("start_utc", ""), r.get("end_utc", "")) for r in existing}
     new_rows: list[dict] = []
     for row in rows:
         normalized = {field: row.get(field, "") for field in FAILURE_FIELDS}
@@ -921,9 +981,7 @@ def append_failures(path: Path, rows: list[dict]) -> int:
         seen.add(key)
         new_rows.append(normalized)
     all_rows = existing + new_rows
-    all_rows.sort(
-        key=lambda r: (r.get("source", ""), r.get("pair", ""), r.get("start_utc", ""))
-    )
+    all_rows.sort(key=lambda r: (r.get("source", ""), r.get("pair", ""), r.get("start_utc", "")))
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=FAILURE_FIELDS)
         writer.writeheader()
@@ -937,9 +995,9 @@ def resolve_failures(path: Path, resolved_keys: set[tuple]) -> None:
         return
     existing = _read_existing(path)
     remaining = [
-        r for r in existing
-        if (r.get("source", ""), r.get("pair", ""),
-            r.get("start_utc", ""), r.get("end_utc", "")) not in resolved_keys
+        r
+        for r in existing
+        if (r.get("source", ""), r.get("pair", ""), r.get("start_utc", ""), r.get("end_utc", "")) not in resolved_keys
     ]
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=FAILURE_FIELDS)
@@ -948,6 +1006,7 @@ def resolve_failures(path: Path, resolved_keys: set[tuple]) -> None:
 
 
 # ── GDELT fetcher ----------------------------------------------------------------─────────────
+
 
 def _gdelt_fetch_one_chunk(
     pair: str,
@@ -987,8 +1046,7 @@ def _gdelt_fetch_one_chunk(
                 last_error = str(exc)
                 secs = _retry_sleep_seconds(exc, sleep_s, attempt)
                 print(
-                    f"  [GDELT] WARN {pair} {ws.date()} attempt {attempt}/{retries}: "
-                    f"{exc}; retry in {secs:.1f}s",
+                    f"  [GDELT] WARN {pair} {ws.date()} attempt {attempt}/{retries}: {exc}; retry in {secs:.1f}s",
                     flush=True,
                 )
                 time.sleep(secs)
@@ -1005,24 +1063,24 @@ def _gdelt_fetch_one_chunk(
             if not title or not seen:
                 continue
             try:
-                ts = datetime.strptime(
-                    seen.replace("Z", ""), "%Y%m%dT%H%M%S"
-                ).replace(tzinfo=UTC)
+                ts = datetime.strptime(seen.replace("Z", ""), "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
             except Exception:
                 continue
             category = _event_category_from_text(title)
-            rows.append({
-                "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
-                "event_type": "headline",
-                "currency": _event_currency_from_text(title, pair),
-                "impact": _impact_from_category(category, "medium"),
-                "headline": title,
-                "actual": "",
-                "forecast": "",
-                "source": "gdelt",
-                "url": str(art.get("url", "")),
-                "event_category": category,
-            })
+            rows.append(
+                {
+                    "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
+                    "event_type": "headline",
+                    "currency": _event_currency_from_text(title, pair),
+                    "impact": _impact_from_category(category, "medium"),
+                    "headline": title,
+                    "actual": "",
+                    "forecast": "",
+                    "source": "gdelt",
+                    "url": str(art.get("url", "")),
+                    "event_category": category,
+                }
+            )
         return rows
 
     def _fetch_window_recursive(ws: datetime, we: datetime, depth: int = 0) -> tuple[list[dict], list[dict]]:
@@ -1049,7 +1107,10 @@ def _gdelt_fetch_one_chunk(
             duration = (we - ws).total_seconds()
             if duration <= 900:  # 15 minutes minimum window
                 indent = "  " * (depth + 1)
-                print(f"{indent}[GDELT] CAP {label} | {len(articles)} articles (window <= 15m, stopping recursion)", flush=True)
+                print(
+                    f"{indent}[GDELT] CAP {label} | {len(articles)} articles (window <= 15m, stopping recursion)",
+                    flush=True,
+                )
                 return _parse_articles(articles), []
 
             mid = ws + (we - ws) / 2
@@ -1058,8 +1119,7 @@ def _gdelt_fetch_one_chunk(
 
             indent = "  " * (depth + 1)
             print(
-                f"{indent}[GDELT] CAP {label} ({len(articles)} articles) -- "
-                "recursively splitting",
+                f"{indent}[GDELT] CAP {label} ({len(articles)} articles) -- recursively splitting",
                 flush=True,
             )
 
@@ -1072,7 +1132,7 @@ def _gdelt_fetch_one_chunk(
             return left_rows + right_rows, left_failures + right_failures
 
         indent = "  " * (depth + 1) if depth > 0 else "  "
-        note = " (cap hit — use --gdelt-split-on-cap)" if cap_hit and not split_on_cap else ""
+        note = " (cap hit - use --gdelt-split-on-cap)" if cap_hit and not split_on_cap else ""
         print(f"{indent}[GDELT] {label} | {len(articles)} articles{note}", flush=True)
         return _parse_articles(articles), []
 
@@ -1112,23 +1172,32 @@ def fetch_gdelt_pair(
     skip_count = 0
     fetch_count = 0
     consecutive_failures = 0
+
     def _process_chunk(chunk_start, chunk_end, i):
         if resume and manifest is not None:
             chunk_days = _chunk_dates(chunk_start, chunk_end)
             if manifest.is_done(pair, chunk_days):
                 if (i + 1) % 100 == 0:
-                    print(f"  [GDELT Skip] {pair}: skipped {i+1}/{total_chunks} chunks ({(i+1)/total_chunks*100:.1f}%)", flush=True)
+                    print(
+                        f"  [GDELT Skip] {pair}: skipped {i + 1}/{total_chunks} chunks ({(i + 1) / total_chunks * 100:.1f}%)",
+                        flush=True,
+                    )
                 return "skip", None, None
 
         if dry_run:
-            print(f"  [DRY-RUN] GDELT {pair} {chunk_start.date()}->{chunk_end.date()} ({i+1}/{total_chunks} - {(i+1)/total_chunks*100:.1f}%)", flush=True)
+            print(
+                f"  [DRY-RUN] GDELT {pair} {chunk_start.date()}->{chunk_end.date()} ({i + 1}/{total_chunks} - {(i + 1) / total_chunks * 100:.1f}%)",
+                flush=True,
+            )
             return "dry", None, None
 
         c_rows: list[dict] = []
         c_fails: list[dict] = []
         for query_label, query in query_specs:
             q_rows, q_fails = _gdelt_fetch_one_chunk(
-                pair, chunk_start, chunk_end,
+                pair,
+                chunk_start,
+                chunk_end,
                 query=query,
                 query_label=query_label,
                 max_records=max_records,
@@ -1142,13 +1211,10 @@ def fetch_gdelt_pair(
 
     # Use 1 worker per pair for chunk concurrency to prevent 429 Too Many Requests
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future_to_chunk = {
-            pool.submit(_process_chunk, cs, ce, i): (i, cs, ce)
-            for i, (cs, ce) in enumerate(chunks)
-        }
+        future_to_chunk = {pool.submit(_process_chunk, cs, ce, i): (i, cs, ce) for i, (cs, ce) in enumerate(chunks)}
 
         for future in as_completed(future_to_chunk):
-            i, cs, ce = future_to_chunk[future]
+            _i, cs, ce = future_to_chunk[future]
             try:
                 status, chunk_rows, chunk_failures = future.result()
                 if status == "skip":
@@ -1171,18 +1237,25 @@ def fetch_gdelt_pair(
                 else:
                     consecutive_failures += 1
                     if consecutive_failures >= 50:
-                        raise RuntimeError(f"Aborting GDELT scraper: 50 consecutive chunks failed for {pair}. Check rate limits or start dates.")
+                        raise RuntimeError(
+                            f"Aborting GDELT scraper: 50 consecutive chunks failed for {pair}. Check rate limits or start dates."
+                        )
 
                 if fetch_count % 5 == 0 or fetch_count == total_chunks:
                     progress_pct = fetch_count / total_chunks * 100
-                    print(f"  [GDELT Progress] {pair}: {fetch_count}/{total_chunks} chunks ({progress_pct:.1f}%)", flush=True)
+                    print(
+                        f"  [GDELT Progress] {pair}: {fetch_count}/{total_chunks} chunks ({progress_pct:.1f}%)",
+                        flush=True,
+                    )
                     if wandb and wandb.run:
-                        wandb.log({
-                            f"gdelt/{pair}/progress_pct": progress_pct,
-                            f"gdelt/{pair}/chunks_fetched": fetch_count,
-                            f"gdelt/{pair}/consecutive_failures": consecutive_failures,
-                            f"gdelt/{pair}/in_flight_articles": len(rows),
-                        })
+                        wandb.log(
+                            {
+                                f"gdelt/{pair}/progress_pct": progress_pct,
+                                f"gdelt/{pair}/chunks_fetched": fetch_count,
+                                f"gdelt/{pair}/consecutive_failures": consecutive_failures,
+                                f"gdelt/{pair}/in_flight_articles": len(rows),
+                            }
+                        )
 
                 if writer and checkpoint_every > 0 and fetch_count % checkpoint_every == 0:
                     if rows:
@@ -1198,15 +1271,14 @@ def fetch_gdelt_pair(
                 print(f"  [GDELT] Error processing chunk {cs.date()}->{ce.date()} for {pair}: {exc}", flush=True)
 
     if skip_count:
-        print(
-            f"[GDELT] {pair}: skipped {skip_count} already-covered chunks", flush=True
-        )
+        print(f"[GDELT] {pair}: skipped {skip_count} already-covered chunks", flush=True)
 
     # caller must writer.append(rows) then manifest.mark(pair, pending_dates)
     return rows, failures, pending_dates
 
 
 # ── EODHD news fetcher ----------------------------------------------------------------────────
+
 
 def fetch_eodhd_news(
     pair: str,
@@ -1240,38 +1312,34 @@ def fetch_eodhd_news(
             print(f"  [EODHD news] WARN {pair} offset={offset}: {exc}", flush=True)
             break
         articles = (
-            payload
-            if isinstance(payload, list)
-            else payload.get("data", [])
-            if isinstance(payload, dict)
-            else []
+            payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
         )
         print(f"  [EODHD news] {pair} offset={offset} | {len(articles)} articles", flush=True)
         if not articles:
             break
         for art in articles:
             title = str(art.get("title", art.get("headline", ""))).strip()
-            date_raw = str(
-                art.get("date", art.get("published_at", art.get("datetime", "")))
-            ).strip()
+            date_raw = str(art.get("date", art.get("published_at", art.get("datetime", "")))).strip()
             if not title or not date_raw:
                 continue
             ts = _coerce_timestamp(date_raw)
             if ts is None:
                 continue
             category = _event_category_from_text(title)
-            rows.append({
-                "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
-                "event_type": "headline",
-                "currency": _event_currency_from_text(title, pair),
-                "impact": _impact_from_category(category, "medium"),
-                "headline": title,
-                "actual": "",
-                "forecast": "",
-                "source": "eodhd_news",
-                "url": str(art.get("link", art.get("url", ""))),
-                "event_category": category,
-            })
+            rows.append(
+                {
+                    "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
+                    "event_type": "headline",
+                    "currency": _event_currency_from_text(title, pair),
+                    "impact": _impact_from_category(category, "medium"),
+                    "headline": title,
+                    "actual": "",
+                    "forecast": "",
+                    "source": "eodhd_news",
+                    "url": str(art.get("link", art.get("url", ""))),
+                    "event_category": category,
+                }
+            )
         if len(articles) < int(limit):
             break
         offset += int(limit)
@@ -1281,9 +1349,8 @@ def fetch_eodhd_news(
 
 # ── EODHD calendar fetcher ----------------------------------------------------------------───
 
-def _calendar_year_chunks(
-    start: datetime, end: datetime
-) -> Iterable[tuple[datetime, datetime]]:
+
+def _calendar_year_chunks(start: datetime, end: datetime) -> Iterable[tuple[datetime, datetime]]:
     """Yield (chunk_start, chunk_end) bounded to calendar years.
 
     A single multi-year from/to request is truncated by the API (~1000 rows), so
@@ -1335,7 +1402,10 @@ def _fetch_calendar_chunk(
                 break
             except Exception as exc:
                 if attempt >= retries:
-                    print(f"  [EODHD calendar] WARN {url} [{chunk_start:%Y-%m-%d}..{chunk_end:%Y-%m-%d}] off={offset}: {exc}", flush=True)
+                    print(
+                        f"  [EODHD calendar] WARN {url} [{chunk_start:%Y-%m-%d}..{chunk_end:%Y-%m-%d}] off={offset}: {exc}",
+                        flush=True,
+                    )
                     payload = None
                     break
                 secs = _retry_sleep_seconds(exc, sleep_s, attempt)
@@ -1373,43 +1443,48 @@ def fetch_eodhd_calendar(
         events: list[dict] = []
         for url in EODHD_ECONOMIC_URLS:
             events = _fetch_calendar_chunk(
-                url, chunk_start, chunk_end,
-                api_key=api_key, sleep_s=sleep_s, retries=retries, limit=limit,
+                url,
+                chunk_start,
+                chunk_end,
+                api_key=api_key,
+                sleep_s=sleep_s,
+                retries=retries,
+                limit=limit,
             )
             if events:
                 break
         print(f"  [EODHD calendar] {chunk_start:%Y-%m-%d}..{chunk_end:%Y-%m-%d} | {len(events)} events", flush=True)
         for event in events:
             title = str(event.get("event", event.get("title", event.get("name", "")))).strip()
-            date_raw = str(
-                event.get("date", event.get("datetime", event.get("timestamp", "")))
-            ).strip()
+            date_raw = str(event.get("date", event.get("datetime", event.get("timestamp", "")))).strip()
             ts = _coerce_timestamp(date_raw)
             if ts is None or not title:
                 continue
             category = _event_category_from_text(title)
-            impact = (
-                str(event.get("impact", event.get("importance", ""))).strip().lower()
-                or _impact_from_category(category, "medium")
+            impact = str(event.get("impact", event.get("importance", ""))).strip().lower() or _impact_from_category(
+                category, "medium"
             )
             currency = _calendar_currency(event, title)
-            rows.append({
-                "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
-                "event_type": "calendar",
-                "currency": currency,
-                "impact": impact,
-                "headline": title,
-                "actual": event.get("actual", ""),
-                "forecast": event.get("forecast", event.get("estimate", "")),
-                "prior": event.get("previous", event.get("prior", "")),
-                "source": "eodhd_calendar",
-                "url": "",
-                "event_category": category,
-            })
+            rows.append(
+                {
+                    "timestamp_utc": ts.isoformat().replace("+00:00", "Z"),
+                    "event_type": "calendar",
+                    "currency": currency,
+                    "impact": impact,
+                    "headline": title,
+                    "actual": event.get("actual", ""),
+                    "forecast": event.get("forecast", event.get("estimate", "")),
+                    "prior": event.get("previous", event.get("prior", "")),
+                    "source": "eodhd_calendar",
+                    "url": "",
+                    "event_category": category,
+                }
+            )
     return rows
 
 
 # ── Retry-failures loader ----------------------------------------------------------------────
+
 
 def load_failures_to_retry(path: Path) -> list[dict]:
     """Read the failures CSV and return all entries as retry specs."""
@@ -1419,6 +1494,7 @@ def load_failures_to_retry(path: Path) -> list[dict]:
 
 
 # ── Argument parsing ----------------------------------------------------------------─────────
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -1430,103 +1506,130 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", required=False, help="End date YYYY-MM-DD (default: today)")
     # Pairs & source
     p.add_argument(
-        "--pairs", nargs="+", default=["EURUSD"],
+        "--pairs",
+        nargs="+",
+        default=["EURUSD"],
         help="Forex pairs, e.g. EURUSD GBPUSD USDJPY",
     )
     p.add_argument(
-        "--source", choices=["gdelt", "eodhd", "official", "both", "free"], default="gdelt",
+        "--source",
+        choices=["gdelt", "eodhd", "official", "both", "free"],
+        default="gdelt",
         help="News source(s): free=GDELT + official central-bank feeds; both=GDELT + EODHD",
     )
     # Outputs
     p.add_argument("--news-out", default=str(DEFAULT_NEWS_OUT))
     p.add_argument("--calendar-out", default=str(DEFAULT_CAL_OUT))
     p.add_argument(
-        "--failures-out", default="data/raw/news/historical_news_failures.csv",
+        "--failures-out",
+        default="data/raw/news/historical_news_failures.csv",
     )
     p.add_argument(
-        "--gdelt-progress-out", default="data/raw/news/gdelt_progress.csv",
+        "--gdelt-progress-out",
+        default="data/raw/news/gdelt_progress.csv",
         help="Per-(pair, date) progress manifest used for accurate --resume",
     )
     # Modes
     p.add_argument(
-        "--append", action="store_true",
+        "--append",
+        action="store_true",
         help="Merge/dedupe with existing output files",
     )
     p.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="Skip GDELT dates that already have GDELT rows in --news-out",
     )
     p.add_argument(
-        "--retry-failures", action="store_true",
+        "--retry-failures",
+        action="store_true",
         help="Re-attempt all entries recorded in --failures-out",
     )
     p.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print chunks that would be fetched without making any HTTP calls",
     )
     # GDELT tuning
     p.add_argument("--gdelt-step-days", type=int, default=1, help="GDELT query window size")
     p.add_argument(
-        "--gdelt-max-records", type=int, default=250,
+        "--gdelt-max-records",
+        type=int,
+        default=250,
         help="GDELT max records per request",
     )
     p.add_argument("--gdelt-retries", type=int, default=5, help="Retries per GDELT chunk")
     p.add_argument(
-        "--gdelt-min-interval", type=float, default=10.0,
+        "--gdelt-min-interval",
+        type=float,
+        default=10.0,
         help="Minimum seconds between GDELT requests, enforced globally across "
-             "all workers (prevents 429 Too Many Requests). Raise if you still "
-             "see 429s; lower to go faster at higher 429 risk.",
+        "all workers (prevents 429 Too Many Requests). Raise if you still "
+        "see 429s; lower to go faster at higher 429 risk.",
     )
     p.add_argument(
-        "--gdelt-split-on-cap", action=argparse.BooleanOptionalAction, default=True,
+        "--gdelt-split-on-cap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Auto-split dense windows that hit the maxrecords cap into AM/PM halves",
     )
     # Checkpoint
     p.add_argument(
-        "--checkpoint-every", type=int, default=1,
+        "--checkpoint-every",
+        type=int,
+        default=1,
         help="Flush rows to CSV every N successful chunks (1 = every chunk)",
     )
     # EODHD tuning
     p.add_argument("--eodhd-limit", type=int, default=100, help="EODHD news page size")
     p.add_argument("--eodhd-api-key", default="", help="Overrides EODHD_API_KEY env var")
     p.add_argument(
-        "--include-eodhd-calendar", action="store_true",
+        "--include-eodhd-calendar",
+        action="store_true",
         help="Also fetch EODHD economic calendar events",
     )
     p.add_argument(
-        "--include-official-feeds", action="store_true",
+        "--include-official-feeds",
+        action="store_true",
         help="Also fetch free official central-bank RSS/Atom feeds into historical_news_combined.parquet",
     )
     # Parallelism
     p.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="Number of parallel pair-fetching threads (1 = sequential)",
     )
     p.add_argument(
-        "--sleep", type=float, default=0.5,
+        "--sleep",
+        type=float,
+        default=0.5,
         help="Seconds between API calls",
     )
     # Post-download sentiment pre-warming (Feature 2)
     p.add_argument(
-        "--score-sentiment", action="store_true",
+        "--score-sentiment",
+        action="store_true",
         help="After the final dedup/flush, run sentiment scoring over the "
-             "downloaded headlines to pre-warm the cache "
-             "(data/embeddings/sentiment_cache.pkl). Skipped during --dry-run.",
+        "downloaded headlines to pre-warm the cache "
+        "(data/embeddings/sentiment_cache.pkl). Skipped during --dry-run.",
     )
     p.add_argument(
-        "--sentiment-workers", type=int, default=4,
-        help="Parallel workers for post-download sentiment scoring "
-             "(only affects the Ollama backend).",
+        "--sentiment-workers",
+        type=int,
+        default=4,
+        help="Parallel workers for post-download sentiment scoring (only affects the Ollama backend).",
     )
     p.add_argument(
-        "--sentiment-backend", default="",
-        help="Force a sentiment backend (ollama/finbert/vader). Empty = "
-             "auto-detect (Ollama -> FinBERT -> VADER).",
+        "--sentiment-backend",
+        default="",
+        help="Force a sentiment backend (ollama/finbert/vader). Empty = auto-detect (Ollama -> FinBERT -> VADER).",
     )
     return p.parse_args()
 
 
 # ── Post-download sentiment pre-warming ───────────────────────────────────────
+
 
 def run_post_download_sentiment(
     news_path: Path,
@@ -1542,7 +1645,7 @@ def run_post_download_sentiment(
     batches. The pipeline caches every result keyed by MD5(headline) to
     data/embeddings/sentiment_cache.pkl, so this is fully resumable/idempotent:
     a re-run skips already-cached headlines and only scores new ones. The giant
-    news CSV is NOT modified — only the pkl cache is warmed.
+    news CSV is NOT modified - only the pkl cache is warmed.
 
     Returns the number of unique headlines submitted for scoring.
     """
@@ -1592,23 +1695,23 @@ def run_post_download_sentiment(
     step = max(1, int(batch_size))
     done = 0
     for i in range(0, total, step):
-        batch = headlines[i:i + step]
+        batch = headlines[i : i + step]
         pipe.score_headlines_batch(batch)
         done += len(batch)
         if done % (step * 4) == 0 or done == total:
             print(
-                f"  [Sentiment] {done:,}/{total:,} "
-                f"({done / total * 100:.1f}%) headlines processed",
+                f"  [Sentiment] {done:,}/{total:,} ({done / total * 100:.1f}%) headlines processed",
                 flush=True,
             )
 
     # Force a final flush so the warmed cache survives the process exit.
     pipe.flush_cache()
-    print(f"[Sentiment] Done — cache warmed for {total:,} unique headline(s).", flush=True)
+    print(f"[Sentiment] Done - cache warmed for {total:,} unique headline(s).", flush=True)
     return total
 
 
 # ── Main -------------------------------------------------------------------------------------
+
 
 def main() -> int:
     args = parse_args()
@@ -1650,10 +1753,14 @@ def main() -> int:
     requested_end_dt = end_dt
 
     sources = (
-        {"gdelt"} if args.source == "gdelt"
-        else {"eodhd"} if args.source == "eodhd"
-        else {"official"} if args.source == "official"
-        else {"gdelt", "official"} if args.source == "free"
+        {"gdelt"}
+        if args.source == "gdelt"
+        else {"eodhd"}
+        if args.source == "eodhd"
+        else {"official"}
+        if args.source == "official"
+        else {"gdelt", "official"}
+        if args.source == "free"
         else {"gdelt", "eodhd"}
     )
     if args.include_official_feeds:
@@ -1689,7 +1796,7 @@ def main() -> int:
     # Pre-seed with existing rows if appending
     if (args.append or args.resume) and news_out.exists():
         print(
-            "[News] Existing file detected — incremental append mode",
+            "[News] Existing file detected - incremental append mode",
             flush=True,
         )
         writer._ensure_header()  # don't overwrite
@@ -1716,16 +1823,16 @@ def main() -> int:
             if s is None or e is None:
                 continue
 
-            print(
-                f"[Retry] {src} {pair} {s.date()}->{e.date()}", flush=True
-            )
+            print(f"[Retry] {src} {pair} {s.date()}->{e.date()}", flush=True)
 
             if src == "gdelt":
                 chunk_rows: list[dict] = []
                 chunk_failures: list[dict] = []
                 for query_label, query in _gdelt_queries(pair):
                     q_rows, q_failures = _gdelt_fetch_one_chunk(
-                        pair, s, e,
+                        pair,
+                        s,
+                        e,
                         query=query,
                         query_label=query_label,
                         max_records=args.gdelt_max_records,
@@ -1739,9 +1846,7 @@ def main() -> int:
                 if chunk_rows:
                     writer.append(chunk_rows)
                 if not chunk_failures:
-                    resolved_keys.add((src, pair,
-                                       entry.get("start_utc", ""),
-                                       entry.get("end_utc", "")))
+                    resolved_keys.add((src, pair, entry.get("start_utc", ""), entry.get("end_utc", "")))
                 still_failing.extend(chunk_failures)
             time.sleep(max(0.0, float(args.sleep)))
 
@@ -1749,8 +1854,7 @@ def main() -> int:
         if resolved_keys:
             resolve_failures(failures_path, resolved_keys)
             print(
-                f"[Retry] Resolved {len(resolved_keys)} chunk(s); "
-                f"{len(still_failing)} still failing",
+                f"[Retry] Resolved {len(resolved_keys)} chunk(s); {len(still_failing)} still failing",
                 flush=True,
             )
 
@@ -1775,13 +1879,13 @@ def main() -> int:
         elif args.resume:
             print(
                 f"[GDELT] Resume requested but progress manifest "
-                f"{args.gdelt_progress_out} is empty/missing — all chunks will be "
+                f"{args.gdelt_progress_out} is empty/missing - all chunks will be "
                 "fetched (existing rows are still de-duplicated on write).",
                 flush=True,
             )
 
     def _fetch_pair_gdelt(pair: str) -> tuple[str, list[dict], list[dict]]:
-        """Worker function for one pair — runs in thread pool."""
+        """Worker function for one pair - runs in thread pool."""
         print(f"[GDELT] >> starting {pair}", flush=True)
         rows, failures, pending_dates = fetch_gdelt_pair(
             pair,
@@ -1801,9 +1905,7 @@ def main() -> int:
         # Flush any remaining rows from this pair, then record their progress.
         if rows and not args.dry_run:
             writer.append(rows)
-            print(
-                f"[GDELT] {pair}: final flush of {len(rows)} rows", flush=True
-            )
+            print(f"[GDELT] {pair}: final flush of {len(rows)} rows", flush=True)
         if manifest is not None and pending_dates and not args.dry_run:
             manifest.mark(pair, pending_dates)
         return pair, rows, failures
@@ -1814,8 +1916,7 @@ def main() -> int:
 
         if args.dry_run:
             print(
-                f"[DRY-RUN] Would fetch GDELT for {len(pairs)} pair(s) "
-                f"with {workers} worker(s)",
+                f"[DRY-RUN] Would fetch GDELT for {len(pairs)} pair(s) with {workers} worker(s)",
                 flush=True,
             )
 
@@ -1850,7 +1951,9 @@ def main() -> int:
             eodhd_rows: list[dict] = []
             for pair in args.pairs:
                 pair_news = fetch_eodhd_news(
-                    pair, start_dt, end_dt,
+                    pair,
+                    start_dt,
+                    end_dt,
                     api_key=api_key,
                     limit=args.eodhd_limit,
                     sleep_s=args.sleep,
@@ -1864,7 +1967,8 @@ def main() -> int:
 
             if args.include_eodhd_calendar:
                 cal_rows = fetch_eodhd_calendar(
-                    start_dt, end_dt,
+                    start_dt,
+                    end_dt,
                     api_key=api_key,
                     sleep_s=args.sleep,
                     dry_run=args.dry_run,

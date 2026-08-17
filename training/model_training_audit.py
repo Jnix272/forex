@@ -58,7 +58,8 @@ def _build_architecture_recipes() -> dict[str, dict[str, Any]]:
         recipes[name] = {
             "role": _ROLE_FROM_DECISION.get(decision, decision),
             "preferred_losses": _RECIPE_LOSS_OVERLAY.get(
-                name, ("directional_huber", "sharpe_huber"),
+                name,
+                ("directional_huber", "sharpe_huber"),
             ),
             "preferred_seq_lens": _seq_lens_from_cfg(cfg),
             "notes": str(cfg.get("default_use") or cfg.get("use_when") or ""),
@@ -216,10 +217,7 @@ def validate_model_training_package(
         reasons.append(f"model identity mismatch across artifacts: {sorted(unique_models)}")
 
     recipe = str(
-        control.get("model_recipe_used")
-        or train_summary.get("recipe")
-        or model_card.get("recipe")
-        or model
+        control.get("model_recipe_used") or train_summary.get("recipe") or model_card.get("recipe") or model
     ).lower()
     known_recipe = model in ARCHITECTURE_RECIPES or recipe in ARCHITECTURE_RECIPES
     gates["recipe_known"] = known_recipe or not cfg.require_recipe_known
@@ -227,8 +225,7 @@ def validate_model_training_package(
         reasons.append(f"recipe: unknown model/recipe '{recipe}'")
 
     restore_decision = bool(
-        control.get("restore_decision")
-        or _nested_get(train_summary, "training_control", "restore_decision")
+        control.get("restore_decision") or _nested_get(train_summary, "training_control", "restore_decision")
     )
     gates["best_epoch_restored"] = restore_decision or not cfg.require_best_epoch_restored
     if cfg.require_best_epoch_restored and not restore_decision:
@@ -237,7 +234,9 @@ def validate_model_training_package(
     overfit_signals = _control_overfit_signals(control)
     gates["overfit_signal_count_ok"] = len(overfit_signals) <= cfg.max_overfit_signals
     if not gates["overfit_signal_count_ok"]:
-        reasons.append(f"training_control_report.json: {len(overfit_signals)} overfit signals > {cfg.max_overfit_signals}")
+        reasons.append(
+            f"training_control_report.json: {len(overfit_signals)} overfit signals > {cfg.max_overfit_signals}"
+        )
 
     train_val_gap = _as_float(
         train_summary.get("train_val_gap", _nested_get(control, "final_metrics", "train_val_gap")),

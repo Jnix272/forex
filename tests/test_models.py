@@ -67,7 +67,7 @@ class TestForexTradingEnv:
         env = _synthetic_env(n=80)
         env.reset()
         while not env.done:
-            obs, reward, done, info = env.step(ScalingAction.HOLD.value)
+            _obs, _reward, _done, info = env.step(ScalingAction.HOLD.value)
             assert "equity" in info
         assert env.idx >= len(env.prices) - 2
 
@@ -125,9 +125,7 @@ def test_build_model_registry_keys(seq_batch, capsys):
     f = seq_batch.shape[-1]
     for name in MODEL_REGISTRY:
         if name == "gnn":
-            m = build_model(
-                name, f, hidden=64, num_layers=2, dropout=0.1, nhead=4
-            )
+            m = build_model(name, f, hidden=64, num_layers=2, dropout=0.1, nhead=4)
         else:
             m = build_model(name, f, seq_len=seq_batch.shape[1])
         m.eval()
@@ -207,8 +205,9 @@ def test_dqn_agent_update():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #10 — Multi-task head, loss, and wrapper
+# #10 - Multi-task head, loss, and wrapper
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestMultiTaskHead:
     def test_output_shapes(self, seq_batch):
@@ -218,9 +217,9 @@ class TestMultiTaskHead:
         h = torch.randn(B, in_features)
         head = MultiTaskHead(in_features=in_features, hidden=32)
         logits, ret_hat, conf = head(h)
-        assert logits.shape  == (B, 3),  f"direction logits: {logits.shape}"
-        assert ret_hat.shape == (B,),    f"return_hat: {ret_hat.shape}"
-        assert conf.shape    == (B,),    f"confidence: {conf.shape}"
+        assert logits.shape == (B, 3), f"direction logits: {logits.shape}"
+        assert ret_hat.shape == (B,), f"return_hat: {ret_hat.shape}"
+        assert conf.shape == (B,), f"confidence: {conf.shape}"
 
     def test_confidence_in_unit_interval(self, seq_batch):
         """Head returns confidence logits; sigmoid maps them to [0, 1] for inference."""
@@ -234,13 +233,11 @@ class TestMultiTaskHead:
 
 class TestMultiTaskLoss:
     def _make_inputs(self, B: int = 8):
-        logits  = torch.randn(B, 3)
+        logits = torch.randn(B, 3)
         ret_hat = torch.randn(B)
-        conf    = torch.randn(B)  # logits — BCEWithLogitsLoss in MultiTaskLoss
-        y_cls   = torch.randint(0, 3, (B,))
-        y_cont  = torch.tensor(
-            np.random.choice([-1.0, 0.0, 1.0], B).astype(np.float32)
-        )
+        conf = torch.randn(B)  # logits - BCEWithLogitsLoss in MultiTaskLoss
+        y_cls = torch.randint(0, 3, (B,))
+        y_cont = torch.tensor(np.random.choice([-1.0, 0.0, 1.0], B).astype(np.float32))
         return logits, ret_hat, conf, y_cls, y_cont
 
     def test_loss_is_scalar_and_positive(self):
@@ -254,64 +251,73 @@ class TestMultiTaskLoss:
         logits, ret_hat, conf, y_cls, y_cont = self._make_inputs()
         # Force large magnitude error
         ret_hat = ret_hat * 10
-        l_low  = MultiTaskLoss(w_ret=0.1)(*[logits, ret_hat, conf, y_cls, y_cont])
+        l_low = MultiTaskLoss(w_ret=0.1)(*[logits, ret_hat, conf, y_cls, y_cont])
         l_high = MultiTaskLoss(w_ret=5.0)(*[logits, ret_hat, conf, y_cls, y_cont])
         assert l_high.item() > l_low.item()
 
     def test_loss_backward(self):
         """Gradients should flow back through all three outputs."""
-        logits  = torch.randn(8, 3, requires_grad=True)
+        logits = torch.randn(8, 3, requires_grad=True)
         ret_hat = torch.randn(8, requires_grad=True)
-        conf    = torch.randn(8, requires_grad=True)
-        y_cls   = torch.zeros(8, dtype=torch.long)
-        y_cont  = torch.zeros(8)
+        conf = torch.randn(8, requires_grad=True)
+        y_cls = torch.zeros(8, dtype=torch.long)
+        y_cont = torch.zeros(8)
         loss = MultiTaskLoss()(logits, ret_hat, conf, y_cls, y_cont)
         loss.backward()
-        assert logits.grad  is not None
+        assert logits.grad is not None
         assert ret_hat.grad is not None
-        assert conf.grad    is not None
+        assert conf.grad is not None
 
     def test_class_weights_applied(self):
         """Passing class weights should change the loss value."""
         torch.manual_seed(42)
         logits, ret_hat, conf, y_cls, y_cont = self._make_inputs(B=16)
         w = torch.tensor([5.0, 1.0, 0.1])
-        l_uniform  = MultiTaskLoss()(logits, ret_hat, conf, y_cls, y_cont)
+        l_uniform = MultiTaskLoss()(logits, ret_hat, conf, y_cls, y_cont)
         l_weighted = MultiTaskLoss(class_weights=w)(logits, ret_hat, conf, y_cls, y_cont)
         assert l_uniform.item() != pytest.approx(l_weighted.item(), rel=1e-2)
 
 
 class TestMultiTaskWrapper:
-    @pytest.mark.parametrize("model_name,extra", [
-        ("haelt",       {"seq_len": 60}),
-        ("mamba",       {}),
-        ("expert",      {}),
-        ("tft",         {}),
-    ])
+    @pytest.mark.parametrize(
+        "model_name,extra",
+        [
+            ("haelt", {"seq_len": 60}),
+            ("mamba", {}),
+            ("expert", {}),
+            ("tft", {}),
+        ],
+    )
     def test_wrapper_output_shapes(self, model_name, extra, seq_batch):
         """Wrapped backbone should return (logits, ret_hat, conf) tuples."""
         B, T, F = seq_batch.shape
-        base = build_model(model_name, F, seq_len=T, **{
-            k: v for k, v in {
-                "hidden_size": 64, "d_model": 64, "nhead": 4,
-                "num_layers": 2, "dropout": 0.1,
-            }.items()
-        })
+        base = build_model(
+            model_name,
+            F,
+            seq_len=T,
+            **dict({
+                    "hidden_size": 64,
+                    "d_model": 64,
+                    "nhead": 4,
+                    "num_layers": 2,
+                    "dropout": 0.1,
+                }.items()),
+        )
         # Compute head_in for this architecture
         head_in_map = {
-            "haelt":  32 + 32,        # lstm_hidden + d_model (both //2 of 64)
-            "mamba":  64,              # d_model
-            "expert": 64,              # d_model
-            "tft":    64,              # hidden_size (we passed 64)
+            "haelt": 32 + 32,  # lstm_hidden + d_model (both //2 of 64)
+            "mamba": 64,  # d_model
+            "expert": 64,  # d_model
+            "tft": 64,  # hidden_size (we passed 64)
         }
         head_in = head_in_map.get(model_name, 64)
 
         wrapped = MultiTaskWrapper(base, head_in=head_in, hidden=32)
         wrapped.eval()
         logits, ret_hat, conf = wrapped(seq_batch)
-        assert logits.shape  == (B, 3)
+        assert logits.shape == (B, 3)
         assert ret_hat.shape == (B,)
-        assert conf.shape    == (B,)
+        assert conf.shape == (B,)
         p = torch.sigmoid(conf)
         assert p.min() >= 0.0 - 1e-6
         assert p.max() <= 1.0 + 1e-6
@@ -320,7 +326,7 @@ class TestMultiTaskWrapper:
         """Oversized head_in estimate uses LazyLinear (iTransformer Identity mean-pools to d_model)."""
         B, T, F = seq_batch.shape
         base = iTransformerScalper(input_size=F, seq_len=T, d_model=32, nhead=4)
-        head_in = 32 * F   # stale F*d_model estimate; real Identity path is d_model
+        head_in = 32 * F  # stale F*d_model estimate; real Identity path is d_model
         wrapped = MultiTaskWrapper(
             base,
             head_in=head_in,
@@ -329,31 +335,31 @@ class TestMultiTaskWrapper:
             force_project=True,
         )
         wrapped.eval()
-        logits, ret_hat, conf = wrapped(seq_batch)
+        logits, _ret_hat, _conf = wrapped(seq_batch)
         assert logits.shape == (B, 3)
 
     def test_wrapper_gradients_flow(self, seq_batch):
         """Loss.backward() should update backbone parameters through the wrapper."""
         B, T, F = seq_batch.shape
-        base    = HAELTHybrid(input_size=F, seq_len=T, lstm_hidden=32, d_model=32)
+        base = HAELTHybrid(input_size=F, seq_len=T, lstm_hidden=32, d_model=32)
         wrapped = MultiTaskWrapper(base, head_in=64, hidden=32)
-        crit    = MultiTaskLoss()
+        crit = MultiTaskLoss()
 
         logits, ret_hat, conf = wrapped(seq_batch)
-        y_cls  = torch.zeros(B, dtype=torch.long)
+        y_cls = torch.zeros(B, dtype=torch.long)
         y_cont = torch.zeros(B)
-        loss   = crit(logits, ret_hat, conf, y_cls, y_cont)
+        loss = crit(logits, ret_hat, conf, y_cls, y_cont)
         loss.backward()
 
         # At least one backbone parameter should have a gradient
-        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
-                       for p in wrapped.backbone.parameters())
+        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in wrapped.backbone.parameters())
         assert has_grad, "No backbone gradients after backward()"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #12 — Ensemble diversity loss and meta-learner training
+# #12 - Ensemble diversity loss and meta-learner training
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestEnsembleDiversityLoss:
     def test_diversity_loss_identical_models_is_high(self):
@@ -361,9 +367,9 @@ class TestEnsembleDiversityLoss:
         B, n_models = 32, 4
         # All models output the same values → pairwise correlation = 1
         single = torch.randn(B, 1).expand(B, n_models)
-        bases  = [TinySeqModel(48)] * n_models
-        ens    = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
-        div    = ens.diversity_loss(single)
+        bases = [TinySeqModel(48)] * n_models
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        div = ens.diversity_loss(single)
         assert div.item() > 0.8, f"Identical outputs should yield diversity ≈ 1, got {div.item():.4f}"
 
     def test_diversity_loss_orthogonal_is_near_zero(self):
@@ -374,8 +380,8 @@ class TestEnsembleDiversityLoss:
         q, _ = torch.linalg.qr(random_mat)
         preds = q[:, :n_models]  # exactly orthonormal columns
         bases = [TinySeqModel(48)] * n_models
-        ens   = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
-        div   = ens.diversity_loss(preds)
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        div = ens.diversity_loss(preds)
         assert abs(div.item()) < 0.15, f"Orthogonal outputs should yield diversity ≈ 0, got {div.item():.4f}"
 
     def test_diversity_loss_differentiable(self):
@@ -383,8 +389,8 @@ class TestEnsembleDiversityLoss:
         B, n_models = 16, 3
         preds = torch.randn(B, n_models, requires_grad=True)
         bases = [TinySeqModel(48)] * n_models
-        ens   = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
-        loss  = ens.diversity_loss(preds)
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        loss = ens.diversity_loss(preds)
         loss.backward()
         assert preds.grad is not None
 
@@ -392,19 +398,16 @@ class TestEnsembleDiversityLoss:
 class TestTrainMetaLearner:
     def _make_loader(self, B: int = 64, T: int = 60, F: int = 48, n: int = 128):
         X = torch.randn(n, T, F)
-        y = torch.tensor(
-            np.random.choice([-1.0, 0.0, 1.0], n).astype(np.float32)
-        )
+        y = torch.tensor(np.random.choice([-1.0, 0.0, 1.0], n).astype(np.float32))
         return DataLoader(TensorDataset(X, y), batch_size=B, shuffle=True)
 
     def test_meta_learner_loss_decreases(self):
         """Meta-learner loss should decrease over 5 training epochs."""
         F = 48
-        bases  = [TinySeqModel(F), TinySeqModel(F), TinySeqModel(F)]
-        ens    = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        bases = [TinySeqModel(F), TinySeqModel(F), TinySeqModel(F)]
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
         loader = self._make_loader(F=F)
-        history = train_meta_learner(ens, loader, epochs=5, lr=1e-2,
-                                     diversity_weight=0.1, verbose=False)
+        history = train_meta_learner(ens, loader, epochs=5, lr=1e-2, diversity_weight=0.1, verbose=False)
         assert len(history) == 5
         # Loss should be finite throughout
         assert all(np.isfinite(v) for v in history)
@@ -412,24 +415,24 @@ class TestTrainMetaLearner:
     def test_base_models_frozen_during_meta_training(self):
         """Base model parameters must NOT change during meta-learner training."""
         F = 48
-        bases  = [TinySeqModel(F), TinySeqModel(F)]
-        ens    = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        bases = [TinySeqModel(F), TinySeqModel(F)]
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
 
         # Capture base param snapshots before
         before = [p.data.clone() for base in ens.bases for p in base.parameters()]
 
-        loader  = self._make_loader(F=F, n=64)
+        loader = self._make_loader(F=F, n=64)
         train_meta_learner(ens, loader, epochs=3, lr=1e-2, verbose=False)
 
         after = [p.data.clone() for base in ens.bases for p in base.parameters()]
-        for b, a in zip(before, after):
+        for b, a in zip(before, after, strict=False):
             assert torch.allclose(b, a), "Base model weights changed during meta training!"
 
     def test_weights_sum_to_one_after_training(self, seq_batch):
         """Ensemble softmax weights must still sum to 1 after training."""
         F = seq_batch.shape[-1]
-        bases  = [TinySeqModel(F), TinySeqModel(F)]
-        ens    = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
+        bases = [TinySeqModel(F), TinySeqModel(F)]
+        ens = EnsembleMetaLearner(bases, context_dim=16, hidden=32)
         loader = self._make_loader(F=F, n=64)
         train_meta_learner(ens, loader, epochs=2, lr=1e-2, verbose=False)
 
@@ -471,8 +474,9 @@ class TestTrainMetaLearner:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #11 — Regime-aware contrastive pre-training
+# #11 - Regime-aware contrastive pre-training
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestRegimeAwareTSCL:
     @pytest.fixture
@@ -483,11 +487,9 @@ class TestRegimeAwareTSCL:
     def test_regime_trainer_runs_and_returns_history(self, small_windows):
         """RegimeAwareTSCLTrainer must complete without error and return loss history."""
         from pretrain.contrastive import RegimeAwareTSCLTrainer
+
         N = len(small_windows)
-        regime_labels = np.where(
-            np.arange(N) < N // 3, 1,
-            np.where(np.arange(N) < 2 * N // 3, -1, 0)
-        ).astype(np.int8)
+        regime_labels = np.where(np.arange(N) < N // 3, 1, np.where(np.arange(N) < 2 * N // 3, -1, 0)).astype(np.int8)
 
         encoder = HAELTHybrid(input_size=16, seq_len=20, lstm_hidden=16, d_model=16)
         trainer = RegimeAwareTSCLTrainer(
@@ -501,10 +503,10 @@ class TestRegimeAwareTSCL:
         )
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             ckpt = os.path.join(tmp, "encoder.pt")
-            history = trainer.pretrain(small_windows, epochs=2, batch_size=32,
-                                       checkpoint_path=ckpt)
+            history = trainer.pretrain(small_windows, epochs=2, batch_size=32, checkpoint_path=ckpt)
         assert "loss" in history
         assert len(history["loss"]) == 2
         assert all(np.isfinite(v) for v in history["loss"])
@@ -512,28 +514,36 @@ class TestRegimeAwareTSCL:
     def test_regime_trainer_loss_lower_than_standard(self, small_windows):
         """Regime-aware TSCL should converge at least as well as standard TSCL on structured data."""
         from pretrain.contrastive import RegimeAwareTSCLTrainer, TSCLTrainer
+
         len(small_windows)
         # Create clearly separated regime structure: first half trending, second mean-rev
-        regime_labels = np.array([1]*60 + [-1]*60, dtype=np.int8)
+        regime_labels = np.array([1] * 60 + [-1] * 60, dtype=np.int8)
 
         def _make_encoder():
             return HAELTHybrid(input_size=16, seq_len=20, lstm_hidden=16, d_model=16)
 
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             enc_std = _make_encoder()
             std_trainer = TSCLTrainer(enc_std, d_model=32, proj_dim=32, lr=1e-3, device="cpu")
-            h_std = std_trainer.pretrain(small_windows, epochs=3, batch_size=32,
-                                          checkpoint_path=os.path.join(tmp, "std.pt"))
+            h_std = std_trainer.pretrain(
+                small_windows, epochs=3, batch_size=32, checkpoint_path=os.path.join(tmp, "std.pt")
+            )
 
             enc_reg = _make_encoder()
             reg_trainer = RegimeAwareTSCLTrainer(
-                enc_reg, regime_labels=regime_labels,
-                d_model=32, proj_dim=32, lr=1e-3, device="cpu",
+                enc_reg,
+                regime_labels=regime_labels,
+                d_model=32,
+                proj_dim=32,
+                lr=1e-3,
+                device="cpu",
             )
-            h_reg = reg_trainer.pretrain(small_windows, epochs=3, batch_size=32,
-                                          checkpoint_path=os.path.join(tmp, "reg.pt"))
+            h_reg = reg_trainer.pretrain(
+                small_windows, epochs=3, batch_size=32, checkpoint_path=os.path.join(tmp, "reg.pt")
+            )
 
         # Both should produce finite losses
         assert all(np.isfinite(v) for v in h_std["loss"])
@@ -542,51 +552,69 @@ class TestRegimeAwareTSCL:
     def test_regime_labels_length_mismatch_handled(self, small_windows):
         """Trainer should handle regime_labels shorter or longer than window count."""
         from pretrain.contrastive import RegimeAwareTSCLTrainer
+
         N = len(small_windows)
         # Shorter labels
         short_labels = np.ones(N // 2, dtype=np.int8)
         encoder = MambaScalper(input_size=16, d_model=16, num_layers=2)
         trainer = RegimeAwareTSCLTrainer(
-            encoder, regime_labels=short_labels,
-            d_model=16, proj_dim=16, device="cpu",
+            encoder,
+            regime_labels=short_labels,
+            d_model=16,
+            proj_dim=16,
+            device="cpu",
         )
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
-            history = trainer.pretrain(small_windows, epochs=1, batch_size=32,
-                                       checkpoint_path=os.path.join(tmp, "e.pt"))
+            history = trainer.pretrain(
+                small_windows, epochs=1, batch_size=32, checkpoint_path=os.path.join(tmp, "e.pt")
+            )
         assert len(history["loss"]) == 1
 
     def test_single_regime_falls_back_to_standard_ntxent(self, small_windows):
         """When all samples share one regime, trainer must fall back to standard NT-Xent."""
         from pretrain.contrastive import RegimeAwareTSCLTrainer
+
         N = len(small_windows)
-        all_same = np.zeros(N, dtype=np.int8)   # only regime 0
-        encoder  = EXPERTEncoder(input_size=16, d_model=16, nhead=4, num_layers=2)
-        trainer  = RegimeAwareTSCLTrainer(
-            encoder, regime_labels=all_same,
-            d_model=16, proj_dim=16, device="cpu",
+        all_same = np.zeros(N, dtype=np.int8)  # only regime 0
+        encoder = EXPERTEncoder(input_size=16, d_model=16, nhead=4, num_layers=2)
+        trainer = RegimeAwareTSCLTrainer(
+            encoder,
+            regime_labels=all_same,
+            d_model=16,
+            proj_dim=16,
+            device="cpu",
         )
         import os
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
-            history = trainer.pretrain(small_windows, epochs=1, batch_size=32,
-                                       checkpoint_path=os.path.join(tmp, "e.pt"))
+            history = trainer.pretrain(
+                small_windows, epochs=1, batch_size=32, checkpoint_path=os.path.join(tmp, "e.pt")
+            )
         assert all(np.isfinite(v) for v in history["loss"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-pair joint training — wrapper and pipeline helpers
+# Multi-pair joint training - wrapper and pipeline helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestMultiPairWrapper:
     """Tests for MultiPairWrapper: pair embedding concatenation and backbone passthrough."""
 
     def _tiny_backbone(self, input_size: int, seq_len: int = 60, num_classes: int = 1):
         return HAELTHybrid(
-            input_size=input_size, seq_len=seq_len,
-            lstm_hidden=32, d_model=32, nhead=2, n_layers=1,
-            dropout=0.0, num_classes=num_classes,
+            input_size=input_size,
+            seq_len=seq_len,
+            lstm_hidden=32,
+            d_model=32,
+            nhead=2,
+            n_layers=1,
+            dropout=0.0,
+            num_classes=num_classes,
         )
 
     def test_two_pairs_no_embed_concatenated_input(self):
@@ -607,59 +635,55 @@ class TestMultiPairWrapper:
     def test_wrapper_two_pairs_with_embed_output_shape(self):
         """MultiPairWrapper(2 pairs, embed_dim=8) keeps backbone output shape."""
         B, T, F, E, P = 4, 60, 24, 8, 2
-        n_inter  = self._n_interaction(P)
+        n_inter = self._n_interaction(P)
         backbone = self._tiny_backbone(input_size=P * (F + E) + n_inter, seq_len=T)
-        model    = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
+        model = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
         model.eval()
-        x   = torch.randn(B, T, 2 * F)
+        x = torch.randn(B, T, 2 * F)
         out = model(x)
         assert out.shape == (B,), f"Expected ({B},), got {out.shape}"
 
     def test_wrapper_four_pairs_with_embed_output_shape(self):
         """4 pairs with embed_dim=16 → (B,) scalar from backbone."""
         B, T, F, E, P = 4, 60, 20, 16, 4
-        n_inter  = self._n_interaction(P)
+        n_inter = self._n_interaction(P)
         backbone = self._tiny_backbone(input_size=P * (F + E) + n_inter, seq_len=T)
-        model    = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
+        model = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
         model.eval()
-        x   = torch.randn(B, T, P * F)
+        x = torch.randn(B, T, P * F)
         out = model(x)
         assert out.shape == (B,), f"Expected ({B},), got {out.shape}"
 
     def test_pair_embeddings_are_distinct_after_init(self):
         """Each pair must have a unique random embedding by default."""
-        P, F, E  = 2, 24, 8
-        n_inter  = self._n_interaction(P)
+        P, F, E = 2, 24, 8
+        n_inter = self._n_interaction(P)
         backbone = self._tiny_backbone(input_size=P * (F + E) + n_inter)
-        model    = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
-        emb0     = model.pair_embeds(torch.tensor([0]))
-        emb1     = model.pair_embeds(torch.tensor([1]))
+        model = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
+        emb0 = model.pair_embeds(torch.tensor([0]))
+        emb1 = model.pair_embeds(torch.tensor([1]))
         assert not torch.allclose(emb0, emb1), "Pair embeddings should differ after init"
 
     def test_gradient_flows_through_backbone_and_embeddings(self):
         """loss.backward() must reach both backbone params and pair embedding weights."""
         B, T, F, E, P = 4, 60, 24, 8, 2
-        n_inter  = self._n_interaction(P)
+        n_inter = self._n_interaction(P)
         backbone = self._tiny_backbone(input_size=P * (F + E) + n_inter, seq_len=T)
-        model    = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
-        out      = model(torch.randn(B, T, P * F))
+        model = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
+        out = model(torch.randn(B, T, P * F))
         out.sum().backward()
 
-        backbone_grad = any(
-            p.grad is not None and p.grad.abs().sum() > 0
-            for p in model.backbone.parameters()
-        )
-        embed_grad = (model.pair_embeds.weight.grad is not None and
-                      model.pair_embeds.weight.grad.abs().sum() > 0)
+        backbone_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.backbone.parameters())
+        embed_grad = model.pair_embeds.weight.grad is not None and model.pair_embeds.weight.grad.abs().sum() > 0
         assert backbone_grad, "No gradient reached backbone parameters"
-        assert embed_grad,    "No gradient reached pair embedding weights"
+        assert embed_grad, "No gradient reached pair embedding weights"
 
     def test_wrapper_with_classification_head(self):
         """Wrapper works when backbone outputs 3-class logits."""
         B, T, F, E, P = 4, 60, 20, 8, 3
-        n_inter  = self._n_interaction(P)
+        n_inter = self._n_interaction(P)
         backbone = self._tiny_backbone(input_size=P * (F + E) + n_inter, seq_len=T, num_classes=3)
-        model    = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
+        model = MultiPairWrapper(backbone, n_pairs=P, f_per_pair=F, embed_dim=E)
         model.eval()
         out = model(torch.randn(B, T, P * F))
         assert out.shape == (B, 3), f"Expected ({B}, 3), got {out.shape}"
@@ -672,26 +696,31 @@ class TestMultiPairHelpers:
 
     def test_get_pairs_from_comma_string(self):
         from training.train_gpu import _get_pairs
+
         args = argparse.Namespace(pairs="EURUSD,GBPUSD,USDJPY", pair="EURUSD")
         assert _get_pairs(args) == ["EURUSD", "GBPUSD", "USDJPY"]
 
     def test_get_pairs_from_list(self):
         from training.train_gpu import _get_pairs
+
         args = argparse.Namespace(pairs=["eurusd", "gbpusd"], pair="EURUSD")
         assert _get_pairs(args) == ["EURUSD", "GBPUSD"]
 
     def test_get_pairs_fallback_to_pair_when_none(self):
         from training.train_gpu import _get_pairs
+
         args = argparse.Namespace(pairs=None, pair="GBPUSD")
         assert _get_pairs(args) == ["GBPUSD"]
 
     def test_get_pairs_strips_whitespace(self):
         from training.train_gpu import _get_pairs
+
         args = argparse.Namespace(pairs=" EURUSD , GBPUSD ", pair="EURUSD")
         assert _get_pairs(args) == ["EURUSD", "GBPUSD"]
 
     def test_get_pairs_empty_string_falls_back(self):
         from training.train_gpu import _get_pairs
+
         args = argparse.Namespace(pairs="", pair="USDJPY")
         assert _get_pairs(args) == ["USDJPY"]
 
@@ -699,13 +728,13 @@ class TestMultiPairHelpers:
 
     def _fake_chunk(self, n: int, T: int = 60, F: int = 8):
         # _build_chunk returns 10-tuple
-        X    = np.random.randn(n, T, F).astype(np.float32)
-        y    = np.random.randn(n).astype(np.float32)
+        X = np.random.randn(n, T, F).astype(np.float32)
+        y = np.random.randn(n).astype(np.float32)
         diff = np.zeros(n, np.float32)
-        pq   = np.ones(n, np.float32)
+        pq = np.ones(n, np.float32)
         y_cls = np.zeros(n, np.int8)
         close = np.ones(n, np.float32)
-        atr   = np.full(n, 0.001, np.float32)
+        atr = np.full(n, 0.001, np.float32)
         spread = np.full(n, 0.0001, np.float32)
         time_idx = np.arange(n)
         return X, y, diff, pq, y_cls, close, atr, spread, F, time_idx
@@ -718,17 +747,22 @@ class TestMultiPairHelpers:
 
         T, F, N = 60, 8, 50
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
-        scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
+        scalers = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.dataset_builder._build_chunk",
-                   side_effect=[self._fake_chunk(N, T, F), self._fake_chunk(N, T, F)]):
+        with patch(
+            "training.dataset_builder._build_chunk", side_effect=[self._fake_chunk(N, T, F), self._fake_chunk(N, T, F)]
+        ):
             X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=T, chunk_idx=0, label_method="rl_reward",
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=T,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
         assert X.shape == (N, T, 2 * F)
         assert y.shape == (N,)
-        assert n_feat  == 2 * F
+        assert n_feat == 2 * F
 
     def test_multipair_chunk_aligns_to_shortest_pair(self):
         """Pairs with different sample counts → trimmed to inner-join minimum."""
@@ -738,13 +772,19 @@ class TestMultiPairHelpers:
 
         T, F, N1, N2 = 60, 8, 100, 73
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
-        scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
+        scalers = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.dataset_builder._build_chunk",
-                   side_effect=[self._fake_chunk(N1, T, F), self._fake_chunk(N2, T, F)]):
-            X, y, _, _, _, _, _, _, _ = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=T, chunk_idx=0, label_method="rl_reward",
+        with patch(
+            "training.dataset_builder._build_chunk",
+            side_effect=[self._fake_chunk(N1, T, F), self._fake_chunk(N2, T, F)],
+        ):
+            X, _y, _, _, _, _, _, _, _ = _build_multipair_chunk(
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=T,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
         assert X.shape[0] == min(N1, N2)
 
@@ -776,18 +816,18 @@ class TestMultiPairHelpers:
 
         with patch("training.dataset_builder._build_chunk", side_effect=[eur, gbp]):
             X, y, _, _, _, close, _, _, n_feat = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=T, chunk_idx=0, label_method="rl_reward",
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=T,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
 
         assert X.shape == (3, T, 2)
         assert n_feat == 2
-        np.testing.assert_array_equal(
-            X[:, 0, 0], np.asarray([10, 20, 30], dtype=np.float32)
-        )
-        np.testing.assert_array_equal(
-            X[:, 0, 1], np.asarray([100, 200, 300], dtype=np.float32)
-        )
+        np.testing.assert_array_equal(X[:, 0, 0], np.asarray([10, 20, 30], dtype=np.float32))
+        np.testing.assert_array_equal(X[:, 0, 1], np.asarray([100, 200, 300], dtype=np.float32))
         np.testing.assert_allclose(y, np.asarray([55, 110, 165], dtype=np.float32))
         np.testing.assert_allclose(close, np.asarray([110, 120, 130], dtype=np.float32))
 
@@ -798,26 +838,37 @@ class TestMultiPairHelpers:
         from training.train_gpu import _build_multipair_chunk
 
         T, F, N = 60, 8, 40
-        rng   = np.random.default_rng(0)
+        rng = np.random.default_rng(0)
         y_eur = rng.standard_normal(N).astype(np.float32)
         y_gbp = rng.standard_normal(N).astype(np.float32)
-        X_z   = np.zeros((N, T, F), np.float32)
+        X_z = np.zeros((N, T, F), np.float32)
 
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
-        scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
+        scalers = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
         diff = np.zeros(N, np.float32)
-        pq   = np.ones(N, np.float32)
-        y_c  = np.zeros(N, np.int8)
+        pq = np.ones(N, np.float32)
+        y_c = np.zeros(N, np.int8)
         time_idx = np.arange(N)
-        with patch("training.dataset_builder._build_chunk",
-                   side_effect=[(X_z, y_eur, diff, pq, y_c, diff, pq, pq, F, time_idx), (X_z, y_gbp, diff, pq, y_c, diff, pq, pq, F, time_idx)]):
+        with patch(
+            "training.dataset_builder._build_chunk",
+            side_effect=[
+                (X_z, y_eur, diff, pq, y_c, diff, pq, pq, F, time_idx),
+                (X_z, y_gbp, diff, pq, y_c, diff, pq, pq, F, time_idx),
+            ],
+        ):
             _, y_out, _, _, _, _, _, _, _ = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=T, chunk_idx=0, label_method="rl_reward",
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=T,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
         np.testing.assert_allclose(
-            y_out, ((y_eur + y_gbp) / 2).astype(np.float32), rtol=1e-5,
+            y_out,
+            ((y_eur + y_gbp) / 2).astype(np.float32),
+            rtol=1e-5,
             err_msg="Labels should be the mean across pairs",
         )
 
@@ -828,33 +879,53 @@ class TestMultiPairHelpers:
         from training.train_gpu import _build_multipair_chunk
 
         pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
-        scalers    = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
+        scalers = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
 
-        with patch("training.dataset_builder._build_chunk",
-                   return_value=(np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), 0, np.array([]))):
-            X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=60, chunk_idx=0, label_method="rl_reward",
+        with patch(
+            "training.dataset_builder._build_chunk",
+            return_value=(
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                0,
+                np.array([]),
+            ),
+        ):
+            X, _y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=60,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
         assert X.size == 0
         assert n_feat == 0
 
     def test_multipair_chunk_three_pairs_feature_count(self):
-        """3 pairs × F each → n_features_total = 3*F."""
+        """3 pairs x F each → n_features_total = 3*F."""
         from sklearn.preprocessing import StandardScaler
 
         from training.train_gpu import _build_multipair_chunk
 
         T, F, N, P = 60, 10, 30, 3
-        pairs      = ["EURUSD", "GBPUSD", "USDJPY"]
+        pairs = ["EURUSD", "GBPUSD", "USDJPY"]
         pair_ticks = dict.fromkeys(pairs, "stub")
-        scalers    = {p: StandardScaler() for p in pairs}
+        scalers = {p: StandardScaler() for p in pairs}
 
-        with patch("training.dataset_builder._build_chunk",
-                   side_effect=[self._fake_chunk(N, T, F) for _ in pairs]):
-            X, y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
-                pair_ticks, fe=None, scalers=scalers,
-                seq_len=T, chunk_idx=0, label_method="rl_reward",
+        with patch("training.dataset_builder._build_chunk", side_effect=[self._fake_chunk(N, T, F) for _ in pairs]):
+            X, _y, _, _, _, _, _, _, n_feat = _build_multipair_chunk(
+                pair_ticks,
+                fe=None,
+                scalers=scalers,
+                seq_len=T,
+                chunk_idx=0,
+                label_method="rl_reward",
             )
-        assert n_feat  == P * F
+        assert n_feat == P * F
         assert X.shape == (N, T, P * F)

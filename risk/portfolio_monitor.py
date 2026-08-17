@@ -1,5 +1,5 @@
 """
-risk/portfolio_monitor.py — Portfolio-level risk aggregation
+risk/portfolio_monitor.py - Portfolio-level risk aggregation
 
 Aggregates exposure across pairs, computes net currency exposure,
 correlation-aware exposure, and liquidity tiering. Designed to sit on top of
@@ -20,19 +20,32 @@ except ImportError:
 
 # Liquidity tiers by average daily volume (lots/day). Tier 1 is the deepest.
 DEFAULT_LIQUIDITY_TIERS: dict[str, int] = {
-    "EURUSD": 1, "GBPUSD": 1, "USDJPY": 1,
-    "AUDUSD": 2, "USDCAD": 2, "USDCHF": 2,
-    "NZDUSD": 2, "EURGBP": 2, "EURJPY": 3,
-    "GBPJPY": 3, "AUDJPY": 3, "EURAUD": 3,
-    "CADJPY": 3, "CHFJPY": 3, "AUDNZD": 4,
-    "EURCHF": 4, "GBPCHF": 4, "NZDJPY": 4,
+    "EURUSD": 1,
+    "GBPUSD": 1,
+    "USDJPY": 1,
+    "AUDUSD": 2,
+    "USDCAD": 2,
+    "USDCHF": 2,
+    "NZDUSD": 2,
+    "EURGBP": 2,
+    "EURJPY": 3,
+    "GBPJPY": 3,
+    "AUDJPY": 3,
+    "EURAUD": 3,
+    "CADJPY": 3,
+    "CHFJPY": 3,
+    "AUDNZD": 4,
+    "EURCHF": 4,
+    "GBPCHF": 4,
+    "NZDJPY": 4,
 }
 
 
 @dataclass
 class ExposureSnapshot:
     """Snapshot of positions + returns history used for aggregation."""
-    positions: dict[str, dict]                    # pair -> {lots, entry_price, direction}
+
+    positions: dict[str, dict]  # pair -> {lots, entry_price, direction}
     returns: dict[str, np.ndarray] | None = None  # pair -> return series (optional)
 
 

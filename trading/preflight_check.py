@@ -40,17 +40,19 @@ class ReadinessReport:
 
     @property
     def is_ready(self) -> bool:
-        return all([
-            self.feed_connected,
-            self.last_tick_age_s < 30.0,
-            self.broker_connected,
-            self.broker_authenticated,
-            self.risk_limits_loaded,
-            self.risk_limits_valid,
-            self.model_loaded,
-            self.model_warmed_up,
-            self.schema_matched,
-        ])
+        return all(
+            [
+                self.feed_connected,
+                self.last_tick_age_s < 30.0,
+                self.broker_connected,
+                self.broker_authenticated,
+                self.risk_limits_loaded,
+                self.risk_limits_valid,
+                self.model_loaded,
+                self.model_warmed_up,
+                self.schema_matched,
+            ]
+        )
 
     def save(self, path: str = "logs/live_readiness_report.json"):
         p = Path(path)
@@ -82,7 +84,9 @@ class ReadinessReport:
 def check_feed(report: ReadinessReport, feed_client: Any) -> None:
     """Verify data feed is connected and recent."""
     try:
-        if (hasattr(feed_client, "is_connected") and feed_client.is_connected()) or (hasattr(feed_client, "connected") and feed_client.connected):
+        if (hasattr(feed_client, "is_connected") and feed_client.is_connected()) or (
+            hasattr(feed_client, "connected") and feed_client.connected
+        ):
             report.feed_connected = True
         else:
             report.errors.append("Data feed not connected")
@@ -171,8 +175,7 @@ def check_risk_limits(report: ReadinessReport, config: dict) -> None:
         report.errors.append(f"Risk check failed: {e}")
 
 
-def check_model(report: ReadinessReport, model: Any,
-                warmup_input: Any | None = None) -> None:
+def check_model(report: ReadinessReport, model: Any, warmup_input: Any | None = None) -> None:
     """Verify model is loaded and can produce inference."""
     try:
         if model is None:
@@ -183,6 +186,7 @@ def check_model(report: ReadinessReport, model: Any,
 
         if warmup_input is not None:
             import torch
+
             model.eval()
             with torch.no_grad():
                 out = model(warmup_input)
@@ -192,7 +196,7 @@ def check_model(report: ReadinessReport, model: Any,
                 report.errors.append("Model warmup returned None")
         else:
             report.model_warmed_up = True
-            report.warnings.append("No warmup input provided — model not tested")
+            report.warnings.append("No warmup input provided - model not tested")
     except Exception as e:
         report.errors.append(f"Model warmup failed: {e}")
 
@@ -206,15 +210,12 @@ def check_calibration(report: ReadinessReport, checkpoint_dir: str) -> None:
         report.warnings.append("No calibration_report.json found (optional)")
 
 
-def check_schema(report: ReadinessReport, model_schema_hash: str,
-                 live_schema_hash: str) -> None:
+def check_schema(report: ReadinessReport, model_schema_hash: str, live_schema_hash: str) -> None:
     """Verify live feature schema matches model's trained schema."""
     if model_schema_hash == live_schema_hash:
         report.schema_matched = True
     else:
-        report.errors.append(
-            f"Schema mismatch: model={model_schema_hash[:12]} live={live_schema_hash[:12]}"
-        )
+        report.errors.append(f"Schema mismatch: model={model_schema_hash[:12]} live={live_schema_hash[:12]}")
 
 
 def run_preflight(
@@ -260,7 +261,7 @@ def run_preflight(
     if model_schema_hash and live_schema_hash:
         check_schema(report, model_schema_hash, live_schema_hash)
     elif model_schema_hash or live_schema_hash:
-        report.warnings.append("Only one schema hash provided — cannot compare")
+        report.warnings.append("Only one schema hash provided - cannot compare")
     else:
         report.schema_matched = True
         report.warnings.append("Schema check skipped (no hashes provided)")
@@ -277,9 +278,6 @@ def run_preflight(
     )
 
     if not report.is_ready:
-        raise RuntimeError(
-            f"Pre-flight check FAILED ({len(report.errors)} errors): "
-            + "; ".join(report.errors[:5])
-        )
+        raise RuntimeError(f"Pre-flight check FAILED ({len(report.errors)} errors): " + "; ".join(report.errors[:5]))
 
     return report

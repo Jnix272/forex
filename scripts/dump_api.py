@@ -19,5 +19,6 @@ def main():
         page.goto("https://www.forexlive.com/", wait_until="networkidle")
         browser.close()
 
+
 if __name__ == "__main__":
     main()

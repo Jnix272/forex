@@ -4,6 +4,7 @@ Streaming Feature Pipeline (Bytewax-based)
 Real-time feature computation pipeline replacing batch Zarr processing.
 Uses Bytewax for stateful stream processing with exactly-once semantics.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,16 +16,18 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 
 try:
-    import bytewax
-    import bytewax.operators as op
-    import bytewax.operators.windowing as wop
-    from bytewax.dataflow import Dataflow
-    from bytewax.inputs import DynamicSource, StatelessSourcePartition
-    from bytewax.testing import TestingSource
+    import bytewax  # pyright: ignore[reportMissingImports]
+    import bytewax.operators as op  # pyright: ignore[reportMissingImports]
+    import bytewax.operators.windowing as wop  # pyright: ignore[reportMissingImports]
+    from bytewax.dataflow import Dataflow  # pyright: ignore[reportMissingImports]
+    from bytewax.inputs import DynamicSource, StatelessSourcePartition  # pyright: ignore[reportMissingImports]
+    from bytewax.testing import TestingSource  # pyright: ignore[reportMissingImports]
+
     BYTEWAX_AVAILABLE = True
 except ImportError:
     BYTEWAX_AVAILABLE = False
     bytewax = None
+
 
 # 1. Config
 @dataclass
@@ -51,6 +54,7 @@ class StreamConfig:
     metrics_interval_sec: int = 30
     enable_metrics: bool = True
 
+
 @dataclass
 class MarketTick:
     symbol: str
@@ -74,6 +78,7 @@ class MarketTick:
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
+
 
 @dataclass
 class ComputedFeatures:
@@ -103,6 +108,7 @@ class ComputedFeatures:
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
 
+
 def parse_tick(event: dict) -> MarketTick:
     return MarketTick(
         symbol=event["symbol"],
@@ -117,8 +123,10 @@ def parse_tick(event: dict) -> MarketTick:
         exchange=event.get("exchange", "unknown"),
     )
 
+
 def tick_to_keyed(tick: MarketTick) -> tuple[str, MarketTick]:
     return (tick.symbol, tick)
+
 
 def _accumulate_ticks(state: list[MarketTick] | None, tick: MarketTick) -> list[MarketTick]:
     if state is None:
@@ -126,8 +134,9 @@ def _accumulate_ticks(state: list[MarketTick] | None, tick: MarketTick) -> list[
     state.append(tick)
     return state
 
+
 def _finalize_window_features(item) -> ComputedFeatures:
-    key, (window_metadata, ticks) = item
+    key, (_window_metadata, ticks) = item
     symbol = key
 
     if not ticks:
@@ -141,25 +150,30 @@ def _finalize_window_features(item) -> ComputedFeatures:
         window_start=0,
         window_end=0,
         tick_count=len(ticks),
-        sma_20=sum(prices)/len(prices),
-        spread_mean=sum(spreads)/len(spreads),
+        sma_20=sum(prices) / len(prices),
+        spread_mean=sum(spreads) / len(spreads),
     )
 
+
 if BYTEWAX_AVAILABLE:
+
     class TickSource(StatelessSourcePartition):
         def __init__(self, config: StreamConfig):
             self.config = config
             try:
-                from confluent_kafka import Consumer
-                self.consumer = Consumer({
-                    'bootstrap.servers': config.bootstrap_servers,
-                    'group.id': 'bytewax_tick_processor',
-                    'auto.offset.reset': 'latest',
-                    'enable.auto.commit': False
-                })
+                from confluent_kafka import Consumer  # pyright: ignore[reportMissingImports]
+
+                self.consumer = Consumer(
+                    {
+                        "bootstrap.servers": config.bootstrap_servers,
+                        "group.id": "bytewax_tick_processor",
+                        "auto.offset.reset": "latest",
+                        "enable.auto.commit": False,
+                    }
+                )
                 self.consumer.subscribe([config.input_topic])
             except ImportError:
-                warnings.warn("confluent_kafka not installed. TickSource will yield no data.")
+                warnings.warn("confluent_kafka not installed. TickSource will yield no data.", stacklevel=2)
                 self.consumer = None
 
         def next_batch(self) -> list[MarketTick]:
@@ -171,19 +185,23 @@ if BYTEWAX_AVAILABLE:
                 if msg is None or msg.error():
                     continue
                 try:
-                    payload = json.loads(msg.value().decode('utf-8'))
+                    payload = json.loads(msg.value().decode("utf-8"))
                     batch.append(parse_tick(payload))
                 except Exception:
                     pass
             return batch
+
         def close(self):
-            if self.consumer: self.consumer.close()
+            if self.consumer:
+                self.consumer.close()
 
     class DynamicTickSource(DynamicSource):
         def __init__(self, config: StreamConfig):
             self.config = config
+
         def build(self, step_id: str, worker_index: int, worker_count: int) -> StatelessSourcePartition:
             return TickSource(self.config)
+
 
 def build_feature_pipeline(config: StreamConfig) -> Dataflow:
     flow = Dataflow("streaming_pipeline")
@@ -202,12 +220,14 @@ def build_feature_pipeline(config: StreamConfig) -> Dataflow:
 
     windowed = wop.collect_window("accumulate_ticks", keyed_stream, clock, windower)
     features = op.map("finalize_window", windowed.down, _finalize_window_features)
+
     # Output to console
     def print_features(step_id, f):
         print(f"Computed features: {f.symbol} | SMA20: {f.sma_20:.5f} | Spread: {f.spread_mean:.5f}")
 
     op.inspect("print_output", features, print_features)
     return flow
+
 
 def create_test_dataflow(config: StreamConfig) -> Dataflow:
     flow = Dataflow("test_pipeline")
@@ -223,8 +243,8 @@ def create_test_dataflow(config: StreamConfig) -> Dataflow:
             yield MarketTick(
                 symbol=symbol,
                 timestamp=int(time.time_ns()) + i * 1_000_000_000,
-                bid=price - spread/2,
-                ask=price + spread/2,
+                bid=price - spread / 2,
+                ask=price + spread / 2,
             )
 
     stream = op.input("ticks", flow, TestingSource(generate_ticks()))
@@ -248,10 +268,12 @@ def create_test_dataflow(config: StreamConfig) -> Dataflow:
     op.inspect("print_output", features, print_features)
     return flow
 
+
 class StreamingFeaturePipeline:
     def __init__(self, config: StreamConfig):
         self.config = config
         self.flow = build_feature_pipeline(config)
+
 
 if __name__ == "__main__":
     if not BYTEWAX_AVAILABLE:
@@ -264,6 +286,7 @@ if __name__ == "__main__":
             window_size_sec=5,
         )
         pipeline = StreamingFeaturePipeline(config)
-        import bytewax.testing
+        import bytewax.testing  # pyright: ignore[reportMissingImports]
+
         print("Starting Bytewax streaming engine on Redpanda...")
         bytewax.testing.run_main(pipeline.flow)

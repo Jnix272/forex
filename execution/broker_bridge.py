@@ -24,6 +24,7 @@ except ImportError:
 
 try:
     from ib_insync import IB, Forex, LimitOrder, MarketOrder, StopOrder
+
     _IB_INSYNC = True
 except ImportError:
     IB = None  # type: ignore[misc, assignment]
@@ -54,8 +55,7 @@ class BrokerBridge:
     def _require_connected(self, op: str) -> None:
         if not self.connected:
             raise BrokerNotConnectedError(
-                f"BrokerBridge.{op}() requires an active connection "
-                f"(broker={self.broker}). Call connect() first."
+                f"BrokerBridge.{op}() requires an active connection (broker={self.broker}). Call connect() first."
             )
 
     def connect(self) -> bool:
@@ -85,9 +85,7 @@ class BrokerBridge:
 
         if self.broker == "IBKR":
             if not _IB_INSYNC:
-                raise ImportError(
-                    "IBKR requires ib_insync. Install with: pip install ib_insync"
-                )
+                raise ImportError("IBKR requires ib_insync. Install with: pip install ib_insync")
             host = str(self.config.get("host", "127.0.0.1"))
             port = int(self.config.get("port", 7497))  # 7497 paper, 7496 live TWS
             client_id = int(self.config.get("client_id", 1))
@@ -106,9 +104,7 @@ class BrokerBridge:
             return True
 
         if self.broker == "OANDA":
-            raise BrokerNotImplementedError(
-                "Use the OANDA client in trading/live_engine.py directly."
-            )
+            raise BrokerNotImplementedError("Use the OANDA client in trading/live_engine.py directly.")
         raise ValueError(f"Unsupported broker: {self.broker}")
 
     def disconnect(self) -> None:
@@ -126,9 +122,15 @@ class BrokerBridge:
             self._ib = None
         self.connected = False
 
-    def execute_order(self, symbol, side: str, lot_size: float,
-                      limit_price: float = None,
-                      stop_loss: float = None, take_profit: float = None) -> bool:
+    def execute_order(
+        self,
+        symbol,
+        side: str,
+        lot_size: float,
+        limit_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> bool:
         """Route an order to the execution engine."""
         self._require_connected("execute_order")
 
@@ -138,10 +140,9 @@ class BrokerBridge:
                 logger.error(f"Symbol {symbol} not found.")
                 return False
 
-            if not symbol_info.visible:
-                if not mt5.symbol_select(symbol, True):
-                    logger.error(f"symbol_select({symbol}) failed.")
-                    return False
+            if not symbol_info.visible and not mt5.symbol_select(symbol, True):
+                logger.error(f"symbol_select({symbol}) failed.")
+                return False
 
             order_type = mt5.ORDER_TYPE_BUY if side.upper() == "BUY" else mt5.ORDER_TYPE_SELL
 
@@ -211,11 +212,10 @@ class BrokerBridge:
             return True
 
         raise BrokerNotImplementedError(
-            f"BrokerBridge.execute_order() is not implemented for {self.broker}. "
-            f"Order: {side} {lot_size} {symbol}"
+            f"BrokerBridge.execute_order() is not implemented for {self.broker}. Order: {side} {lot_size} {symbol}"
         )
 
-    def modify_order(self, ticket: int, stop_loss: float = None, take_profit: float = None) -> bool:
+    def modify_order(self, ticket: int, stop_loss: float | None = None, take_profit: float | None = None) -> bool:
         """Modify an existing order or position."""
         self._require_connected("modify_order")
 
@@ -343,21 +343,21 @@ class BrokerBridge:
                 if qty == 0:
                     continue
                 sym = getattr(pos.contract, "symbol", "") or getattr(pos.contract, "localSymbol", "")
-                out.append({
-                    "ticket": int(getattr(pos.contract, "conId", 0) or 0),
-                    "symbol": str(sym).replace(".", ""),
-                    "volume": abs(qty),
-                    "type": "BUY" if qty > 0 else "SELL",
-                    "price_open": float(getattr(pos, "avgCost", 0.0) or 0.0),
-                    "sl": None,
-                    "tp": None,
-                    "profit": None,
-                })
+                out.append(
+                    {
+                        "ticket": int(getattr(pos.contract, "conId", 0) or 0),
+                        "symbol": str(sym).replace(".", ""),
+                        "volume": abs(qty),
+                        "type": "BUY" if qty > 0 else "SELL",
+                        "price_open": float(getattr(pos, "avgCost", 0.0) or 0.0),
+                        "sl": None,
+                        "tp": None,
+                        "profit": None,
+                    }
+                )
             return out
 
-        raise BrokerNotImplementedError(
-            f"BrokerBridge.get_positions() is not implemented for {self.broker}."
-        )
+        raise BrokerNotImplementedError(f"BrokerBridge.get_positions() is not implemented for {self.broker}.")
 
     def get_latency(self) -> int | None:
         """Round-trip latency to the broker in milliseconds."""
@@ -392,9 +392,7 @@ class BrokerBridge:
                 return None
             return max(0, int((time.perf_counter() - t0) * 1000))
 
-        raise BrokerNotImplementedError(
-            f"BrokerBridge.get_latency() is not implemented for {self.broker}."
-        )
+        raise BrokerNotImplementedError(f"BrokerBridge.get_latency() is not implemented for {self.broker}.")
 
     def get_bid_ask(self, symbol: str) -> tuple[float, float]:
         """Return (bid, ask) for ``symbol``. Fail-closed when disconnected."""
@@ -423,9 +421,7 @@ class BrokerBridge:
                 return mid - 1e-5, mid + 1e-5
             return bid, ask
 
-        raise BrokerNotImplementedError(
-            f"BrokerBridge.get_bid_ask() is not implemented for {self.broker}."
-        )
+        raise BrokerNotImplementedError(f"BrokerBridge.get_bid_ask() is not implemented for {self.broker}.")
 
     def get_account_equity(self) -> float:
         """Account equity / NAV when the venue exposes it."""
@@ -438,15 +434,17 @@ class BrokerBridge:
         if self.broker == "IBKR":
             vals = self._ib.accountValues()
             for v in vals:
-                if str(getattr(v, "tag", "")) == "NetLiquidation" and str(getattr(v, "currency", "")) in ("", "USD", "BASE"):
+                if str(getattr(v, "tag", "")) == "NetLiquidation" and str(getattr(v, "currency", "")) in (
+                    "",
+                    "USD",
+                    "BASE",
+                ):
                     try:
                         return float(v.value)
                     except Exception:
                         continue
             raise RuntimeError("IBKR: NetLiquidation not found in accountValues")
-        raise BrokerNotImplementedError(
-            f"BrokerBridge.get_account_equity() is not implemented for {self.broker}."
-        )
+        raise BrokerNotImplementedError(f"BrokerBridge.get_account_equity() is not implemented for {self.broker}.")
 
     def is_connected(self) -> bool:
         if self.broker == "IBKR" and self._ib is not None:

@@ -14,26 +14,31 @@ from typing import Any
 import polars as pl
 
 from contracts import (
-    TickContract, BarContract, FeatureContract, LabelContract, DatasetContract,
-    ContractRegistry, Stage
+    BarContract,
+    DatasetContract,
+    FeatureContract,
+    LabelContract,
+    Stage,
+    TickContract,
 )
-from contracts.validation.gates import PipelineStageValidator
 from contracts.validation.drift import SchemaDriftDetector
+from contracts.validation.gates import PipelineStageValidator
 from contracts.validation.reporter import ValidationReporter
+from feature_store.materializer import FeatureMaterializer, MaterializationJob, create_materializer
+from feature_store.registry import FeatureRegistry, get_registry
+from feature_store.store import FeatureStore, create_feature_store
+from features.incremental import StreamingFeatureProcessor, create_incremental_processor
+from lineage.store import FileLineageStore
+from lineage.tracker import LineageEvent, LineageEventType, LineageTracker
 from pipeline.config import PipelineConfig, PipelineStageName, load_pipeline_config
 from pipeline.orchestrator import PipelineOrchestrator, create_orchestrator
 from pipeline.quality_gates import DataQualityGates, create_quality_gates
-from feature_store.store import FeatureStore, ParquetFeatureStore, create_feature_store
-from feature_store.materializer import FeatureMaterializer, MaterializationJob, create_materializer
-from feature_store.registry import FeatureRegistry, get_registry
-from lineage.tracker import LineageTracker, LineageEventType, LineageEvent
-from lineage.store import FileLineageStore, SQLiteLineageStore
-from features.incremental import StreamingFeatureProcessor, IncrementalFeatureEngine, create_incremental_processor
 
 
 @dataclass
 class PipelineComponents:
     """Container for all pipeline components"""
+
     config: PipelineConfig
     orchestrator: PipelineOrchestrator
     feature_store: FeatureStore
@@ -58,7 +63,7 @@ def create_full_pipeline(
 ) -> PipelineComponents:
     """
     Create a fully configured pipeline with all components.
-    
+
     Args:
         config_path: Path to pipeline config YAML
         config: PipelineConfig object (alternative to config_path)
@@ -67,64 +72,62 @@ def create_full_pipeline(
         enable_quality_gates: Enable quality gates
         enable_incremental: Enable incremental processing
         output_dir: Base output directory
-        
+
     Returns:
         PipelineComponents with all initialized components
     """
     # Load or create config
     if config is None:
         config = load_pipeline_config(config_path)
-    
+
     # Override config based on flags
     config.lineage.enabled = enable_lineage
     config.feature_store.enabled = enable_feature_store
     config.quality_gates.enabled = enable_quality_gates
     config.incremental.enabled = enable_incremental
     config.output_dir = str(output_dir)
-    
+
     # Create orchestrator
     orchestrator = create_orchestrator(config=config)
-    
+
     # Create feature store
     feature_store = create_feature_store(
         store_type=config.feature_store.store_type,
         base_path=config.feature_store.path,
     )
-    
+
     # Create materializer
     materializer = create_materializer(
         feature_store_path=config.feature_store.path,
         quality_gates_dir=config.quality_gates.log_dir if enable_quality_gates else None,
         lineage_dir=config.lineage.path if enable_lineage else None,
     )
-    
+
     # Get/create registry
     registry = get_registry()
-    
+
     # Create lineage tracker
     lineage_tracker = None
     if enable_lineage:
-        lineage_tracker = LineageTracker(
-            store=FileLineageStore(Path(config.lineage.path) / "lineage.jsonl")
-        )
-    
+        lineage_tracker = LineageTracker(store=FileLineageStore(Path(config.lineage.path) / "lineage.jsonl"))
+
     # Create drift detector
-    drift_detector = SchemaDriftDetector(
-        reference_dir=Path(output_dir) / "drift_reference"
-    )
-    
+    drift_detector = SchemaDriftDetector(reference_dir=Path(output_dir) / "drift_reference")
+
     # Create reporter
     reporter = ValidationReporter(Path(output_dir) / "validation")
-    
+
     # Create quality gates
     quality_gates = {}
     if enable_quality_gates:
         quality_gates = {
             "ingestion": create_quality_gates("ingestion", remediation_log_dir=config.quality_gates.log_dir),
             "resampling": create_quality_gates("resampling", remediation_log_dir=config.quality_gates.log_dir),
-            "feature_engineering": create_quality_gates("feature_engineering", remediation_log_dir=config.quality_gates.log_dir),
+            "feature_engineering": create_quality_gates(
+                "feature_engineering", remediation_log_dir=config.quality_gates.log_dir
+            ),
         }
-    
+
     # Create validators
     validators = {
         PipelineStageName.INGESTION: PipelineStageValidator(
@@ -148,7 +151,7 @@ def create_full_pipeline(
             output_dir=Path(output_dir) / "validation",
         ),
     }
-    
+
     # Create incremental processor
     incremental_processor = None
     if enable_incremental:
@@ -156,7 +159,7 @@ def create_full_pipeline(
             state_dir=config.incremental.state_dir,
             warmup_bars=config.incremental.warmup_bars,
         )
-    
+
     return PipelineComponents(
         config=config,
         orchestrator=orchestrator,
@@ -180,13 +183,13 @@ def validate_dataframe(
 ) -> tuple[pl.DataFrame, Any]:
     """
     Validate a DataFrame against the contract for a stage.
-    
+
     Args:
         df: DataFrame to validate
         stage: Pipeline stage
         pair: Currency pair
         strict: If True, raise on validation errors
-        
+
     Returns:
         Tuple of (validated DataFrame, metadata)
     """
@@ -197,11 +200,11 @@ def validate_dataframe(
         Stage.LABELING: LabelContract,
         Stage.DATASET_BUILD: DatasetContract,
     }
-    
+
     contract_class = contract_map.get(stage)
     if not contract_class:
         raise ValueError(f"No contract for stage: {stage}")
-    
+
     return contract_class.validate(df, pair=pair, strict=strict)
 
 
@@ -214,14 +217,14 @@ def run_quality_gates(
 ) -> tuple[pl.DataFrame, Any]:
     """
     Run quality gates on a DataFrame.
-    
+
     Args:
         df: DataFrame to check
         stage: Stage name
         pair: Currency pair
         auto_remediate: Whether to auto-remediate issues
         log_dir: Directory for remediation logs
-        
+
     Returns:
         Tuple of (remediated DataFrame, report)
     """
@@ -230,7 +233,7 @@ def run_quality_gates(
         auto_remediate=auto_remediate,
         remediation_log_dir=log_dir,
     )
-    
+
     return gates.run(df, pair=pair)
 
 
@@ -246,7 +249,7 @@ def track_lineage(
 ) -> Any:
     """
     Track a lineage event.
-    
+
     Args:
         event_type: Type of lineage event
         stage: Pipeline stage
@@ -256,23 +259,29 @@ def track_lineage(
         output_path: Output file path
         metadata: Additional metadata
         tracker: LineageTracker instance (uses global if None)
-        
+
     Returns:
         LineageRecord
     """
     if tracker is None:
         from lineage.tracker import get_tracker
+
         tracker = get_tracker()
-    
+
     if tracker is None:
         return None
-    
-    return tracker.record_event(LineageEvent(
-        event_type=event_type,
-        stage=stage,
-        pair=pair,
-        metadata=metadata or {},
-    ), input_data, output_data, output_path)
+
+    return tracker.record_event(
+        LineageEvent(
+            event_type=event_type,
+            stage=stage,
+            pair=pair,
+            metadata=metadata or {},
+        ),
+        input_data,
+        output_data,
+        output_path,
+    )
 
 
 def materialize_features(
@@ -287,7 +296,7 @@ def materialize_features(
 ) -> Any:
     """
     Convenience function to materialize features for pairs.
-    
+
     Args:
         pairs: Currency pairs
         start_date: Start date (YYYY-MM-DD)
@@ -297,18 +306,18 @@ def materialize_features(
         bar_freq: Bar frequency
         quality_gates: Enable quality gates
         lineage_tracking: Enable lineage tracking
-        
+
     Returns:
         MaterializationResult
     """
     from datetime import datetime
-    
+
     materializer = create_materializer(
         feature_store_path=feature_store_path,
         quality_gates_dir="logs/quality_gates" if quality_gates else None,
         lineage_dir="logs/lineage" if lineage_tracking else None,
     )
-    
+
     job = MaterializationJob(
         version=version,
         pairs=pairs,
@@ -319,7 +328,7 @@ def materialize_features(
         quality_gates=quality_gates,
         lineage_tracking=lineage_tracking,
     )
-    
+
     return materializer.materialize(job)
 
 
@@ -331,13 +340,13 @@ def process_streaming(
 ) -> pl.DataFrame | None:
     """
     Process bars incrementally for streaming.
-    
+
     Args:
         bars: New bars to process
         pair: Currency pair
         state_dir: State directory
         warmup_bars: Warmup bars needed
-        
+
     Returns:
         Features DataFrame or None if still warming up
     """
@@ -345,7 +354,7 @@ def process_streaming(
         state_dir=state_dir,
         warmup_bars=warmup_bars,
     )
-    
+
     return processor.process_bar(bars, pair)
 
 
@@ -359,8 +368,8 @@ def example_full_pipeline():
         enable_feature_store=True,
         enable_quality_gates=True,
     )
-    
+
     # Run pipeline
     report = components.orchestrator.run()
-    
+
     return report

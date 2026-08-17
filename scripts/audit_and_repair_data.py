@@ -18,9 +18,12 @@ def audit_and_repair(start_date: str, end_date: str, csv_path: str):
         print("Scanning dataset for existing months...")
         df = pl.scan_csv(csv_path, ignore_errors=True)
         # Parse timestamp to extract Year and Month
-        df_months = df.select([
-            pl.col("timestamp_utc").str.slice(0, 7).alias("year_month")
-        ]).filter(pl.col("year_month").is_not_null()).unique().collect()
+        df_months = (
+            df.select([pl.col("timestamp_utc").str.slice(0, 7).alias("year_month")])
+            .filter(pl.col("year_month").is_not_null())
+            .unique()
+            .collect()
+        )
 
         existing_months = set(df_months["year_month"].to_list())
         print(f"Found {len(existing_months)} unique months in dataset.")
@@ -61,6 +64,7 @@ def audit_and_repair(start_date: str, end_date: str, csv_path: str):
         # Check if the download script exists
         if os.path.exists("scripts/download_2008_news.py"):
             import sys
+
             subprocess.run([sys.executable, "scripts/download_2008_news.py"], check=True)
             # Merge logic is handled in the download_2008_news.py script itself or we do it here.
         else:
@@ -77,20 +81,31 @@ def audit_and_repair(start_date: str, end_date: str, csv_path: str):
 
         print(f"Running GDELT download from {start_gdelt} to {end_gdelt}...")
         import sys
-        subprocess.run([
-            sys.executable, "scripts/download_historical_news.py",
-            "--start", start_gdelt,
-            "--end", end_gdelt,
-            "--workers", "4"
-        ], check=True)
+
+        subprocess.run(
+            [
+                sys.executable,
+                "scripts/download_historical_news.py",
+                "--start",
+                start_gdelt,
+                "--end",
+                end_gdelt,
+                "--workers",
+                "4",
+            ],
+            check=True,
+        )
 
     print("Repair process finished. Re-run audit to verify.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", type=str, default="2008-01-01", help="Start date to audit (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default=datetime.now(UTC).strftime("%Y-%m-%d"), help="End date to audit")
-    parser.add_argument("--csv", type=str, default="data/raw/news/historical_news_combined.parquet", help="Path to historical news CSV")
+    parser.add_argument(
+        "--csv", type=str, default="data/raw/news/historical_news_combined.parquet", help="Path to historical news CSV"
+    )
     args = parser.parse_args()
 
     audit_and_repair(args.start, args.end, args.csv)

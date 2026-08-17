@@ -7,10 +7,8 @@ avoiding redundant recomputation of 170-220 features across overlapping windows.
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -44,12 +42,12 @@ def build_pair_feature_cache(
     *,
     cache_dir: str = DEFAULT_CACHE_DIR,
     bar_freq: str = "5m",
-    fe_kwargs: dict = None,
+    fe_kwargs: dict | None = None,
     news_mode: str = "calendar",
-    news_file: str = None,
-    calendar_file: str = None,
-    cot_data: dict = None,
-    cross_asset: dict = None,
+    news_file: str | None = None,
+    calendar_file: str | None = None,
+    cot_data: dict | None = None,
+    cross_asset: dict | None = None,
     sentiment_pipe=None,
     data_mgr=None,
     overwrite: bool = False,
@@ -87,9 +85,9 @@ def build_pair_feature_cache(
         return str(output)
 
     # Initialize data infrastructure
+    import training.dataset_builder as dsb
     from data.sources import ForexDataManager
     from training.dataset_builder import _ensure_bound
-    import training.dataset_builder as dsb
 
     _ensure_bound()
     mgr = data_mgr or ForexDataManager()
@@ -105,7 +103,7 @@ def build_pair_feature_cache(
 
     while month < end_dt:
         next_month = (month + timedelta(days=32)).replace(day=1)
-        m_start = month.strftime("%Y-%m-%d")
+        month.strftime("%Y-%m-%d")
         m_end = min(next_month, end_dt).strftime("%Y-%m-%d")
         month_key = _month_key(month)
 
@@ -131,6 +129,7 @@ def build_pair_feature_cache(
 
         # Resample bars
         from training.dataset_builder import ForexDataPipeline
+
         pipeline = ForexDataPipeline(
             bar_freq=bar_freq or "5m",
             session_filter=False,
@@ -144,10 +143,7 @@ def build_pair_feature_cache(
         # Filter to target month
         m_start_ts = pl.lit(month.strftime("%Y-%m-%d")).str.to_datetime()
         m_end_ts = pl.lit(m_end).str.to_datetime()
-        bars = bars.filter(
-            (pl.col("timestamp_utc") >= m_start_ts) &
-            (pl.col("timestamp_utc") < m_end_ts)
-        )
+        bars = bars.filter((pl.col("timestamp_utc") >= m_start_ts) & (pl.col("timestamp_utc") < m_end_ts))
 
         if len(bars) < 50:
             print(f"[FeatCache] {pair} {month_key}: only {len(bars)} bars, skipping")
@@ -165,7 +161,7 @@ def build_pair_feature_cache(
                 calendar_file=calendar_file,
                 cot_data=cot_data,
                 pair=pair,
-                **(fe_kwargs or {})
+                **(fe_kwargs or {}),
             )
         except Exception as e:
             print(f"[FeatCache] {pair} {month_key}: FE failed ({e}), skipping")
@@ -183,7 +179,7 @@ def build_pair_feature_cache(
         n_rows = len(F)
         total_bars += n_rows
         months_processed += 1
-        print(f"[FeatCache] {pair} {month_key}: {n_rows:,} bars × {n_cols} features → {output_file.name}")
+        print(f"[FeatCache] {pair} {month_key}: {n_rows:,} bars x {n_cols} features → {output_file.name}")
 
         month = next_month
 
@@ -191,6 +187,7 @@ def build_pair_feature_cache(
     # Write manifest
     manifest_path = output / "_manifest.json"
     import json
+
     manifest = {
         "pair": pair,
         "start": start,
@@ -204,7 +201,7 @@ def build_pair_feature_cache(
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"\n[FeatCache] {pair}: {total_bars:,} bars × {months_processed} months in {elapsed:.0f}s")
+    print(f"\n[FeatCache] {pair}: {total_bars:,} bars x {months_processed} months in {elapsed:.0f}s")
     print(f"[FeatCache] Path: {output}")
 
     return str(output)
@@ -217,8 +214,8 @@ def load_cached_features(
     *,
     cache_dir: str = DEFAULT_CACHE_DIR,
     version: str = CACHE_VERSION,
-    columns: list[str] = None,
-) -> Optional[pl.DataFrame]:
+    columns: list[str] | None = None,
+) -> pl.DataFrame | None:
     """
     Load cached features for a date range.
 
@@ -243,8 +240,8 @@ def load_cached_features(
             # Filter to requested date range
             m_end = next_month.strftime("%Y-%m-%d")
             df = df.filter(
-                (pl.col("timestamp_utc") >= pl.lit(start).str.to_datetime()) &
-                (pl.col("timestamp_utc") < pl.lit(m_end).str.to_datetime())
+                (pl.col("timestamp_utc") >= pl.lit(start).str.to_datetime())
+                & (pl.col("timestamp_utc") < pl.lit(m_end).str.to_datetime())
             )
             if len(df) > 0:
                 if columns:
@@ -258,8 +255,8 @@ def load_cached_features(
     result = pl.concat(frames)
     # Re-filter to exact range
     result = result.filter(
-        (pl.col("timestamp_utc") >= pl.lit(start).str.to_datetime()) &
-        (pl.col("timestamp_utc") < pl.lit(end).str.to_datetime())
+        (pl.col("timestamp_utc") >= pl.lit(start).str.to_datetime())
+        & (pl.col("timestamp_utc") < pl.lit(end).str.to_datetime())
     )
     return result if len(result) > 0 else None
 
@@ -273,7 +270,7 @@ def build_single_pass_dataset(
     feature_cache_dir: str = DEFAULT_CACHE_DIR,
     seq_len: int = 80,
     fe=None,
-    scalers: dict = None,
+    scalers: dict | None = None,
     label_method: str = "rl_reward",
     lookahead_bars: int = 30,
     profit_atr_mult: float = 1.2,
@@ -281,15 +278,14 @@ def build_single_pass_dataset(
     data_mgr=None,
 ) -> tuple[str, int, int]:
     """
-    Single-pass dataset builder — processes full history once instead of window-by-window.
+    Single-pass dataset builder - processes full history once instead of window-by-window.
 
     Loads pre-built feature caches for all pairs, aligns timestamps, computes labels
     in one pass, builds sliding windows, and writes to Zarr.
 
     Returns (cache_path, n_samples, n_features_total).
     """
-    import hashlib, json, time
-    import numpy as np, pandas as pd
+    import time
     from pathlib import Path
 
     t0 = time.time()
@@ -340,8 +336,18 @@ def build_single_pass_dataset(
         idx = idx[valid]
 
         # Extract feature columns (exclude timestamp, close, atr, spread, etc.)
-        exclude_cols = {"timestamp_utc", "close", "mid_close", "bid_close", "ask_close",
-                        "atr_6", "atr_20", "spread_pips", "pair", "source"}
+        exclude_cols = {
+            "timestamp_utc",
+            "close",
+            "mid_close",
+            "bid_close",
+            "ask_close",
+            "atr_6",
+            "atr_20",
+            "spread_pips",
+            "pair",
+            "source",
+        }
         feat_cols = [c for c in df.columns if c not in exclude_cols]
         X = np.asarray(df.select(feat_cols).to_numpy(), dtype=np.float32)
         pair_Xs[p] = X[idx]
@@ -357,7 +363,7 @@ def build_single_pass_dataset(
     n_total = len(common_ts)
 
     if n_total < seq_len + lookahead_bars:
-        raise RuntimeError(f"Only {n_total} aligned bars — need {seq_len + lookahead_bars}")
+        raise RuntimeError(f"Only {n_total} aligned bars - need {seq_len + lookahead_bars}")
 
     # Build sliding windows from aligned data
     n_feat_per_pair = pair_Xs[pairs[0]].shape[1]
@@ -368,6 +374,7 @@ def build_single_pass_dataset(
 
     # Build sliding windows
     from numpy.lib.stride_tricks import sliding_window_view
+
     X_seq = sliding_window_view(X_aligned, (seq_len, n_total_features))  # (n-seq+1, seq_len, F)
     X_seq = np.ascontiguousarray(X_seq)
 
@@ -380,7 +387,8 @@ def build_single_pass_dataset(
         raise RuntimeError("Missing close or atr columns in feature cache")
 
     # Simple labeling: use Numba-accelerated scan
-    from labeling.rl_reward_numba import _scan_barriers_simple, _numba_available
+    from labeling.rl_reward_numba import _numba_available, _scan_barriers_simple
+
     delay = 1
     entry_long = close + 0.00001
     entry_short = close - 0.00001
@@ -390,32 +398,40 @@ def build_single_pass_dataset(
 
     if _numba_available():
         reward_long, reward_short = _scan_barriers_simple(
-            close.astype(np.float64), entry_long.astype(np.float64),
-            entry_short.astype(np.float64), exit_long.astype(np.float64),
-            exit_short.astype(np.float64), atr_col.astype(np.float64),
-            valid_market, profit_atr_mult, stop_atr_mult, 1.5, 0.0001,
-            lookahead_bars, delay,
+            close.astype(np.float64),
+            entry_long.astype(np.float64),
+            entry_short.astype(np.float64),
+            exit_long.astype(np.float64),
+            exit_short.astype(np.float64),
+            atr_col.astype(np.float64),
+            valid_market,
+            profit_atr_mult,
+            stop_atr_mult,
+            1.5,
+            0.0001,
+            lookahead_bars,
+            delay,
         )
     else:
         reward_long = np.zeros(n_total, dtype=np.float32)
         reward_short = np.zeros(n_total, dtype=np.float32)
 
-    reward = np.maximum(reward_long, reward_short)
+    np.maximum(reward_long, reward_short)
     label = np.select(
-        [(reward_long > 1.5) & (reward_long >= reward_short),
-         (reward_short > 1.5) & (reward_short > reward_long)],
-        [1, -1], default=0
+        [(reward_long > 1.5) & (reward_long >= reward_short), (reward_short > 1.5) & (reward_short > reward_long)],
+        [1, -1],
+        default=0,
     )
 
     # Align labels with windows
     n_windows = X_seq.shape[0]
-    y_seq = label[seq_len-1:seq_len-1+n_windows].astype(np.float32)
+    y_seq = label[seq_len - 1 : seq_len - 1 + n_windows].astype(np.float32)
     y_cls_seq = y_seq.copy()
 
     # Quality filter
     keep = np.ones(n_windows, dtype=bool)
-    keep[:n_windows - lookahead_bars - delay] = True
-    keep[-(lookahead_bars + delay):] = False
+    keep[: n_windows - lookahead_bars - delay] = True
+    keep[-(lookahead_bars + delay) :] = False
 
     X_seq = X_seq[keep]
     y_seq = y_seq[keep]
@@ -425,34 +441,47 @@ def build_single_pass_dataset(
     label_idx = np.arange(seq_len - 1, seq_len - 1 + n_windows)[keep]
     close_seq = close[label_idx].astype(np.float32)
     atr_seq = atr_col[label_idx].astype(np.float32)
-    spread_seq = (spread_col[label_idx].astype(np.float32) if spread_col is not None
-                  else np.zeros(len(label_idx), dtype=np.float32))
+    spread_seq = (
+        spread_col[label_idx].astype(np.float32)
+        if spread_col is not None
+        else np.zeros(len(label_idx), dtype=np.float32)
+    )
 
     # Write Zarr
-    from training.gpu_cache_io import (_zarr_open_group, _zarr_create,
-                                        ZARR_FEATURE_DTYPE, ZARR_LABEL_DTYPE,
-                                        make_training_zarr_compressor)
-    from pathlib import Path
-    import os
+
+    from training.gpu_cache_io import (
+        ZARR_FEATURE_DTYPE,
+        ZARR_LABEL_DTYPE,
+        _zarr_create,
+        _zarr_open_group,
+        make_training_zarr_compressor,
+    )
 
     cp = Path(cache_path)
     cp.parent.mkdir(parents=True, exist_ok=True)
 
     if cp.exists():
         import shutil
+
         shutil.rmtree(cp, ignore_errors=True)
 
     _compressor = make_training_zarr_compressor()
     _chunk_rows = min(4096, len(X_seq))
-    c0 = (_chunk_rows,) + X_seq.shape[1:]
+    c0 = (_chunk_rows, *X_seq.shape[1:])
 
     z_store = _zarr_open_group(str(cp), mode="w")
     _zarr_create(z_store, "X", shape=X_seq.shape, chunks=c0, dtype=ZARR_FEATURE_DTYPE, compressor=_compressor)
     _zarr_create(z_store, "y", shape=y_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-    _zarr_create(z_store, "y_cls", shape=y_cls_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-    _zarr_create(z_store, "close", shape=close_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
+    _zarr_create(
+        z_store, "y_cls", shape=y_cls_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor
+    )
+    _zarr_create(
+        z_store, "close", shape=close_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor
+    )
     _zarr_create(z_store, "atr", shape=atr_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
-    _zarr_create(z_store, "spread", shape=spread_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor)
+    _zarr_create(
+        z_store, "spread", shape=spread_seq.shape, chunks=(c0[0],), dtype=ZARR_LABEL_DTYPE, compressor=_compressor
+    )
 
     z_store["X"][:] = np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE)
     z_store["y"][:] = y_seq

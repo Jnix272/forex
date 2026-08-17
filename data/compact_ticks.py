@@ -2,14 +2,13 @@
 Build consolidated DuckDB from compact daily parquet partitions.
 
 Replaces 189K individual files (raw hourly + compact daily) with a single
-DuckDB database for 10-50× faster reads.
+DuckDB database for 10-50x faster reads.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 
@@ -17,7 +16,7 @@ import duckdb
 def build_forex_duckdb(
     compact_dir: str = "data/compact/dukascopy",
     output_path: str = "data/store/forex_ticks.duckdb",
-    pairs: Optional[list[str]] = None,
+    pairs: list[str] | None = None,
     only_missing: bool = False,
 ) -> str:
     """
@@ -41,9 +40,7 @@ def build_forex_duckdb(
         raise FileNotFoundError(f"Compact directory not found: {pair_dir}")
 
     all_pairs = sorted(
-        p.name.replace("pair=", "")
-        for p in pair_dir.iterdir()
-        if p.is_dir() and p.name.startswith("pair=")
+        p.name.replace("pair=", "") for p in pair_dir.iterdir() if p.is_dir() and p.name.startswith("pair=")
     )
 
     if pairs:
@@ -66,17 +63,16 @@ def build_forex_duckdb(
     conn.execute("SET threads = 8")
 
     # Build glob for parquet files
-    glob_path = str(compact / f"granularity={granularity}" / "pair=*" / "year=*" / "month=*" / "day=*" / "ticks.parquet")
+    glob_path = str(
+        compact / f"granularity={granularity}" / "pair=*" / "year=*" / "month=*" / "day=*" / "ticks.parquet"
+    )
 
     if only_missing and Path(output_path).exists():
         # Check which pairs are already in the DB
-        existing = set(
-            row[0]
-            for row in conn.execute("SELECT DISTINCT pair FROM ticks").fetchall()
-        )
+        existing = {row[0] for row in conn.execute("SELECT DISTINCT pair FROM ticks").fetchall()}
         pairs = [p for p in pairs if p not in existing]
         if not pairs:
-            print("[DuckDB] All pairs already present — nothing to do")
+            print("[DuckDB] All pairs already present - nothing to do")
             conn.close()
             return output_path
         print(f"[DuckDB] Incremental: adding {len(pairs)} new pairs")
@@ -85,7 +81,7 @@ def build_forex_duckdb(
         pair_filter = ", ".join(f"'{p}'" for p in pairs)
         conn.execute(f"""
             CREATE TEMP TABLE new_ticks AS
-            SELECT 
+            SELECT
                 timestamp,
                 bid, ask, mid, spread, volume,
                 pair, source
@@ -101,7 +97,7 @@ def build_forex_duckdb(
         # Full build
         conn.execute(f"""
             CREATE TABLE ticks AS
-            SELECT 
+            SELECT
                 timestamp,
                 bid, ask, mid, spread, volume,
                 pair, source
@@ -127,7 +123,7 @@ def build_forex_duckdb(
 
     total = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
 
-    print(f"\n[DuckDB] Complete — {total:,} ticks across {len(stats)} pairs")
+    print(f"\n[DuckDB] Complete - {total:,} ticks across {len(stats)} pairs")
     for row in stats:
         print(f"  {row[0]:8s}: {row[1]:>12,} ticks  ({row[2][:10]} → {row[3][:10]})")
 
@@ -164,7 +160,7 @@ def verify_duckdb(
 
     # Check for bad data
     nulls = conn.execute("""
-        SELECT COUNT(*) FROM ticks 
+        SELECT COUNT(*) FROM ticks
         WHERE bid IS NULL OR ask IS NULL OR bid > ask OR bid <= 0 OR ask <= 0
     """).fetchone()[0]
     if nulls > 0:
@@ -177,14 +173,12 @@ def verify_duckdb(
         SELECT pair, COUNT(*) as n, COUNT(DISTINCT DATE_TRUNC('year', timestamp)) as years
         FROM ticks GROUP BY pair ORDER BY pair
     """).fetchall()
-    report["stats"]["pairs"] = {
-        row[0]: {"ticks": row[1], "years": row[2]}
-        for row in pairs
-    }
+    report["stats"]["pairs"] = {row[0]: {"ticks": row[1], "years": row[2]} for row in pairs}
 
     # Performance benchmark
     if sample_queries:
         import time
+
         # Benchmark: query 1 month of data
         start = time.time()
         conn.execute("""
@@ -196,7 +190,7 @@ def verify_duckdb(
 
         # Benchmark: query 1 year
         start = time.time()
-        result = conn.execute("""
+        conn.execute("""
             SELECT * FROM ticks
             WHERE pair = 'EURUSD' AND timestamp_utc BETWEEN '2024-01-01' AND '2025-01-01'
         """).fetchall()
@@ -213,12 +207,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build consolidated DuckDB from compact parquet")
     ap.add_argument("--compact-dir", default="data/compact/dukascopy")
     ap.add_argument("--output", default="data/store/forex_ticks.duckdb")
-    ap.add_argument("--pairs", nargs="+", default=None,
-                    help="Pairs to include (default: all)")
-    ap.add_argument("--incremental", action="store_true",
-                    help="Only add pairs not already in the DuckDB")
-    ap.add_argument("--verify", action="store_true",
-                    help="Verify after build")
+    ap.add_argument("--pairs", nargs="+", default=None, help="Pairs to include (default: all)")
+    ap.add_argument("--incremental", action="store_true", help="Only add pairs not already in the DuckDB")
+    ap.add_argument("--verify", action="store_true", help="Verify after build")
 
     args = ap.parse_args()
 

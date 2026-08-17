@@ -24,35 +24,36 @@ if str(_ROOT) not in sys.path:
 from data.sources import DUKA_PAIR_MAP, TICK_COLUMNS, DukascopyLoader
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Expected price ranges  (min_bid, max_ask) — wide but realistic for 2024
+# Expected price ranges  (min_bid, max_ask) - wide but realistic for 2024
 # ─────────────────────────────────────────────────────────────────────────────
 PRICE_BOUNDS: dict[str, tuple[float, float]] = {
-    "EURUSD": (1.05,  1.15),
-    "GBPUSD": (1.20,  1.35),
+    "EURUSD": (1.05, 1.15),
+    "GBPUSD": (1.20, 1.35),
     "USDJPY": (130.0, 160.0),
-    "AUDUSD": (0.60,  0.72),
-    "USDCAD": (1.30,  1.40),
-    "USDCHF": (0.83,  0.96),
-    "NZDUSD": (0.57,  0.65),
-    "EURGBP": (0.84,  0.90),
+    "AUDUSD": (0.60, 0.72),
+    "USDCAD": (1.30, 1.40),
+    "USDCHF": (0.83, 0.96),
+    "NZDUSD": (0.57, 0.65),
+    "EURGBP": (0.84, 0.90),
     "EURJPY": (138.0, 168.0),
 }
 
-# Download date/hour — choose a well-known liquid session (London open, Tue)
-DATE  = "2024-01-02"
-HOURS = [10]          # just 1 hour per pair to keep it fast
+# Download date/hour - choose a well-known liquid session (London open, Tue)
+DATE = "2024-01-02"
+HOURS = [10]  # just 1 hour per pair to keep it fast
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def check_pair(loader: DukascopyLoader, pair: str) -> dict:
     """Download 1 hour for `pair` and return a result dict."""
     result = {
-        "pair":     pair,
-        "ok":       False,
-        "ticks":    0,
-        "elapsed":  0.0,
-        "errors":   [],
+        "pair": pair,
+        "ok": False,
+        "ticks": 0,
+        "elapsed": 0.0,
+        "errors": [],
     }
 
     t0 = time.perf_counter()
@@ -66,7 +67,7 @@ def check_pair(loader: DukascopyLoader, pair: str) -> dict:
 
     # ── basic existence ──────────────────────────────────────────────────────
     if df.empty:
-        result["errors"].append("DataFrame is empty — no ticks returned")
+        result["errors"].append("DataFrame is empty - no ticks returned")
         return result
 
     result["ticks"] = len(df)
@@ -95,9 +96,7 @@ def check_pair(loader: DukascopyLoader, pair: str) -> dict:
     if (df["bid"] < lo).any() or (df["ask"] > hi).any():
         actual_lo = df["bid"].min()
         actual_hi = df["ask"].max()
-        result["errors"].append(
-            f"Prices out of expected range [{lo}, {hi}]: got [{actual_lo:.5f}, {actual_hi:.5f}]"
-        )
+        result["errors"].append(f"Prices out of expected range [{lo}, {hi}]: got [{actual_lo:.5f}, {actual_hi:.5f}]")
 
     # ── pair / source tags ────────────────────────────────────────────────────
     if "pair" in df.columns and (df["pair"] != pair).any():
@@ -118,14 +117,14 @@ def run():
     loader = DukascopyLoader(
         concurrency=16,
         max_retries=3,
-        verbose=False,   # suppress per-file progress; we print our own
+        verbose=False,  # suppress per-file progress; we print our own
     )
 
     pairs = list(DUKA_PAIR_MAP.keys())
-    print(f"\n{'-'*60}")
+    print(f"\n{'-' * 60}")
     print(f"  Dukascopy Live Download Check  |  {DATE}  |  hour {HOURS[0]:02d}:00 UTC")
     print(f"  Pairs: {', '.join(pairs)}")
-    print(f"{'-'*60}\n")
+    print(f"{'-' * 60}\n")
 
     results = []
     all_ok = True
@@ -149,11 +148,11 @@ def run():
     failed = len(results) - passed
     total_ticks = sum(r["ticks"] for r in results)
 
-    print(f"\n{'-'*60}")
+    print(f"\n{'-' * 60}")
     print(f"  Result : {'ALL PASSED' if all_ok else f'{failed} FAILED'}")
     print(f"  Pairs  : {passed}/{len(results)} passed")
     print(f"  Ticks  : {total_ticks:,} total ticks downloaded")
-    print(f"{'-'*60}\n")
+    print(f"{'-' * 60}\n")
 
     sys.exit(0 if all_ok else 1)
 

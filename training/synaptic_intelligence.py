@@ -24,7 +24,7 @@ class DynamicSILambdaConfig:
 
       - When the model is *struggling* (task loss high, e.g. a regime
         shock), λ falls toward ``lambda_min`` so the model is free to
-        re-fit — exactly when adaptation matters most.
+        re-fit - exactly when adaptation matters most.
 
     The mapping is a smooth sigmoid:
 
@@ -33,7 +33,7 @@ class DynamicSILambdaConfig:
     where ``κ`` is the task-loss level at which λ sits at its midpoint.
     ``κ`` self-calibrates per run via an exponential moving average of
     ``L_task`` (so the schedule adapts to whatever loss magnitude the
-    active criterion — Sharpe-Proxy / Huber / CE — produces, and the
+    active criterion - Sharpe-Proxy / Huber / CE - produces, and the
     schedule is smooth across batches, not bang-bang).
 
     This composes cleanly with the per-epoch θ* re-anchoring in
@@ -43,15 +43,15 @@ class DynamicSILambdaConfig:
 
     Backward-compat: when ``enabled=False`` (default), callers should
     pass ``lambda_max`` straight through as the static ``lambda_si``
-    used by ``apply_si_loss`` — behaviour is identical to pre-dynamic-SI.
-    """
+    used by ``apply_si_loss`` - behaviour is identical to pre-dynamic-SI.
+    """  # noqa: RUF002
 
     enabled: bool = False
-    target_ratio: float = 0.1      # legacy field kept for the loss-ratio variant; unused by the sigmoid schedule
-    lambda_min: float = 0.0        # floor (allow 0 = fully relax SI during regime shocks)
-    lambda_max: float = 1.0        # ceiling = static si_lambda when disabled
-    ema_alpha: float = 0.99        # 1-α: EMA weight for κ; 0.99 → slow-tracking scale
-    warmup_batches: int = 0        # constant λ=lambda_max for first N batches of each epoch
+    target_ratio: float = 0.1  # legacy field kept for the loss-ratio variant; unused by the sigmoid schedule
+    lambda_min: float = 0.0  # floor (allow 0 = fully relax SI during regime shocks)
+    lambda_max: float = 1.0  # ceiling = static si_lambda when disabled
+    ema_alpha: float = 0.99  # 1-α: EMA weight for κ; 0.99 → slow-tracking scale  # noqa: RUF003
+    warmup_batches: int = 0  # constant λ=lambda_max for first N batches of each epoch
     eps: float = 1e-8
 
     def as_static_lambda(self) -> float:
@@ -80,7 +80,7 @@ def compute_dynamic_si_lambda(
     Notes:
         - Uses ``abs(L_task)`` for κ so the schedule is sign-correct under
           Sharpe-Proxy / Huber / CE losses alike (Sharpe-Proxy can be negative).
-        - Output λ is a Python float, **detached** from autograd — the caller
+        - Output λ is a Python float, **detached** from autograd - the caller
           must not re-inject it as a differentiable tensor or it would bias
           the gradient of the regularised objective.
     """
@@ -110,7 +110,7 @@ class SynapticIntelligence(nn.Module):
     ):
         """
         Initialize Synaptic Intelligence.
-        
+
         Args:
             model: The PyTorch model to track.
             epsilon: Small constant to avoid division by zero in importance calculation.
@@ -120,10 +120,10 @@ class SynapticIntelligence(nn.Module):
         self.epsilon = epsilon
 
         self.params = {n: p for n, p in self.model.named_parameters() if p.requires_grad}
-        
+
         # Initialize state buffers
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             # Importance weights (\Omega)
             self.register_buffer(f"omega_{name}", torch.zeros_like(p, requires_grad=False))
             # Accumulated path integral of gradients
@@ -147,7 +147,7 @@ class SynapticIntelligence(nn.Module):
         centralization) so the path integral reflects the true loss gradients.
         """
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             saved_p = getattr(self, f"saved_params_{name}")
             saved_p.copy_(p.data)
             last_grad = getattr(self, f"last_grad_{name}")
@@ -159,13 +159,13 @@ class SynapticIntelligence(nn.Module):
     def post_step(self):
         r"""
         Call this AFTER optimizer.step().
-        Accumulates the path integral: \int g(\theta) d\theta 
+        Accumulates the path integral: \int g(\theta) d\theta
         Approximated as: -grad * (theta_new - theta_old), using the raw
         gradient snapshot from ``pre_step`` (before any in-place clipping /
         centralization of ``p.grad``).
         """
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             saved_p = getattr(self, f"saved_params_{name}")
             path_int = getattr(self, f"path_integral_{name}")
             last_grad = getattr(self, f"last_grad_{name}")
@@ -180,20 +180,20 @@ class SynapticIntelligence(nn.Module):
         Finalizes the importance weights for the task and resets the tracking state.
         """
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             omega = getattr(self, f"omega_{name}")
             path_int = getattr(self, f"path_integral_{name}")
             cached_p = getattr(self, f"cached_params_{name}")
-            
+
             # Total parameter change during the task
             delta_theta_total = p.data - cached_p
-            
+
             # \Omega_k = \Omega_{k, old} + (path_integral_k) / (\Delta\theta_{k, total}^2 + \epsilon)
-            # Use absolute value for path integral to ensure positive importance, 
+            # Use absolute value for path integral to ensure positive importance,
             # as non-convexity can sometimes result in small negative values locally.
-            importance = torch.abs(path_int) / (delta_theta_total ** 2 + self.epsilon)
+            importance = torch.abs(path_int) / (delta_theta_total**2 + self.epsilon)
             omega.add_(importance)
-            
+
             # Reset for the next task
             cached_p.copy_(p.data)
             path_int.zero_()
@@ -205,7 +205,7 @@ class SynapticIntelligence(nn.Module):
         """
         loss = torch.tensor(0.0, device=next(self.model.parameters()).device)
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             cached_p = getattr(self, f"cached_params_{name}")
             omega = getattr(self, f"omega_{name}")
             loss = loss + (omega * (p - cached_p) ** 2).sum()

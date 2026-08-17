@@ -1,16 +1,20 @@
-"""Cache path helpers, integrity checks, and dataset verification.\n\nSee docs/CONTINUE.md."""
 from __future__ import annotations
 
-import os
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from typing import Any
 
-import numpy as np
+FeatureEngineer = Any
+"""Cache path helpers, integrity checks, and dataset verification.\n\nSee docs/CONTINUE.md."""
+import os  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from config.settings import FEATURES, LABELING
-from training.config_validate import _effective_max_seq_len
-from training.cv_splits import _embargo_bars
-from training.gpu_cache_io import (
+import numpy as np  # noqa: E402
+
+from config.settings import FEATURES, LABELING  # noqa: E402  # noqa: E402, F811
+from training.config_validate import _effective_max_seq_len  # noqa: E402
+from training.core import _log_warn  # noqa: E402
+from training.cv_splits import _embargo_bars  # noqa: E402
+from training.gpu_cache_io import (  # noqa: E402
     ZARR,
     _atr_path,
     _close_path,
@@ -24,42 +28,13 @@ from training.gpu_cache_io import (
     _zarr_open_group,
 )
 
-_HOST = None
-_BOUND = False
-_HOST_DEPS = (
-    '_log_error',
-    '_log_warn',
-    '_log_info',
-    'LABELING',
-    'FEATURES',
-    'PATHS',
-    'ZARR',
-    'sanitize_array',
-    'DatasetManifest',
-)
-
-
-def bind_host(host_mod) -> None:
-    global _HOST, _BOUND
-    _HOST = host_mod
-    g = globals()
-    for name in _HOST_DEPS:
-        if hasattr(host_mod, name):
-            g[name] = getattr(host_mod, name)
-    _BOUND = True
-
-
-def _ensure_bound() -> None:
-    import training.train_gpu as tg
-    bind_host(tg)
-
 # -----------------------------------------------------------------------------
 # PHASE 1 ΓÇö CHUNKED DATA PIPELINE
 # -----------------------------------------------------------------------------
 
+
 def _get_pairs(args) -> list[str]:
     """Return the list of pairs to train on, from --pairs or --pair."""
-    _ensure_bound()
     raw = getattr(args, "pairs", None)
     if not raw:
         return [args.pair.upper()]
@@ -105,7 +80,7 @@ def _effective_window_days(args) -> int:
 def _iter_date_windows(start: str, end: str, window_days: int) -> list[tuple[str, str]]:
     """Split an inclusive YYYY-MM-DD range into inclusive date windows."""
     start_dt = datetime.strptime(start, "%Y-%m-%d")
-    end_dt   = datetime.strptime(end, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
     if end_dt < start_dt:
         raise ValueError(f"data_end ({end}) is earlier than data_start ({start})")
 
@@ -121,15 +96,14 @@ def _iter_date_windows(start: str, end: str, window_days: int) -> list[tuple[str
 
 def _resolve_cross_asset_source(args) -> str:
     """Resolve cross-asset provider with env override matching downloader behavior."""
-    return str(
-        os.getenv("CROSS_ASSET_SOURCE", "").strip()
-        or getattr(args, "cross_asset_provider", "auto")
-        or "auto"
-    ).strip().lower()
+    return (
+        str(os.getenv("CROSS_ASSET_SOURCE", "").strip() or getattr(args, "cross_asset_provider", "auto") or "auto")
+        .strip()
+        .lower()
+    )
 
 
 def _cache_target_col(args) -> str:
-
     """Keep cache y as reward/PnL; direction labels live in y_cls sidecar.
 
 
@@ -145,15 +119,12 @@ def _cache_target_col(args) -> str:
     return "reward"
 
 
-
-
-
 def _get_cache_path(args) -> Path:
-    _ensure_bound()
-    pairs    = _get_pairs(args)
+    pairs = _get_pairs(args)
     pair_tag = "-".join(sorted(pairs))
     if len(pair_tag) > 30:
         import hashlib
+
         pair_tag = hashlib.md5(pair_tag.encode("utf-8")).hexdigest()[:10] + f"_{len(pairs)}pairs"
     target_col = _cache_target_col(args)
 
@@ -180,19 +151,16 @@ def _get_cache_path(args) -> Path:
 
         from config.feature_mask import FEATURE_MASK as _FM
         from config.settings import LABEL_REGIME as _LR
+
         _mask_payload = {str(k): bool(v) for k, v in sorted(_FM.items())}
-        mask_digest = hashlib.md5(
-            json.dumps(_mask_payload, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:8]
+        mask_digest = hashlib.md5(json.dumps(_mask_payload, sort_keys=True).encode("utf-8")).hexdigest()[:8]
         _lr_payload = {
             "barrier_scale": _LR.get("barrier_scale"),
             "session_cost_scale": _LR.get("session_cost_scale"),
             "session_horizon_mult": _LR.get("session_horizon_mult"),
             "spread_horizon": _LR.get("spread_horizon"),
         }
-        lr_digest = hashlib.md5(
-            json.dumps(_lr_payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:6]
+        lr_digest = hashlib.md5(json.dumps(_lr_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:6]
     except Exception:
         mask_digest = "nomask"
         lr_digest = "nolr"
@@ -207,8 +175,6 @@ def _get_cache_path(args) -> Path:
     use_zarr_cache = bool(ZARR)
     ext = ".zarr" if use_zarr_cache else ""
     return Path(args.data_cache) / f"dataset_{tag}{ext}"
-
-
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")
@@ -250,8 +216,7 @@ def _require_rl_market_cache(cache_path: str) -> None:
     )
 
 
-def _load_rl_market_from_cache(cache_path: str, start: int, n_env: int
-                               ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_rl_market_from_cache(cache_path: str, start: int, n_env: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load per-sequence close/ATR/spread aligned with X/y indices."""
     end = start + n_env
     if ZARR and str(cache_path).endswith(".zarr") and Path(cache_path).is_dir():
@@ -260,12 +225,9 @@ def _load_rl_market_from_cache(cache_path: str, start: int, n_env: int
         atr = np.asarray(z["atr"][start:end], dtype=np.float32)
         spreads = np.asarray(z["spread"][start:end], dtype=np.float32)
     else:
-        prices = np.asarray(np.load(_close_path(cache_path), mmap_mode="r")[start:end],
-                            dtype=np.float32)
-        atr = np.asarray(np.load(_atr_path(cache_path), mmap_mode="r")[start:end],
-                         dtype=np.float32)
-        spreads = np.asarray(np.load(_spread_path(cache_path), mmap_mode="r")[start:end],
-                             dtype=np.float32)
+        prices = np.asarray(np.load(_close_path(cache_path), mmap_mode="r")[start:end], dtype=np.float32)
+        atr = np.asarray(np.load(_atr_path(cache_path), mmap_mode="r")[start:end], dtype=np.float32)
+        spreads = np.asarray(np.load(_spread_path(cache_path), mmap_mode="r")[start:end], dtype=np.float32)
     return prices, atr, spreads
 
 
@@ -278,9 +240,7 @@ def _market_bar_arrays_from_feats(
     """Bar-level close/ATR/spread aligned with feature rows (before sequence filter)."""
     close_col = "mid_close" if "mid_close" in feats.columns else "close"
     if close_col not in feats.columns:
-        raise ValueError(
-            f"[Data] RL market cache requires '{close_col}' or 'close' in features"
-        )
+        raise ValueError(f"[Data] RL market cache requires '{close_col}' or 'close' in features")
     atr_w = int(getattr(fe, "atr_w", FEATURES.get("atr_window", 6)))
     atr_col = f"atr_{atr_w}"
     if atr_col not in feats.columns:
@@ -299,14 +259,14 @@ def _market_bar_arrays_from_feats(
         spread_bars = feats["spread_avg"].reindex(x_index).astype(np.float64).values
     else:
         print(
-            "[Data] WARN: no spread_pips/spread_avg in feature frame — "
+            "[Data] WARN: no spread_pips/spread_avg in feature frame - "
             "synthesizing default spread (0.5 pip) for RL market cache. "
             "Enable spread features in FEATURE_MASK / FeatureEngineer build."
         )
         spread_bars = np.full(len(x_index), 0.5 * pip, dtype=np.float64)
-    close_seq = np.asarray(close_bars[seq_len - 1:], dtype=np.float32)
-    atr_seq = np.asarray(np.maximum(atr_bars[seq_len - 1:], pip), dtype=np.float32)
-    spread_seq = np.asarray(np.maximum(spread_bars[seq_len - 1:], pip * 0.1), dtype=np.float32)
+    close_seq = np.asarray(close_bars[seq_len - 1 :], dtype=np.float32)
+    atr_seq = np.asarray(np.maximum(atr_bars[seq_len - 1 :], pip), dtype=np.float32)
+    spread_seq = np.asarray(np.maximum(spread_bars[seq_len - 1 :], pip * 0.1), dtype=np.float32)
     return close_seq, atr_seq, spread_seq
 
 
@@ -326,7 +286,7 @@ def _resolve_pair_feat_indices(feat_names: list | None, f_per_pair: int) -> tupl
 
 
 def _promotion_holdout_n(n_samples: int, args) -> int:
-    """Bars reserved for promotion gate — never used in walk-forward CV."""
+    """Bars reserved for promotion gate - never used in walk-forward CV."""
     frac = min(max(float(getattr(args, "promote_forward_frac", 0.1)), 0.01), 0.5)
     # Tiny/quick/synthetic caches cannot spare a hard floor of 50 bars.
     floor = 50
@@ -339,16 +299,6 @@ def _trainable_max_index(n_total: int, args) -> int:
     """Last exclusive index usable for pretrain/RL (excludes holdout + embargo)."""
     n_total = max(0, int(n_total))
     return max(0, n_total - _promotion_holdout_n(n_total, args) - _embargo_bars(args))
-
-
-
-
-
-
-
-
-
-
 
 
 def _on_disk_sequence_count(cache_path: str) -> int | None:
@@ -377,8 +327,10 @@ def _clamp_n_samples_to_disk(cache_path: str, n_samples: int) -> int:
     n_disk = _on_disk_sequence_count(cache_path)
     if n_disk is None or n_disk >= n_samples:
         return n_samples
-    print(f"[Data] WARN: on-disk arrays have {n_disk:,} rows but pipeline reported "
-          f"{n_samples:,} ΓÇö clamping to {n_disk:,} (check X/Y export parity)")
+    print(
+        f"[Data] WARN: on-disk arrays have {n_disk:,} rows but pipeline reported "
+        f"{n_samples:,} ΓÇö clamping to {n_disk:,} (check X/Y export parity)"
+    )
     return n_disk
 
 
@@ -393,11 +345,16 @@ def _cache_length_snapshot(cache_path: str) -> dict:
     if ZARR and p.is_dir() and (p / ".zgroup").exists():
         try:
             z = _zarr_open_group(cache_path, mode="r")
-            if "X" in z: out["zarr_X"] = int(z["X"].shape[0])
-            if "y" in z: out["zarr_y"] = int(z["y"].shape[0])
-            if "y_cls" in z: out["zarr_y_cls"] = int(z["y_cls"].shape[0])
-            if "pq" in z: out["zarr_pq"] = int(z["pq"].shape[0])
-            if "diff" in z: out["zarr_diff"] = int(z["diff"].shape[0])
+            if "X" in z:
+                out["zarr_X"] = int(z["X"].shape[0])
+            if "y" in z:
+                out["zarr_y"] = int(z["y"].shape[0])
+            if "y_cls" in z:
+                out["zarr_y_cls"] = int(z["y_cls"].shape[0])
+            if "pq" in z:
+                out["zarr_pq"] = int(z["pq"].shape[0])
+            if "diff" in z:
+                out["zarr_diff"] = int(z["diff"].shape[0])
             for mk in _RL_MARKET_ZARR_KEYS:
                 if mk in z:
                     out[f"zarr_{mk}"] = int(z[mk].shape[0])
@@ -406,6 +363,7 @@ def _cache_length_snapshot(cache_path: str) -> dict:
     px, py = Path(_x_path(cache_path)), Path(_y_path(cache_path))
     try:
         import numpy.lib.format as np_fmt
+
         if px.exists():
             with open(px, "rb") as f:
                 version = np_fmt.read_magic(f)
@@ -414,7 +372,7 @@ def _cache_length_snapshot(cache_path: str) -> dict:
         if py.exists():
             with open(py, "rb") as f:
                 version = np_fmt.read_magic(f)
-                shape, fortran, dtype = np_fmt._read_array_header(f, version)
+                shape, fortran, dtype = np_fmt._read_array_header(f, version)  # noqa: RUF059
             out["npy_y"] = int(shape[0])
         for key, path in (
             ("npy_y_cls", _y_cls_path(cache_path)),
@@ -428,7 +386,7 @@ def _cache_length_snapshot(cache_path: str) -> dict:
             if pp.exists():
                 with open(pp, "rb") as f:
                     version = np_fmt.read_magic(f)
-                    shape, fortran, dtype = np_fmt._read_array_header(f, version)
+                    shape, _fortran, _dtype = np_fmt._read_array_header(f, version)
                 out[key] = int(shape[0])
     except Exception as e:
         print(f"[Cache] Direct NPY header read failed: {e}. Falling back to mmap.")
@@ -449,8 +407,9 @@ def _cache_length_snapshot(cache_path: str) -> dict:
                 out[key] = int(np.load(str(pp), mmap_mode="r").shape[0])
     return out
 
-import hashlib
-import json
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
 
 
 def _compute_content_hash(args) -> str:
@@ -469,10 +428,10 @@ def _compute_content_hash(args) -> str:
 
     # Convert to a stable JSON string
     state_str = json.dumps(state, sort_keys=True)
-    return hashlib.sha256(state_str.encode('utf-8')).hexdigest()
+    return hashlib.sha256(state_str.encode("utf-8")).hexdigest()
+
 
 def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
-    _ensure_bound()
     snap = _cache_length_snapshot(cache_path)
     problems = []
 
@@ -491,6 +450,7 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
                 if ZARR and p_cache.is_dir() and (p_cache / ".zgroup").exists():
                     try:
                         import zarr
+
                         z_store = zarr.open(str(p_cache), mode="r")
                         manifest = dict(getattr(z_store, "attrs", {}) or {})
                     except Exception:
@@ -500,6 +460,7 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
 
         if manifest_path.exists() and not manifest:
             import json
+
             try:
                 with open(manifest_path) as f:
                     manifest = json.load(f)
@@ -511,12 +472,13 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
                 current_hash = _compute_content_hash(args)
                 cached_hash = manifest.get("content_hash", "missing")
                 if current_hash != "no_args" and cached_hash != "missing" and current_hash != cached_hash:
-                    problems.append(f"feature content hash mismatch (cached: {cached_hash[:8]}, current: {current_hash[:8]})")
+                    problems.append(
+                        f"feature content hash mismatch (cached: {cached_hash[:8]}, current: {current_hash[:8]})"
+                    )
             try:
                 expected_pairs = _get_pairs(args)
                 manifest_pairs = manifest.get("pairs")
                 if len(expected_pairs) > 1 and not manifest_pairs:
-
                     problems.append("Manifest missing pairs for multi-pair cache")
 
                 if manifest_pairs:
@@ -525,31 +487,23 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
                     if manifest_pairs != expected_pairs:
                         problems.append(f"Manifest mismatch: pairs {manifest_pairs} != requested {expected_pairs}")
                     if len(expected_pairs) > 1:
-
                         schema_path = Path(str(cache_path) + "_feature_schema.json")
 
                         if not schema_path.exists():
-
                             problems.append("Multi-pair feature schema missing")
 
                         else:
-
                             try:
-
                                 schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
                                 expected_n = int(manifest.get("n_features", 0) or 0)
 
                                 if not isinstance(schema, list) or len(schema) != expected_n:
-
                                     problems.append(
-
                                         f"Multi-pair feature schema length {len(schema) if isinstance(schema, list) else 'invalid'} != n_features {expected_n}"
-
                                     )
 
                             except Exception as e:
-
                                 problems.append(f"Multi-pair feature schema unreadable: {e}")
 
                 if manifest.get("seq_len"):
@@ -559,18 +513,9 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
                             f"Manifest mismatch: seq_len {manifest.get('seq_len')} != "
                             f"required max {requested_seq} (training.seq_len / curriculum target)"
                         )
-                if (
-
-                    getattr(args, "label_method", "") == "rl_reward"
-
-                    and manifest.get("y_cls_source") != "labels.label"
-
-                ):
-
+                if getattr(args, "label_method", "") == "rl_reward" and manifest.get("y_cls_source") != "labels.label":
                     problems.append(
-
                         "Manifest y_cls_source is stale/missing; rebuild required so y_cls uses true direction labels"
-
                     )
 
                 # We can also check bar_freq, strategy_mode, etc
@@ -591,17 +536,11 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
         elif "zarr_X" not in snap or "zarr_y" not in snap:
             problems.append("Zarr store missing required arrays: X and/or y")
         if "zarr_y_cls" in snap and snap["zarr_y_cls"] != snap.get("zarr_X"):
-            problems.append(
-                f"Zarr y_cls={snap['zarr_y_cls']:,} != X={snap.get('zarr_X', 0):,}"
-            )
+            problems.append(f"Zarr y_cls={snap['zarr_y_cls']:,} != X={snap.get('zarr_X', 0):,}")
         if "zarr_pq" in snap and snap["zarr_pq"] != snap.get("zarr_X"):
-            problems.append(
-                f"Zarr pq={snap['zarr_pq']:,} != X={snap.get('zarr_X', 0):,}"
-            )
+            problems.append(f"Zarr pq={snap['zarr_pq']:,} != X={snap.get('zarr_X', 0):,}")
         if "zarr_diff" in snap and snap["zarr_diff"] != snap.get("zarr_X"):
-            problems.append(
-                f"Zarr diff={snap['zarr_diff']:,} != X={snap.get('zarr_X', 0):,}"
-            )
+            problems.append(f"Zarr diff={snap['zarr_diff']:,} != X={snap.get('zarr_X', 0):,}")
         for mk in _RL_MARKET_ZARR_KEYS:
             zk = f"zarr_{mk}"
             if zk in snap and snap[zk] != snap.get("zarr_X"):
@@ -631,7 +570,6 @@ def _verify_dataset(
     alignment checks, and anomaly flags.  All results are appended to
     build_log.jsonl and printed to stdout.
     """
-    _ensure_bound()
     from data.dataset_manifest import DatasetManifest
 
     report = {
@@ -657,6 +595,7 @@ def _verify_dataset(
 
         if is_zarr:
             import zarr as _zarr
+
             z = _zarr.open(str(cache_path), mode="r")
             X_sample = z["X"][:sample_n]
             y_sample = z["y"][:sample_n]
@@ -724,15 +663,13 @@ def _verify_dataset(
                 y_cls_finite = y_cls_sample[np.isfinite(y_cls_sample)]
                 if len(y_cls_finite) > 0:
                     unique, counts = np.unique(y_cls_finite, return_counts=True)
-                    dist = {int(v): int(c) for v, c in zip(unique, counts)}
+                    dist = {int(v): int(c) for v, c in zip(unique, counts, strict=False)}
                     report["labels"]["direction_dist"] = dist
                     total = sum(dist.values())
                     for side, cnt in dist.items():
                         pct = cnt / total * 100
                         if pct < 5 and side != 0:
-                            report["anomalies"].append(
-                                f"rare_direction_{side}: {pct:.1f}%"
-                            )
+                            report["anomalies"].append(f"rare_direction_{side}: {pct:.1f}%")
         else:
             report["anomalies"].append("all_labels_nan")
 
@@ -792,7 +729,7 @@ def _verify_dataset(
     print(
         f"[{context}] Verify: {n_samples:,} samples x {n_features} features"
         f" | reward μ={report['labels'].get('mean_reward', 'N/A')}"
-        f" σ={report['labels'].get('std_reward', 'N/A')}"
+        f" σ={report['labels'].get('std_reward', 'N/A')}"  # noqa: RUF001
         f"{anomaly_str}"
     )
 
@@ -817,12 +754,12 @@ def _validate_dataset_builder_reader_contract(
       1. ``multitask`` mode requires a ``pq`` array that is satisfiable
          (i.e. either present in the cache, or absent so the reader falls
          back to ``pq=1.0``). If the array is present but its dtype is not
-         ``float32`` we warn — the BCE loss head silently promotes it.
+         ``float32`` we warn - the BCE loss head silently promotes it.
       2. ``pq`` value range is ``[0, 1]``. Outside that range the BCE head
          is poorly defined; this is the previous silent-legacy behaviour
          that the old ``min(1, |y|)`` reader-side fallback papered over.
          Now the reader honours the real array, so a bad writer becomes
-         visible — fail-stop instead of training on garbage.
+         visible - fail-stop instead of training on garbage.
       3. ``y_cls`` ∈ {-1, 0, +1}. The dataset builder writes
          ``np.sign(y_seq)`` or, for ``rl_reward``, a consensus-d direction
          label. A bug that writes raw reward floats into ``y_cls`` would
@@ -841,7 +778,6 @@ def _validate_dataset_builder_reader_contract(
     ``problems`` is a list of human-readable strings, joined with ``" | "``
     for display.
     """
-    _ensure_bound()
     p = Path(cache_path)
     problems: list[str] = []
 
@@ -872,7 +808,7 @@ def _validate_dataset_builder_reader_contract(
             problems.append(f"reader_contract: zarr tile read failed: {exc}")
             return False, problems
     else:
-        # NPY fallback path (Windows) — read the relevant sidecars.
+        # NPY fallback path (Windows) - read the relevant sidecars.
         try:
             X_tile = np.load(_x_path(cache_path), mmap_mode="r")[:k].astype(np.float32, copy=False)
         except Exception as exc:  # pragma: no cover
@@ -901,6 +837,7 @@ def _validate_dataset_builder_reader_contract(
     if is_zarr:
         try:
             import json as _json
+
             meta_file = p / "X" / ".zarray"
             if meta_file.exists():
                 cs = int(_json.loads(meta_file.read_text())["chunks"][0])
@@ -908,7 +845,7 @@ def _validate_dataset_builder_reader_contract(
                 # partitioning. Anything >= 64 is sane; below warns.
                 if cs < 64:
                     problems.append(
-                        f"reader_contract: zarr X row-chunk size {cs} < 64 — "
+                        f"reader_contract: zarr X row-chunk size {cs} < 64 - "
                         "ZarrStreamDataset will decompress one chunk per row "
                         "(reintroduces the per-row decompress cost it was "
                         "designed to avoid). Rebuild with a larger chunk."
@@ -923,21 +860,22 @@ def _validate_dataset_builder_reader_contract(
     if pq_tile is None:
         if multitask_on and label_is_rl:
             # Reader falls back to ``pq=1.0`` (uniform confidence target for
-            # the BCE head) — this is *safe* but not what an rl_reward
+            # the BCE head) - this is *safe* but not what an rl_reward
             # cache intends. Surface a rebuild hint, not a failure.
             problems.append(
                 "reader_contract: multitask + rl_reward enabled but cache "
-                "has no `pq` array — confidence head will train against "
+                "has no `pq` array - confidence head will train against "
                 "uniform-1.0 target (rebuild to get true path-quality labels)"
             )
     else:
         finite = pq_tile[np.isfinite(pq_tile)]
         if finite.size:
-            vmin = float(finite.min()); vmax = float(finite.max())
+            vmin = float(finite.min())
+            vmax = float(finite.max())
             if vmin < 0.0 or vmax > 1.0:
                 problems.append(
                     f"reader_contract: pq range [{vmin:.4f}, {vmax:.4f}] "
-                    "outside [0, 1] — BCE confidence head is ill-defined; "
+                    "outside [0, 1] - BCE confidence head is ill-defined; "
                     "rebuild with a clamped writer (np.clip(pq, 0, 1))"
                 )
 
@@ -950,7 +888,7 @@ def _validate_dataset_builder_reader_contract(
             if bad:
                 problems.append(
                     "reader_contract: y_cls contains values outside "
-                    f"{{-1, 0, +1}}: {bad[:5]} (count={len(bad)}) — "
+                    f"{{-1, 0, +1}}: {bad[:5]} (count={len(bad)}) - "
                     "classification head will see stray class ids"
                 )
 
@@ -970,7 +908,7 @@ def _validate_dataset_builder_reader_contract(
                 if bad:
                     problems.append(
                         "reader_contract: diff contains values outside "
-                        f"{{0, 1, 2}}: {bad[:5]} (count={len(bad)}) — "
+                        f"{{0, 1, 2}}: {bad[:5]} (count={len(bad)}) - "
                         "curriculum stage selection will misclassify these"
                     )
 
@@ -978,12 +916,13 @@ def _validate_dataset_builder_reader_contract(
     if X_tile is not None and X_tile.ndim >= 2:
         try:
             from training.gpu_cache_io import _scaler_npz_path
+
             scaler_path = _scaler_npz_path(Path(cache_path))
             if scaler_path.exists():
                 scaler_npz = np.load(str(scaler_path))
                 # StandardScaler persists ``scale_`` (per-feature std) and
                 # ``mean_`` (per-feature mean). Both should match the X
-                # feature dim — the last axis of X.
+                # feature dim - the last axis of X.
                 feat_dim = int(X_tile.shape[-1])
                 for arr_name in ("scale_", "mean_"):
                     if arr_name in scaler_npz:
@@ -992,7 +931,7 @@ def _validate_dataset_builder_reader_contract(
                             problems.append(
                                 f"reader_contract: scaler.{arr_name} "
                                 f"shape ({s.shape[0]}) != X feature dim "
-                                f"({feat_dim}) — `scaler.transform` will "
+                                f"({feat_dim}) - `scaler.transform` will "
                                 "crash inside the DataLoader worker"
                             )
                             break
@@ -1004,7 +943,6 @@ def _validate_dataset_builder_reader_contract(
 
 def _postprocess_cache_integrity_check(cache_path: str, args, *, context: str = "Data") -> None:
     """Fail immediately if a freshly processed cache is incomplete or inconsistent."""
-    _ensure_bound()
     ok, reason = _validate_cache_integrity(cache_path, args)
     if not ok:
         raise RuntimeError(
@@ -1014,7 +952,9 @@ def _postprocess_cache_integrity_check(cache_path: str, args, *, context: str = 
     # Reader-contract checks: dump tile values + shape hooks across the
     # builder→reader boundary. Fail-stop on hard errors; warn on soft ones.
     ok_rc, problems = _validate_dataset_builder_reader_contract(
-        cache_path, args, context=context,
+        cache_path,
+        args,
+        context=context,
     )
     if not ok_rc:
         raise RuntimeError(
@@ -1023,7 +963,7 @@ def _postprocess_cache_integrity_check(cache_path: str, args, *, context: str = 
             + ". Delete/rebuild the cache before training."
         )
     if problems:
-        # Soft warnings (e.g. "pq not present — falling back to uniform 1.0")
+        # Soft warnings (e.g. "pq not present - falling back to uniform 1.0")
         for msg in problems:
             try:
                 _log_warn(f"[{context}] {msg}")
@@ -1076,8 +1016,8 @@ def _warn_multitask_cache_sidecars(cache_path: str, args) -> None:
 
 
 def _delete_cache_artifacts(cache_path: str) -> None:
-    _ensure_bound()
     import shutil as _shutil
+
     p = Path(cache_path)
     # Zarr is a directory ΓÇö use shutil.rmtree
     if p.is_dir() and str(cache_path).endswith(".zarr"):
@@ -1087,19 +1027,19 @@ def _delete_cache_artifacts(cache_path: str) -> None:
         p.unlink()
         print(f"[Data] Removed corrupt cache artifact: {p}")
     for fp in (
-        Path(_x_path(cache_path)), Path(_y_path(cache_path)), _scaler_npz_path(p),
-        Path(_diff_path(cache_path)), Path(_pq_path(cache_path)),
+        Path(_x_path(cache_path)),
+        Path(_y_path(cache_path)),
+        _scaler_npz_path(p),
+        Path(_diff_path(cache_path)),
+        Path(_pq_path(cache_path)),
         Path(_y_cls_path(cache_path)),
-        Path(_close_path(cache_path)), Path(_atr_path(cache_path)),
+        Path(_close_path(cache_path)),
+        Path(_atr_path(cache_path)),
         Path(_spread_path(cache_path)),
         Path(str(cache_path) + "_manifest.json"),
-
         Path(str(cache_path) + "_meta.json"),
-
         Path(str(cache_path) + "_resume.json"),
-
         Path(str(cache_path) + "_feature_schema.json"),
-
         Path(str(cache_path) + "_pair_readiness_report.json"),
     ):
         if fp.exists():

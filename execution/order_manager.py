@@ -39,7 +39,7 @@ class OrderManager:
                 self.active_orders = {}
                 self.closed_orders = []
         else:
-            logger.info("[OrderManager] No existing state file — starting fresh")
+            logger.info("[OrderManager] No existing state file - starting fresh")
 
     def _persist_state(self):
         """Atomically write current state to disk."""
@@ -47,17 +47,21 @@ class OrderManager:
         tmp_path = self.state_file.with_suffix(".tmp")
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "active_orders": self.active_orders,
-                    "closed_orders": self.closed_orders[-500:],
-                    "last_updated": datetime.now(UTC).isoformat(),
-                }, f, indent=2, default=str)
+                json.dump(
+                    {
+                        "active_orders": self.active_orders,
+                        "closed_orders": self.closed_orders[-500:],
+                        "last_updated": datetime.now(UTC).isoformat(),
+                    },
+                    f,
+                    indent=2,
+                    default=str,
+                )
             tmp_path.replace(self.state_file)
         except OSError as e:
             logger.error(f"[OrderManager] State persist failed: {e}")
 
-    def register_trade(self, trade_id: str, symbol: str, side: str,
-                       entry_price: float, sl: float, tp: float):
+    def register_trade(self, trade_id: str, symbol: str, side: str, entry_price: float, sl: float, tp: float):
         self.active_orders[trade_id] = {
             "symbol": symbol,
             "side": side,
@@ -69,8 +73,7 @@ class OrderManager:
         }
         self._persist_state()
 
-    def close_trade(self, trade_id: str, exit_price: float,
-                    reason: str = "manual"):
+    def close_trade(self, trade_id: str, exit_price: float, reason: str = "manual"):
         if trade_id not in self.active_orders:
             logger.warning(f"[OrderManager] Cannot close unknown trade: {trade_id}")
             return
@@ -91,8 +94,7 @@ class OrderManager:
         self._persist_state()
         return order
 
-    def update_trailing_stop(self, trade_id: str, current_price: float,
-                             trail_pips: float = 10.0):
+    def update_trailing_stop(self, trade_id: str, current_price: float, trail_pips: float = 10.0):
         if trade_id not in self.active_orders:
             return
 

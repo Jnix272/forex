@@ -5,11 +5,12 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-# Optional imports for plotting – only required if --plot is used
+# Optional imports for plotting – only required if --plot is used  # noqa: RUF003
 try:
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
+
 
 def check_array(name: str, obj: zarr.Array, full: bool = False):
     """Perform sanity checks on a Zarr array in chunks to prevent OOM."""
@@ -21,8 +22,8 @@ def check_array(name: str, obj: zarr.Array, full: bool = False):
     n_total = 0
     sum_val = 0.0
     sum_sq_val = 0.0
-    min_val = float('inf')
-    max_val = float('-inf')
+    min_val = float("inf")
+    max_val = float("-inf")
     has_nan = False
     has_inf = False
 
@@ -51,21 +52,22 @@ def check_array(name: str, obj: zarr.Array, full: bool = False):
     if has_inf:
         issues.append("Contains infinite values")
 
-    mean_val = sum_val / n_total if n_total > 0 else float('nan')
+    mean_val = sum_val / n_total if n_total > 0 else float("nan")
     var_val = (sum_sq_val / n_total) - (mean_val**2) if n_total > 0 else 0
     std_val = float(np.sqrt(max(0, var_val)))
 
     stats = {
         "shape": obj.shape,
         "dtype": str(obj.dtype),
-        "min": min_val if min_val != float('inf') else float('nan'),
-        "max": max_val if max_val != float('-inf') else float('nan'),
+        "min": min_val if min_val != float("inf") else float("nan"),
+        "max": max_val if max_val != float("-inf") else float("nan"),
         "mean": mean_val,
         "std": std_val,
     }
 
     extra = {}
     return {"issues": issues, "stats": stats, "extra": extra}
+
 
 def generate_plots(name: str, extra: dict, out_dir: Path):
     if plt is None:
@@ -95,20 +97,23 @@ def generate_plots(name: str, extra: dict, out_dir: Path):
             written.append(corr_path)
     return written
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Data quality check for Zarr cache used by the Forex scaling model.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--cache-path", required=True, type=Path,
-                        help="Path to the root of the Zarr store (directory).")
-    parser.add_argument("--full", action="store_true",
-                        help="Compute full statistics (histograms, correlation).")
-    parser.add_argument("--plot", action="store_true",
-                        help="Generate PNG plots for histograms / correlation matrices.")
-    parser.add_argument("--output-dir", type=Path,
-                        default=Path.cwd() / "artifacts",
-                        help="Directory where the markdown report and any plot images will be saved.")
+    parser.add_argument(
+        "--cache-path", required=True, type=Path, help="Path to the root of the Zarr store (directory)."
+    )
+    parser.add_argument("--full", action="store_true", help="Compute full statistics (histograms, correlation).")
+    parser.add_argument("--plot", action="store_true", help="Generate PNG plots for histograms / correlation matrices.")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path.cwd() / "artifacts",
+        help="Directory where the markdown report and any plot images will be saved.",
+    )
     args = parser.parse_args()
 
     if not args.cache_path.is_dir():
@@ -119,7 +124,7 @@ def main():
     store = zarr.open(store=args.cache_path, mode="r")
     report = ["# Data Quality Report", f"Cache path: `{args.cache_path}`", ""]
     plot_paths = []
-    for name in store.keys():
+    for name in store:
         obj = store[name]
         if isinstance(obj, zarr.Array):
             res = check_array(name, obj, full=args.full)
@@ -127,14 +132,14 @@ def main():
             report.append(f"**Shape:** {res['stats']['shape']}")
             report.append(f"**Dtype:** {res['stats']['dtype']}")
             report.append("**Stats:**")
-            report.extend([f"- {k}: {v}" for k, v in res['stats'].items()])
-            if res['issues']:
+            report.extend([f"- {k}: {v}" for k, v in res["stats"].items()])
+            if res["issues"]:
                 report.append("**Issues Detected:**")
-                report.extend([f"- {i}" for i in res['issues']])
+                report.extend([f"- {i}" for i in res["issues"]])
             else:
                 report.append("**Issues Detected:** None")
-            if args.plot and res['extra']:
-                plots = generate_plots(name, res['extra'], out_dir)
+            if args.plot and res["extra"]:
+                plots = generate_plots(name, res["extra"], out_dir)
                 for p in plots:
                     rel = p.relative_to(out_dir)
                     report.append(f"![{p.name}]({rel})")
@@ -150,6 +155,7 @@ def main():
         print("Plots generated:")
         for p in plot_paths:
             print(p)
+
 
 if __name__ == "__main__":
     main()

@@ -13,45 +13,184 @@ DEFAULT_INPUTS = [
 DEFAULT_OUTPUT = "data/raw/news/historical_news_combined.parquet"
 DEFAULT_PAIRS = ["EURUSD", "USDJPY", "GBPUSD"]
 FX_MACRO_TERMS = [
-    "forex", "foreign exchange", "fx",
-    "federal reserve", "fed", "fomc", "ecb", "bank of england", "boe",
-    "bank of japan", "boj", "central bank", "monetary policy",
-    "interest rate", "rate hike", "rate cut",
-    "treasury yield", "treasury yields", "bond yield", "bond yields",
-    "government bond", "gilts", "bund",
-    "inflation", "cpi", "ppi", "gdp", "recession",
-    "unemployment", "payroll", "payrolls", "nfp", "jobs report", "wage growth",
-    "retail sales", "consumer confidence", "durable goods",
-    "industrial production", "manufacturing pmi", "services pmi", "pmi", "ism",
-    "trade balance", "current account", "budget deficit",
-    "quantitative easing", "qe", "stimulus", "tariff", "trade war",
-    "brexit", "eurozone", "euro zone",
+    "forex",
+    "foreign exchange",
+    "fx",
+    "federal reserve",
+    "fed",
+    "fomc",
+    "ecb",
+    "bank of england",
+    "boe",
+    "bank of japan",
+    "boj",
+    "central bank",
+    "monetary policy",
+    "interest rate",
+    "rate hike",
+    "rate cut",
+    "treasury yield",
+    "treasury yields",
+    "bond yield",
+    "bond yields",
+    "government bond",
+    "gilts",
+    "bund",
+    "inflation",
+    "cpi",
+    "ppi",
+    "gdp",
+    "recession",
+    "unemployment",
+    "payroll",
+    "payrolls",
+    "nfp",
+    "jobs report",
+    "wage growth",
+    "retail sales",
+    "consumer confidence",
+    "durable goods",
+    "industrial production",
+    "manufacturing pmi",
+    "services pmi",
+    "pmi",
+    "ism",
+    "trade balance",
+    "current account",
+    "budget deficit",
+    "quantitative easing",
+    "qe",
+    "stimulus",
+    "tariff",
+    "trade war",
+    "brexit",
+    "eurozone",
+    "euro zone",
 ]
 CURRENCY_TERMS = [
-    "currency", "currencies", "dollar", "greenback", "euro", "yen",
-    "sterling", "british pound", "pound sterling", "usd", "eur", "jpy", "gbp",
+    "currency",
+    "currencies",
+    "dollar",
+    "greenback",
+    "euro",
+    "yen",
+    "sterling",
+    "british pound",
+    "pound sterling",
+    "usd",
+    "eur",
+    "jpy",
+    "gbp",
 ]
 CURRENCY_CONTEXT_TERMS = [
-    "forex", "foreign exchange", "fx", "market", "markets", "trader", "traders",
-    "trade", "trades", "trading", "against", "versus", "vs", "pair", "pairs",
-    "rise", "rises", "rising", "rose", "gain", "gains", "gained", "higher",
-    "fall", "falls", "falling", "fell", "drop", "drops", "dropped", "lower",
-    "slip", "slips", "slipped", "weaken", "weakens", "weakened", "weak",
-    "strengthen", "strengthens", "strengthened", "strong", "mixed", "subdued",
-    "weighed", "rally", "rebound", "volatility", "safe haven", "carry trade",
-    "libor", "interbank",
+    "forex",
+    "foreign exchange",
+    "fx",
+    "market",
+    "markets",
+    "trader",
+    "traders",
+    "trade",
+    "trades",
+    "trading",
+    "against",
+    "versus",
+    "vs",
+    "pair",
+    "pairs",
+    "rise",
+    "rises",
+    "rising",
+    "rose",
+    "gain",
+    "gains",
+    "gained",
+    "higher",
+    "fall",
+    "falls",
+    "falling",
+    "fell",
+    "drop",
+    "drops",
+    "dropped",
+    "lower",
+    "slip",
+    "slips",
+    "slipped",
+    "weaken",
+    "weakens",
+    "weakened",
+    "weak",
+    "strengthen",
+    "strengthens",
+    "strengthened",
+    "strong",
+    "mixed",
+    "subdued",
+    "weighed",
+    "rally",
+    "rebound",
+    "volatility",
+    "safe haven",
+    "carry trade",
+    "libor",
+    "interbank",
 ]
 GENERAL_NEWS_EXCLUDE_TERMS = [
-    "sport", "football", "soccer", "tennis", "cricket", "olympic",
-    "movie", "film", "music", "celebrity", "fashion", "restaurant",
-    "recipe", "weather", "earthquake", "hurricane", "fire", "crime",
-    "murder", "shooting", "killed", "dead", "wedding", "divorce",
-    "rebel", "rebels", "violence", "war", "iraq", "kenya",
-    "net asset value", "portfolio update", "transaction in own shares",
-    "name change", "etf", "stock", "stocks", "share", "shares",
-    "trillion-dollar", "valuation", "contract", "acquires", "awarded",
-    "distribution", "announces", "plc", "inc", "corp",
-    "etfs", "software", "integration", "ipo", "hydrogen",
+    "sport",
+    "football",
+    "soccer",
+    "tennis",
+    "cricket",
+    "olympic",
+    "movie",
+    "film",
+    "music",
+    "celebrity",
+    "fashion",
+    "restaurant",
+    "recipe",
+    "weather",
+    "earthquake",
+    "hurricane",
+    "fire",
+    "crime",
+    "murder",
+    "shooting",
+    "killed",
+    "dead",
+    "wedding",
+    "divorce",
+    "rebel",
+    "rebels",
+    "violence",
+    "war",
+    "iraq",
+    "kenya",
+    "net asset value",
+    "portfolio update",
+    "transaction in own shares",
+    "name change",
+    "etf",
+    "stock",
+    "stocks",
+    "share",
+    "shares",
+    "trillion-dollar",
+    "valuation",
+    "contract",
+    "acquires",
+    "awarded",
+    "distribution",
+    "announces",
+    "plc",
+    "inc",
+    "corp",
+    "etfs",
+    "software",
+    "integration",
+    "ipo",
+    "hydrogen",
 ]
 
 
@@ -131,7 +270,7 @@ def merge_massive_datasets(
     if os.path.exists(tmp_output):
         os.remove(tmp_output)
 
-    db_path = 'data/raw/news/merge_db.duckdb'
+    db_path = "data/raw/news/merge_db.duckdb"
     if os.path.exists(db_path):
         os.remove(db_path)
     con = duckdb.connect(database=db_path)
@@ -198,10 +337,12 @@ def merge_massive_datasets(
         queries.append(q)
 
     union_query = " UNION ALL ".join(queries)
-    
+
     print("\n[STEP 1.1] Loading raw data into physical staging table...")
-    con.execute(f"CREATE TABLE raw_news AS SELECT * FROM ({union_query}) WHERE part_year >= {int(start_year)} AND part_year <= {int(end_year)};")
-    
+    con.execute(
+        f"CREATE TABLE raw_news AS SELECT * FROM ({union_query}) WHERE part_year >= {int(start_year)} AND part_year <= {int(end_year)};"
+    )
+
     print("\n[STEP 1.2] Deduplicating, sorting, and exporting to Parquet...")
     con.execute(f"""
         COPY (
@@ -236,8 +377,8 @@ def merge_massive_datasets(
             print("Cleanup failed:", e)
 
     con.close()
-    if os.path.exists('data/raw/news/merge_db.duckdb'):
-        os.remove('data/raw/news/merge_db.duckdb')
+    if os.path.exists("data/raw/news/merge_db.duckdb"):
+        os.remove("data/raw/news/merge_db.duckdb")
 
     elapsed = time.time() - start_time
     file_size_gb = os.path.getsize(output_parquet) / (1024**3)
@@ -246,7 +387,9 @@ def merge_massive_datasets(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Merge large news CSV/Parquet files into a pair-scoped Parquet dataset.")
+    parser = argparse.ArgumentParser(
+        description="Merge large news CSV/Parquet files into a pair-scoped Parquet dataset."
+    )
     parser.add_argument("--input", nargs="+", default=DEFAULT_INPUTS, help="News CSV or Parquet files to merge")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output Parquet path")
     parser.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS, help="Pairs to keep")

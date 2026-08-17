@@ -24,9 +24,9 @@ except ImportError:
 
 # Local session open/close times (stable across DST; UTC walls shift).
 _SESSION_LOCAL_HOURS = {
-    "asia":   (time(9, 0), time(18, 0), "Asia/Tokyo"),
+    "asia": (time(9, 0), time(18, 0), "Asia/Tokyo"),
     "london": (time(8, 0), time(16, 30), "Europe/London"),
-    "ny":     (time(9, 30), time(16, 0), "America/New_York"),
+    "ny": (time(9, 30), time(16, 0), "America/New_York"),
 }
 
 # Production policy / limit / cost keys (no private "overlap" alias).
@@ -119,6 +119,7 @@ def get_session_hours_utc(session: str, date: datetime | None = None) -> tuple[i
     ref_date = date.date() if hasattr(date, "date") else date
 
     from datetime import datetime as dt
+
     open_local = dt.combine(ref_date, local_open, tzinfo=tz)
     close_local = dt.combine(ref_date, local_close, tzinfo=tz)
 
@@ -142,7 +143,7 @@ def _in_local_window(dt_utc: datetime, session: str) -> bool:
 
 
 def classify_session(dt_utc: datetime | None = None) -> SessionInfo:
-    """DST-aware session classification — shared SoT for risk / live / fills."""
+    """DST-aware session classification - shared SoT for risk / live / fills."""
     if dt_utc is None:
         dt_utc = datetime.now(UTC)
     elif dt_utc.tzinfo is None:
@@ -232,12 +233,16 @@ def session_spread_mult(
     backtest fills, and slippage calibrator share one table.
     """
     key = resolve_session_policy_key(
-        session, asia_london=asia_london, london_ny=london_ny, now=now,
+        session,
+        asia_london=asia_london,
+        london_ny=london_ny,
+        now=now,
     )
     table = scales
     if table is None:
         try:
             from config.settings import LABEL_REGIME as _LR
+
             table = _LR.get("session_cost_scale") or _DEFAULT_SESSION_SPREAD_MULT
         except Exception:
             table = _DEFAULT_SESSION_SPREAD_MULT
@@ -252,6 +257,7 @@ def default_session_slip_factors(scales: dict | None = None) -> dict[str, float]
     else:
         try:
             from config.settings import LABEL_REGIME as _LR
+
             raw = _LR.get("session_cost_scale") or {}
             mults.update({normalize_session_name(k): float(v) for k, v in raw.items()})
         except Exception:

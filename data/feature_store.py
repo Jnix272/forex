@@ -31,7 +31,8 @@ from data.feature_definitions import (
 # CONTENT HASHING (for deduplication / versioning)
 # ════════════════════════════════════════════════════════════════════════════
 
-def compute_feature_hash(spec: FeatureSpec, params: dict = None) -> str:
+
+def compute_feature_hash(spec: FeatureSpec, params: dict | None = None) -> str:
     """Deterministic hash of feature definition + parameters."""
     content = {
         "name": spec.name,
@@ -53,6 +54,7 @@ def compute_data_hash(df: pl.DataFrame, feature_col: str) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 # FEATURE STORE
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class FeatureStore:
     """
@@ -120,22 +122,21 @@ class FeatureStore:
         return conn
 
     def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                # Schema version — seed on first init, never overwrite
-                conn.execute("""
+        with self._lock, self._connect() as conn:
+            # Schema version - seed on first init, never overwrite
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS schema_version (
                         version INTEGER PRIMARY KEY,
                         updated_at TEXT
                     )
                 """)
-                conn.execute(
-                    "INSERT OR IGNORE INTO schema_version (version, updated_at) VALUES (?, ?)",
-                    (self.SCHEMA_VERSION, datetime.now(UTC).isoformat()),
-                )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, updated_at) VALUES (?, ?)",
+                (self.SCHEMA_VERSION, datetime.now(UTC).isoformat()),
+            )
 
-                # Feature definitions
-                conn.execute("""
+            # Feature definitions
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS features (
                         name TEXT PRIMARY KEY,
                         feature_type TEXT NOT NULL,
@@ -155,8 +156,8 @@ class FeatureStore:
                     )
                 """)
 
-                # Materialization tracking (which time ranges are computed)
-                conn.execute("""
+            # Materialization tracking (which time ranges are computed)
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS materializations (
                         feature_name TEXT NOT NULL,
                         start_ts TEXT NOT NULL,      -- ISO format
@@ -171,15 +172,15 @@ class FeatureStore:
                     )
                 """)
 
-                # Lineage / dependency graph.
-                # NOTE: Only `downstream` carries a FK back to the features
-                # table, because `upstream` entries may legitimately be raw
-                # OHLCV column names (high, low, volume, …) or intermediate
-                # signals (adx_14, rsi_14, trend_regime, …) that are inputs
-                # consumed by the materializers but are NOT themselves entries
-                # in the feature registry.  Adding a FK on upstream would
-                # produce hundreds of violations on every fresh init.
-                conn.execute("""
+            # Lineage / dependency graph.
+            # NOTE: Only `downstream` carries a FK back to the features
+            # table, because `upstream` entries may legitimately be raw
+            # OHLCV column names (high, low, volume, …) or intermediate
+            # signals (adx_14, rsi_14, trend_regime, …) that are inputs
+            # consumed by the materializers but are NOT themselves entries
+            # in the feature registry.  Adding a FK on upstream would
+            # produce hundreds of violations on every fresh init.
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS lineage (
                         downstream TEXT NOT NULL,
                         upstream TEXT NOT NULL,
@@ -188,8 +189,8 @@ class FeatureStore:
                     )
                 """)
 
-                # Materialization job queue
-                conn.execute("""
+            # Materialization job queue
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS job_queue (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         feature_name TEXT NOT NULL,
@@ -206,8 +207,8 @@ class FeatureStore:
                     )
                 """)
 
-                # Stats / monitoring
-                conn.execute("""
+            # Stats / monitoring
+            conn.execute("""
                     CREATE TABLE IF NOT EXISTS feature_stats (
                         feature_name TEXT NOT NULL,
                         ts TEXT NOT NULL,              -- computation timestamp
@@ -225,13 +226,13 @@ class FeatureStore:
 
     def _sync_registry(self) -> None:
         """Upsert builtin features into registry DB."""
-        with self._lock:
-            with self._connect() as conn:
-                now = datetime.now(UTC).isoformat()
+        with self._lock, self._connect() as conn:
+            now = datetime.now(UTC).isoformat()
 
-                for spec in self.registry.all():
-                    content_hash = compute_feature_hash(spec)
-                    conn.execute("""
+            for spec in self.registry.all():
+                content_hash = compute_feature_hash(spec)
+                conn.execute(
+                    """
                         INSERT INTO features (
                             name, feature_type, description, source, transformation,
                             dependencies, params, version, tags, owner,
@@ -242,20 +243,35 @@ class FeatureStore:
                             description = excluded.description,
                             params = excluded.params,
                             tags = excluded.tags
-                    """, (
-                        spec.name, spec.feature_type.value, spec.description, spec.source.value,
-                        spec.transformation, json.dumps(spec.dependencies), json.dumps(spec.params),
-                        spec.version, json.dumps(spec.tags), spec.owner,
-                        spec.created_at or now, now, int(spec.deprecated), content_hash
-                    ))
+                    """,
+                    (
+                        spec.name,
+                        spec.feature_type.value,
+                        spec.description,
+                        spec.source.value,
+                        spec.transformation,
+                        json.dumps(spec.dependencies),
+                        json.dumps(spec.params),
+                        spec.version,
+                        json.dumps(spec.tags),
+                        spec.owner,
+                        spec.created_at or now,
+                        now,
+                        int(spec.deprecated),
+                        content_hash,
+                    ),
+                )
 
-                    # Lineage — upstream may be a raw column name (high, low, volume, …)
-                    # that is not itself a registered feature; only downstream has a FK.
-                    for dep in spec.dependencies:
-                        conn.execute("""
+                # Lineage - upstream may be a raw column name (high, low, volume, …)
+                # that is not itself a registered feature; only downstream has a FK.
+                for dep in spec.dependencies:
+                    conn.execute(
+                        """
                             INSERT OR IGNORE INTO lineage (downstream, upstream)
                             VALUES (?, ?)
-                        """, (spec.name, dep))
+                        """,
+                        (spec.name, dep),
+                    )
 
     # ──────────────────────────────────────────────────────────────────────
     # FEATURE REGISTRY QUERIES
@@ -266,9 +282,7 @@ class FeatureStore:
         with self._lock:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT * FROM features WHERE name = ? AND deprecated = 0", (name,)
-                ).fetchone()
+                row = conn.execute("SELECT * FROM features WHERE name = ? AND deprecated = 0", (name,)).fetchone()
 
             if not row:
                 return None
@@ -289,7 +303,7 @@ class FeatureStore:
             )
 
     def list_features(
-        self, source: FeatureSource = None, tag: str = None, deprecated: bool = False
+        self, source: FeatureSource = None, tag: str | None = None, deprecated: bool = False
     ) -> list[FeatureSpec]:
         """List features with optional filters."""
         with self._lock:
@@ -333,15 +347,11 @@ class FeatureStore:
                 result = {"upstream": [], "downstream": []}
 
                 if direction in ("upstream", "both"):
-                    rows = conn.execute(
-                        "SELECT upstream FROM lineage WHERE downstream = ?", (feature_name,)
-                    ).fetchall()
+                    rows = conn.execute("SELECT upstream FROM lineage WHERE downstream = ?", (feature_name,)).fetchall()
                     result["upstream"] = [r[0] for r in rows]
 
                 if direction in ("downstream", "both"):
-                    rows = conn.execute(
-                        "SELECT downstream FROM lineage WHERE upstream = ?", (feature_name,)
-                    ).fetchall()
+                    rows = conn.execute("SELECT downstream FROM lineage WHERE upstream = ?", (feature_name,)).fetchall()
                     result["downstream"] = [r[0] for r in rows]
 
             return result
@@ -357,31 +367,33 @@ class FeatureStore:
         feature_dir.mkdir(parents=True, exist_ok=True)
         return feature_dir / f"{feature_name}_{date_str}.parquet"
 
-    def is_materialized(
-        self, feature_name: str, start: datetime, end: datetime
-    ) -> bool:
+    def is_materialized(self, feature_name: str, start: datetime, end: datetime) -> bool:
         """Check if feature is materialized for time range."""
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute("""
+                row = conn.execute(
+                    """
                     SELECT 1 FROM materializations
                     WHERE feature_name = ? AND start_ts <= ? AND end_ts >= ?
-                """, (feature_name, start.isoformat(), end.isoformat())).fetchone()
+                """,
+                    (feature_name, start.isoformat(), end.isoformat()),
+                ).fetchone()
             return row is not None
 
     def get_materialized_ranges(self, feature_name: str) -> list[tuple[datetime, datetime]]:
         """Get all materialized time ranges for a feature."""
         with self._lock:
             with self._connect() as conn:
-                rows = conn.execute("""
+                rows = conn.execute(
+                    """
                     SELECT start_ts, end_ts FROM materializations
                     WHERE feature_name = ? ORDER BY start_ts
-                """, (feature_name,)).fetchall()
+                """,
+                    (feature_name,),
+                ).fetchall()
             return [(datetime.fromisoformat(r[0]), datetime.fromisoformat(r[1])) for r in rows]
 
-    def load_feature(
-        self, feature_name: str, start: datetime, end: datetime
-    ) -> pl.DataFrame | None:
+    def load_feature(self, feature_name: str, start: datetime, end: datetime) -> pl.DataFrame | None:
         """Load materialized feature data for time range."""
         if not self.is_materialized(feature_name, start, end):
             return None
@@ -406,9 +418,7 @@ class FeatureStore:
         combined = pl.concat(dfs)
         # Filter to requested range
         if "timestamp_utc" in combined.columns:
-            combined = combined.filter(
-                (pl.col("timestamp_utc") >= start) & (pl.col("timestamp_utc") <= end)
-            )
+            combined = combined.filter((pl.col("timestamp_utc") >= start) & (pl.col("timestamp_utc") <= end))
         return combined.sort("timestamp_utc")
 
     def materialize(
@@ -484,9 +494,9 @@ class FeatureStore:
     def _resolve_bars(self, start: datetime, end: datetime, requires_ohlcv: bool) -> pl.DataFrame:
         df = self._load_bars_frame()
         if df is not None and not df.is_empty() and "timestamp_utc" in df.columns:
-            return df.filter(
-                (pl.col("timestamp_utc") >= start) & (pl.col("timestamp_utc") <= end)
-            ).sort("timestamp_utc")
+            return df.filter((pl.col("timestamp_utc") >= start) & (pl.col("timestamp_utc") <= end)).sort(
+                "timestamp_utc"
+            )
         if requires_ohlcv:
             raise RuntimeError(
                 "FeatureStore: OHLCV bars required but none attached. "
@@ -494,6 +504,7 @@ class FeatureStore:
             )
         # Scaffold daily timestamps so macro materializers can still align.
         import pandas as pd
+
         idx = pd.date_range(start=start, end=end, freq="1D", tz="UTC")
         return pl.DataFrame({"timestamp_utc": idx})
 
@@ -530,7 +541,7 @@ class FeatureStore:
         df.write_parquet(path, compression="zstd")
 
         # Compute stats
-        feature_col = [c for c in df.columns if c != "timestamp_utc"][0]
+        feature_col = next(c for c in df.columns if c != "timestamp_utc")
         vals = df[feature_col].to_numpy()
         stats = {
             "mean": float(np.nanmean(vals)) if len(vals) > 0 else None,
@@ -538,38 +549,55 @@ class FeatureStore:
             "min": float(np.nanmin(vals)) if len(vals) > 0 else None,
             "max": float(np.nanmax(vals)) if len(vals) > 0 else None,
             "null_count": int(df[feature_col].null_count()),
-            "skew": float(np.nan) if len(vals) < 3 else float(
-                np.nanmean((vals - np.nanmean(vals))**3) / (np.nanstd(vals)**3 + 1e-12)
-            ),
-            "kurtosis": float(np.nan) if len(vals) < 4 else float(
-                np.nanmean((vals - np.nanmean(vals))**4) / (np.nanstd(vals)**4 + 1e-12) - 3
-            ),
+            "skew": float(np.nan)
+            if len(vals) < 3
+            else float(np.nanmean((vals - np.nanmean(vals)) ** 3) / (np.nanstd(vals) ** 3 + 1e-12)),
+            "kurtosis": float(np.nan)
+            if len(vals) < 4
+            else float(np.nanmean((vals - np.nanmean(vals)) ** 4) / (np.nanstd(vals) ** 4 + 1e-12) - 3),
         }
 
         data_hash = compute_data_hash(df, feature_col)
 
-        with self._lock:
-            with self._connect() as conn:
-                now = datetime.now(UTC).isoformat()
+        with self._lock, self._connect() as conn:
+            now = datetime.now(UTC).isoformat()
 
-                conn.execute("""
+            conn.execute(
+                """
                     INSERT OR REPLACE INTO materializations
                     (feature_name, start_ts, end_ts, path, rows, data_hash, created_at, strategy)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    feature_name, start.isoformat(), end.isoformat(),
-                    str(path.relative_to(self.root)), len(df), data_hash, now, strategy.value
-                ))
+                """,
+                (
+                    feature_name,
+                    start.isoformat(),
+                    end.isoformat(),
+                    str(path.relative_to(self.root)),
+                    len(df),
+                    data_hash,
+                    now,
+                    strategy.value,
+                ),
+            )
 
-                conn.execute("""
+            conn.execute(
+                """
                     INSERT OR REPLACE INTO feature_stats
                     (feature_name, ts, mean, std, min, max, null_count, skew, kurtosis)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    feature_name, now,
-                    stats["mean"], stats["std"], stats["min"], stats["max"],
-                    stats["null_count"], stats["skew"], stats["kurtosis"]
-                ))
+                """,
+                (
+                    feature_name,
+                    now,
+                    stats["mean"],
+                    stats["std"],
+                    stats["min"],
+                    stats["max"],
+                    stats["null_count"],
+                    stats["skew"],
+                    stats["kurtosis"],
+                ),
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # JOB QUEUE (for async materialization)
@@ -587,10 +615,13 @@ class FeatureStore:
         with self._lock:
             with self._connect() as conn:
                 now = datetime.now(UTC).isoformat()
-                cursor = conn.execute("""
+                cursor = conn.execute(
+                    """
                     INSERT INTO job_queue (feature_name, start_ts, end_ts, strategy, priority, created_at, status)
                     VALUES (?, ?, ?, ?, ?, ?, 'pending')
-                """, (feature_name, start.isoformat(), end.isoformat(), strategy.value, priority, now))
+                """,
+                    (feature_name, start.isoformat(), end.isoformat(), strategy.value, priority, now),
+                )
                 job_id = cursor.lastrowid
             return job_id
 
@@ -599,30 +630,34 @@ class FeatureStore:
         with self._lock:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                rows = conn.execute("""
+                rows = conn.execute(
+                    """
                     SELECT * FROM job_queue
                     WHERE status = 'pending'
                     ORDER BY priority DESC, created_at ASC
                     LIMIT ?
-                """, (limit,)).fetchall()
+                """,
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
 
     def mark_job_started(self, job_id: int) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE job_queue SET status = 'running', started_at = ? WHERE id = ?",
-                    (datetime.now(UTC).isoformat(), job_id)
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE job_queue SET status = 'running', started_at = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), job_id),
+            )
 
-    def mark_job_done(self, job_id: int, error: str = None) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                status = 'failed' if error else 'done'
-                conn.execute("""
+    def mark_job_done(self, job_id: int, error: str | None = None) -> None:
+        with self._lock, self._connect() as conn:
+            status = "failed" if error else "done"
+            conn.execute(
+                """
                     UPDATE job_queue SET status = ?, finished_at = ?, error = ?
                     WHERE id = ?
-                """, (status, datetime.now(UTC).isoformat(), error, job_id))
+                """,
+                (status, datetime.now(UTC).isoformat(), error, job_id),
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # INCREMENTAL / ON-DEMAND HELPERS
@@ -656,11 +691,13 @@ class FeatureStore:
             if bars_end is not None and bars_end > latest:
                 # Recompute a short overlap window for rolling features.
                 from datetime import timedelta
+
                 start = latest - timedelta(minutes=max(0, int(lookback_bars)))
                 return True, start, bars_end
 
         if end > latest:
             from datetime import timedelta
+
             start = latest - timedelta(minutes=max(0, int(lookback_bars)))
             return True, start, end
         return False, None, None
@@ -671,9 +708,8 @@ class FeatureStore:
 
     def vacuum(self) -> None:
         """Compact database."""
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("VACUUM")
+        with self._lock, self._connect() as conn:
+            conn.execute("VACUUM")
 
     def get_storage_stats(self) -> dict:
         """Get storage usage statistics."""
@@ -701,7 +737,7 @@ class FeatureStore:
 _DEFAULT_STORE: FeatureStore | None = None
 
 
-def get_feature_store(root: str | Path = None) -> FeatureStore:
+def get_feature_store(root: str | Path | None = None) -> FeatureStore:
     """Get or create global feature store instance."""
     global _DEFAULT_STORE
     if _DEFAULT_STORE is None:
@@ -726,6 +762,7 @@ if __name__ == "__main__":
 
     # Register a test feature
     from data.feature_definitions import FeatureSource, FeatureSpec, FeatureType, MaterializationStrategy
+
     test_spec = FeatureSpec(
         name="test_feature",
         feature_type=FeatureType.NUMERIC,

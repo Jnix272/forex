@@ -2,7 +2,7 @@ import datetime
 
 entry = f"""---
 
-## {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Pipeline Configuration & Fixes
+## {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - Pipeline Configuration & Fixes
 
 ### Summary
 Configured the data pipeline and feature engineering script to run on a 5-minute (`5m`) timeframe across all 10 available pairs using the Ubuntu hardware profile configuration (`config/run_ubuntu.yaml`). Also fixed a hardcoded log message that incorrectly stated 1-minute resampling despite dynamic logic.
@@ -23,8 +23,8 @@ Configured the data pipeline and feature engineering script to run on a 5-minute
 
 """
 
-with open('docs/SESSION_REPORT.md', 'r') as f:
+with open("docs/SESSION_REPORT.md") as f:
     content = f.read()
 
-with open('docs/SESSION_REPORT.md', 'w') as f:
+with open("docs/SESSION_REPORT.md", "w") as f:
     f.write(entry + "\n" + content)

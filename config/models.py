@@ -1,5 +1,5 @@
 """
-config/models.py  —  Supervised architecture hyperparameters
+config/models.py  -  Supervised architecture hyperparameters
 ===========================================================
 Defaults aligned with `training/train_gpu.py` builders and `models/architectures.py`.
 Edit here to change per-architecture specs; `settings.MODELS` re-exports this dict.
@@ -8,9 +8,7 @@ Edit here to change per-architecture specs; `settings.MODELS` re-exports this di
 from typing import Any
 
 # Keys accepted by train_gpu --model and build_model()
-SUPPORTED_SUPERVISED: frozenset[str] = frozenset(
-    {"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm"}
-)
+SUPPORTED_SUPERVISED: frozenset[str] = frozenset({"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm"})
 
 BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
     "xgboost": {
@@ -75,7 +73,9 @@ MODELS: dict[str, dict[str, Any]] = {
         "nhead": 8,
         "num_layers": 3,
         "dropout": 0.25,
-        "seq_len": 60,
+        # 80 bars at 5-min = 6h40m - matches run.yaml training.seq_len,
+        # strategy_profiles.scalping.seq_len, and curriculum.seq_schedule.
+        "seq_len": 80,
         "learning_rate": 3e-4,
         "pretrain_epochs": 12,
         "pretrain_lr": 8e-5,
@@ -133,7 +133,5 @@ def architecture_config(name: str) -> dict[str, Any]:
     """Return hyperparameter dict for a supervised architecture key."""
     key = name.lower().strip()
     if key not in MODELS:
-        raise KeyError(
-            f"Unknown architecture {name!r}; expected one of {sorted(SUPPORTED_SUPERVISED)}"
-        )
+        raise KeyError(f"Unknown architecture {name!r}; expected one of {sorted(SUPPORTED_SUPERVISED)}")
     return dict(MODELS[key])

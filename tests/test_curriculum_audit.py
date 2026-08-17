@@ -1,4 +1,5 @@
 """Tests for curriculum/FEATURE_MASK audits and run.yaml parseability."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -56,9 +57,7 @@ def test_apply_yaml_config_fails_hard_on_bad_indent(tmp_path):
 
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "strategy:\n"
-        "  mode: scalping\n"
-        "   profit_target_atr: 1.2\n",
+        "strategy:\n  mode: scalping\n   profit_target_atr: 1.2\n",
         encoding="utf-8",
     )
     p = argparse.ArgumentParser()
@@ -80,9 +79,7 @@ def test_curriculum_audit_detects_missing_overlap_orphan():
         },
     }
     mask = {"spread_pips": True, "ofi": True, "ret_5": True, "sentiment_raw": True}
-    report = audit_curriculum_feature_groups(
-        schema=schema, feature_groups=groups, feature_mask=mask
-    )
+    report = audit_curriculum_feature_groups(schema=schema, feature_groups=groups, feature_mask=mask)
     assert "execution_cost" in report["missing_from_schema"]
     assert "ghost_feature" in report["missing_from_schema"]["execution_cost"]
     assert "ofi" in report["overlapping"]
@@ -139,9 +136,7 @@ def test_settings_aligned_with_run_yaml_curriculum():
     """settings.CURRICULUM schedule stubs must match active config/run.yaml."""
     raw = yaml.safe_load(Path("config/run.yaml").read_text(encoding="utf-8-sig"))
     curr = raw["curriculum"]
-    report = audit_settings_yaml_curriculum_drift(
-        CURRICULUM, curr, yaml_path="config/run.yaml"
-    )
+    report = audit_settings_yaml_curriculum_drift(CURRICULUM, curr, yaml_path="config/run.yaml")
     assert report["errors"] == [], report["errors"]
     assert report["only_settings_groups"] == []
     assert report["only_yaml_groups"] == []
@@ -222,6 +217,7 @@ def test_enforce_dataset_feature_schema_raises_when_gated(tmp_path):
     audit_path = tmp_path / "cache_feature_schema_audit.json"
     assert audit_path.is_file()
     import json
+
     payload = json.loads(audit_path.read_text(encoding="utf-8"))
     assert "parts" in payload
     assert "built_schema" in payload["parts"]
@@ -273,9 +269,7 @@ def test_ubuntu_profile_pretrain_epochs_not_critical():
     )
 
     raw = load_yaml_config("config/run_ubuntu.yaml")
-    report = audit_settings_yaml_section_mismatches(
-        raw, yaml_path="config/run_ubuntu.yaml"
-    )
+    report = audit_settings_yaml_section_mismatches(raw, yaml_path="config/run_ubuntu.yaml")
     # Hardware-scaled pretrain.epochs must not fail closed vs settings stubs.
     assert not any("pretrain.epochs" in e for e in report["errors"]), report["errors"]
     # Strategy ↔ LABELING still fail-closed on profile YAMLs.

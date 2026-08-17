@@ -117,7 +117,19 @@ def headline_filter_sql(currency: str, pair: str) -> str:
     keywords = {
         "EUR": ["eur", "euro", "ecb", "eurozone", "european central bank"],
         "USD": ["usd", "dollar", "fed", "federal reserve", "fomc", "treasury"],
-        "GBP": ["gbp/usd", "gbpjpy", "gbp jpy", "pound sterling", "sterling", "boe", "bank of england", "uk inflation", "uk rates", "britain economy", "british economy"],
+        "GBP": [
+            "gbp/usd",
+            "gbpjpy",
+            "gbp jpy",
+            "pound sterling",
+            "sterling",
+            "boe",
+            "bank of england",
+            "uk inflation",
+            "uk rates",
+            "britain economy",
+            "british economy",
+        ],
         "JPY": ["jpy", "yen", "boj", "bank of japan", "japan", "tokyo"],
     }
     terms = keywords.get(currency, [currency.lower(), pair.lower()])
@@ -136,8 +148,7 @@ def headline_filter_sql(currency: str, pair: str) -> str:
         "buy kensington",
     ]
     exclusions = " AND ".join(
-        f"lower(headline) NOT LIKE '%{term.replace(chr(39), chr(39) + chr(39))}%'"
-        for term in noise_terms
+        f"lower(headline) NOT LIKE '%{term.replace(chr(39), chr(39) + chr(39))}%'" for term in noise_terms
     )
     return f"({include} AND {exclusions})"
 
@@ -219,8 +230,8 @@ def rows_from_real_news(
                 FROM {rel}
                 WHERE headline IS NOT NULL
                   AND length(trim(headline)) > 12
-                  AND upper(coalesce(currency, '')) IN ({', '.join("'" + c + "'" for c in pair_currencies(pair))})
-                  AND ({' OR '.join(headline_filter_sql(c, pair) for c in pair_currencies(pair))})
+                  AND upper(coalesce(currency, '')) IN ({", ".join("'" + c + "'" for c in pair_currencies(pair))})
+                  AND ({" OR ".join(headline_filter_sql(c, pair) for c in pair_currencies(pair))})
                   AND strftime(try_cast(timestamp_utc AS TIMESTAMP), '%Y-%m') <> '{month}'
                 ORDER BY hash('{pair}-{month}-{currency}-fallback' || coalesce(headline, '') || coalesce(url, ''))
                 LIMIT {int(events_per_currency)}
@@ -229,7 +240,7 @@ def rows_from_real_news(
 
         for idx, sample in enumerate(samples[:events_per_currency]):
             day = days[(idx * 3 + len(currency)) % len(days)]
-            row = dict(zip(FIELDS, sample))
+            row = dict(zip(FIELDS, sample, strict=False))
             original_source = str(row.get("source") or "historical_news")
             row["timestamp_utc"] = event_timestamp(day, pair, currency, idx)
             row["currency"] = currency
@@ -243,9 +254,7 @@ def detect_missing_months(news_file: str, pairs: list[str]) -> dict[str, list[st
     try:
         import duckdb
     except Exception as exc:
-        raise SystemExit(
-            "DuckDB is required for --detect-missing. Use --month or install DuckDB."
-        ) from exc
+        raise SystemExit("DuckDB is required for --detect-missing. Use --month or install DuckDB.") from exc
 
     path = Path(news_file)
     if not path.exists() or path.stat().st_size == 0:
@@ -256,7 +265,7 @@ def detect_missing_months(news_file: str, pairs: list[str]) -> dict[str, list[st
     result: dict[str, list[str]] = {}
 
     for pair in pairs:
-        currencies = pair_currencies(pair) + ["GLOBAL", "ALL"]
+        currencies = [*pair_currencies(pair), "GLOBAL", "ALL"]
         sql_currencies = ", ".join("'" + c + "'" for c in currencies)
         months = [
             row[0]

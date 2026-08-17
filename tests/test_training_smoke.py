@@ -40,9 +40,7 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
         momentum=False,
         # added
         chunk_size=10000,
-        cross_asset_mode='auto',
-
-
+        cross_asset_mode="auto",
         cache_integrity_gate=False,
         integrity_gate=False,
         feature_schema_gate=False,
@@ -50,7 +48,7 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
         data_quality_check=False,
         pretrain_ablation=False,
         pretrain=False,
-        pretrain_method='byol',
+        pretrain_method="byol",
         no_wandb=True,
         drift_gate=False,
         skip_training=False,
@@ -60,7 +58,7 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
         walk_forward_folds=3,
         ignore_preflight=True,
         profile=False,
-        wandb_project='forex_scaling_test',
+        wandb_project="forex_scaling_test",
         rl_train=False,
         train_ensemble=False,
         macro=False,
@@ -92,6 +90,7 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
         data_source="synthetic",
     )
 
+
 @patch("training.train_gpu.parse_args")
 @patch("training.train_gpu.supervised_train")
 def test_mini_supervised_smoke_test(mock_supervised, mock_parse_args, tmp_path):
@@ -105,10 +104,11 @@ def test_mini_supervised_smoke_test(mock_supervised, mock_parse_args, tmp_path):
 
     # Ensure supervised_train was called with the right arguments
     mock_supervised.assert_called_once()
-    called_args, called_kwargs = mock_supervised.call_args
+    called_args, _called_kwargs = mock_supervised.call_args
     assert called_args[4].mode == "supervised"
     # Ensure mode was correctly parsed and used
     assert args.mode == "supervised"
+
 
 @patch("training.train_gpu.parse_args")
 @patch("training.train_gpu._promote_best_fold")
@@ -133,9 +133,10 @@ def test_mock_reject_promotion_test(mock_supervised, mock_promote, mock_parse_ar
     # Actually main() calls _promote_best_fold for the 1 fold run if cv_hist is constructed.
     # Since mock_supervised returns 100.0, the cv_hist will have {"fold": 0, "best_metric": 100.0}
     mock_promote.assert_called_once()
-    called_args, called_kwargs = mock_promote.call_args
+    called_args, _called_kwargs = mock_promote.call_args
     cv_hist = called_args[2]
     assert cv_hist[0]["best_metric"] == 100.0
+
 
 @patch("training.train_gpu.parse_args")
 @patch("training.train_gpu._promote_best_fold")
@@ -152,6 +153,6 @@ def test_mock_pass_promotion_test(mock_supervised, mock_promote, mock_parse_args
     main()
 
     mock_promote.assert_called_once()
-    called_args, called_kwargs = mock_promote.call_args
+    called_args, _called_kwargs = mock_promote.call_args
     cv_hist = called_args[2]
     assert cv_hist[0]["best_metric"] == 0.5

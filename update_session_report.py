@@ -1,9 +1,9 @@
 import datetime
 
-with open('docs/SESSION_REPORT.md', 'r') as f:
+with open("docs/SESSION_REPORT.md") as f:
     content = f.read()
 
-new_content = f"""## {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Phase 2 Execution Completion
+new_content = f"""## {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - Phase 2 Execution Completion
 
 ### Summary
 Completed the implementation of Phase 2 improvements as defined in the task plan. This involved adding missing logic for Backtest Realism, Risk Enforcement, and Promotion Gates.
@@ -32,5 +32,5 @@ Completed the implementation of Phase 2 improvements as defined in the task plan
 
 {content}"""
 
-with open('docs/SESSION_REPORT.md', 'w') as f:
+with open("docs/SESSION_REPORT.md", "w") as f:
     f.write(new_content)

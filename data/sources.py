@@ -3,9 +3,9 @@ data/sources.py
 ================
 Production data connectors for all three specified sources:
 
-  1. DukascopyLoader   — Free tick data (EUR/USD, GBP/USD, 2003–present)
-  2. TickDataSuite     — Paid Ducascopy-based data with spread reconstruction
-  3. LMAXLoader        — Institutional LMAX Exchange Level-2 tick feed
+  1. DukascopyLoader   - Free tick data (EUR/USD, GBP/USD, 2003–present)
+  2. TickDataSuite     - Paid Ducascopy-based data with spread reconstruction
+  3. LMAXLoader        - Institutional LMAX Exchange Level-2 tick feed
 
 All loaders produce the same output schema:
   DataFrame with UTC DatetimeIndex and columns:
@@ -22,7 +22,7 @@ Raw files are LZMA-compressed binaries at:
 Each .bi5 file covers exactly one hour of ticks.
 Binary format per tick (20 bytes):
   milliseconds_offset : uint32 (ms since start of hour)
-  ask_price_scaled    : uint32 (price × 100000 for JPY pairs, × 10000 others)
+  ask_price_scaled    : uint32 (price x 100000 for JPY pairs, x 10000 others)
   bid_price_scaled    : uint32
   ask_volume          : float32
   bid_volume          : float32
@@ -34,7 +34,7 @@ available at: https://www.lmax.com/exchange/market-data
 Institutional feed requires LMAX brokerage account.
 The REST endpoint returns per-bar OHLCV + spread data which we
 reconstruct to tick resolution using the Ask/Bid bar prices.
-"""
+"""  # noqa: RUF002
 
 import asyncio
 import lzma
@@ -54,6 +54,7 @@ import polars as pl
 
 try:
     import duckdb
+
     _DUCKDB = True
 except ImportError:
     duckdb = None
@@ -70,10 +71,17 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 TICK_COLUMNS = ["bid", "ask", "mid", "spread", "volume", "pair", "source"]
-PIP_SIZES    = {
-    "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
-    "USDCAD": 0.0001, "USDCHF": 0.0001, "NZDUSD": 0.0001, "EURGBP": 0.0001,
-    "USDJPY": 0.01,   "EURJPY": 0.01,   "GBPJPY": 0.01,
+PIP_SIZES = {
+    "EURUSD": 0.0001,
+    "GBPUSD": 0.0001,
+    "AUDUSD": 0.0001,
+    "USDCAD": 0.0001,
+    "USDCHF": 0.0001,
+    "NZDUSD": 0.0001,
+    "EURGBP": 0.0001,
+    "USDJPY": 0.01,
+    "EURJPY": 0.01,
+    "GBPJPY": 0.01,
 }
 
 
@@ -107,7 +115,7 @@ def _enforce_schema(df: pd.DataFrame, pair: str, source: str) -> pd.DataFrame:
         if col in df.columns and df[col].dtype != np.float32:
             df[col] = df[col].astype(np.float32, copy=False)
 
-    df["pair"]   = pd.Categorical.from_codes(np.zeros(len(df), dtype=np.int8), categories=[pair])
+    df["pair"] = pd.Categorical.from_codes(np.zeros(len(df), dtype=np.int8), categories=[pair])
     df["source"] = pd.Categorical.from_codes(np.zeros(len(df), dtype=np.int8), categories=[source])
 
     # Golden Rule: drop rows where bid >= ask (data corruption)
@@ -138,9 +146,15 @@ DUKASCOPY_URL = "https://datafeed.dukascopy.com/datafeed/{pair}/{year}/{month:02
 
 # Dukascopy uses pair codes like "EURUSD" but the URL uses uppercase pair without slash
 DUKA_PAIR_MAP = {
-    "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "USDJPY": "USDJPY",
-    "AUDUSD": "AUDUSD", "USDCAD": "USDCAD", "USDCHF": "USDCHF",
-    "NZDUSD": "NZDUSD", "EURGBP": "EURGBP", "EURJPY": "EURJPY",
+    "EURUSD": "EURUSD",
+    "GBPUSD": "GBPUSD",
+    "USDJPY": "USDJPY",
+    "AUDUSD": "AUDUSD",
+    "USDCAD": "USDCAD",
+    "USDCHF": "USDCHF",
+    "NZDUSD": "NZDUSD",
+    "EURGBP": "EURGBP",
+    "EURJPY": "EURJPY",
     "GBPJPY": "GBPJPY",
 }
 
@@ -153,7 +167,9 @@ DEFAULT_LMAX_DATA_DIR = str(_DATA_DIR / "raw" / "lmax")
 
 # Point value for price descaling (non-JPY default: ÷100000, JPY pairs: ÷1000)
 DUKA_POINT = {
-    "USDJPY": 1000, "EURJPY": 1000, "GBPJPY": 1000,
+    "USDJPY": 1000,
+    "EURJPY": 1000,
+    "GBPJPY": 1000,
 }
 
 
@@ -171,16 +187,16 @@ def _parse_bi5_hour(raw_bytes: bytes, dt_hour: datetime, pair: str) -> pd.DataFr
         return pd.DataFrame()
 
     point = DUKA_POINT.get(pair, 100000)
-    n     = len(raw_bytes) // 20
+    n = len(raw_bytes) // 20
     if n == 0:
         return pd.DataFrame()
 
     ticks = np.frombuffer(raw_bytes, dtype=">u4,>u4,>u4,>f4,>f4")[:n]
-    ms_offsets  = ticks["f0"].astype(np.int64)
-    ask_scaled  = ticks["f1"].astype(np.float32, copy=False)
-    bid_scaled  = ticks["f2"].astype(np.float32, copy=False)
-    ask_vol     = ticks["f3"].astype(np.float32, copy=False)
-    bid_vol     = ticks["f4"].astype(np.float32, copy=False)
+    ms_offsets = ticks["f0"].astype(np.int64)
+    ask_scaled = ticks["f1"].astype(np.float32, copy=False)
+    bid_scaled = ticks["f2"].astype(np.float32, copy=False)
+    ask_vol = ticks["f3"].astype(np.float32, copy=False)
+    bid_vol = ticks["f4"].astype(np.float32, copy=False)
 
     ask = ask_scaled / point
     bid = bid_scaled / point
@@ -189,11 +205,14 @@ def _parse_bi5_hour(raw_bytes: bytes, dt_hour: datetime, pair: str) -> pd.DataFr
     epoch_ms = int(dt_hour.timestamp() * 1000) + ms_offsets
     idx = pd.to_datetime(epoch_ms, unit="ms", utc=True)
 
-    df = pd.DataFrame({
-        "bid":    bid,
-        "ask":    ask,
-        "volume": vol,
-    }, index=idx)
+    df = pd.DataFrame(
+        {
+            "bid": bid,
+            "ask": ask,
+            "volume": vol,
+        },
+        index=idx,
+    )
 
     # DS-006: Sanitize the raw bi5 dataframe so we don't hit infinite retry loops
     # during validation due to duplicate timestamps or zero/inverted spreads.
@@ -215,6 +234,7 @@ def _run_dukascopy_async(coro):
     if sys.platform == "win32":
         try:
             import warnings
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -239,20 +259,20 @@ class DukascopyLoader:
 
     def __init__(
         self,
-        cache_dir:    str  = DEFAULT_DUKASCOPY_CACHE_DIR,
+        cache_dir: str = DEFAULT_DUKASCOPY_CACHE_DIR,
         request_delay: float = 0.05,
-        max_retries:   int  = 8,
-        verbose:       bool = True,
-        concurrency:   int  = 12,
+        max_retries: int = 8,
+        verbose: bool = True,
+        concurrency: int = 12,
         max_parallel_pairs: int = 1,
     ):
-        self.cache_dir    = Path(cache_dir)
-        self.delay        = request_delay
-        self.max_retries  = max_retries
-        self.verbose      = verbose
-        self.concurrency  = max(1, concurrency)
+        self.cache_dir = Path(cache_dir)
+        self.delay = request_delay
+        self.max_retries = max_retries
+        self.verbose = verbose
+        self.concurrency = max(1, concurrency)
         self.max_parallel_pairs = max(1, max_parallel_pairs)
-        self._print_lock  = Lock()
+        self._print_lock = Lock()
         self._parse_failures = 0
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -325,10 +345,7 @@ class DukascopyLoader:
             return False
         if df.loc[:, ["bid", "ask"]].isna().any().any():
             return False
-        if (df["ask"] <= df["bid"]).any():
-            return False
-
-        return True
+        return not (df["ask"] <= df["bid"]).any()
 
     def _load_and_validate(
         self,
@@ -368,21 +385,22 @@ class DukascopyLoader:
         return result
 
     def _cache_path(self, pair: str, dt: datetime) -> Path:
-        return (self.cache_dir / pair /
-                f"{dt.year}" / f"{dt.month:02d}" /
-                f"{dt.day:02d}_{dt.hour:02d}.parquet")
+        return self.cache_dir / pair / f"{dt.year}" / f"{dt.month:02d}" / f"{dt.day:02d}_{dt.hour:02d}.parquet"
 
     async def _fetch_hour_async(
-        self, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
-        pair: str, dt: datetime,
+        self,
+        session: aiohttp.ClientSession,
+        semaphore: asyncio.Semaphore,
+        pair: str,
+        dt: datetime,
     ) -> bytes | None:
         """Download one hour of .bi5 data. Releases the semaphore between retries."""
         url = DUKASCOPY_URL.format(
-            pair  = DUKA_PAIR_MAP.get(pair, pair),
-            year  = dt.year,
-            month = dt.month - 1,   # Dukascopy months are 0-indexed (Jan=00, Dec=11)
-            day   = dt.day,
-            hour  = dt.hour,
+            pair=DUKA_PAIR_MAP.get(pair, pair),
+            year=dt.year,
+            month=dt.month - 1,  # Dukascopy months are 0-indexed (Jan=00, Dec=11)
+            day=dt.day,
+            hour=dt.hour,
         )
         req_timeout = aiohttp.ClientTimeout(total=60, sock_connect=20, sock_read=45)
 
@@ -395,7 +413,7 @@ class DukascopyLoader:
                         if resp.status == 200:
                             data = await resp.read()
                             # Truncated TCP bodies are common on flaky links; LZMA then fails
-                            # with "end-of-stream marker" — reject and retry instead of parsing.
+                            # with "end-of-stream marker" - reject and retry instead of parsing.
                             cl = resp.headers.get("Content-Length")
                             if asyncio.iscoroutine(cl):
                                 cl = await cl
@@ -420,7 +438,7 @@ class DukascopyLoader:
                 except (TimeoutError, aiohttp.ClientError, OSError):
                     pass
             # Backoff happens OUTSIDE the semaphore so slots stay free
-            backoff = min(20, 1.5 ** attempt) if attempt > 0 else 0.75
+            backoff = min(20, 1.5**attempt) if attempt > 0 else 0.75
             await asyncio.sleep(backoff)
         return None
 
@@ -432,7 +450,7 @@ class DukascopyLoader:
         dt: datetime,
         executor: ThreadPoolExecutor,
     ) -> pd.DataFrame:
-        """Load one hour — from disk cache or network fetch."""
+        """Load one hour - from disk cache or network fetch."""
         cache_file = self._cache_path(pair, dt)
 
         if cache_file.exists():
@@ -444,7 +462,7 @@ class DukascopyLoader:
             except Exception:
                 pass
 
-            # Corrupted or incomplete parquet — delete and refetch so future
+            # Corrupted or incomplete parquet - delete and refetch so future
             # runs don't keep hitting the same bad file.
             try:
                 cache_file.unlink(missing_ok=True)
@@ -471,9 +489,7 @@ class DukascopyLoader:
                 try:
                     raw_bytes = lzma.decompress(payload)
                     if len(raw_bytes) % 20 != 0:
-                        raise ValueError(
-                            f"truncated Dukascopy payload: {len(raw_bytes)} bytes is not divisible by 20"
-                        )
+                        raise ValueError(f"truncated Dukascopy payload: {len(raw_bytes)} bytes is not divisible by 20")
                     df = _parse_bi5_hour(raw_bytes, dt, pair)
                     if not self._validate_cached_hour(df, dt):
                         raise ValueError("parsed hour failed integrity validation")
@@ -494,24 +510,23 @@ class DukascopyLoader:
 
             try:
                 return await loop.run_in_executor(
-                    executor, _process, raw_lzma,
+                    executor,
+                    _process,
+                    raw_lzma,
                 )
             except (lzma.LZMAError, ValueError) as e:
                 self._parse_failures += 1
                 if self.verbose and self._parse_failures <= 8:
-                    print(
-                        f"  [Dukascopy] invalid .bi5 {pair} {hour_lbl} "
-                        f"(retry {body_try + 1}/3): {e!r}"
-                    )
+                    print(f"  [Dukascopy] invalid .bi5 {pair} {hour_lbl} (retry {body_try + 1}/3): {e!r}")
                 await asyncio.sleep(0.75 * (body_try + 1))
 
         return pd.DataFrame()
 
     def load(
         self,
-        pair:  str,
+        pair: str,
         start: str,
-        end:   str,
+        end: str,
         hours: list[int] | None = None,
         auto_redownload: bool = True,
         max_redownload_passes: int = 2,
@@ -520,9 +535,9 @@ class DukascopyLoader:
         Synchronous wrapper for modern async loading.
         Maintains compatibility with existing training scripts.
         """
-        pair     = pair.upper().replace("/", "")
+        pair = pair.upper().replace("/", "")
         start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
-        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
+        end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC)
         tasks_dt = self._build_tasks_dt(start_dt, end_dt, hours)
 
         if not tasks_dt:
@@ -530,8 +545,10 @@ class DukascopyLoader:
 
         self._parse_failures = 0
         if self.verbose:
-            print(f"[Dukascopy] Async Loading {pair} | {start} -> {end} | "
-                  f"{len(tasks_dt)} hours | Concurrency: {self.concurrency}")
+            print(
+                f"[Dukascopy] Async Loading {pair} | {start} -> {end} | "
+                f"{len(tasks_dt)} hours | Concurrency: {self.concurrency}"
+            )
 
         return self._load_and_validate(
             pair,
@@ -542,18 +559,18 @@ class DukascopyLoader:
 
     async def _load_all_async(
         self,
-        pair:      str,
+        pair: str,
         datetimes: list[datetime],
-        session:   aiohttp.ClientSession | None = None,
-        semaphore: asyncio.Semaphore | None     = None,
-        executor:  ThreadPoolExecutor | None    = None,
+        session: aiohttp.ClientSession | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> pd.DataFrame:
         """
         Core async orchestrator. Accepts shared session/semaphore/executor so
         load_multiple can reuse one connection pool across all pairs.
         When called standalone (load()), creates its own resources.
         """
-        own_session  = session  is None
+        own_session = session is None
         own_executor = executor is None
 
         if semaphore is None:
@@ -562,12 +579,12 @@ class DukascopyLoader:
             executor = ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 4))
 
         async def _run(sess: aiohttp.ClientSession) -> pd.DataFrame:
-            total     = len(datetimes)
+            total = len(datetimes)
             completed = 0
             results: list[pd.DataFrame | None] = [None] * total
-            log_step  = max(total // 40, 25)
-            loop      = asyncio.get_running_loop()
-            t0        = loop.time()
+            log_step = max(total // 40, 25)
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
 
             async def _wrapped(idx: int, dt: datetime):
                 return idx, await self._load_hour_async(sess, semaphore, pair, dt, executor)
@@ -577,21 +594,22 @@ class DukascopyLoader:
             for coro in asyncio.as_completed(tasks):
                 idx, df = await coro
                 results[idx] = df
-                completed += 1
+                completed += 1  # noqa: SIM113
                 if self.verbose and (completed % log_step == 0 or completed == total):
                     elapsed = loop.time() - t0
-                    rate    = completed / max(elapsed, 0.1)
-                    eta     = (total - completed) / max(rate, 0.01)
+                    rate = completed / max(elapsed, 0.1)
+                    eta = (total - completed) / max(rate, 0.01)
                     pct_done = completed * 100 / total
-                    print(f"  [{pair}] {int(pct_done):3d}% | {completed}/{total}"
-                          f" | {rate:.0f} h/s | ETA {eta:.0f}s")
+                    print(f"  [{pair}] {int(pct_done):3d}% | {completed}/{total} | {rate:.0f} h/s | ETA {eta:.0f}s")
                     if wandb and wandb.run:
-                        wandb.log({
-                            f"dukascopy/{pair}/progress_pct": pct_done,
-                            f"dukascopy/{pair}/hours_fetched": completed,
-                            f"dukascopy/{pair}/rate_hps": rate,
-                            f"dukascopy/{pair}/eta_s": eta,
-                        })
+                        wandb.log(
+                            {
+                                f"dukascopy/{pair}/progress_pct": pct_done,
+                                f"dukascopy/{pair}/hours_fetched": completed,
+                                f"dukascopy/{pair}/rate_hps": rate,
+                                f"dukascopy/{pair}/eta_s": eta,
+                            }
+                        )
 
             non_empty = [df for df in results if df is not None and not df.empty]
             if not non_empty:
@@ -602,7 +620,7 @@ class DukascopyLoader:
         try:
             if own_session:
                 conn_limit = self.concurrency + 5
-                connector  = aiohttp.TCPConnector(
+                connector = aiohttp.TCPConnector(
                     limit=conn_limit,
                     limit_per_host=conn_limit,
                     ttl_dns_cache=300,
@@ -626,35 +644,34 @@ class DukascopyLoader:
         self,
         pairs: list[str],
         start: str,
-        end:   str,
+        end: str,
         hours: list[int] | None = None,
     ) -> dict[str, pd.DataFrame]:
-        """Load multiple pairs (see ``max_parallel_pairs`` — default is one at a time)."""
+        """Load multiple pairs (see ``max_parallel_pairs`` - default is one at a time)."""
         self._parse_failures = 0
         return _run_dukascopy_async(self._load_multiple_async(pairs, start, end, hours))
 
     async def _load_multiple_async(
         self, pairs: list[str], start: str, end: str, hours: list[int] | None
     ) -> dict[str, pd.DataFrame]:
-        hours    = list(range(24)) if hours is None else hours
+        hours = list(range(24)) if hours is None else hours
         start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
-        end_dt   = datetime.strptime(end,   "%Y-%m-%d").replace(tzinfo=UTC)
-        n_pairs  = max(len(pairs), 1)
+        end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC)
+        n_pairs = max(len(pairs), 1)
         pair_parallel = min(n_pairs, self.max_parallel_pairs)
 
         # Pool size: only ``pair_parallel`` pairs may hit the host at once.
         per_pair = self.concurrency + 5
         host_cap = per_pair * pair_parallel
-        connector  = aiohttp.TCPConnector(
+        connector = aiohttp.TCPConnector(
             limit=host_cap,
             limit_per_host=host_cap,
             ttl_dns_cache=300,
             enable_cleanup_closed=True,
             keepalive_timeout=30,
         )
-        executor   = ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 4))
-        semaphores = {p.upper().replace("/", ""): asyncio.Semaphore(self.concurrency)
-                      for p in pairs}
+        executor = ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 4))
+        semaphores = {p.upper().replace("/", ""): asyncio.Semaphore(self.concurrency) for p in pairs}
 
         async def _one_pair(sess: aiohttp.ClientSession, pair: str) -> tuple:
             pair = pair.upper().replace("/", "")
@@ -662,8 +679,11 @@ class DukascopyLoader:
             if not tasks_dt:
                 return pair, pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
             return pair, await self._load_all_async(
-                pair, tasks_dt,
-                session=sess, semaphore=semaphores[pair], executor=executor,
+                pair,
+                tasks_dt,
+                session=sess,
+                semaphore=semaphores[pair],
+                executor=executor,
             )
 
         try:
@@ -680,21 +700,21 @@ class DukascopyLoader:
                     part = await asyncio.gather(*[_one_pair(sess, p) for p in chunk])
                     pair_results.extend(part)
 
-            return {p: df for p, df in pair_results}
+            return dict(pair_results)
         finally:
             executor.shutdown(wait=False)
 
     def load_eurusd_gbpusd(
         self,
         start: str,
-        end:   str,
+        end: str,
         session_only: bool = True,
     ) -> dict[str, pd.DataFrame]:
         """
         Convenience: load EUR/USD and GBP/USD (the two most liquid pairs).
         session_only=True loads only London session + NY open (07–17 UTC),
         reducing file count by ~54% while keeping all tradeable hours.
-        """
+        """  # noqa: RUF002
         hours = list(range(7, 18)) if session_only else None  # London session + NY open
         return self.load_multiple(["EURUSD", "GBPUSD"], start, end, hours)
 
@@ -703,6 +723,7 @@ class DukascopyLoader:
 # 2. TICK DATA SUITE LOADER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TickDataSuiteLoader:
     """
     Loader for data processed by Tick Data Suite (TDS).
@@ -710,7 +731,7 @@ class TickDataSuiteLoader:
     Tick Data Suite is a MetaTrader plugin that:
       - Downloads Dukascopy raw tick data
       - Reconstructs real bid/ask spreads (Dukascopy only provides one-sided
-        spread in its free feed — TDS uses a proprietary spread model)
+        spread in its free feed - TDS uses a proprietary spread model)
       - Exports to CSV, FXT, or HSTv401 formats for MT4/MT5 backtesting
 
     TDS export formats supported here:
@@ -736,10 +757,10 @@ class TickDataSuiteLoader:
     def __init__(
         self,
         data_dir: str = DEFAULT_TDS_DATA_DIR,
-        verbose:  bool = True,
+        verbose: bool = True,
     ):
         self.data_dir = Path(data_dir)
-        self.verbose  = verbose
+        self.verbose = verbose
 
     def _detect_format(self, filepath: Path) -> str:
         """Detect whether file is TDS tick CSV, TDS bar CSV, or Parquet."""
@@ -796,8 +817,7 @@ class TickDataSuiteLoader:
                 iterator=False,
             )
             df["datetime"] = pd.to_datetime(
-                df["date"].astype(str) + " " + df["time"].astype(str),
-                utc=True, errors="coerce"
+                df["date"].astype(str) + " " + df["time"].astype(str), utc=True, errors="coerce"
             )
             df = df.dropna(subset=("datetime",)).set_index("datetime")
 
@@ -808,7 +828,7 @@ class TickDataSuiteLoader:
 
     def load_file(self, filepath: str, pair: str) -> pd.DataFrame:
         """Load a single TDS export file."""
-        fp  = Path(filepath)
+        fp = Path(filepath)
         fmt = self._detect_format(fp)
 
         if fmt == "parquet":
@@ -820,18 +840,17 @@ class TickDataSuiteLoader:
         else:
             raise ValueError(f"Unsupported TDS format: {fmt}  ({filepath})")
 
-        df = _enforce_schema(df, pair.upper().replace("/",""), "tickdatasuite")
+        df = _enforce_schema(df, pair.upper().replace("/", ""), "tickdatasuite")
         if self.verbose:
             pip = PIP_SIZES.get(pair.upper().replace("/", ""), 0.0001)
-            print(f"[TDS] Loaded {fp.name} | {len(df):,} ticks | "
-                  f"Spread: {df['spread'].mean()/pip:.2f} pips avg")
+            print(f"[TDS] Loaded {fp.name} | {len(df):,} ticks | Spread: {df['spread'].mean() / pip:.2f} pips avg")
         return df
 
     def load_directory(
         self,
-        pair:  str,
+        pair: str,
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
         """
         Load all TDS files for a pair from data_dir.
@@ -874,12 +893,13 @@ class TickDataSuiteLoader:
         combined = combined[~combined.index.duplicated(keep="first")]
 
         # Date filter
-        if start: combined = combined[combined.index >= pd.Timestamp(start, tz="UTC")]
-        if end:   combined = combined[combined.index <= pd.Timestamp(end,   tz="UTC")]
+        if start:
+            combined = combined[combined.index >= pd.Timestamp(start, tz="UTC")]
+        if end:
+            combined = combined[combined.index <= pd.Timestamp(end, tz="UTC")]
 
         if self.verbose:
-            print(f"[TDS] {pair_clean}: {len(combined):,} ticks | "
-                  f"{combined.index[0]} -> {combined.index[-1]}")
+            print(f"[TDS] {pair_clean}: {len(combined):,} ticks | {combined.index[0]} -> {combined.index[-1]}")
         return combined
 
     def convert_to_parquet(self, pair: str):
@@ -888,7 +908,7 @@ class TickDataSuiteLoader:
         Run once after exporting from TDS.
         """
         pair_clean = pair.upper().replace("/", "")
-        csv_files  = list((self.data_dir / pair_clean).glob("*.csv"))
+        csv_files = list((self.data_dir / pair_clean).glob("*.csv"))
         for f in csv_files:
             out = f.with_suffix(".parquet")
             if out.exists():
@@ -910,9 +930,15 @@ LMAX_HIST_BASE = "https://www.lmax.com/exchange/market-data"
 
 # LMAX instrument IDs for major FX pairs
 LMAX_INSTRUMENTS = {
-    "EURUSD": "4001",   "GBPUSD": "4002",   "USDJPY": "4003",
-    "AUDUSD": "4004",   "USDCAD": "4005",   "EURGBP": "4006",
-    "USDCHF": "4007",   "NZDUSD": "4009",   "EURJPY": "4012",
+    "EURUSD": "4001",
+    "GBPUSD": "4002",
+    "USDJPY": "4003",
+    "AUDUSD": "4004",
+    "USDCAD": "4005",
+    "EURGBP": "4006",
+    "USDCHF": "4007",
+    "NZDUSD": "4009",
+    "EURJPY": "4012",
 }
 
 
@@ -940,19 +966,19 @@ class LMAXLoader:
       DateTime,BidOpen,BidHigh,BidLow,BidClose,AskOpen,AskHigh,AskLow,AskClose,Volume
 
     Live API returns JSON order book snapshots at ~100ms resolution.
-    """
+    """  # noqa: RUF002
 
     def __init__(
         self,
-        data_dir:    str  = DEFAULT_LMAX_DATA_DIR,
-        username:    str | None = None,
-        password:    str | None = None,
-        verbose:     bool = True,
+        data_dir: str = DEFAULT_LMAX_DATA_DIR,
+        username: str | None = None,
+        password: str | None = None,
+        verbose: bool = True,
     ):
         self.data_dir = Path(data_dir)
         self.username = username or os.getenv("LMAX_USERNAME")
         self.password = password or os.getenv("LMAX_PASSWORD")
-        self.verbose  = verbose
+        self.verbose = verbose
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._session_token: str | None = None
 
@@ -960,10 +986,10 @@ class LMAXLoader:
 
     def load_historical_csv(
         self,
-        pair:  str,
+        pair: str,
         filepath: str | None = None,
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
         """
         Load LMAX historical 1-minute OHLCV CSV data.
@@ -1000,15 +1026,19 @@ class LMAXLoader:
         combined = pd.concat(frames).sort_index()
         combined = combined[~combined.index.duplicated(keep="first")]
 
-        if start: combined = combined[combined.index >= pd.Timestamp(start, tz="UTC")]
-        if end:   combined = combined[combined.index <= pd.Timestamp(end,   tz="UTC")]
+        if start:
+            combined = combined[combined.index >= pd.Timestamp(start, tz="UTC")]
+        if end:
+            combined = combined[combined.index <= pd.Timestamp(end, tz="UTC")]
 
         combined = _enforce_schema(combined, pair_clean, "lmax_historical")
         if self.verbose:
             pip = PIP_SIZES.get(pair_clean, 0.0001)
-            print(f"[LMAX] Historical {pair_clean}: {len(combined):,} bars | "
-                  f"Spread: {combined['spread'].mean()/pip:.2f} pips avg | "
-                  f"{combined.index[0]} -> {combined.index[-1]}")
+            print(
+                f"[LMAX] Historical {pair_clean}: {len(combined):,} bars | "
+                f"Spread: {combined['spread'].mean() / pip:.2f} pips avg | "
+                f"{combined.index[0]} -> {combined.index[-1]}"
+            )
         return combined
 
     def _parse_lmax_csv(self, filepath: Path) -> pd.DataFrame:
@@ -1038,20 +1068,23 @@ class LMAXLoader:
         df.columns = df.columns.str.lower().str.strip()
         col_map = {}
         for c in df.columns:
-            if "bidclose"  in c or c == "bc":  col_map[c] = "bid"
-            elif "askclose" in c or c == "ac": col_map[c] = "ask"
-            elif "volume"   in c or c == "vol":col_map[c] = "volume"
+            if "bidclose" in c or c == "bc":
+                col_map[c] = "bid"
+            elif "askclose" in c or c == "ac":
+                col_map[c] = "ask"
+            elif "volume" in c or c == "vol":
+                col_map[c] = "volume"
         df = df.rename(columns=col_map)
 
         # Fall back to synthesizing bid/ask from BidHigh/Low if BidClose missing
         if "bid" not in df.columns:
-            bh_col = next((c for c in df.columns if "bidhi" in c or c=="bh"), None)
-            bl_col = next((c for c in df.columns if "bidlo" in c or c=="bl"), None)
+            bh_col = next((c for c in df.columns if "bidhi" in c or c == "bh"), None)
+            bl_col = next((c for c in df.columns if "bidlo" in c or c == "bl"), None)
             if bh_col and bl_col:
                 df["bid"] = (df[bh_col] + df[bl_col]) / 2.0
         if "ask" not in df.columns:
-            ah_col = next((c for c in df.columns if "askhi" in c or c=="ah"), None)
-            al_col = next((c for c in df.columns if "asklo" in c or c=="al"), None)
+            ah_col = next((c for c in df.columns if "askhi" in c or c == "ah"), None)
+            al_col = next((c for c in df.columns if "asklo" in c or c == "al"), None)
             if ah_col and al_col:
                 df["ask"] = (df[ah_col] + df[al_col]) / 2.0
 
@@ -1066,8 +1099,8 @@ class LMAXLoader:
             return False
         try:
             import json
-            payload = json.dumps({"username": self.username,
-                                   "password": self.password}).encode()
+
+            payload = json.dumps({"username": self.username, "password": self.password}).encode()
             req = Request(
                 f"{LMAX_REST_BASE}/public/security/authenticate",
                 data=payload,
@@ -1092,12 +1125,12 @@ class LMAXLoader:
         Returns dict with keys: bid_levels, ask_levels, timestamp
         Each level: {"price": float, "quantity": float}
         """
-        if not self._session_token:
-            if not self.login():
-                return None
+        if not self._session_token and not self.login():
+            return None
         try:
             import json
-            instr_id = LMAX_INSTRUMENTS.get(pair.upper().replace("/",""), "4001")
+
+            instr_id = LMAX_INSTRUMENTS.get(pair.upper().replace("/", ""), "4001")
             req = Request(
                 f"{LMAX_REST_BASE}/public/orderbook/{instr_id}/data",
                 headers={
@@ -1108,12 +1141,12 @@ class LMAXLoader:
             with urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read())
                 return {
-                    "timestamp":  pd.Timestamp.now(tz="UTC"),
-                    "pair":       pair,
+                    "timestamp": pd.Timestamp.now(tz="UTC"),
+                    "pair": pair,
                     "bid_levels": data.get("bids", [])[:10],
                     "ask_levels": data.get("asks", [])[:10],
-                    "best_bid":   float(data["bids"][0]["price"]) if data.get("bids") else None,
-                    "best_ask":   float(data["asks"][0]["price"]) if data.get("asks") else None,
+                    "best_bid": float(data["bids"][0]["price"]) if data.get("bids") else None,
+                    "best_ask": float(data["asks"][0]["price"]) if data.get("asks") else None,
                 }
         except Exception as e:
             print(f"[LMAX] Order book error: {e}")
@@ -1121,9 +1154,9 @@ class LMAXLoader:
 
     def stream_ticks(
         self,
-        pair:      str,
-        n_ticks:   int = 1000,
-        callback = None,
+        pair: str,
+        n_ticks: int = 1000,
+        callback=None,
     ) -> pd.DataFrame:
         """
         Poll the LMAX REST API for live tick data.
@@ -1131,9 +1164,8 @@ class LMAXLoader:
 
         callback: optional function(tick_dict) called on each new tick.
         """
-        if not self._session_token:
-            if not self.login():
-                return pd.DataFrame()
+        if not self._session_token and not self.login():
+            return pd.DataFrame()
 
         try:
             asyncio.get_running_loop()
@@ -1151,17 +1183,18 @@ class LMAXLoader:
             ob = self.fetch_orderbook(pair)
             if ob and ob["best_bid"] and ob["best_ask"]:
                 tick = {
-                    "bid":    ob["best_bid"],
-                    "ask":    ob["best_ask"],
+                    "bid": ob["best_bid"],
+                    "ask": ob["best_ask"],
                     "volume": 1,
                 }
                 ticks.append((ob["timestamp"], tick))
-                if callback: callback(tick)
-            time.sleep(0.1)   # 10 Hz polling — replace with FIX 4.4 for production
+                if callback:
+                    callback(tick)
+            time.sleep(0.1)  # 10 Hz polling - replace with FIX 4.4 for production
 
         idx = pd.DatetimeIndex([t[0] for t in ticks], tz="UTC")
-        df  = pd.DataFrame([t[1] for t in ticks], index=idx)
-        return _enforce_schema(df, pair.upper().replace("/",""), "lmax_live")
+        df = pd.DataFrame([t[1] for t in ticks], index=idx)
+        return _enforce_schema(df, pair.upper().replace("/", ""), "lmax_live")
 
     def convert_to_parquet(self, pair: str):
         """Convert all LMAX CSVs to Parquet for fast future loads."""
@@ -1179,6 +1212,7 @@ class LMAXLoader:
 # UNIFIED DATA MANAGER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class ForexDataManager:
     """
     Single interface across all three data sources.
@@ -1192,15 +1226,15 @@ class ForexDataManager:
     -----
         mgr = ForexDataManager()
 
-        # Research / backtest — free Dukascopy data
+        # Research / backtest - free Dukascopy data
         df = mgr.load("EURUSD", start="2023-01-01", end="2023-12-31",
                        source="dukascopy")
 
-        # Backtest with real spreads — TDS export
+        # Backtest with real spreads - TDS export
         df = mgr.load("EURUSD", start="2023-01-01", end="2023-12-31",
                        source="tds")
 
-        # Live trading — LMAX ECN feed
+        # Live trading - LMAX ECN feed
         df = mgr.load("EURUSD", source="lmax_live", n_ticks=10000)
 
         # Auto-select best available source
@@ -1211,49 +1245,50 @@ class ForexDataManager:
 
     def __init__(
         self,
-        dukascopy_dir:  str = DEFAULT_DUKASCOPY_CACHE_DIR,
+        dukascopy_dir: str = DEFAULT_DUKASCOPY_CACHE_DIR,
         dukascopy_compact_dir: str = DEFAULT_DUKASCOPY_COMPACT_DIR,
-        tds_dir:        str = DEFAULT_TDS_DATA_DIR,
-        lmax_dir:       str = DEFAULT_LMAX_DATA_DIR,
-        myfxbook_dir:   str = "",          # auto-resolved from data/myfxbook.py default
-        eodhd_api_key:  str = "",          # falls back to EODHD_API_KEY env var
-        eodhd_cache_dir: str = "",         # auto-resolved from data/eodhd.py default
-        lmax_username:  str | None = None,
-        lmax_password:  str | None = None,
-        verbose:        bool = True,
+        tds_dir: str = DEFAULT_TDS_DATA_DIR,
+        lmax_dir: str = DEFAULT_LMAX_DATA_DIR,
+        myfxbook_dir: str = "",  # auto-resolved from data/myfxbook.py default
+        eodhd_api_key: str = "",  # falls back to EODHD_API_KEY env var
+        eodhd_cache_dir: str = "",  # auto-resolved from data/eodhd.py default
+        lmax_username: str | None = None,
+        lmax_password: str | None = None,
+        verbose: bool = True,
     ):
         from data.databento_loader import DatabentoLoader
         from data.eodhd import DEFAULT_EODHD_CACHE_DIR, EODHDLoader
         from data.myfxbook import DEFAULT_MYFXBOOK_DATA_DIR, MyfxbookLoader
-        self.duka     = DukascopyLoader(dukascopy_dir, verbose=verbose)
-        self.tds      = TickDataSuiteLoader(tds_dir, verbose=verbose)
-        self.lmax     = LMAXLoader(lmax_dir, lmax_username, lmax_password, verbose=verbose)
+
+        self.duka = DukascopyLoader(dukascopy_dir, verbose=verbose)
+        self.tds = TickDataSuiteLoader(tds_dir, verbose=verbose)
+        self.lmax = LMAXLoader(lmax_dir, lmax_username, lmax_password, verbose=verbose)
         self.databento = DatabentoLoader(verbose=verbose)
         self.myfxbook = MyfxbookLoader(myfxbook_dir or DEFAULT_MYFXBOOK_DATA_DIR, verbose=verbose)
-        self.eodhd    = EODHDLoader(
-            api_key   = eodhd_api_key,
-            cache_dir = eodhd_cache_dir or DEFAULT_EODHD_CACHE_DIR,
-            verbose   = verbose,
+        self.eodhd = EODHDLoader(
+            api_key=eodhd_api_key,
+            cache_dir=eodhd_cache_dir or DEFAULT_EODHD_CACHE_DIR,
+            verbose=verbose,
         )
         self.duka_compact_dir = Path(dukascopy_compact_dir)
         self.duka_compact_dir.mkdir(parents=True, exist_ok=True)
-        self.verbose  = verbose
+        self.verbose = verbose
 
     def load(
         self,
-        pair:     str,
-        source:   str  = "auto",
-        start:    str | None = None,
-        end:      str | None = None,
-        n_ticks:  int  = 10_000,       # for live sources
-        session_only: bool = True,     # London session + NY open 07-17 UTC (Dukascopy)
-        streaming: bool = False,       # return Polars LazyFrame (filters pushed down)
-        as_pandas: bool = False,       # return legacy pandas DataFrame instead of Polars
+        pair: str,
+        source: str = "auto",
+        start: str | None = None,
+        end: str | None = None,
+        n_ticks: int = 10_000,  # for live sources
+        session_only: bool = True,  # London session + NY open 07-17 UTC (Dukascopy)
+        streaming: bool = False,  # return Polars LazyFrame (filters pushed down)
+        as_pandas: bool = False,  # return legacy pandas DataFrame instead of Polars
     ) -> pl.DataFrame | pl.LazyFrame | pd.DataFrame:
         """
         Load tick/bar data for a pair.
 
-        Defaults to Polars (5-10× less RAM than the old pandas path) and is the
+        Defaults to Polars (5-10x less RAM than the old pandas path) and is the
         format the rest of the pipeline already speaks. Pass `as_pandas=True` for
         callers that haven't been ported yet; pass `streaming=True` for a LazyFrame
         that defers materialisation to the caller so even a multi-year query stays
@@ -1267,29 +1302,30 @@ class ForexDataManager:
 
             try:
                 df = self.query_dukascopy_duckdb(
-                    pair, start, end, streaming=streaming, as_pandas=as_pandas,
+                    pair,
+                    start,
+                    end,
+                    streaming=streaming,
+                    as_pandas=as_pandas,
                 )
                 if streaming:
                     # Lazy path: push the session filter down too.
                     if session_only:
                         df = df.filter(
-                            (pl.col("timestamp_utc").dt.hour() >= 7) &
-                            (pl.col("timestamp_utc").dt.hour() < 18)
+                            (pl.col("timestamp_utc").dt.hour() >= 7) & (pl.col("timestamp_utc").dt.hour() < 18)
                         )
                     return df
                 # Materialised path (Polars or pandas depending on as_pandas)
                 if as_pandas:
                     if not df.empty:
                         if session_only:
-                            df = df[(df['timestamp_utc'].dt.hour >= 7)
-                                    & (df['timestamp_utc'].dt.hour < 18)]
+                            df = df[(df["timestamp_utc"].dt.hour >= 7) & (df["timestamp_utc"].dt.hour < 18)]
                         return df
                 else:
                     if df.height > 0:
                         if session_only:
                             df = df.filter(
-                                (pl.col("timestamp_utc").dt.hour() >= 7) &
-                                (pl.col("timestamp_utc").dt.hour() < 18)
+                                (pl.col("timestamp_utc").dt.hour() >= 7) & (pl.col("timestamp_utc").dt.hour() < 18)
                             )
                         return df
             except Exception as e:
@@ -1311,7 +1347,7 @@ class ForexDataManager:
             from pathlib import Path as _Path
 
             db_dir = _Path(self.databento.data_dir)
-            mbp10_files  = sorted(db_dir.glob(f"{pair}_mbp-10_*.parquet"))
+            mbp10_files = sorted(db_dir.glob(f"{pair}_mbp-10_*.parquet"))
             trades_files = sorted(db_dir.glob(f"{pair}_trades_*.parquet"))
 
             frames = []
@@ -1319,11 +1355,16 @@ class ForexDataManager:
             # 1. Load databento mbp-10 where available (highest quality)
             if mbp10_files:
                 df_mbp = self.databento.load(pair, start, end)
-                if not (len(df_mbp) == 0) if hasattr(df_mbp, 'is_empty') else not df_mbp.empty:
+                if len(df_mbp) != 0 if hasattr(df_mbp, "is_empty") else not df_mbp.empty:
                     import pandas as _pd
-                    if hasattr(df_mbp, 'to_pandas'):
+
+                    if hasattr(df_mbp, "to_pandas"):
                         df_mbp = df_mbp.to_pandas()
-                    df_mbp = _enforce_schema(df_mbp.set_index("timestamp_utc") if "timestamp_utc" in df_mbp.columns else df_mbp, pair, "databento")
+                    df_mbp = _enforce_schema(
+                        df_mbp.set_index("timestamp_utc") if "timestamp_utc" in df_mbp.columns else df_mbp,
+                        pair,
+                        "databento",
+                    )
                     frames.append(("mbp10", df_mbp))
 
             # Determine gap: dates NOT covered by mbp-10
@@ -1335,30 +1376,45 @@ class ForexDataManager:
             # 2. Fill gap with databento trades
             if trades_files and start and end:
                 import pandas as _pd
+
                 gap_start = (mbp10_end + _pd.Timedelta("1ms")).strftime("%Y-%m-%d") if mbp10_end else start
                 if gap_start < end:
                     # Temporarily swap the glob pattern to load trades files
                     from data.databento_loader import DatabentoLoader as _DBL
+
                     _DBL(data_dir=str(db_dir), verbose=self.verbose)
                     # Patch to load trades schema files
                     trades_pattern = f"{pair}_trades_*.parquet"
                     import polars as _pl
+
                     try:
                         lazy = _pl.scan_parquet(str(db_dir / trades_pattern))
                         schema = lazy.collect_schema()
                         ts_col = "ts_event" if "ts_event" in schema.names() else "ts_recv"
                         import datetime as _dt
+
                         _s = _dt.datetime.strptime(gap_start, "%Y-%m-%d").replace(tzinfo=_dt.UTC)
-                        _e = _dt.datetime.strptime(end, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=_dt.UTC)
+                        _e = _dt.datetime.strptime(end, "%Y-%m-%d").replace(
+                            hour=23, minute=59, second=59, tzinfo=_dt.UTC
+                        )
                         lazy = lazy.filter((_pl.col(ts_col) >= _s) & (_pl.col(ts_col) <= _e))
                         first_px = lazy.select(_pl.col("bid_px_00").first()).collect()["bid_px_00"][0]
                         scale = 1e9 if first_px and first_px > 10000 else 1.0
-                        df_tr = lazy.select([
-                            _pl.col(ts_col).alias("timestamp_utc"),
-                            (_pl.col("bid_px_00") / scale).cast(_pl.Float32).alias("bid"),
-                            (_pl.col("ask_px_00") / scale).cast(_pl.Float32).alias("ask"),
-                            ((_pl.col("bid_sz_00") + _pl.col("ask_sz_00")) / 2.0).cast(_pl.Float32).alias("volume"),
-                        ]).collect().to_pandas().set_index("timestamp_utc")
+                        df_tr = (
+                            lazy.select(
+                                [
+                                    _pl.col(ts_col).alias("timestamp_utc"),
+                                    (_pl.col("bid_px_00") / scale).cast(_pl.Float32).alias("bid"),
+                                    (_pl.col("ask_px_00") / scale).cast(_pl.Float32).alias("ask"),
+                                    ((_pl.col("bid_sz_00") + _pl.col("ask_sz_00")) / 2.0)
+                                    .cast(_pl.Float32)
+                                    .alias("volume"),
+                                ]
+                            )
+                            .collect()
+                            .to_pandas()
+                            .set_index("timestamp_utc")
+                        )
                         df_tr = _enforce_schema(df_tr, pair, "databento_trades")
                         if not df_tr.empty:
                             frames.append(("trades", df_tr))
@@ -1369,6 +1425,7 @@ class ForexDataManager:
             # 3. Fill any remaining gap with Dukascopy
             covered_end = max(f.index.max() for _, f in frames) if frames else None
             import pandas as _pd2
+
             duka_start = (covered_end + _pd2.Timedelta("1ms")).strftime("%Y-%m-%d") if covered_end else start
             if duka_start and end and duka_start < end:
                 hours = list(range(7, 18)) if session_only else None
@@ -1387,7 +1444,9 @@ class ForexDataManager:
             combined = combined[~combined.index.duplicated(keep="first")]
             if self.verbose:
                 sources_used = [s for s, _ in frames]
-                print(f"[Hybrid] {pair}: {len(combined):,} ticks | sources={sources_used} | {combined.index.min()} -> {combined.index.max()}")
+                print(
+                    f"[Hybrid] {pair}: {len(combined):,} ticks | sources={sources_used} | {combined.index.min()} -> {combined.index.max()}"
+                )
             return combined
 
         elif source == "lmax_historical":
@@ -1413,19 +1472,22 @@ class ForexDataManager:
             # All failed -> synthetic fallback
             print(f"[DataManager] All sources failed for {pair}. Using synthetic data.")
             if self.verbose:
-                for e in errors: print(e)
+                for e in errors:
+                    print(e)
             from data.data_ingestion import generate_synthetic_tick_data
+
             return generate_synthetic_tick_data(n_rows=n_ticks)
 
         else:
-            raise ValueError(f"Unknown source '{source}'. "
-                             f"Options: dukascopy, tds, lmax_historical, lmax_live, myfxbook, eodhd, auto")
+            raise ValueError(
+                f"Unknown source '{source}'. Options: dukascopy, tds, lmax_historical, lmax_live, myfxbook, eodhd, auto"
+            )
 
     def load_all_pairs(
         self,
         source: str = "dukascopy",
-        start:  str | None = None,
-        end:    str | None = None,
+        start: str | None = None,
+        end: str | None = None,
     ) -> dict[str, pd.DataFrame]:
         """Load all 9 configured pairs. Uses load_multiple for Dukascopy (shared session)."""
         if source == "dukascopy":
@@ -1445,20 +1507,20 @@ class ForexDataManager:
         n_duplicate_timestamps = int(pd.Index(df.index).duplicated(keep="first").sum())
 
         report = {
-            "pair":             pair,
-            "source":           df["source"].iloc[0] if "source" in df.columns else "unknown",
-            "n_ticks":          len(df),
-            "date_range":       f"{df.index[0]} -> {df.index[-1]}",
-            "avg_spread_pips":  round(df["spread"].mean() / PIP_SIZES.get(pair, 0.0001), 3),
-            "min_spread_pips":  round(df["spread"].min()  / PIP_SIZES.get(pair, 0.0001), 3),
-            "max_spread_pips":  round(df["spread"].max()  / PIP_SIZES.get(pair, 0.0001), 3),
-            "avg_gap_seconds":  round(gaps.mean(), 3),
-            "max_gap_seconds":  round(gaps.max(), 1),
+            "pair": pair,
+            "source": df["source"].iloc[0] if "source" in df.columns else "unknown",
+            "n_ticks": len(df),
+            "date_range": f"{df.index[0]} -> {df.index[-1]}",
+            "avg_spread_pips": round(df["spread"].mean() / PIP_SIZES.get(pair, 0.0001), 3),
+            "min_spread_pips": round(df["spread"].min() / PIP_SIZES.get(pair, 0.0001), 3),
+            "max_spread_pips": round(df["spread"].max() / PIP_SIZES.get(pair, 0.0001), 3),
+            "avg_gap_seconds": round(gaps.mean(), 3),
+            "max_gap_seconds": round(gaps.max(), 1),
             "n_gaps_over_1min": int((gaps > 60).sum()),
             "n_spread_anomalies": int(n_spread_anomalies),
             "n_bid_ask_inversions": int(n_bid_ask_inversion),
             "n_duplicate_timestamps": n_duplicate_timestamps,
-            "quality_score":    round(
+            "quality_score": round(
                 100 * (1 - (n_spread_anomalies + n_bid_ask_inversion + n_duplicate_timestamps) / max(len(df), 1)), 2
             ),
         }
@@ -1598,8 +1660,7 @@ class ForexDataManager:
             summary[pair] = pair_summary
             if self.verbose:
                 print(
-                    f"[DataManager] Compacted {pair}: "
-                    f"{pair_summary['partitions_written']} {granularity} partition(s)"
+                    f"[DataManager] Compacted {pair}: {pair_summary['partitions_written']} {granularity} partition(s)"
                 )
 
         return summary
@@ -1671,7 +1732,7 @@ class ForexDataManager:
         Read tick data for a pair/date range.
 
         Returns a Polars DataFrame by default (memory-cheap columnar Arrow buffers,
-        the same in-memory format DuckDB uses internally — so the result is moved
+        the same in-memory format DuckDB uses internally - so the result is moved
         across the boundary as a zero-copy Arrow transfer, not copied through pandas).
 
         Modes:
@@ -1681,8 +1742,8 @@ class ForexDataManager:
             the feature cache).
           - `streaming=True`: a Polars LazyFrame with filters/column projection
             pushed down to parquet. Nothing is materialised until .collect() is
-            called — the caller stays in control of the working set.
-          - `as_pandas=True`: legacy pandas DataFrame (uses ~5-10× more RAM and
+            called - the caller stays in control of the working set.
+          - `as_pandas=True`: legacy pandas DataFrame (uses ~5-10x more RAM and
             triggers an Arrow→NumPy conversion; kept for callers that haven't
             been ported yet).
 
@@ -1697,11 +1758,12 @@ class ForexDataManager:
         granularity = self._normalize_granularity(granularity)
         pair_dir = self.duka_compact_dir / f"granularity={granularity}" / f"pair={pair}"
 
-        #FAST path: consolidated DuckDB. Arrow -> Polars, zero pandas copies.
+        # FAST path: consolidated DuckDB. Arrow -> Polars, zero pandas copies.
         consolidated_db = self.duka_compact_dir.parent.parent / "store" / "forex_ticks.duckdb"
         if consolidated_db.exists():
             try:
                 import duckdb
+
                 with duckdb.connect(str(consolidated_db), read_only=True) as conn:
                     query = """
                         SELECT timestamp, bid, ask, mid, spread, volume, pair, source
@@ -1711,7 +1773,7 @@ class ForexDataManager:
                           AND timestamp < ?
                         ORDER BY timestamp
                     """
-                    #Use Arrow instead of pandas: Arrow is Polars' native
+                    # Use Arrow instead of pandas: Arrow is Polars' native
                     # in-memory format, so DuckDB hands the buffer to Polars
                     # without an extra NumPy materialisation. This is what
                     # keeps a 50M-row query at ~1-2 GB peak instead of 7+.
@@ -1723,17 +1785,11 @@ class ForexDataManager:
                             df_pl = df_pl.rename({"timestamp": "timestamp_utc"})
                         ts_col = df_pl["timestamp_utc"]
                         if ts_col.dtype == pl.Utf8:
-                            df_pl = df_pl.with_columns(
-                                pl.col("timestamp_utc").str.to_datetime(time_zone="UTC")
-                            )
+                            df_pl = df_pl.with_columns(pl.col("timestamp_utc").str.to_datetime(time_zone="UTC"))
                         elif getattr(ts_col.dtype, "time_zone", None) is None:
-                            df_pl = df_pl.with_columns(
-                                pl.col("timestamp_utc").dt.replace_time_zone("UTC")
-                            )
+                            df_pl = df_pl.with_columns(pl.col("timestamp_utc").dt.replace_time_zone("UTC"))
                         elif ts_col.dtype.time_zone != "UTC":
-                            df_pl = df_pl.with_columns(
-                                pl.col("timestamp_utc").dt.convert_time_zone("UTC")
-                            )
+                            df_pl = df_pl.with_columns(pl.col("timestamp_utc").dt.convert_time_zone("UTC"))
                         if streaming:
                             return df_pl.lazy()
                         if as_pandas:
@@ -1743,16 +1799,12 @@ class ForexDataManager:
                 if self.verbose:
                     print(f"[DuckDB] Failed to read consolidated DB, falling back to parquet scan: {e}")
 
-        #allback: Polars lazy scan over the per-day hive-partitioned parquet
+        # allback: Polars lazy scan over the per-day hive-partitioned parquet
         # files. Filters are pushed down so only matching daily files are read.
         glob_path = str(pair_dir / "year=*" / "month=*" / "day=*" / "ticks.parquet")
         lf = pl.scan_parquet(glob_path, hive_partitioning=True)
         lf = (
-            lf.filter(
-                (pl.col("timestamp") >= start_ts) &
-                (pl.col("timestamp") < end_ts) &
-                (pl.col("pair") == pair)
-            )
+            lf.filter((pl.col("timestamp") >= start_ts) & (pl.col("timestamp") < end_ts) & (pl.col("pair") == pair))
             .with_columns(pl.col("timestamp").alias("timestamp_utc"))
             .drop("timestamp")
             .sort("timestamp_utc")
@@ -1761,21 +1813,17 @@ class ForexDataManager:
         if streaming:
             return lf
 
-        #Default materialised Polars path
+        # Default materialised Polars path
         df_pl = lf.collect()
         if df_pl.is_empty():
             return pl.DataFrame() if not as_pandas else pd.DataFrame()
 
-        #Coerce timezone on the materialised frame too
+        # Coerce timezone on the materialised frame too
         ts_series = df_pl["timestamp_utc"]
         if ts_series.dtype == pl.Utf8:
-            df_pl = df_pl.with_columns(
-                pl.col("timestamp_utc").str.to_datetime(time_zone="UTC")
-            )
+            df_pl = df_pl.with_columns(pl.col("timestamp_utc").str.to_datetime(time_zone="UTC"))
         elif getattr(ts_series.dtype, "time_zone", None) is None:
-            df_pl = df_pl.with_columns(
-                pl.col("timestamp_utc").dt.replace_time_zone("UTC")
-            )
+            df_pl = df_pl.with_columns(pl.col("timestamp_utc").dt.replace_time_zone("UTC"))
 
         if "pair" not in df_pl.columns:
             df_pl = df_pl.with_columns(pl.lit(pair).alias("pair"))
@@ -1866,35 +1914,35 @@ class ForexDataManager:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Data Sources — connection test")
+    print("Data Sources - connection test")
     print("=" * 55)
 
     mgr = ForexDataManager(verbose=True)
 
-    # 1. Dukascopy — try loading 3 days of EURUSD
+    # 1. Dukascopy - try loading 3 days of EURUSD
     print("\n[1] Dukascopy free tick data")
     try:
         df_duka = mgr.load(
-            "EURUSD", source="dukascopy",
-            start="2024-01-02", end="2024-01-04",
+            "EURUSD",
+            source="dukascopy",
+            start="2024-01-02",
+            end="2024-01-04",
             session_only=True,
         )
         print(f"    Ticks: {len(df_duka):,}")
         print(f"    Sample:\n{df_duka.head(3)}")
         rpt = mgr.quality_report(df_duka, "EURUSD")
-        print(f"    Quality: {rpt['quality_score']}% | "
-              f"Avg spread: {rpt['avg_spread_pips']} pips")
+        print(f"    Quality: {rpt['quality_score']}% | Avg spread: {rpt['avg_spread_pips']} pips")
     except Exception as e:
         print(f"    Dukascopy error: {e}")
-        print("    (Expected if no internet — offline / air-gapped)")
+        print("    (Expected if no internet - offline / air-gapped)")
 
-    # 2. TDS — check if export files exist
+    # 2. TDS - check if export files exist
     print("\n[2] Tick Data Suite")
     tds_dir = Path(DEFAULT_TDS_DATA_DIR) / "EURUSD"
     if tds_dir.exists() and list(tds_dir.glob("*.csv")):
         try:
-            df_tds = mgr.load("EURUSD", source="tds",
-                               start="2024-01-01", end="2024-01-31")
+            df_tds = mgr.load("EURUSD", source="tds", start="2024-01-01", end="2024-01-31")
             print(f"    Ticks: {len(df_tds):,}")
         except Exception as e:
             print(f"    TDS load error: {e}")
@@ -1902,13 +1950,12 @@ if __name__ == "__main__":
         print(f"    No TDS files found in {tds_dir}/")
         print("    Export tick data from Tick Data Suite -> place CSVs there")
 
-    # 3. LMAX — historical CSV check
+    # 3. LMAX - historical CSV check
     print("\n[3] LMAX Exchange")
     lmax_dir = Path(DEFAULT_LMAX_DATA_DIR) / "EURUSD"
     if lmax_dir.exists() and list(lmax_dir.glob("*.csv")):
         try:
-            df_lmax = mgr.load("EURUSD", source="lmax_historical",
-                                start="2024-01-01", end="2024-01-31")
+            df_lmax = mgr.load("EURUSD", source="lmax_historical", start="2024-01-01", end="2024-01-31")
             print(f"    Bars: {len(df_lmax):,}")
         except Exception as e:
             print(f"    LMAX load error: {e}")
@@ -1919,4 +1966,3 @@ if __name__ == "__main__":
 
     print("\n[Schema] All sources produce the same columns:")
     print(f"    {TICK_COLUMNS}")
-

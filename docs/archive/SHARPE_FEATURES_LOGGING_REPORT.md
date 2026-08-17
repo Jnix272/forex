@@ -26,7 +26,7 @@ Three interconnected problems are identified. The Sharpe ratio is being calculat
 
 ```python
 # Current — wrong: applies sqrt a second time
-self._ann_sqrt = float(ann) ** 0.5   # → √325 ≈ 18
+self._ann_sqrt = float(ann) ** 0.5  # → √325 ≈ 18
 ```
 
 This means the actual annualisation factor used in the loss is `~18` instead of the intended `325`. The Sharpe gradient is nearly **18× too weak**, so the Huber baseline dominates training and the Sharpe loss provides almost no signal.
@@ -35,10 +35,10 @@ This means the actual annualisation factor used in the loss is `~18` instead of 
 Pick one convention and stick to it:
 ```python
 # Option A — pass raw period count in config (e.g. 252*420 = 105840), apply sqrt once:
-self._ann_sqrt = float(ann) ** 0.5   # sqrt(105840) ≈ 325 ✅
+self._ann_sqrt = float(ann) ** 0.5  # sqrt(105840) ≈ 325 ✅
 
 # Option B — pass pre-computed sqrt in config (325.0), don't apply sqrt again:
-self._ann_sqrt = float(ann)           # use directly ✅
+self._ann_sqrt = float(ann)  # use directly ✅
 ```
 
 ---
@@ -52,13 +52,13 @@ self._ann_sqrt = float(ann)           # use directly ✅
 
 **Description:**  
 ```python
-std = returns.std(unbiased=False)   # ddof=0 — biased estimator
+std = returns.std(unbiased=False)  # ddof=0 — biased estimator
 ```
 Using `unbiased=False` on small training batches (e.g. 128 samples) gives a standard deviation that is systematically too small. This artificially inflates the Sharpe ratio during training, causing the model to think its signals are cleaner than they actually are.
 
 **Recommended Fix:**
 ```python
-std = returns.std(unbiased=True)    # ddof=1 — correct sample std ✅
+std = returns.std(unbiased=True)  # ddof=1 — correct sample std ✅
 ```
 
 ---
@@ -99,7 +99,7 @@ All Sharpe calculations in the codebase compute raw `mean / std` with no risk-fr
 
 **Recommended Fix:**
 ```python
-ANNUAL_RF = 0.05          # load from config
+ANNUAL_RF = 0.05  # load from config
 rf_per_bar = ANNUAL_RF / bars_per_year
 excess_returns = returns - rf_per_bar
 sharpe = excess_returns.mean() / excess_returns.std(ddof=1) * ann_sqrt
@@ -116,7 +116,7 @@ sharpe = excess_returns.mean() / excess_returns.std(ddof=1) * ann_sqrt
 
 **Description:**  
 ```python
-regime_consistency = np.mean(val_sharpes)   # average of per-fold Sharpes
+regime_consistency = np.mean(val_sharpes)  # average of per-fold Sharpes
 ```
 Averaging Sharpe ratios across folds breaks mathematical consistency. Because Sharpe is non-linear (ratio of mean to std), a fold with high volatility and good returns weighs equally to a low-volatility fold with mediocre returns. The correct approach is to concatenate all fold predictions into one series and compute a single overall Sharpe.
 
@@ -160,14 +160,10 @@ The variable is assigned at line 1334 (which is why vulture flagged it as "assig
 ```python
 # If finbert_embs is provided, join it to the feature frame on timestamp:
 if finbert_embs is not None and len(finbert_embs) > 0:
-    emb_df = pl.DataFrame(finbert_embs)   # columns: timestamp_utc, fb_0..fb_7
-    F = F.join_asof(
-        emb_df.sort("timestamp_utc"),
-        on="timestamp_utc",
-        strategy="backward"
-    ).with_columns([
-        pl.col(f"fb_{i}").fill_null(0.0) for i in range(8)
-    ])
+    emb_df = pl.DataFrame(finbert_embs)  # columns: timestamp_utc, fb_0..fb_7
+    F = F.join_asof(emb_df.sort("timestamp_utc"), on="timestamp_utc", strategy="backward").with_columns(
+        [pl.col(f"fb_{i}").fill_null(0.0) for i in range(8)]
+    )
 else:
     # Fallback to zeros only when no embeddings provided
     F = F.with_columns([pl.lit(0.0).alias(f"fb_{i}") for i in range(8)])
@@ -218,10 +214,10 @@ This was already identified as a known issue (fixed in `onnx_compatible_features
 Establish one canonical name in `config/settings.py` and use it everywhere:
 ```python
 TEMPORAL_FEATURE_NAMES = {
-    "hour_sin": "time_sin",   # maps old names → current names
+    "hour_sin": "time_sin",  # maps old names → current names
     "hour_cos": "time_cos",
-    "dow_sin":  "day_sin",
-    "dow_cos":  "day_cos",
+    "dow_sin": "day_sin",
+    "dow_cos": "day_cos",
 }
 ```
 
@@ -296,6 +292,7 @@ print(f"[DemotionMonitor] ⬇️ DEMOTION TRIGGERED for {model_id}")
 Replace all operational `print()` with structured `logging` calls:
 ```python
 import logging
+
 logger = logging.getLogger("forex.training")
 
 logger.critical("[Preflight] FATAL: model not loaded")
@@ -318,12 +315,13 @@ The FastAPI application has no server-side logging. When a position sizing reque
 **Recommended Fix:**
 ```python
 import logging
+
 logger = logging.getLogger("forex.api")
+
 
 @app.post("/position-size")
 async def position_size(payload: PositionPayload):
-    logger.info("position_size called: pair=%s risk_pct=%.4f", 
-                payload.pair, payload.risk_pct)
+    logger.info("position_size called: pair=%s risk_pct=%.4f", payload.pair, payload.risk_pct)
     try:
         result = compute_position(payload)
         logger.info("position_size result: size=%.2f", result.size)
@@ -351,8 +349,8 @@ from logging.handlers import RotatingFileHandler
 
 handler = RotatingFileHandler(
     "logs/training.log",
-    maxBytes=50 * 1024 * 1024,   # 50 MB per file
-    backupCount=5                 # keep 5 rotated files
+    maxBytes=50 * 1024 * 1024,  # 50 MB per file
+    backupCount=5,  # keep 5 rotated files
 )
 ```
 Add a cron or startup cleanup for old demotion JSON files:

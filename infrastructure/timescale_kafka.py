@@ -2,11 +2,11 @@
 infrastructure/timescale_kafka.py
 ==================================
 Two components:
-  1. TimescaleDBStore  — write/read tick data via hypertables
-  2. KafkaTickConsumer — stream live ticks into TimescaleDB in real-time
+  1. TimescaleDBStore  - write/read tick data via hypertables
+  2. KafkaTickConsumer - stream live ticks into TimescaleDB in real-time
 
 TimescaleDB is purpose-built for time-series: it chunks data by time,
-auto-compresses old chunks, and runs time-series queries 10-100× faster
+auto-compresses old chunks, and runs time-series queries 10-100x faster
 than plain PostgreSQL on large tick datasets.
 
 Kafka decouples the data feed (broker API) from the storage layer,
@@ -22,21 +22,23 @@ import warnings
 import numpy as np
 import pandas as pd
 
-# ── Optional heavy dependencies — gracefully degraded ────────────────────────
+# ── Optional heavy dependencies - gracefully degraded ────────────────────────
 try:
     import psycopg2
     import psycopg2.extras
+
     PSYCOPG2 = True
 except ImportError:
     PSYCOPG2 = False
-    warnings.warn("psycopg2 not installed. pip install psycopg2-binary")
+    warnings.warn("psycopg2 not installed. pip install psycopg2-binary", stacklevel=2)
 
 try:
     from kafka import KafkaConsumer, KafkaProducer  # noqa: F401
+
     KAFKA = True
 except ImportError:
     KAFKA = False
-    warnings.warn("kafka-python not installed. pip install kafka-python")
+    warnings.warn("kafka-python not installed. pip install kafka-python", stacklevel=2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,21 +118,18 @@ class TimescaleDBStore:
 
     def __init__(
         self,
-        host:   str = "localhost",
-        port:   int = 5432,
+        host: str = "localhost",
+        port: int = 5432,
         dbname: str = "forex_ticks",
-        user:   str = "forex_user",
+        user: str = "forex_user",
         password: str = "",
         tick_table: str = "tick_data",
-        bar_table:  str = "ohlcv_bars",
+        bar_table: str = "ohlcv_bars",
         news_table: str = "news_data",
     ):
-        self.dsn = (
-            f"host={host} port={port} dbname={dbname} "
-            f"user={user} password={password}"
-        )
+        self.dsn = f"host={host} port={port} dbname={dbname} user={user} password={password}"
         self.tick_table = tick_table
-        self.bar_table  = bar_table
+        self.bar_table = bar_table
         self.news_table = news_table
         self._conn: object | None = None
 
@@ -153,11 +152,11 @@ class TimescaleDBStore:
         """
         store = cls.__new__(cls)
         store.tick_table = "tick_data"
-        store.bar_table  = "ohlcv_bars"
+        store.bar_table = "ohlcv_bars"
         store.news_table = "news_data"
         store._mock_ticks: list[dict] = []
-        store._mock_bars:  list[dict] = []
-        store._mock_news:  list[dict] = []
+        store._mock_bars: list[dict] = []
+        store._mock_news: list[dict] = []
         store._is_mock = True
         print("[TimescaleDB] Running in MOCK mode (in-memory storage)")
         return store
@@ -175,14 +174,11 @@ class TimescaleDBStore:
         conn = self.connect()
         with conn.cursor() as cur:
             safe_tick = self.tick_table.replace(".", "_")
-            safe_bar  = self.bar_table.replace(".", "_")
+            safe_bar = self.bar_table.replace(".", "_")
             safe_news = self.news_table.replace(".", "_")
-            cur.execute(TICK_DDL.format(
-                table=self.tick_table, table_safe=safe_tick))
-            cur.execute(BAR_DDL.format(
-                table=self.bar_table, table_safe=safe_bar))
-            cur.execute(NEWS_DDL.format(
-                table=self.news_table, table_safe=safe_news))
+            cur.execute(TICK_DDL.format(table=self.tick_table, table_safe=safe_tick))
+            cur.execute(BAR_DDL.format(table=self.bar_table, table_safe=safe_bar))
+            cur.execute(NEWS_DDL.format(table=self.news_table, table_safe=safe_news))
         conn.commit()
         print(f"[TimescaleDB] Schema ready: {self.tick_table}, {self.bar_table}, {self.news_table}")
 
@@ -191,7 +187,7 @@ class TimescaleDBStore:
     def write_ticks(self, df: pd.DataFrame, pair: str = "EURUSD"):
         """
         Bulk-insert tick DataFrame into TimescaleDB.
-        Uses execute_values for 10-100× faster inserts than row-by-row.
+        Uses execute_values for 10-100x faster inserts than row-by-row.
 
         df must have columns: [bid, ask, volume] with UTC DatetimeIndex.
         """
@@ -202,8 +198,7 @@ class TimescaleDBStore:
 
         conn = self.connect()
         rows = [
-            (ts.isoformat(), pair, float(row["bid"]),
-             float(row["ask"]), int(row.get("volume", 0)))
+            (ts.isoformat(), pair, float(row["bid"]), float(row["ask"]), int(row.get("volume", 0)))
             for ts, row in df.iterrows()
         ]
         sql = f"""
@@ -223,14 +218,10 @@ class TimescaleDBStore:
             return len(records)
 
         conn = self.connect()
-        cols = ["open", "high", "low", "close", "volume",
-                "spread_avg", "bid_close", "ask_close", "n_ticks"]
+        cols = ["open", "high", "low", "close", "volume", "spread_avg", "bid_close", "ask_close", "n_ticks"]
         rows = []
         for ts, row in df.iterrows():
-            rows.append((
-                ts.isoformat(), pair, freq,
-                *[float(row.get(c, 0) or 0) for c in cols]
-            ))
+            rows.append((ts.isoformat(), pair, freq, *[float(row.get(c, 0) or 0) for c in cols]))
         sql = f"""
             INSERT INTO {self.bar_table}
             (time, pair, freq, open, high, low, close, volume,
@@ -255,13 +246,16 @@ class TimescaleDBStore:
             emb = row.get("finbert_embedding")
             if isinstance(emb, (list, np.ndarray)):
                 emb = json.dumps(list(emb))
-            rows.append((
-                ts.isoformat(), pair,
-                str(row.get("headline", "")),
-                float(row.get("sentiment_score", 0.0)),
-                emb,
-                bool(row.get("is_high_impact", False))
-            ))
+            rows.append(
+                (
+                    ts.isoformat(),
+                    pair,
+                    str(row.get("headline", "")),
+                    float(row.get("sentiment_score", 0.0)),
+                    emb,
+                    bool(row.get("is_high_impact", False)),
+                )
+            )
         sql = f"""
             INSERT INTO {self.news_table}
             (time, pair, headline, sentiment_score, finbert_embedding, is_high_impact)
@@ -276,9 +270,9 @@ class TimescaleDBStore:
 
     def read_ticks(
         self,
-        pair:  str = "EURUSD",
+        pair: str = "EURUSD",
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
         limit: int = 1_000_000,
     ) -> pd.DataFrame:
         """
@@ -315,17 +309,16 @@ class TimescaleDBStore:
             LIMIT  %s
         """
         params.append(limit)
-        df = pd.read_sql(sql, conn, params=params, index_col="time",
-                         parse_dates=["time"])
+        df = pd.read_sql(sql, conn, params=params, index_col="time", parse_dates=["time"])
         df.index = pd.to_datetime(df.index, utc=True)
         return df.sort_index()
 
     def read_bars(
         self,
-        pair:  str = "EURUSD",
-        freq:  str = "1min",
+        pair: str = "EURUSD",
+        freq: str = "1min",
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
         limit: int = 100_000,
     ) -> pd.DataFrame:
         """Read pre-aggregated OHLCV bars."""
@@ -355,16 +348,15 @@ class TimescaleDBStore:
             LIMIT  %s
         """
         params.append(limit)
-        df = pd.read_sql(sql, conn, params=params, index_col="time",
-                         parse_dates=["time"])
+        df = pd.read_sql(sql, conn, params=params, index_col="time", parse_dates=["time"])
         df.index = pd.to_datetime(df.index, utc=True)
         return df.sort_index()
 
     def read_news(
         self,
-        pair:  str = "EURUSD",
+        pair: str = "EURUSD",
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
         limit: int = 10_000,
     ) -> pd.DataFrame:
         """Read pre-computed news sentiment and embeddings."""
@@ -397,8 +389,7 @@ class TimescaleDBStore:
             LIMIT  %s
         """
         params.append(limit)
-        df = pd.read_sql(sql, conn, params=params, index_col="time",
-                         parse_dates=["time"])
+        df = pd.read_sql(sql, conn, params=params, index_col="time", parse_dates=["time"])
         df.index = pd.to_datetime(df.index, utc=True)
         return df.sort_index()
 
@@ -409,10 +400,7 @@ class TimescaleDBStore:
             return ticks[-1] if ticks else None
         conn = self.connect()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(
-                f"SELECT * FROM {self.tick_table} WHERE pair=%s "
-                f"ORDER BY time DESC LIMIT 1", (pair,)
-            )
+            cur.execute(f"SELECT * FROM {self.tick_table} WHERE pair=%s ORDER BY time DESC LIMIT 1", (pair,))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -424,14 +412,15 @@ class TimescaleDBStore:
 def _empty_tick_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["bid", "ask", "mid", "spread", "volume"])
 
+
 def _empty_bar_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["open", "high", "low", "close", "volume",
-                                  "spread_avg", "bid_close", "ask_close"])
+    return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "spread_avg", "bid_close", "ask_close"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KAFKA TICK CONSUMER
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class KafkaTickConsumer:
     """
@@ -444,7 +433,7 @@ class KafkaTickConsumer:
                                                                       ↓
                                                               Model Inference
 
-    This means the model never waits for I/O — it reads from TimescaleDB
+    This means the model never waits for I/O - it reads from TimescaleDB
     while Kafka handles the upstream buffering independently.
 
     Usage (in a background thread)
@@ -457,31 +446,31 @@ class KafkaTickConsumer:
 
     def __init__(
         self,
-        store:            TimescaleDBStore,
-        bootstrap_servers: str  = "localhost:9092",
-        tick_topic:        str  = "forex.ticks",
-        news_topic:        str  = "forex.news",
-        consumer_group:    str  = "forex_scaler",
-        batch_size:        int  = 1000,
-        flush_interval_ms: int  = 500,
+        store: TimescaleDBStore,
+        bootstrap_servers: str = "localhost:9092",
+        tick_topic: str = "forex.ticks",
+        news_topic: str = "forex.news",
+        consumer_group: str = "forex_scaler",
+        batch_size: int = 1000,
+        flush_interval_ms: int = 500,
     ):
-        self.store             = store
+        self.store = store
         self.bootstrap_servers = bootstrap_servers
-        self.tick_topic        = tick_topic
-        self.news_topic        = news_topic
-        self.consumer_group    = consumer_group
-        self.batch_size        = batch_size
+        self.tick_topic = tick_topic
+        self.news_topic = news_topic
+        self.consumer_group = consumer_group
+        self.batch_size = batch_size
         self.flush_interval_ms = flush_interval_ms
-        self._running          = False
+        self._running = False
         self._thread: threading.Thread | None = None
-        self._tick_buffer:  list[dict] = []
-        self._news_buffer:  list[dict] = []
+        self._tick_buffer: list[dict] = []
+        self._news_buffer: list[dict] = []
         self.stats = {"ticks_consumed": 0, "batches_written": 0, "errors": 0}
 
     def start(self):
         """Start consuming in a background daemon thread."""
         if not KAFKA:
-            print("[Kafka] kafka-python not installed — consumer disabled")
+            print("[Kafka] kafka-python not installed - consumer disabled")
             return
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -518,8 +507,7 @@ class KafkaTickConsumer:
 
                     # Flush buffer when full or after interval
                     elapsed_ms = (time.time() - last_flush) * 1000
-                    if (len(self._tick_buffer) >= self.batch_size
-                            or elapsed_ms >= self.flush_interval_ms):
+                    if len(self._tick_buffer) >= self.batch_size or elapsed_ms >= self.flush_interval_ms:
                         self._flush_buffer()
                         last_flush = time.time()
 
@@ -532,7 +520,7 @@ class KafkaTickConsumer:
 
     def _handle_message(self, message):
         topic = message.topic
-        data  = message.value
+        data = message.value
 
         if topic == self.tick_topic:
             # Expected format: {time, pair, bid, ask, volume}
@@ -565,7 +553,7 @@ class KafkaTickConsumer:
                     df["time"] = pd.to_datetime(df["time"], utc=True)
                     df = df.set_index("time")
                 if "pair" not in df.columns:
-                    df["pair"] = "EURUSD" # Default if not provided
+                    df["pair"] = "EURUSD"  # Default if not provided
 
                 for pair, group in df.groupby("pair"):
                     self.store.write_news(group, pair=pair)
@@ -579,16 +567,19 @@ class KafkaTickConsumer:
 # MOCK KAFKA PRODUCER  (for testing without a live Kafka cluster)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class MockKafkaProducer:
     """
     Simulates a Kafka producer by feeding synthetic ticks directly
     to a TimescaleDB mock store. Use during development/testing.
     """
 
-    def __init__(self, store: TimescaleDBStore, pairs: list[str] = ["EURUSD"]):
-        self.store   = store
-        self.pairs   = pairs
-        self._rng    = np.random.default_rng(42)
+    def __init__(self, store: TimescaleDBStore, pairs: list[str] | None = None):
+        if pairs is None:
+            pairs = ["EURUSD"]
+        self.store = store
+        self.pairs = pairs
+        self._rng = np.random.default_rng(42)
         self._prices = dict.fromkeys(pairs, 1.085)
 
     def produce_ticks(self, n: int = 10_000) -> int:
@@ -606,25 +597,26 @@ class MockKafkaProducer:
         log_ret = self._rng.normal(0, 0.0001, n)
         mid = base * np.exp(np.cumsum(log_ret))
         spread = 0.00005
-        ts = pd.date_range(
-            start=pd.Timestamp.utcnow() - pd.Timedelta(seconds=n),
-            periods=n, freq="1s", tz="UTC"
+        ts = pd.date_range(start=pd.Timestamp.utcnow() - pd.Timedelta(seconds=n), periods=n, freq="1s", tz="UTC")
+        return pd.DataFrame(
+            {
+                "bid": np.round(mid - spread / 2, 5),
+                "ask": np.round(mid + spread / 2, 5),
+                "volume": self._rng.integers(1, 20, n),
+            },
+            index=ts,
         )
-        return pd.DataFrame({
-            "bid":    np.round(mid - spread / 2, 5),
-            "ask":    np.round(mid + spread / 2, 5),
-            "volume": self._rng.integers(1, 20, n),
-        }, index=ts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONVENIENCE: get a connected store (real or mock)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def get_store(mock: bool = False) -> TimescaleDBStore:
     """
     Returns a TimescaleDB store.
-    Pass mock=True for dev/test — no database required.
+    Pass mock=True for dev/test - no database required.
     In production, set environment variables and pass mock=False.
     """
     if mock or not PSYCOPG2 or not os.getenv("TIMESCALE_HOST"):
@@ -633,7 +625,7 @@ def get_store(mock: bool = False) -> TimescaleDBStore:
 
 
 if __name__ == "__main__":
-    print("TimescaleDB + Kafka — integration smoke test")
+    print("TimescaleDB + Kafka - integration smoke test")
     store = get_store(mock=True)
     producer = MockKafkaProducer(store, pairs=["EURUSD", "GBPUSD"])
     n = producer.produce_ticks(n=5_000)

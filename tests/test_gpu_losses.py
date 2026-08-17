@@ -1,4 +1,5 @@
 """Unit tests for trading-aware GPU losses."""
+
 from __future__ import annotations
 
 import argparse
@@ -15,7 +16,7 @@ def test_soft_direction_bounds_and_grad_at_large_pred():
     assert torch.all(out.abs() < 1.0)
     assert float(out[2].detach()) == 0.0
     out.sum().backward()
-    # softsign grad = 1/(1+|x|)^2 — still material at |x|=50 (~4e-4), unlike tanh (~0)
+    # softsign grad = 1/(1+|x|)^2 - still material at |x|=50 (~4e-4), unlike tanh (~0)
     assert pred.grad is not None
     assert float(pred.grad[0].abs()) > 1e-5
     assert float(pred.grad[-1].abs()) > 1e-5
@@ -38,11 +39,7 @@ def test_apply_yaml_maps_distillation_student_when_enabled(tmp_path):
 
     cfg = tmp_path / "kd.yaml"
     cfg.write_text(
-        "distillation:\n"
-        "  enabled: true\n"
-        "  student_model: tft\n"
-        "  teacher_model: mamba\n"
-        "  alpha: 0.4\n",
+        "distillation:\n  enabled: true\n  student_model: tft\n  teacher_model: mamba\n  alpha: 0.4\n",
         encoding="utf-8",
     )
     p = argparse.ArgumentParser()
@@ -61,10 +58,7 @@ def test_apply_yaml_skips_distillation_when_disabled(tmp_path):
 
     cfg = tmp_path / "kd_off.yaml"
     cfg.write_text(
-        "distillation:\n"
-        "  enabled: false\n"
-        "  student_model: tft\n"
-        "  teacher_model: mamba\n",
+        "distillation:\n  enabled: false\n  student_model: tft\n  teacher_model: mamba\n",
         encoding="utf-8",
     )
     p = argparse.ArgumentParser()

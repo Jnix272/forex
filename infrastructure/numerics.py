@@ -12,13 +12,26 @@ except ImportError:  # pragma: no cover
 
 # Columns that must never be clipped to the default feature range (prices,
 # volumes, spreads, etc.). Matches features.feature_engineering_pl.
-_SANITIZE_NO_CLIP = frozenset({
-    "open", "high", "low", "close", "volume",
-    "bid", "ask", "mid",
-    "bid_close", "ask_close", "spread", "spread_pips",
-    "expected_latency_ms", "timestamp_utc",
-    "cot_net_hf", "cot_net_comm",
-})
+_SANITIZE_NO_CLIP = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "bid",
+        "ask",
+        "mid",
+        "bid_close",
+        "ask_close",
+        "spread",
+        "spread_pips",
+        "expected_latency_ms",
+        "timestamp_utc",
+        "cot_net_hf",
+        "cot_net_comm",
+    }
+)
 
 
 def sanitize_frame(
@@ -37,14 +50,9 @@ def sanitize_frame(
     cleaned = cleaned.fillna(fill_value)
     if clip_range is not None:
         exclude = _SANITIZE_NO_CLIP if no_clip is None else frozenset(no_clip)
-        num_cols = [
-            c for c in cleaned.select_dtypes(include=[np.number]).columns
-            if c not in exclude
-        ]
+        num_cols = [c for c in cleaned.select_dtypes(include=[np.number]).columns if c not in exclude]
         if num_cols:
-            cleaned[num_cols] = cleaned[num_cols].clip(
-                lower=clip_range[0], upper=clip_range[1]
-            )
+            cleaned[num_cols] = cleaned[num_cols].clip(lower=clip_range[0], upper=clip_range[1])
 
     return cleaned
 
@@ -92,9 +100,7 @@ def sanitize_array(
             pd.Series(raw.ravel(), dtype=object),
             errors="coerce",
         ).to_numpy(dtype=np.float64)
-        clean = np.nan_to_num(
-            flat, nan=np.float64(fill_value)
-        ).astype(np.float32).reshape(shape)
+        clean = np.nan_to_num(flat, nan=np.float64(fill_value)).astype(np.float32).reshape(shape)
 
     bad_mask = ~np.isfinite(clean)
     bad_count = int(bad_mask.sum())

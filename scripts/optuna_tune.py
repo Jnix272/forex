@@ -12,8 +12,8 @@ import torch
 import yaml
 
 ARTIFACT_DIR = Path("logs/optuna")
-OPTUNA_CONFIG_DIR = Path("config/optuna")   # isolated folder for all trial + best configs
-BEST_CONFIG_DIR = OPTUNA_CONFIG_DIR         # kept for compat with helpers that reference it
+OPTUNA_CONFIG_DIR = Path("config/optuna")  # isolated folder for all trial + best configs
+BEST_CONFIG_DIR = OPTUNA_CONFIG_DIR  # kept for compat with helpers that reference it
 ACTIVE_RUN_CONFIG = Path("config/run.yaml")  # applied automatically after study finishes
 DEFAULT_METRIC = "val_sharpe"
 
@@ -42,38 +42,56 @@ def _mode_defaults(mode: str) -> dict[str, Any]:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Optuna tuner for forex deep models")
-    parser.add_argument("--model", required=True, choices=["tft", "haelt", "transformer"],
-                        help="Architecture to tune.")
-    parser.add_argument("--mode", default="cheap", choices=["cheap", "deep"],
-                        help="Cheap = fast proxy search. Deep = stronger proxy + confirmation.")
+    parser.add_argument("--model", required=True, choices=["tft", "haelt", "transformer"], help="Architecture to tune.")
+    parser.add_argument(
+        "--mode",
+        default="cheap",
+        choices=["cheap", "deep"],
+        help="Cheap = fast proxy search. Deep = stronger proxy + confirmation.",
+    )
     parser.add_argument("--trials", type=int, default=30, help="Number of Optuna trials.")
-    parser.add_argument("--epochs", type=int, default=0,
-                        help="Override trial epochs. 0 = mode default.")
-    parser.add_argument("--folds", type=int, default=0,
-                        help="Override proxy walk-forward folds. 0 = mode default.")
-    parser.add_argument("--metric", default=DEFAULT_METRIC, choices=["val_loss", "val_sharpe"],
-                        help="Trial objective metric.")
-    parser.add_argument("--confirm-top-k", type=int, default=-1,
-                        help="After the proxy search, rerun the top K trials with fuller CV. -1 = mode default.")
-    parser.add_argument("--full-confirm-folds", type=int, default=0,
-                        help="Full CV folds for top-K confirmation. 0 = mode default.")
-    parser.add_argument("--full-confirm-epochs", type=int, default=0,
-                        help="Epochs for top-K confirmation. 0 = mode default.")
-    parser.add_argument("--study-name", type=str, default="",
-                        help="Optional explicit Optuna study name.")
-    parser.add_argument("--hpo-scheduler", type=str, default="tpe",
-                        choices=["tpe", "pbt", "bohb", "asha"],
-                        help="HPO strategy (Improvement #12): tpe=default; "
-                             "asha=successive halving; bohb=BO+hyperband; "
-                             "pbt=population-based evolutionary.")
-    parser.add_argument("--curriculum-only", action="store_true",
-                        help="Search curriculum shape + adaptation thresholds only; "
-                             "keep model/training hyperparams from config/run.yaml.")
-    parser.add_argument("--launch-training", action="store_true",
-                        help="After the study finishes and best config is applied, "
-                             "start a full training.train_gpu run using config/run.yaml.")
-    parser.add_argument("--auto", action="store_true",
-                        help="Shorthand for --launch-training (search → apply best → full train).")
+    parser.add_argument("--epochs", type=int, default=0, help="Override trial epochs. 0 = mode default.")
+    parser.add_argument("--folds", type=int, default=0, help="Override proxy walk-forward folds. 0 = mode default.")
+    parser.add_argument(
+        "--metric", default=DEFAULT_METRIC, choices=["val_loss", "val_sharpe"], help="Trial objective metric."
+    )
+    parser.add_argument(
+        "--confirm-top-k",
+        type=int,
+        default=-1,
+        help="After the proxy search, rerun the top K trials with fuller CV. -1 = mode default.",
+    )
+    parser.add_argument(
+        "--full-confirm-folds", type=int, default=0, help="Full CV folds for top-K confirmation. 0 = mode default."
+    )
+    parser.add_argument(
+        "--full-confirm-epochs", type=int, default=0, help="Epochs for top-K confirmation. 0 = mode default."
+    )
+    parser.add_argument("--study-name", type=str, default="", help="Optional explicit Optuna study name.")
+    parser.add_argument(
+        "--hpo-scheduler",
+        type=str,
+        default="tpe",
+        choices=["tpe", "pbt", "bohb", "asha"],
+        help="HPO strategy (Improvement #12): tpe=default; "
+        "asha=successive halving; bohb=BO+hyperband; "
+        "pbt=population-based evolutionary.",
+    )
+    parser.add_argument(
+        "--curriculum-only",
+        action="store_true",
+        help="Search curriculum shape + adaptation thresholds only; "
+        "keep model/training hyperparams from config/run.yaml.",
+    )
+    parser.add_argument(
+        "--launch-training",
+        action="store_true",
+        help="After the study finishes and best config is applied, "
+        "start a full training.train_gpu run using config/run.yaml.",
+    )
+    parser.add_argument(
+        "--auto", action="store_true", help="Shorthand for --launch-training (search → apply best → full train)."
+    )
     return parser.parse_args()
 
 
@@ -81,18 +99,22 @@ def _trial_checkpoint_path(checkpoint_dir: Path, model_name: str, folds: int) ->
     model = str(model_name).lower().strip()
     candidates: list[Path] = []
     for fi in range(max(1, int(folds))):
-        candidates.extend([
-            checkpoint_dir / f"{model}_fold{fi}_last.pt",
-            checkpoint_dir / f"{model}_fold{fi}_best.pt",
-            checkpoint_dir / model / f"{model}_fold{fi}_last.pt",
-            checkpoint_dir / model / f"{model}_fold{fi}_best.pt",
-        ])
-    candidates.extend([
-        checkpoint_dir / f"{model}_last.pt",
-        checkpoint_dir / f"{model}_best.pt",
-        checkpoint_dir / model / f"{model}_last.pt",
-        checkpoint_dir / model / f"{model}_best.pt",
-    ])
+        candidates.extend(
+            [
+                checkpoint_dir / f"{model}_fold{fi}_last.pt",
+                checkpoint_dir / f"{model}_fold{fi}_best.pt",
+                checkpoint_dir / model / f"{model}_fold{fi}_last.pt",
+                checkpoint_dir / model / f"{model}_fold{fi}_best.pt",
+            ]
+        )
+    candidates.extend(
+        [
+            checkpoint_dir / f"{model}_last.pt",
+            checkpoint_dir / f"{model}_best.pt",
+            checkpoint_dir / model / f"{model}_last.pt",
+            checkpoint_dir / model / f"{model}_best.pt",
+        ]
+    )
     existing = [p for p in candidates if p.exists()]
     if not existing:
         raise RuntimeError(f"No trial checkpoint found under {checkpoint_dir}")
@@ -141,23 +163,22 @@ def _curriculum_diagnostics(history: dict[str, Any]) -> dict[str, Any]:
     total_stalls = int(stalls_curve[-1]) if stalls_curve else 0
 
     events = history.get("curriculum_events", [])
-    advance_types = {"seq_len_increase", "difficulty_increase",
-                     "seq_len_schedule_floor", "difficulty_schedule_floor"}
-    recovery_count  = sum(1 for e in events if e.get("type") == "recovery")
-    advance_count   = sum(1 for e in events if e.get("type") in advance_types)
+    advance_types = {"seq_len_increase", "difficulty_increase", "seq_len_schedule_floor", "difficulty_schedule_floor"}
+    recovery_count = sum(1 for e in events if e.get("type") == "recovery")
+    advance_count = sum(1 for e in events if e.get("type") in advance_types)
 
     # Did the schedule ever advance beyond its first stage?
-    seq_hist  = history.get("seq_len", [])
+    seq_hist = history.get("seq_len", [])
     diff_hist = history.get("difficulty_stage", [])
-    seq_advanced  = len(seq_hist)  > 0 and max(seq_hist)  > seq_hist[0]  if seq_hist  else False
+    seq_advanced = len(seq_hist) > 0 and max(seq_hist) > seq_hist[0] if seq_hist else False
     diff_advanced = len(diff_hist) > 0 and max(diff_hist) > diff_hist[0] if diff_hist else False
 
     return {
-        "total_stalls":    total_stalls,
-        "advance_count":   advance_count,
-        "recovery_count":  recovery_count,
-        "seq_advanced":    seq_advanced,
-        "diff_advanced":   diff_advanced,
+        "total_stalls": total_stalls,
+        "advance_count": advance_count,
+        "recovery_count": recovery_count,
+        "seq_advanced": seq_advanced,
+        "diff_advanced": diff_advanced,
     }
 
 
@@ -215,14 +236,14 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
         score += min(0.05, 0.01 * n_folds)
 
     # P2: Curriculum health penalties/bonuses
-    total_stalls  = curr_diag["total_stalls"]
+    total_stalls = curr_diag["total_stalls"]
     curr_diag["advance_count"]
-    seq_advanced  = curr_diag["seq_advanced"]
+    seq_advanced = curr_diag["seq_advanced"]
     diff_advanced = curr_diag["diff_advanced"]
 
     # Penalty: excessive stalls → unstable training (gradient noise / schedule too aggressive)
     if total_stalls > 2:
-        score -= 0.05 * (total_stalls - 2)   # -0.05 per stall above the 2-stall tolerance
+        score -= 0.05 * (total_stalls - 2)  # -0.05 per stall above the 2-stall tolerance
 
     # Penalty: schedule never advanced → curriculum too conservative or model stuck at easy
     if not seq_advanced and not diff_advanced:
@@ -275,12 +296,20 @@ def _hardware_safe_batch_choices(model_name: str, d_model: int, seq_len: int) ->
 # ---------------------------------------------------------------------------
 
 _CURRICULUM_PARAMS = (
-    "cur_seq_start", "cur_seq_ramp_epoch", "cur_seq_target",
-    "cur_collapse_drop", "cur_collapse_min_peak",
-    "cur_advance_lr_mult", "cur_collapse_lr_mult", "cur_stable_window",
-    "cur_reversal_threshold", "cur_recovery_window", "cur_min_epochs_per_stage",
+    "cur_seq_start",
+    "cur_seq_ramp_epoch",
+    "cur_seq_target",
+    "cur_collapse_drop",
+    "cur_collapse_min_peak",
+    "cur_advance_lr_mult",
+    "cur_collapse_lr_mult",
+    "cur_stable_window",
+    "cur_reversal_threshold",
+    "cur_recovery_window",
+    "cur_min_epochs_per_stage",
     # difficulty schedule (P2)
-    "cur_diff_ramp_epoch", "cur_diff_final_stage",
+    "cur_diff_ramp_epoch",
+    "cur_diff_final_stage",
 )
 
 
@@ -367,7 +396,6 @@ def _sample_curriculum(trial, model_name: str) -> dict[str, Any]:
         # Epoch at which the ramp begins (midpoint of the search range)
         "cur_seq_ramp_epoch": trial.suggest_categorical("cur_seq_ramp_epoch", [6, 10, 14, 20]),
         "cur_seq_target": cur_seq_target,
-
         # Auto-Tuner sensitivity ------------------------------------------------
         # How aggressively the stall fires (smaller = more sensitive)
         "cur_collapse_drop": trial.suggest_categorical("cur_collapse_drop", [0.10, 0.15, 0.20, 0.25]),
@@ -380,14 +408,12 @@ def _sample_curriculum(trial, model_name: str) -> dict[str, Any]:
         # Consecutive stable epochs needed before advancing market difficulty
         "cur_stable_window": trial.suggest_categorical("cur_stable_window", [2, 3, 4]),
         # Single-epoch Sharpe drop below this also triggers a stall (P1 unified guard)
-        "cur_reversal_threshold": trial.suggest_categorical(
-            "cur_reversal_threshold", [-0.15, -0.10, -0.05]
-        ),
+        "cur_reversal_threshold": trial.suggest_categorical("cur_reversal_threshold", [-0.15, -0.10, -0.05]),
         # Epochs stable post-stall required before unfreezing (P1 recovery)
         "cur_recovery_window": trial.suggest_categorical("cur_recovery_window", [3, 4, 5]),
         # Minimum cooldown epochs between any two advances (P1 cooldown)
         "cur_min_epochs_per_stage": trial.suggest_categorical("cur_min_epochs_per_stage", [2, 3, 4]),
-        # Difficulty schedule (P2) — when to introduce medium/hard market bars
+        # Difficulty schedule (P2) - when to introduce medium/hard market bars
         # epoch at which medium-difficulty bars first appear (hard always follows 4 epochs later)
         "cur_diff_ramp_epoch": trial.suggest_categorical("cur_diff_ramp_epoch", [4, 6, 8, 12]),
         # highest difficulty stage reached by end of training (0=easy only, 1=medium, 2=all bars)
@@ -421,8 +447,9 @@ def _build_difficulty_schedule(
     return deduped
 
 
-def _build_seq_schedule(cur_seq_start: int, cur_seq_ramp_epoch: int,
-                        cur_seq_target: int, total_epochs: int) -> list[dict]:
+def _build_seq_schedule(
+    cur_seq_start: int, cur_seq_ramp_epoch: int, cur_seq_target: int, total_epochs: int
+) -> list[dict]:
     """Convert curriculum params into a concrete seq_schedule list.
 
     Structure:
@@ -433,7 +460,7 @@ def _build_seq_schedule(cur_seq_start: int, cur_seq_ramp_epoch: int,
     if cur_seq_target <= cur_seq_start:
         return [{"epoch_start": 0, "seq_len": int(cur_seq_start)}]
 
-    mid = int(round((cur_seq_start + cur_seq_target) / 2))
+    mid = round((cur_seq_start + cur_seq_target) / 2)
     second_ramp = min(cur_seq_ramp_epoch + max(4, (total_epochs - cur_seq_ramp_epoch) // 2), total_epochs - 1)
     schedule = [
         {"epoch_start": 0, "seq_len": int(cur_seq_start)},
@@ -589,9 +616,7 @@ def _build_trial_config(
     cfg["optuna"]["curriculum_only"] = bool(getattr(args, "curriculum_only", False))
     cfg["optuna"]["hpo_scheduler"] = str(getattr(args, "hpo_scheduler", "tpe") or "tpe")
     cfg["optuna"]["auto_load"] = True
-    cfg["optuna"]["auto_launch"] = bool(
-        getattr(args, "auto", False) or getattr(args, "launch_training", False)
-    )
+    cfg["optuna"]["auto_launch"] = bool(getattr(args, "auto", False) or getattr(args, "launch_training", False))
 
     # -----------------------------------------------------------------------
     # Curriculum: Optuna designs the schedule; Auto-Tuner guards it at runtime
@@ -607,16 +632,18 @@ def _build_trial_config(
 
     # Override adaptation sensitivity with Optuna's chosen thresholds
     cfg["curriculum"].setdefault("adaptation", {})
-    cfg["curriculum"]["adaptation"].update({
-        "collapse_drop":               float(params["cur_collapse_drop"]),
-        "collapse_min_peak":           float(params["cur_collapse_min_peak"]),
-        "advance_lr_mult":             float(params["cur_advance_lr_mult"]),
-        "collapse_lr_mult":            float(params["cur_collapse_lr_mult"]),
-        "stable_window":               int(params["cur_stable_window"]),
-        "collapse_reversal_threshold": float(params.get("cur_reversal_threshold", -0.10)),
-        "recovery_window":             int(params.get("cur_recovery_window", 4)),
-        "min_epochs_per_stage":        int(params.get("cur_min_epochs_per_stage", 3)),
-    })
+    cfg["curriculum"]["adaptation"].update(
+        {
+            "collapse_drop": float(params["cur_collapse_drop"]),
+            "collapse_min_peak": float(params["cur_collapse_min_peak"]),
+            "advance_lr_mult": float(params["cur_advance_lr_mult"]),
+            "collapse_lr_mult": float(params["cur_collapse_lr_mult"]),
+            "stable_window": int(params["cur_stable_window"]),
+            "collapse_reversal_threshold": float(params.get("cur_reversal_threshold", -0.10)),
+            "recovery_window": int(params.get("cur_recovery_window", 4)),
+            "min_epochs_per_stage": int(params.get("cur_min_epochs_per_stage", 3)),
+        }
+    )
 
     # P2: build difficulty schedule from Optuna's chosen params
     if "cur_diff_ramp_epoch" in params and "cur_diff_final_stage" in params:
@@ -629,12 +656,15 @@ def _build_trial_config(
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     OPTUNA_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    trial_cfg_path = OPTUNA_CONFIG_DIR / f"run_optuna_{_safe_slug(args.model)}_{getattr(args, '_trial_suffix', 'trial')}.yaml"
+    trial_cfg_path = (
+        OPTUNA_CONFIG_DIR / f"run_optuna_{_safe_slug(args.model)}_{getattr(args, '_trial_suffix', 'trial')}.yaml"
+    )
     return cfg, trial_cfg_path
 
 
-def _run_trial_process(args, params: dict[str, Any], *, trial_number: int, epochs: int, folds: int,
-                       phase: str = "proxy") -> tuple[Path, dict[str, Any]]:
+def _run_trial_process(
+    args, params: dict[str, Any], *, trial_number: int, epochs: int, folds: int, phase: str = "proxy"
+) -> tuple[Path, dict[str, Any]]:
     base_cfg_path = Path("config/run.yaml")
     if not base_cfg_path.exists():
         raise FileNotFoundError(f"Base config {base_cfg_path} not found.")
@@ -660,12 +690,17 @@ def _run_trial_process(args, params: dict[str, Any], *, trial_number: int, epoch
         sys.executable,
         "-m",
         "training.train_gpu",
-        "--config", str(trial_cfg_path),
-        "--model", args.model,
-        "--run-name", run_name,
+        "--config",
+        str(trial_cfg_path),
+        "--model",
+        args.model,
+        "--run-name",
+        run_name,
         "--no-all-models",
-        "--walk-forward-folds", str(int(folds)),
-        "--checkpoint-dir", str(checkpoint_dir),
+        "--walk-forward-folds",
+        str(int(folds)),
+        "--checkpoint-dir",
+        str(checkpoint_dir),
         "--no-wandb",
         "--no-resume",
         "--no-training-memory",
@@ -700,7 +735,9 @@ def _run_trial_process(args, params: dict[str, Any], *, trial_number: int, epoch
             if m_loss:
                 latest_loss = float(m_loss.group(1))
 
-            m_sh = re.search(r"(?:val(?:_sharpe| sharpe)|sharpe_proxy|sharpe)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE)
+            m_sh = re.search(
+                r"(?:val(?:_sharpe| sharpe)|sharpe_proxy|sharpe)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE
+            )
             if m_sh:
                 latest_sharpe = float(m_sh.group(1))
 
@@ -768,16 +805,20 @@ def _write_trial_report(study_name: str, trial_number: int, payload: dict[str, A
 def _sorted_trial_rows(study: optuna.Study) -> list[dict[str, Any]]:
     rows = []
     for t in study.trials:
-        rows.append({
-            "trial": int(t.number),
-            "state": str(t.state),
-            "value": t.value,
-            "params": dict(t.params),
-            "user_attrs": dict(t.user_attrs),
-        })
+        rows.append(
+            {
+                "trial": int(t.number),
+                "state": str(t.state),
+                "value": t.value,
+                "params": dict(t.params),
+                "user_attrs": dict(t.user_attrs),
+            }
+        )
+
     def _sort_key(row):
         value = row.get("value")
         return float("inf") if value is None else float(value)
+
     return sorted(rows, key=_sort_key)
 
 
@@ -806,8 +847,7 @@ def _launch_training_run(args) -> int:
     """Run full production training with the Optuna-applied config."""
     if not ACTIVE_RUN_CONFIG.exists():
         raise FileNotFoundError(
-            f"Cannot launch training: {ACTIVE_RUN_CONFIG} not found. "
-            "Did _export_best_config run successfully?"
+            f"Cannot launch training: {ACTIVE_RUN_CONFIG} not found. Did _export_best_config run successfully?"
         )
 
     run_name = f"optuna_launch_{_safe_slug(args.model)}_{_safe_slug(args.study_name)}"
@@ -815,9 +855,12 @@ def _launch_training_run(args) -> int:
         sys.executable,
         "-m",
         "training.train_gpu",
-        "--config", str(ACTIVE_RUN_CONFIG),
-        "--model", args.model,
-        "--run-name", run_name,
+        "--config",
+        str(ACTIVE_RUN_CONFIG),
+        "--model",
+        args.model,
+        "--run-name",
+        run_name,
         "--no-all-models",
         "--no-auto-tune",
     ]
@@ -837,7 +880,7 @@ def _export_best_config(args, study: optuna.Study) -> None:
     curriculum_only = bool(getattr(args, "curriculum_only", False))
     params = _assemble_trial_params(best_params, curriculum_only=curriculum_only, base_cfg_path=base_cfg_path)
     args._trial_suffix = f"best_{_safe_slug(args.metric)}"
-    # Keep production epoch budget from run.yaml — not the short confirm-trial count.
+    # Keep production epoch budget from run.yaml - not the short confirm-trial count.
     production_epochs = _production_epochs_from_config(base_cfg_path)
     cfg, export_path = _build_trial_config(
         base_cfg_path,
@@ -893,7 +936,7 @@ def _export_best_config(args, study: optuna.Study) -> None:
 def _confirm_top_trials(args, study: optuna.Study) -> None:
     if args.confirm_top_k <= 0:
         return
-    top_trials = [t for t in study.best_trials[:args.confirm_top_k] if t.value is not None]
+    top_trials = [t for t in study.best_trials[: args.confirm_top_k] if t.value is not None]
     if not top_trials:
         return
 
@@ -919,15 +962,19 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
             ):
                 trial_cfg_path = payload.get("trial_cfg_path")
                 checkpoint_dir = payload.get("checkpoint_dir")
-            checkpoint_dir = Path(checkpoint_dir or f"checkpoints/optuna_{_safe_slug(args.model)}_confirm_{int(t.number)}")
+            checkpoint_dir = Path(
+                checkpoint_dir or f"checkpoints/optuna_{_safe_slug(args.model)}_confirm_{int(t.number)}"
+            )
             confirm = _evaluate_trial_artifacts(checkpoint_dir, args.model, int(args.full_confirm_folds), args.metric)
-            confirm_rows.append({
-                "trial": int(t.number),
-                "objective_score": confirm["objective_score"],
-                "diagnostics": confirm["diagnostics"],
-                "checkpoint_path": confirm["checkpoint_path"],
-                "params": params,
-            })
+            confirm_rows.append(
+                {
+                    "trial": int(t.number),
+                    "objective_score": confirm["objective_score"],
+                    "diagnostics": confirm["diagnostics"],
+                    "checkpoint_path": confirm["checkpoint_path"],
+                    "params": params,
+                }
+            )
         finally:
             if trial_cfg_path and Path(trial_cfg_path).exists():
                 Path(trial_cfg_path).unlink()
@@ -976,15 +1023,19 @@ def objective(trial, args):
         trial.set_user_attr("diagnostics", result["diagnostics"])
         trial.set_user_attr("train_summary", result["summary"])
         trial.set_user_attr("mode", args.mode)
-        _write_trial_report(args.study_name, int(trial.number), {
-            "trial": int(trial.number),
-            "params": params,
-            "objective_metric": args.metric,
-            "objective_score": result["objective_score"],
-            "checkpoint_path": result["checkpoint_path"],
-            "diagnostics": result["diagnostics"],
-            "train_summary": result["summary"],
-        })
+        _write_trial_report(
+            args.study_name,
+            int(trial.number),
+            {
+                "trial": int(trial.number),
+                "params": params,
+                "objective_metric": args.metric,
+                "objective_score": result["objective_score"],
+                "checkpoint_path": result["checkpoint_path"],
+                "diagnostics": result["diagnostics"],
+                "train_summary": result["summary"],
+            },
+        )
         return float(result["objective_score"])
     except subprocess.CalledProcessError as exc:
         print(f"[Optuna] Trial {trial.number} failed with exit code {exc.returncode}")
@@ -1002,9 +1053,10 @@ def main():
         args.launch_training = True
     elif not args.launch_training:
         from training.optuna_config import read_run_yaml_optuna_section
+
         if read_run_yaml_optuna_section().get("auto_launch"):
             args.launch_training = True
-            print("[Optuna] auto_launch=true in config/run.yaml — full training will start after study.")
+            print("[Optuna] auto_launch=true in config/run.yaml - full training will start after study.")
     defaults = _mode_defaults(args.mode)
     if int(args.epochs) <= 0:
         args.epochs = int(defaults["epochs"])
@@ -1025,6 +1077,7 @@ def main():
     storage = f"sqlite:///{study_db_path.as_posix()}"
 
     from training.hpo import build_optuna_search
+
     hpo_scheduler = str(getattr(args, "hpo_scheduler", "tpe") or "tpe").lower()
     sampler, pruner = build_optuna_search(
         hpo_scheduler,
@@ -1032,8 +1085,7 @@ def main():
         min_resource=2,
         max_resource=max(int(args.epochs), 2),
     )
-    print(f"[Optuna] HPO scheduler={hpo_scheduler} sampler={type(sampler).__name__} "
-          f"pruner={type(pruner).__name__}")
+    print(f"[Optuna] HPO scheduler={hpo_scheduler} sampler={type(sampler).__name__} pruner={type(pruner).__name__}")
 
     study = optuna.create_study(
         study_name=args.study_name,
@@ -1046,7 +1098,9 @@ def main():
 
     search_scope = "curriculum-only" if args.curriculum_only else "architecture + curriculum"
     print(f"[Optuna] Commencing {args.trials} trials for {args.model}")
-    print(f"[Optuna] Scope={search_scope} mode={args.mode} metric={args.metric} folds={args.folds} epochs={args.epochs}")
+    print(
+        f"[Optuna] Scope={search_scope} mode={args.mode} metric={args.metric} folds={args.folds} epochs={args.epochs}"
+    )
     if args.curriculum_only:
         print("[Optuna] Architecture/training hyperparams fixed from config/run.yaml")
     print(f"[Optuna] Study stored in {study_db_path}")
@@ -1068,8 +1122,10 @@ def main():
     if args.launch_training:
         _launch_training_run(args)
     else:
-        print("\n[Optuna] Next step: python -m training.train_gpu --config config/run.yaml "
-              f"--model {args.model} --no-all-models")
+        print(
+            "\n[Optuna] Next step: python -m training.train_gpu --config config/run.yaml "
+            f"--model {args.model} --no-all-models"
+        )
         print("[Optuna] Or re-run with --auto / --launch-training to chain full training.")
 
 

@@ -28,12 +28,14 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, WeightedRando
 
 try:
     import zarr
+
     ZARR_AVAILABLE = True
 except ImportError:
     ZARR_AVAILABLE = False
 
 try:
     from torch.utils.checkpoint import checkpoint
+
     CHECKPOINT_AVAILABLE = True
 except ImportError:
     CHECKPOINT_AVAILABLE = False
@@ -43,9 +45,11 @@ except ImportError:
 # 1. Streaming Dataset with Prefetching
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class StreamingDatasetConfig:
     """Configuration for streaming dataset."""
+
     cache_path: str
     indices: np.ndarray
     chunk_size: int = 512  # Zarr chunk size (rows per chunk)
@@ -131,20 +135,17 @@ class StreamingMemmapDataset(Dataset):
         return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
 
-
-
-
 class SequentialZarrDataset(IterableDataset):
     """
     Sequential-read IterableDataset for zarr-backed training data.
-    
+
     Reads zarr in blocks aligned to chunk boundaries so each physical chunk
     is decompressed exactly once per epoch visit. Rows within each block
     are shuffled in memory; block visit order is shuffled each epoch.
-    
+
     Each DataLoader worker receives a disjoint, contiguous slice of the
     sorted index array. Because the index is sorted, each worker naturally
-    owns different zarr chunks — no locking or coordination needed.
+    owns different zarr chunks - no locking or coordination needed.
     """
 
     def __init__(
@@ -224,7 +225,7 @@ class SequentialZarrDataset(IterableDataset):
 class PrefetchDataLoader:
     """
     Wrapper around DataLoader that prefetches batches in a background thread.
-    
+
     Eliminates GPU idle time during CPU-side data loading/preprocessing.
     """
 
@@ -298,6 +299,7 @@ class PrioritizedDataLoader(PrefetchDataLoader):
     epoch so updated priorities take effect). Batches carry sample indices so
     the training loop can call ``update_priorities``.
     """
+
     def __init__(self, dataset, batch_size: int, alpha: float = 0.6, beta: float = 0.4, **kwargs):
         self.alpha = alpha
         self.beta = beta
@@ -316,7 +318,7 @@ class PrioritizedDataLoader(PrefetchDataLoader):
         """Update priorities based on training loss."""
         # Convert loss to priority (e.g., loss + epsilon)
         priorities = (losses.detach().cpu().abs() + 1e-6) ** self.alpha
-        for idx, p in zip(indices.view(-1).tolist(), priorities.view(-1).tolist()):
+        for idx, p in zip(indices.view(-1).tolist(), priorities.view(-1).tolist(), strict=False):
             if 0 <= idx < len(self.priorities):
                 self.priorities[idx] = p
                 self.max_priority = max(self.max_priority, p)
@@ -342,14 +344,15 @@ class PrioritizedDataLoader(PrefetchDataLoader):
         return super().__iter__()
 
 
-
 # ═════════════════════════════════════════════════════════════════════════════
 # 2. Gradient Checkpointing
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class CheckpointPolicy:
     """Policy for selective gradient checkpointing."""
+
     # Module name patterns to checkpoint
     checkpoint_patterns: list[str] = None  # e.g., ["transformer", "mamba", "encoder"]
     # Module name patterns to never checkpoint
@@ -370,20 +373,20 @@ def apply_gradient_checkpointing(
 ) -> nn.Module:
     """
     Apply selective gradient checkpointing to model modules.
-    
+
     Wraps target modules with torch.utils.checkpoint.checkpoint to trade
     compute for memory: activations are recomputed during backward instead
     of stored during forward.
-    
+
     Args:
         model: The model to apply checkpointing to.
         policy: CheckpointPolicy defining which modules to checkpoint.
-        
+
     Returns:
         The model with checkpointed modules.
     """
     if not CHECKPOINT_AVAILABLE:
-        warnings.warn("torch.utils.checkpoint not available; skipping gradient checkpointing")
+        warnings.warn("torch.utils.checkpoint not available; skipping gradient checkpointing", stacklevel=2)
         return model
 
     if policy is None:
@@ -404,8 +407,10 @@ def apply_gradient_checkpointing(
 
     def checkpoint_forward(module):
         """Wrap module forward with checkpoint."""
+
         def forward(*args, **kwargs):
             return checkpoint(module._original_forward, *args, use_reentrant=False, **kwargs)
+
         return forward
 
     for name, module in model.named_modules():
@@ -427,9 +432,10 @@ def checkpoint_sequential(
 ) -> torch.Tensor:
     """
     Checkpoint a sequence of modules.
-    
+
     Memory-efficient alternative to sequential forward pass.
     """
+
     def run_module(m, x):
         return m(x)
 
@@ -443,11 +449,12 @@ def checkpoint_sequential(
 # 4. Memory Profiler
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @contextmanager
 def memory_profiler(device: str = "cuda") -> Iterator[dict[str, float]]:
     """
     Context manager for profiling peak memory usage.
-    
+
     Usage:
         with memory_profiler() as stats:
             # training step
@@ -458,9 +465,9 @@ def memory_profiler(device: str = "cuda") -> Iterator[dict[str, float]]:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         start_alloc = torch.cuda.memory_allocated()
-        start_reserved = torch.cuda.memory_reserved()
+        torch.cuda.memory_reserved()
     else:
-        start_alloc = start_reserved = 0
+        start_alloc = 0
 
     try:
         yield stats
@@ -474,19 +481,21 @@ def memory_profiler(device: str = "cuda") -> Iterator[dict[str, float]]:
         else:
             peak_alloc = peak_reserved = current_alloc = current_reserved = 0
 
-        stats.update({
-            "peak_gpu_allocated_gb": peak_alloc / 1e9,
-            "peak_gpu_reserved_gb": peak_reserved / 1e9,
-            "current_gpu_allocated_gb": current_alloc / 1e9,
-            "current_gpu_reserved_gb": current_reserved / 1e9,
-            "delta_allocated_gb": (peak_alloc - start_alloc) / 1e9,
-        })
+        stats.update(
+            {
+                "peak_gpu_allocated_gb": peak_alloc / 1e9,
+                "peak_gpu_reserved_gb": peak_reserved / 1e9,
+                "current_gpu_allocated_gb": current_alloc / 1e9,
+                "current_gpu_reserved_gb": current_reserved / 1e9,
+                "delta_allocated_gb": (peak_alloc - start_alloc) / 1e9,
+            }
+        )
 
 
 class MemoryMonitor:
     """
     Continuous memory monitoring callback for training loops.
-    
+
     Logs memory usage at specified intervals and warns on OOM risk.
     """
 
@@ -511,8 +520,8 @@ class MemoryMonitor:
 
             if allocated > self.warn_threshold:
                 warnings.warn(
-                    f"[MemoryMonitor] High GPU memory: {allocated/1e9:.2f} GB allocated, "
-                    f"{reserved/1e9:.2f} GB reserved. Peak: {self.peak/1e9:.2f} GB"
+                    f"[MemoryMonitor] High GPU memory: {allocated / 1e9:.2f} GB allocated, "
+                    f"{reserved / 1e9:.2f} GB reserved. Peak: {self.peak / 1e9:.2f} GB", stacklevel=2
                 )
 
             return {
@@ -532,6 +541,7 @@ class MemoryMonitor:
 # 5. Convenience: Integrated Training Context
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @contextmanager
 def memory_efficient_training(
     model: nn.Module,
@@ -540,9 +550,9 @@ def memory_efficient_training(
 ) -> Iterator[dict]:
     """
     Context manager for memory-efficient training setup.
-    
+
     Applies gradient checkpointing and yields control, then cleans up.
-    
+
     Usage:
         with memory_efficient_training(model, checkpoint_policy=policy) as mem:
             for epoch in epochs:
@@ -560,10 +570,10 @@ def memory_efficient_training(
         yield {}
     finally:
         if checkpoint_policy is not None:
-            for name, module in model.named_modules():
-                if hasattr(module, '_original_forward'):
+            for _name, module in model.named_modules():
+                if hasattr(module, "_original_forward"):
                     module.forward = module._original_forward
-                    delattr(module, '_original_forward')
+                    delattr(module, "_original_forward")
 
         if enable_profiler and torch.cuda.is_available():
             peak = torch.cuda.max_memory_allocated() / 1e9
@@ -573,6 +583,7 @@ def memory_efficient_training(
 # ════════════════════════════════════════════════════════════════════════════
 # 6. Dataset Factory
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def create_streaming_dataloader(
     cache_path: str,
@@ -587,7 +598,7 @@ def create_streaming_dataloader(
 ) -> DataLoader:
     """
     Factory function to create a streaming DataLoader with optimal settings.
-    
+
     Args:
         cache_path: Path to Zarr/NPY cache directory.
         indices: Sample indices to use.
@@ -597,14 +608,18 @@ def create_streaming_dataloader(
         chunk_size: Zarr chunk size.
         sequential: Use sequential Zarr reading (IterableDataset).
         shuffle_blocks: Shuffle zarr chunk blocks per epoch.
-        
+
     Returns:
         Configured DataLoader with prefetching.
     """
     if sequential and ZARR_AVAILABLE:
         dataset = SequentialZarrDataset(
-            cache_path, indices, chunk_size, shuffle_blocks=True,
-            worker_rank=0, num_workers=num_workers,
+            cache_path,
+            indices,
+            chunk_size,
+            shuffle_blocks=True,
+            worker_rank=0,
+            num_workers=num_workers,
         )
         return DataLoader(
             dataset,
@@ -615,7 +630,10 @@ def create_streaming_dataloader(
         )
     else:
         dataset = StreamingMemmapDataset(
-            cache_path, indices, chunk_size, use_zarr_chunks=sequential,
+            cache_path,
+            indices,
+            chunk_size,
+            use_zarr_chunks=sequential,
         )
         return PrefetchDataLoader(
             dataset,

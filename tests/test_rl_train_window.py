@@ -1,4 +1,5 @@
 """Tests for holdout-safe RL/pretrain index helpers."""
+
 from __future__ import annotations
 
 import argparse
@@ -20,13 +21,13 @@ from training.train_gpu import (
 
 
 def _args(**kw):
-    base = dict(
-        promote_forward_frac=0.1,
-        seq_len=60,
-        lookahead_bars=15,
-        execution_delay_bars=1,
-        rl_val_frac=0.15,
-    )
+    base = {
+        "promote_forward_frac": 0.1,
+        "seq_len": 60,
+        "lookahead_bars": 15,
+        "execution_delay_bars": 1,
+        "rl_val_frac": 0.15,
+    }
     base.update(kw)
     return argparse.Namespace(**base)
 

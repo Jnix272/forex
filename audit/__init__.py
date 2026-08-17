@@ -1,11 +1,11 @@
 """
-audit — full lineage + reproducibility manifests (Improvement #6)
+audit - full lineage + reproducibility manifests (Improvement #6)
 
 Two modules:
-  * audit.lineage   — data lineage (dataset → preprocessing → features →
+  * audit.lineage   - data lineage (dataset → preprocessing → features →
                       labels → training run), model registry records, and an
                       audit trail of promotion / rollback decisions.
-  * audit.manifest  — generate / verify / regenerate reproducibility manifests
+  * audit.manifest  - generate / verify / regenerate reproducibility manifests
                       (JSON snapshots of every artifact + inputs + environment
                       for a training run) stored alongside checkpoints.
 """

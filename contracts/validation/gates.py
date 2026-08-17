@@ -10,22 +10,24 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+import numpy as np
 import polars as pl
 
-from contracts.base import ContractRegistry, Stage, ContractMetadata
-from contracts.tick import TickContract
 from contracts.bar import BarContract
+from contracts.base import ContractMetadata, Stage
+from contracts.dataset import DatasetContract
 from contracts.feature import FeatureContract
 from contracts.label import LabelContract
-from contracts.dataset import DatasetContract
+from contracts.tick import TickContract
 
 
-class ValidationResult(str, Enum):
+class ValidationResult(StrEnum):
     """Validation result status"""
+
     PASS = "pass"
     WARN = "warn"
     FAIL = "fail"
@@ -35,6 +37,7 @@ class ValidationResult(str, Enum):
 @dataclass
 class GateResult:
     """Result of a single validation gate"""
+
     gate_name: str
     stage: Stage
     pair: str | None
@@ -43,7 +46,7 @@ class GateResult:
     metadata: ContractMetadata | None = None
     duration_ms: float = 0.0
     details: dict[str, Any] = field(default_factory=dict)
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "gate_name": self.gate_name,
@@ -59,12 +62,12 @@ class GateResult:
 
 class ValidationGate:
     """Base class for validation gates"""
-    
+
     def __init__(self, name: str, stage: Stage, fail_fast: bool = True):
         self.name = name
         self.stage = stage
         self.fail_fast = fail_fast
-    
+
     def run(self, df: pl.DataFrame, pair: str | None = None, **kwargs) -> GateResult:
         """Run the validation gate"""
         start = time.perf_counter()
@@ -84,7 +87,7 @@ class ValidationGate:
                 duration_ms=duration_ms,
                 details={"error": str(e), "error_type": type(e).__name__},
             )
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         """Override in subclass"""
         raise NotImplementedError
@@ -92,7 +95,7 @@ class ValidationGate:
 
 class ContractValidationGate(ValidationGate):
     """Gate that validates against a data contract"""
-    
+
     def __init__(self, contract_class: type, fail_fast: bool = True):
         super().__init__(
             name=f"{contract_class.contract_name}_validation",
@@ -100,12 +103,12 @@ class ContractValidationGate(ValidationGate):
             fail_fast=fail_fast,
         )
         self.contract_class = contract_class
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         try:
-            validated_df, metadata = self.contract_class.validate(df, pair=pair, strict=False)
+            _validated_df, metadata = self.contract_class.validate(df, pair=pair, strict=False)
             warnings = metadata.warnings
-            
+
             if warnings:
                 return GateResult(
                     gate_name=self.name,
@@ -137,11 +140,11 @@ class ContractValidationGate(ValidationGate):
 
 class RowCountGate(ValidationGate):
     """Gate that checks minimum row count"""
-    
+
     def __init__(self, min_rows: int = 100, stage: Stage = Stage.INGESTION):
         super().__init__(name="row_count_check", stage=stage)
         self.min_rows = min_rows
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         n_rows = len(df)
         if n_rows < self.min_rows:
@@ -165,11 +168,11 @@ class RowCountGate(ValidationGate):
 
 class NullThresholdGate(ValidationGate):
     """Gate that checks null percentage threshold"""
-    
+
     def __init__(self, max_null_pct: float = 0.05, stage: Stage = Stage.FEATURE_ENGINEERING):
         super().__init__(name="null_threshold_check", stage=stage)
         self.max_null_pct = max_null_pct
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         violations = []
         for col in df.columns:
@@ -178,7 +181,7 @@ class NullThresholdGate(ValidationGate):
                 null_pct = null_count / len(df) if len(df) > 0 else 0
                 if null_pct > self.max_null_pct:
                     violations.append({"column": col, "null_pct": null_pct, "null_count": null_count})
-        
+
         if violations:
             return GateResult(
                 gate_name=self.name,
@@ -199,17 +202,17 @@ class NullThresholdGate(ValidationGate):
 
 class DistributionDriftGate(ValidationGate):
     """Gate that checks for distribution drift against reference"""
-    
+
     def __init__(
-        self, 
+        self,
         reference_stats: dict[str, dict] | None = None,
         psi_threshold: float = 0.2,
-        stage: Stage = Stage.FEATURE_ENGINEERING
+        stage: Stage = Stage.FEATURE_ENGINEERING,
     ):
         super().__init__(name="distribution_drift_check", stage=stage)
         self.reference_stats = reference_stats or {}
         self.psi_threshold = psi_threshold
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         if not self.reference_stats:
             return GateResult(
@@ -219,24 +222,24 @@ class DistributionDriftGate(ValidationGate):
                 result=ValidationResult.SKIP,
                 message="No reference stats provided, skipping drift check",
             )
-        
+
         drift_violations = []
         for col in df.columns:
             if col not in self.reference_stats:
                 continue
             if not df.schema[col].is_numeric():
                 continue
-            
+
             ref = self.reference_stats[col]
             current_vals = df[col].drop_nulls().to_numpy()
             if len(current_vals) < 100:
                 continue
-            
+
             # Compute PSI (Population Stability Index)
             psi = self._compute_psi(current_vals, ref.get("bins", 10), ref.get("bin_edges"))
             if psi > self.psi_threshold:
                 drift_violations.append({"column": col, "psi": psi, "threshold": self.psi_threshold})
-        
+
         if drift_violations:
             return GateResult(
                 gate_name=self.name,
@@ -253,45 +256,47 @@ class DistributionDriftGate(ValidationGate):
             result=ValidationResult.PASS,
             message="No significant distribution drift",
         )
-    
+
     def _compute_psi(self, current: np.ndarray, n_bins: int, ref_bin_edges: np.ndarray | None) -> float:
         """Compute Population Stability Index"""
         import numpy as np
-        
+
         if ref_bin_edges is not None:
             bin_edges = ref_bin_edges
         else:
             # Create bins from current data
             _, bin_edges = np.histogram(current, bins=n_bins)
-        
+
         # Current distribution
         current_hist, _ = np.histogram(current, bins=bin_edges)
         current_dist = current_hist / current_hist.sum()
-        
+
         # Reference distribution (uniform if not provided)
         ref_dist = np.ones(n_bins) / n_bins
-        
+
         # PSI = sum((current - ref) * ln(current / ref))
         psi = 0.0
-        for c, r in zip(current_dist, ref_dist):
+        for c, r in zip(current_dist, ref_dist, strict=False):
             if c > 0 and r > 0:
                 psi += (c - r) * np.log(c / r)
-        
+
         return psi
 
 
 class LookaheadGuardGate(ValidationGate):
     """Gate that checks for lookahead bias in features"""
-    
+
     def __init__(self, stage: Stage = Stage.FEATURE_ENGINEERING):
         super().__init__(name="lookahead_guard", stage=stage)
-    
+
     def _validate(self, df: pl.DataFrame, pair: str | None, **kwargs) -> GateResult:
         try:
-            from features.lookahead_guard import assert_no_lookahead, LookaheadViolation
-            
+            from features.lookahead_guard import LookaheadViolation, assert_no_lookahead  # noqa: F401
+
             # Get feature columns (numeric, non-target)
-            feature_cols = [c for c in df.columns if df.schema[c].is_numeric() and c not in ["label", "reward", "tb_label"]]
+            feature_cols = [
+                c for c in df.columns if df.schema[c].is_numeric() and c not in ["label", "reward", "tb_label"]
+            ]
             if len(feature_cols) == 0:
                 return GateResult(
                     gate_name=self.name,
@@ -300,11 +305,13 @@ class LookaheadGuardGate(ValidationGate):
                     result=ValidationResult.SKIP,
                     message="No feature columns to check",
                 )
-            
+
             # Use last row of each sequence as features
             features = df.select(feature_cols).tail(1).to_numpy()
-            timestamps = df["timestamp_utc"].tail(1).to_numpy() if "timestamp_utc" in df.columns else np.arange(len(features))
-            
+            timestamps = (
+                df["timestamp_utc"].tail(1).to_numpy() if "timestamp_utc" in df.columns else np.arange(len(features))
+            )
+
             report = assert_no_lookahead(
                 timestamps=timestamps,
                 features=features,
@@ -312,7 +319,7 @@ class LookaheadGuardGate(ValidationGate):
                 rolling_check=True,
                 permutation_check=False,
             )
-            
+
             if report.violations:
                 return GateResult(
                     gate_name=self.name,
@@ -322,7 +329,7 @@ class LookaheadGuardGate(ValidationGate):
                     message=f"Lookahead violations detected: {len(report.violations)}",
                     details={"violations": [str(v) for v in report.violations]},
                 )
-            
+
             return GateResult(
                 gate_name=self.name,
                 stage=self.stage,
@@ -351,9 +358,9 @@ class LookaheadGuardGate(ValidationGate):
 
 class PipelineStageValidator:
     """Orchestrates validation gates for a pipeline stage"""
-    
+
     def __init__(
-        self, 
+        self,
         stage: Stage,
         gates: list[ValidationGate] | None = None,
         fail_fast: bool = True,
@@ -364,11 +371,11 @@ class PipelineStageValidator:
         self.fail_fast = fail_fast
         self.output_dir = Path(output_dir) if output_dir else None
         self.results: list[GateResult] = []
-    
+
     def _default_gates(self, stage: Stage) -> list[ValidationGate]:
         """Get default gates for a stage"""
         gates = []
-        
+
         if stage == Stage.INGESTION:
             gates.append(ContractValidationGate(TickContract))
             gates.append(RowCountGate(min_rows=100, stage=stage))
@@ -386,30 +393,30 @@ class PipelineStageValidator:
         elif stage == Stage.DATASET_BUILD:
             gates.append(ContractValidationGate(DatasetContract))
             gates.append(RowCountGate(min_rows=1000, stage=stage))
-        
+
         return gates
-    
+
     def validate(self, df: pl.DataFrame, pair: str | None = None, **kwargs) -> list[GateResult]:
         """Run all gates for this stage"""
         self.results = []
-        
+
         for gate in self.gates:
             result = gate.run(df, pair=pair, **kwargs)
             self.results.append(result)
-            
+
             # Log result
             self._log_result(result)
-            
+
             # Fail fast
             if self.fail_fast and result.result == ValidationResult.FAIL:
                 break
-        
+
         # Save results if output directory specified
         if self.output_dir:
             self._save_results(pair)
-        
+
         return self.results
-    
+
     def _log_result(self, result: GateResult):
         """Log gate result"""
         icon = {
@@ -418,19 +425,19 @@ class PipelineStageValidator:
             ValidationResult.FAIL: "✗",
             ValidationResult.SKIP: "⊘",
         }.get(result.result, "?")
-        
+
         print(f"  [{icon}] {result.gate_name} ({result.stage.value}): {result.message} ({result.duration_ms:.1f}ms)")
-    
+
     def _save_results(self, pair: str | None):
         """Save validation results to JSON"""
         if not self.output_dir:
             return
-        
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         pair_str = pair or "unknown"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = self.output_dir / f"validation_{self.stage.value}_{pair_str}_{timestamp}.json"
-        
+
         data = {
             "stage": self.stage.value,
             "pair": pair,
@@ -442,12 +449,12 @@ class PipelineStageValidator:
                 "warnings": sum(1 for r in self.results if r.result == ValidationResult.WARN),
                 "failed": sum(1 for r in self.results if r.result == ValidationResult.FAIL),
                 "skipped": sum(1 for r in self.results if r.result == ValidationResult.SKIP),
-            }
+            },
         }
-        
+
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
-    
+
     def get_summary(self) -> dict[str, Any]:
         """Get validation summary"""
         return {
@@ -457,7 +464,9 @@ class PipelineStageValidator:
             "warnings": sum(1 for r in self.results if r.result == ValidationResult.WARN),
             "failed": sum(1 for r in self.results if r.result == ValidationResult.FAIL),
             "skipped": sum(1 for r in self.results if r.result == ValidationResult.SKIP),
-            "overall": "fail" if any(r.result == ValidationResult.FAIL for r in self.results) else
-                      "warn" if any(r.result == ValidationResult.WARN for r in self.results) else
-                      "pass",
+            "overall": "fail"
+            if any(r.result == ValidationResult.FAIL for r in self.results)
+            else "warn"
+            if any(r.result == ValidationResult.WARN for r in self.results)
+            else "pass",
         }

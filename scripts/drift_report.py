@@ -18,18 +18,17 @@ from monitoring.drift_gate import compute_drift_report
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Forex cache drift report")
-    p.add_argument("--cache-path", type=str, required=True,
-                   help="Path to dataset cache (.zarr dir or NPY base path).")
-    p.add_argument("--baseline-samples", type=int, default=20_000,
-                   help="Rows from the start of cache used as baseline.")
-    p.add_argument("--live-samples", type=int, default=5_000,
-                   help="Rows from the end of cache used as recent/live slice.")
+    p.add_argument("--cache-path", type=str, required=True, help="Path to dataset cache (.zarr dir or NPY base path).")
+    p.add_argument(
+        "--baseline-samples", type=int, default=20_000, help="Rows from the start of cache used as baseline."
+    )
+    p.add_argument(
+        "--live-samples", type=int, default=5_000, help="Rows from the end of cache used as recent/live slice."
+    )
     p.add_argument("--psi-threshold", type=float, default=float(MONITORING.get("psi_threshold", 0.2)))
     p.add_argument("--ks-pvalue-threshold", type=float, default=float(MONITORING.get("ks_pvalue_threshold", 0.05)))
-    p.add_argument("--top-k", type=int, default=20,
-                   help="Number of highest-PSI features to print.")
-    p.add_argument("--json-out", type=str, default="",
-                   help="Optional output path for full JSON report.")
+    p.add_argument("--top-k", type=int, default=20, help="Number of highest-PSI features to print.")
+    p.add_argument("--json-out", type=str, default="", help="Optional output path for full JSON report.")
     return p.parse_args()
 
 
@@ -60,10 +59,7 @@ def main() -> None:
             print(f"  - {r}")
     print("Top shifted features (by PSI):")
     for row in report["top_features"]:
-        print(
-            f"  - feature[{row['feature_idx']}] "
-            f"psi={row['psi']:.6f} ks_p={row['ks_pvalue']:.6f}"
-        )
+        print(f"  - feature[{row['feature_idx']}] psi={row['psi']:.6f} ks_p={row['ks_pvalue']:.6f}")
 
     if args.json_out:
         out_path = Path(args.json_out)

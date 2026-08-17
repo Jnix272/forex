@@ -26,7 +26,8 @@ def main():
         socket.send_string(payload)
 
         print(f"Sent tick {tick} (size: {len(features)})")
-        time.sleep(1.0) # 1 tick per second
+        time.sleep(1.0)  # 1 tick per second
+
 
 if __name__ == "__main__":
     main()

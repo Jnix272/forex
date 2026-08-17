@@ -17,6 +17,7 @@ Keep the factual meaning and sentiment identical.
 Headline: "{headline}"
 """
 
+
 def generate_variations(row: dict) -> list[dict]:
     """Ask Ollama to generate 3 variations of the headline."""
     headline = row["headline"]
@@ -26,11 +27,8 @@ def generate_variations(row: dict) -> list[dict]:
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": 0.7,
-            "num_predict": 200
-        },
-        "format": "json"
+        "options": {"temperature": 0.7, "num_predict": 200},
+        "format": "json",
     }
 
     variations = []
@@ -78,6 +76,7 @@ def augment_dataset(df: pd.DataFrame, max_concurrent: int = 10) -> pd.DataFrame:
 
     return pd.DataFrame(augmented_rows)
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", type=str, default="2020-02-01", help="Start date")
@@ -120,7 +119,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if out_path.exists():
-        augmented_df.to_csv(out_path, mode='a', header=False, index=False)
+        augmented_df.to_csv(out_path, mode="a", header=False, index=False)
         print(f"Appended to {out_path}")
     else:
         augmented_df.to_csv(out_path, index=False)
@@ -130,6 +129,7 @@ def main():
     print("\nSample variations:")
     for _, row in augmented_df.head(5).iterrows():
         print(f" - {row['headline']}")
+
 
 if __name__ == "__main__":
     main()

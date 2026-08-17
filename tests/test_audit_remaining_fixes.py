@@ -1,4 +1,5 @@
 """Tests for remaining training-audit remediations."""
+
 from __future__ import annotations
 
 import pytest
@@ -8,12 +9,14 @@ def test_embargo_purge_from_config_matches_yaml_floor():
     from labeling.rl_reward_labeling import max_label_horizon_mult
     from training.cv_splits import embargo_purge_from_config
 
-    emb, pur, meth = embargo_purge_from_config({
-        "training": {"seq_len": 80},
-        "strategy": {"lookahead_bars": 30},
-        "execution": {"delay_bars": 1},
-        "validation": {"embargo_bars": 60, "purge_bars": 120, "method": "purged_embargo"},
-    })
+    emb, pur, meth = embargo_purge_from_config(
+        {
+            "training": {"seq_len": 80},
+            "strategy": {"lookahead_bars": 30},
+            "execution": {"delay_bars": 1},
+            "validation": {"embargo_bars": 60, "purge_bars": 120, "method": "purged_embargo"},
+        }
+    )
     # Dynamic floor = 80 + int(30 * max_horizon_mult) + 1  (> yaml 60)
     eff_lh = int(30 * max_label_horizon_mult())
     assert emb == 80 + eff_lh + 1
@@ -105,6 +108,6 @@ def test_stage_timer_accumulates():
     assert s["b"] >= 0.005
     assert "a" in s and "b" in s
     g = t.gpu_summary()
-    assert g["n_samples"] == 6  # enter+exit × 3 stages
+    assert g["n_samples"] == 6  # enter+exit x 3 stages
     assert "gpu_util_pct_mean" in g
     assert "gpu_util_pct_max" in g

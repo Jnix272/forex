@@ -1,10 +1,10 @@
 """
-pretrain/extended_trainers.py — Additional self-supervised pretrain objectives.
+pretrain/extended_trainers.py - Additional self-supervised pretrain objectives.
 
-  vae        — variational autoencoder (reconstruction + KL)
-  cluster    — k-means regime discovery + contrastive same-cluster positives
-  forecast   — predict future timesteps from prefix (causal pretext)
-  drift      — push apart clean vs heavily corrupted window embeddings
+  vae        - variational autoencoder (reconstruction + KL)
+  cluster    - k-means regime discovery + contrastive same-cluster positives
+  forecast   - predict future timesteps from prefix (causal pretext)
+  drift      - push apart clean vs heavily corrupted window embeddings
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ try:
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+
     TORCH = True
 except ImportError:
     TORCH = False
@@ -29,8 +30,10 @@ try:
     def _pbar(it, **kw):
         return _tqdm(it, **kw)
 except ImportError:
+
     def _pbar(it, **kw):
         return it
+
 
 if TORCH:
     from pretrain.contrastive import (
@@ -48,7 +51,7 @@ if TORCH:
     def _kmeans_numpy(X: np.ndarray, k: int, n_iter: int = 20, seed: int = 0) -> np.ndarray:
         """Lloyd k-means on (N, D); returns cluster id per row."""
         X = np.asarray(X, dtype=np.float64)
-        n, d = X.shape
+        n, _d = X.shape
         k = max(1, min(int(k), n))
         rng = np.random.default_rng(seed)
         centroids = X[rng.choice(n, size=k, replace=False)].copy()
@@ -176,8 +179,9 @@ if TORCH:
                 )
             base_lr = self.opt.param_groups[0]["lr"]
             warmup_epochs = min(3, epochs)
-            epoch_bar = (_pbar(range(epochs), desc="VAE Pretrain", unit="ep", leave=True)
-                         if not silent else range(epochs))
+            epoch_bar = (
+                _pbar(range(epochs), desc="VAE Pretrain", unit="ep", leave=True) if not silent else range(epochs)
+            )
             for epoch in epoch_bar:
                 self._total_epochs += 1
                 if epoch < warmup_epochs:
@@ -197,7 +201,7 @@ if TORCH:
                         continue
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
                     recon, mu, logvar = self._forward(x)
-                    recon_loss = F.mse_loss(recon, x, reduction='none').sum(dim=list(range(1, recon.ndim))).mean()
+                    recon_loss = F.mse_loss(recon, x, reduction="none").sum(dim=list(range(1, recon.ndim))).mean()
                     kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
                     loss = recon_loss + self.beta * kl
                     if not torch.isfinite(loss):
@@ -262,9 +266,7 @@ if TORCH:
                 nn.ReLU(),
                 nn.Linear(int(proj_dim), int(proj_dim)),
             ).to(self.device)
-            self.log_temp = nn.Parameter(
-                torch.tensor(float(temperature)).log().to(self.device)
-            )
+            self.log_temp = nn.Parameter(torch.tensor(float(temperature)).log().to(self.device))
             self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
             self.opt = torch.optim.AdamW(
                 list(self.encoder.parameters()) + list(self.proj.parameters()) + [self.log_temp],
@@ -284,9 +286,7 @@ if TORCH:
             self.encoder.eval()
             with torch.no_grad():
                 for start in range(0, len(X), batch_size):
-                    xb = torch.as_tensor(
-                        X[start : start + batch_size], dtype=torch.float32, device=self.device
-                    )
+                    xb = torch.as_tensor(X[start : start + batch_size], dtype=torch.float32, device=self.device)
                     h = _encode_last(self.encoder, xb).cpu().numpy()
                     embs.append(h)
             self.encoder.train()
@@ -296,8 +296,8 @@ if TORCH:
         def nt_xent(self, z1: torch.Tensor, z2: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
             """Supervised contrastive: only same-cluster pairs are positives.
 
-            Vectorised O(B²) computation — the previous per-anchor python loop
-            was O(B) allocations and ~10× slower on GPU batches.
+            Vectorised O(B²) computation - the previous per-anchor python loop
+            was O(B) allocations and ~10x slower on GPU batches.
             """
             B = z1.shape[0]
             z = torch.cat([z1, z2], dim=0).float()
@@ -373,11 +373,8 @@ if TORCH:
             N = len(X)
             history = {"loss": [], "align": [], "unif": []}
             if not silent:
-                print(
-                    f"[ClusterTSCL] {epochs} ep | {N:,} windows | k={self.n_clusters} | "
-                    f"batch={batch_size}"
-                )
-            for epoch in range(epochs):
+                print(f"[ClusterTSCL] {epochs} ep | {N:,} windows | k={self.n_clusters} | batch={batch_size}")
+            for _epoch in range(epochs):
                 self._total_epochs += 1
                 self._fit_clusters(X, batch_size=min(batch_size * 4, 1024))
                 idx_perm = np.random.permutation(N)
@@ -387,9 +384,7 @@ if TORCH:
                     batch_idx = idx_perm[start : start + batch_size]
                     if len(batch_idx) < 4:
                         continue
-                    labels = torch.as_tensor(
-                        self.cluster_labels[batch_idx], dtype=torch.long, device=self.device
-                    )
+                    labels = torch.as_tensor(self.cluster_labels[batch_idx], dtype=torch.long, device=self.device)
                     x = X[batch_idx]
                     v1 = self.aug.augment_batch(x)
                     v2 = self.aug.augment_batch(x)
@@ -514,11 +509,8 @@ if TORCH:
             N = len(X)
             history = {"loss": [], "forecast_mse": [], "embed_std": []}
             if not silent:
-                print(
-                    f"[Forecast] {epochs} ep | {N:,} windows | horizon={self.horizon} bars | "
-                    f"batch={batch_size}"
-                )
-            for epoch in range(epochs):
+                print(f"[Forecast] {epochs} ep | {N:,} windows | horizon={self.horizon} bars | batch={batch_size}")
+            for _epoch in range(epochs):
                 self._total_epochs += 1
                 idx_perm = np.random.permutation(N)
                 epoch_loss = 0.0
@@ -549,10 +541,7 @@ if TORCH:
                 history["forecast_mse"].append(diag["forecast_mse"])
                 history["embed_std"].append(diag["embed_std"])
                 if not silent:
-                    print(
-                        f"[Forecast] Ep {self._total_epochs:3d} | loss={avg:.4f} "
-                        f"| mse={diag['forecast_mse']:.4f}"
-                    )
+                    print(f"[Forecast] Ep {self._total_epochs:3d} | loss={avg:.4f} | mse={diag['forecast_mse']:.4f}")
             if not silent:
                 self.save_encoder(checkpoint_path)
             return history
@@ -601,9 +590,10 @@ if TORCH:
                 x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
                 clean = F.normalize(_encode_last(self.encoder, x), dim=-1)
                 drift = F.normalize(
-                    _encode_last(self.encoder, torch.as_tensor(
-                        self.aug.augment_batch(sample), dtype=torch.float32, device=self.device
-                    )),
+                    _encode_last(
+                        self.encoder,
+                        torch.as_tensor(self.aug.augment_batch(sample), dtype=torch.float32, device=self.device),
+                    ),
                     dim=-1,
                 )
                 dist = (clean - drift).norm(dim=1).mean().item()
@@ -636,11 +626,8 @@ if TORCH:
             N = len(X)
             history = {"loss": [], "drift_margin": [], "embed_std": []}
             if not silent:
-                print(
-                    f"[DriftPretrain] {epochs} ep | {N:,} windows | margin={self.margin} | "
-                    f"batch={batch_size}"
-                )
-            for epoch in range(epochs):
+                print(f"[DriftPretrain] {epochs} ep | {N:,} windows | margin={self.margin} | batch={batch_size}")
+            for _epoch in range(epochs):
                 self._total_epochs += 1
                 idx_perm = np.random.permutation(N)
                 epoch_loss = 0.0
@@ -651,9 +638,7 @@ if TORCH:
                         continue
                     x_np = X[batch_idx]
                     x = torch.as_tensor(x_np, dtype=torch.float32, device=self.device)
-                    drift_x = torch.as_tensor(
-                        self.aug.augment_batch(x_np), dtype=torch.float32, device=self.device
-                    )
+                    drift_x = torch.as_tensor(self.aug.augment_batch(x_np), dtype=torch.float32, device=self.device)
                     clean = F.normalize(_encode_last(self.encoder, x), dim=-1)
                     drift = F.normalize(_encode_last(self.encoder, drift_x), dim=-1)
                     dist = (clean - drift).norm(dim=1)
@@ -681,11 +666,19 @@ if TORCH:
             return history
 
 else:
+
     class VAESeqTrainer:
-        def __init__(self, **kw): pass
-        def pretrain(self, *a, **kw): return {"loss": [0.0]}
-        def diagnostics(self, *a, **kw): return {}
-        def save_encoder(self, *a, **kw): pass
+        def __init__(self, **kw):
+            pass
+
+        def pretrain(self, *a, **kw):
+            return {"loss": [0.0]}
+
+        def diagnostics(self, *a, **kw):
+            return {}
+
+        def save_encoder(self, *a, **kw):
+            pass
 
     ClusterContrastiveTrainer = VAESeqTrainer
     ForecastPretextTrainer = VAESeqTrainer

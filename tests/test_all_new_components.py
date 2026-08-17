@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Integration tests for all new components added 2026-08-10."""
 
-import sys, time, traceback, warnings, os
+import os
+import sys
+import time
+import traceback
+import warnings
 
 # Ensure project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,8 +28,10 @@ def test(name):
                 failed += 1
                 print(f"  ✗ {name}: {e}")
                 traceback.print_exc()
+
         wrapper.__name__ = func.__name__
         return wrapper
+
     return decorator
 
 
@@ -33,9 +39,10 @@ def test(name):
 # 1. DATA COVERAGE
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Data coverage validation")
 def test_coverage():
-    from training.data_coverage import validate_pair_coverage, validate_news_data, validate_source_directories
+    from training.data_coverage import validate_news_data, validate_pair_coverage, validate_source_directories
 
     valid, report = validate_pair_coverage(["EURUSD", "AUDUSD", "NOPE"], min_years=2, expected_years=18)
     assert "EURUSD" in valid, "EURUSD should be valid"
@@ -54,9 +61,15 @@ def test_coverage():
 # 2. FEATURE CACHE
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Feature cache paths")
 def test_feature_cache():
-    from data.feature_cache import feat_cache_path, feat_cache_exists, load_cached_features, DEFAULT_CACHE_DIR, CACHE_VERSION
+    from data.feature_cache import (
+        DEFAULT_CACHE_DIR,
+        feat_cache_exists,
+        feat_cache_path,
+        load_cached_features,
+    )
 
     path = feat_cache_path("EURUSD")
     assert "EURUSD" in str(path)
@@ -65,7 +78,7 @@ def test_feature_cache():
     exists = feat_cache_exists("EURUSD")
     assert isinstance(exists, bool)
 
-    # Try loading — should return None since no cache exists
+    # Try loading - should return None since no cache exists
     result = load_cached_features("EURUSD", "2024-01-01", "2024-02-01")
     assert result is None or result is not None  # nullable
 
@@ -74,10 +87,12 @@ def test_feature_cache():
 # 3. NUMBA LABELING
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Simple Numba barrier scan")
 def test_numba_simple():
     import numpy as np
-    from labeling.rl_reward_numba import _scan_barriers_simple, _numba_available
+
+    from labeling.rl_reward_numba import _numba_available, _scan_barriers_simple
 
     assert _numba_available(), "Numba should be available"
     n = 2000
@@ -90,10 +105,19 @@ def test_numba_simple():
     valid_market = np.ones(n, dtype=bool)
 
     rl, rs = _scan_barriers_simple(
-        close.astype(np.float64), entry_long.astype(np.float64),
-        entry_short.astype(np.float64), exit_long.astype(np.float64),
-        exit_short.astype(np.float64), atr.astype(np.float64),
-        valid_market, 1.2, 0.8, 1.5, 0.0001, 30, 1,
+        close.astype(np.float64),
+        entry_long.astype(np.float64),
+        entry_short.astype(np.float64),
+        exit_long.astype(np.float64),
+        exit_short.astype(np.float64),
+        atr.astype(np.float64),
+        valid_market,
+        1.2,
+        0.8,
+        1.5,
+        0.0001,
+        30,
+        1,
     )
     assert rl.shape == (n,)
     assert rs.shape == (n,)
@@ -103,6 +127,7 @@ def test_numba_simple():
 @test("Regime Numba barrier scan")
 def test_numba_regime():
     import numpy as np
+
     from labeling.rl_reward_numba import _scan_barriers_regime
 
     n = 1500
@@ -119,12 +144,21 @@ def test_numba_regime():
     horizon_arr = np.full(n, 30, dtype=np.int32)
     tx_arr = np.full(n, 1.5, dtype=np.float32)
 
-    rl, rs, pq, ct, tx = _scan_barriers_regime(
-        close.astype(np.float64), entry_long.astype(np.float64),
-        entry_short.astype(np.float64), exit_long.astype(np.float64),
-        exit_short.astype(np.float64), atr.astype(np.float64),
-        valid_market, tp_mult, sl_mult, horizon_arr, tx_arr,
-        0.0001, 1, 45,
+    rl, _rs, pq, ct, _tx = _scan_barriers_regime(
+        close.astype(np.float64),
+        entry_long.astype(np.float64),
+        entry_short.astype(np.float64),
+        exit_long.astype(np.float64),
+        exit_short.astype(np.float64),
+        atr.astype(np.float64),
+        valid_market,
+        tp_mult,
+        sl_mult,
+        horizon_arr,
+        tx_arr,
+        0.0001,
+        1,
+        45,
     )
     assert rl.shape == (n,)
     assert pq.shape == (n,)
@@ -136,9 +170,10 @@ def test_numba_regime():
 # 4. MODEL TRAINING PROFILES
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Model training profiles")
 def test_profiles():
-    from config.model_training_profile import get_training_profile, MODEL_PROFILES
+    from config.model_training_profile import get_training_profile
 
     for name in ["haelt", "tft", "transformer", "mamba", "gnn", "expert"]:
         p = get_training_profile(name)
@@ -163,12 +198,13 @@ def test_profiles():
 # 5. PGD HARDENING
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("PGD with new features")
 def test_pgd():
     import numpy as np
 
     # Test the class structure without torch
-    from training.adversarial_generator import PGDAttack, GraphAdversarialAttack, create_adversarial_attack
+    from training.adversarial_generator import create_adversarial_attack
 
     # Test factory with new params
     attack = create_adversarial_attack(method="pgd", normalize_grad=True, warmup_steps=10)
@@ -189,6 +225,7 @@ def test_pgd():
 
     # Test feature eps multipliers
     from training.adversarial_generator import AdversarialAttack
+
     base = AdversarialAttack(eps=0.3)
     multipliers = np.array([0.5, 1.0, 2.0], dtype=np.float32)
     base.set_feature_eps_multipliers(multipliers)
@@ -199,10 +236,10 @@ def test_pgd():
 # 6. CURRICULUM
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Curriculum miner feedback config")
 def test_curriculum():
-    from training.curriculum import CurriculumManagerConfig, DifficultyCurriculumConfig
-    from training.curriculum import create_curriculum_manager
+    from training.curriculum import CurriculumManagerConfig, create_curriculum_manager
 
     # Test config with new fields
     cfg = CurriculumManagerConfig(
@@ -221,18 +258,19 @@ def test_curriculum():
         forgetting_threshold=0.2,
         freeze_patience=2,
     )
-    info = mgr.update(0, losses=None, forgetting_rate=0.3, easy_ratio=0.1)
-    assert "forgetting_rate" in info or True  # Depends on mode
-    assert "easy_ratio" in info or True
+    mgr.update(0, losses=None, forgetting_rate=0.3, easy_ratio=0.1)
+    assert True  # Depends on mode
+    assert True
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 7. MONITORING SYSTEM
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("Unified event schema")
 def test_events():
-    from monitoring.events import TrainingEvent, EventType, Severity, validate_payload
+    from monitoring.events import EventType, Severity, TrainingEvent, validate_payload
 
     event = TrainingEvent.log("test", source="test", run_id="t1")
     assert event.event_type == EventType.LOG
@@ -245,19 +283,19 @@ def test_events():
     e2 = TrainingEvent.from_dict(d)
     assert e2.event_id == event.event_id
 
-    ok, errors = validate_payload(EventType.LOG, {"message": "x", "logger": "y"})
+    ok, _errors = validate_payload(EventType.LOG, {"message": "x", "logger": "y"})
     assert ok
 
 
 @test("Check registry")
 def test_checks():
-    from monitoring.checks import get_registry, get_engine, CheckContext
+    from monitoring.checks import get_registry
 
     registry = get_registry()
     checks = registry.list_all()
     assert len(checks) >= 20, f"Expected >=20 checks, got {len(checks)}"
 
-    phases = set(c.phase.value for c in checks)
+    phases = {c.phase.value for c in checks}
     assert "batch" in phases
     assert "epoch" in phases
     assert "pretrain" in phases
@@ -281,12 +319,13 @@ def test_alerts():
 # 8. CONFIG
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("YAML configs load")
 def test_yaml():
     import yaml
 
-    cfg = yaml.safe_load(open("config/run.yaml"))
-    ubuntu = yaml.safe_load(open("config/run_ubuntu.yaml"))
+    cfg = yaml.safe_load(open("config/run.yaml"))  # noqa: SIM115
+    yaml.safe_load(open("config/run_ubuntu.yaml"))  # noqa: SIM115
 
     # New config keys
     assert cfg["data"]["min_pair_years"] == 2
@@ -310,6 +349,7 @@ def test_yaml():
 # ════════════════════════════════════════════════════════════════════════════
 # 9. ZARR CHUNKING
 # ════════════════════════════════════════════════════════════════════════════
+
 
 @test("Zarr chunk row resolver")
 def test_chunking():
@@ -337,33 +377,52 @@ def test_chunking():
 # 10. COMPILATION CHECK
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @test("All modified files compile")
 def test_compile():
     import subprocess
 
     files = [
-        "config/model_training_profile.py", "config/feature_mask.py", "config/settings.py",
-        "training/model_factory.py", "training/gpu_cli.py", "training/supervised_loop.py",
-        "training/curriculum.py", "training/adversarial_generator.py",
-        "training/dataset_builder.py", "training/gpu_datasets.py",
-        "training/config_validate.py", "training/data_coverage.py", "training/rl_runner.py",
+        "config/model_training_profile.py",
+        "config/feature_mask.py",
+        "config/settings.py",
+        "training/model_factory.py",
+        "training/gpu_cli.py",
+        "training/supervised_loop.py",
+        "training/curriculum.py",
+        "training/adversarial_generator.py",
+        "training/dataset_builder.py",
+        "training/gpu_datasets.py",
+        "training/config_validate.py",
+        "training/data_coverage.py",
+        "training/rl_runner.py",
         "pretrain/hard_example_mining.py",
-        "labeling/rl_reward_labeling.py", "labeling/rl_reward_numba.py",
+        "labeling/rl_reward_labeling.py",
+        "labeling/rl_reward_numba.py",
         "labeling/triple_barrier_labeling.py",
         "features/feature_engineering_pl.py",
-        "data/feature_cache.py", "data/sources.py", "data/compact_ticks.py",
-        "monitoring/__init__.py", "monitoring/events.py", "monitoring/event_bus.py",
+        "data/feature_cache.py",
+        "data/sources.py",
+        "data/compact_ticks.py",
+        "monitoring/__init__.py",
+        "monitoring/events.py",
+        "monitoring/event_bus.py",
         "monitoring/unified_logger.py",
-        "monitoring/checks/__init__.py", "monitoring/checks/nan_detection.py",
-        "monitoring/checks/gradient_norm.py", "monitoring/checks/loss_plateau.py",
-        "monitoring/checks/representation_collapse.py", "monitoring/checks/checkpoint_load.py",
-        "monitoring/checks/data_drift.py", "monitoring/checks/resource_monitor.py",
-        "monitoring/alerts/engine.py", "monitoring/dashboard/app.py",
+        "monitoring/checks/__init__.py",
+        "monitoring/checks/nan_detection.py",
+        "monitoring/checks/gradient_norm.py",
+        "monitoring/checks/loss_plateau.py",
+        "monitoring/checks/representation_collapse.py",
+        "monitoring/checks/checkpoint_load.py",
+        "monitoring/checks/data_drift.py",
+        "monitoring/checks/resource_monitor.py",
+        "monitoring/alerts/engine.py",
+        "monitoring/dashboard/app.py",
         "scripts/migrate_to_duckdb.py",
     ]
     for f in files:
         r = subprocess.run([sys.executable, "-m", "py_compile", f], capture_output=True)
-        assert r.returncode == 0, f"Failed: {f} — {r.stderr.decode()[:100]}"
+        assert r.returncode == 0, f"Failed: {f} - {r.stderr.decode()[:100]}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -372,7 +431,7 @@ def test_compile():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("INTEGRATION TESTS — All New Components")
+    print("INTEGRATION TESTS - All New Components")
     print("=" * 60)
     t0 = time.time()
 
@@ -391,9 +450,9 @@ if __name__ == "__main__":
     test_compile()
 
     elapsed = time.time() - t0
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {passed} passed, {failed} failed")
     print(f"Time: {elapsed:.1f}s")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     sys.exit(1 if failed > 0 else 0)

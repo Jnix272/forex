@@ -6,10 +6,10 @@ Closes the canonical in-sample leak from audit 2026-08-07, finding E3 /
 ``[0, total)`` of the SAME cache the base models were trained on, with no
 chronological split, purge, or embargo. Now the script must compute the
 ``_trainable_max_index`` (= total - promotion-holdout - embargo) and
-sample only from the [0, _trainable) prefix — mirroring
+sample only from the [0, _trainable) prefix - mirroring
 ``training/post_train.run_ensemble_meta``.
 
-These tests pin the helper-level contract — they target the pure
+These tests pin the helper-level contract - they target the pure
 split-compute logic without standing up torch / zarr / models.
 """
 
@@ -19,14 +19,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from training.cache_integrity import _promotion_holdout_n, _trainable_max_index  # noqa: E402
-from training.cv_splits import _embargo_bars  # noqa: E402
+from training.cache_integrity import _promotion_holdout_n, _trainable_max_index
+from training.cv_splits import _embargo_bars
 
 try:
     from types import SimpleNamespace
@@ -34,15 +33,15 @@ except ImportError:  # pragma: no cover - always available in py3
     SimpleNamespace = None  # type: ignore[assignment]
 
 
-def _args(**kw) -> "SimpleNamespace":
+def _args(**kw) -> SimpleNamespace:
     """Build the minimal args namespace used by the embargo / holdout helpers."""
-    base = dict(
-        seq_len=60,
-        lookahead_bars=30,
-        execution_delay_bars=1,
-        promote_forward_frac=0.1,
-        quick_mode=False,
-    )
+    base = {
+        "seq_len": 60,
+        "lookahead_bars": 30,
+        "execution_delay_bars": 1,
+        "promote_forward_frac": 0.1,
+        "quick_mode": False,
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -85,7 +84,7 @@ def test_trainable_max_index_grows_with_total():
 
 def test_trainable_max_index_no_drop_when_holdout_pct_is_zero():
     """If promote_forward_frac is set to 0.01 (the smallest allowed), the
-    holdout still respects the floor of 50 bars — protects against
+    holdout still respects the floor of 50 bars - protects against
     off-by-zero under-sampling on small caches."""
     a = _args(promote_forward_frac=0.001)  # below 0.01 floor
     total = 1_000
@@ -98,7 +97,7 @@ def test_trainable_max_index_no_drop_when_holdout_pct_is_zero():
 def test_meta_idx_sampling_excludes_holdout_and_embargo_tail():
     """Standalone script's meta_idx logic: ``np.sort(rng.choice(_trainable, n_meta,
     replace=False))`` must produce indices strictly less than
-    ``_trainable_max_index(total, args)`` — never sampling from the
+    ``_trainable_max_index(total, args)`` - never sampling from the
     chronological holdout nor the embargo gap. This is the exact contract
     fix; the standalone script is required to mirror the production path
     (training/post_train.run_ensemble_meta:164-174)."""
@@ -114,7 +113,7 @@ def test_meta_idx_sampling_excludes_holdout_and_embargo_tail():
         f"meta_idx max ({meta_idx.max()}) must be < trainable "
         f"({trainable}); otherwise the meta-learner has sampled from the "
         "chronological promotion holdout, which the bases also trained "
-        "on — in-sample leak (audit E3)."
+        "on - in-sample leak (audit E3)."
     )
 
 
@@ -137,7 +136,7 @@ def test_old_uniform_sampling_pattern_was_a_leak():
     # The leak: the old pattern CAN return indices in [trainable, total)
     assert (old >= trainable).any(), (
         "If this assertion fails, the old pattern sampled within the "
-        "trainable prefix by luck — re-seed the test. The point is the OLD "
+        "trainable prefix by luck - re-seed the test. The point is the OLD "
         "pattern PERMITS sampling from [trainable, total), which is the leak."
     )
     # The fix always excludes that tail:

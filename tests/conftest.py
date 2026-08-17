@@ -11,7 +11,7 @@ if str(_ROOT) not in sys.path:
 
 
 # Standalone integration harness (custom `test()` decorator, runs under
-# `python tests/test_all_new_components.py`). Not a pytest module — exclude
+# `python tests/test_all_new_components.py`). Not a pytest module - exclude
 # from collection so pytest doesn't interpret `def test(name)` as a fixture.
 collect_ignore = ["test_all_new_components.py"]
 

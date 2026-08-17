@@ -6,18 +6,18 @@ Sidecar process for the Forex Scaling Model.
 A sidecar is a companion process that runs alongside the main training or
 inference process and handles observability independently:
 
-  • Async log shipping — the main process sends log events via a Queue;
+  • Async log shipping - the main process sends log events via a Queue;
     the sidecar writes them to file, JSONL, and optional Discord without
     blocking the training loop.
-  • Metrics collection — GPU temperature, memory, NaN/gradient health,
+  • Metrics collection - GPU temperature, memory, NaN/gradient health,
     epoch timing, and per-batch latency are aggregated and emitted as
     structured JSONL events.
-  • Health monitoring — a background watchdog detects frozen training
+  • Health monitoring - a background watchdog detects frozen training
     (no heartbeat within a configurable timeout) and fires alerts.
-  • Log rotation & retention — RotatingFileHandler + optional time-based
+  • Log rotation & retention - RotatingFileHandler + optional time-based
     cleanup of old log files.
-  • Deduplication — identical alerts within a window are suppressed.
-  • Process isolation — if the main process crashes, the sidecar can still
+  • Deduplication - identical alerts within a window are suppressed.
+  • Process isolation - if the main process crashes, the sidecar can still
     flush remaining buffered events and write a final summary.
 
 Usage
@@ -69,7 +69,7 @@ def _now_iso() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMAND TYPES — what the main process sends to the sidecar
+# COMMAND TYPES - what the main process sends to the sidecar
 # ─────────────────────────────────────────────────────────────────────────────
 
 CMD_LOG = "log"
@@ -83,6 +83,7 @@ CMD_SHUTDOWN = "shutdown"
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDECAR PROCESS (runs in a separate OS process)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SidecarProcess:
     """
@@ -146,14 +147,16 @@ class SidecarProcess:
                 encoding="utf-8",
             )
             fh.setLevel(logging.DEBUG)
-            fh.setFormatter(logging.Formatter(
-                "%(asctime)s [%(levelname)-8s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            ))
+            fh.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s [%(levelname)-8s] %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
             self._logger.addHandler(fh)
 
         try:
-            self._jsonl_handle = open(str(self._jsonl_path), "a", encoding="utf-8")
+            self._jsonl_handle = open(str(self._jsonl_path), "a", encoding="utf-8")  # noqa: SIM115
         except Exception as e:
             _SIDECAR_LOGGER.error(f"Failed to open JSONL file: {e}")
             return False
@@ -166,10 +169,7 @@ class SidecarProcess:
         )
         self._process.start()
         self._start_ts = time.monotonic()
-        _SIDECAR_LOGGER.info(
-            f"Sidecar started — pid={self._process.pid} "
-            f"log={self._log_path} jsonl={self._jsonl_path}"
-        )
+        _SIDECAR_LOGGER.info(f"Sidecar started - pid={self._process.pid} log={self._log_path} jsonl={self._jsonl_path}")
         return True
 
     def stop(self, timeout_s: float = 5.0) -> None:
@@ -206,10 +206,7 @@ class SidecarProcess:
                 h.close()
                 self._logger.removeHandler(h)
 
-        _SIDECAR_LOGGER.info(
-            f"Sidecar stopped — {self._event_count} events, "
-            f"{self._dropped_events} dropped"
-        )
+        _SIDECAR_LOGGER.info(f"Sidecar stopped - {self._event_count} events, {self._dropped_events} dropped")
 
     def send(self, cmd: str, data: dict[str, Any]) -> bool:
         """
@@ -242,7 +239,7 @@ class SidecarProcess:
         return self.send(CMD_FLUSH, {})
 
     # ─────────────────────────────────────────────────────────────────────────
-    # INTERNAL — the run loop that executes in the child process
+    # INTERNAL - the run loop that executes in the child process
     # ─────────────────────────────────────────────────────────────────────────
 
     def _run_loop(self, q: Queue, stop: threading.Event) -> None:
@@ -354,9 +351,7 @@ class SidecarProcess:
         buffer.append(record)
 
         if queue_size > self.max_queue_size * 0.8:
-            _SIDECAR_LOGGER.warning(
-                f"Sidecar queue nearly full ({queue_size}/{self.max_queue_size})"
-            )
+            _SIDECAR_LOGGER.warning(f"Sidecar queue nearly full ({queue_size}/{self.max_queue_size})")
 
     def _flush_buffer(self, buffer: list[dict[str, Any]]) -> None:
         """Write buffered events to JSONL and flush."""
@@ -372,9 +367,7 @@ class SidecarProcess:
         except Exception as e:
             _SIDECAR_LOGGER.error(f"Failed to flush buffer: {e}")
 
-    def _write_jsonl(
-        self, buffer: list[dict[str, Any]], record: dict[str, Any]
-    ) -> None:
+    def _write_jsonl(self, buffer: list[dict[str, Any]], record: dict[str, Any]) -> None:
         """Write a single record directly to JSONL (bypasses buffer)."""
         if self._jsonl_handle is None:
             return
@@ -387,8 +380,9 @@ class SidecarProcess:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDECAR MANAGER — the public API used by training/inference code
+# SIDECAR MANAGER - the public API used by training/inference code
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class Sidecar:
     """
@@ -458,9 +452,7 @@ class Sidecar:
             self._started = True
 
         if self._started:
-            _SIDECAR_LOGGER.info(
-                f"Sidecar started — mode={self.mode} run={self.run_name}"
-            )
+            _SIDECAR_LOGGER.info(f"Sidecar started - mode={self.mode} run={self.run_name}")
         return self._started
 
     def stop(self) -> None:
@@ -489,9 +481,7 @@ class Sidecar:
             self._sidecar.log(level, message, **fields)
         elif self._queue:
             try:
-                self._queue.put_nowait(
-                    {"cmd": CMD_LOG, "data": {"level": level, "message": message, **fields}}
-                )
+                self._queue.put_nowait({"cmd": CMD_LOG, "data": {"level": level, "message": message, **fields}})
             except queue.Full:
                 pass
 
@@ -503,9 +493,7 @@ class Sidecar:
             self._sidecar.metric(metric_name, values)
         elif self._queue:
             try:
-                self._queue.put_nowait(
-                    {"cmd": CMD_METRIC, "data": {"metric": metric_name, "values": values}}
-                )
+                self._queue.put_nowait({"cmd": CMD_METRIC, "data": {"metric": metric_name, "values": values}})
             except queue.Full:
                 pass
 
@@ -517,9 +505,7 @@ class Sidecar:
             self._sidecar.heartbeat()
         elif self._queue:
             try:
-                self._queue.put_nowait(
-                    {"cmd": CMD_HEARTBEAT, "ts": _now_iso()}
-                )
+                self._queue.put_nowait({"cmd": CMD_HEARTBEAT, "ts": _now_iso()})
             except queue.Full:
                 pass
 
@@ -560,7 +546,7 @@ class Sidecar:
         return False
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Internal — in-process run loop (for thread mode)
+    # Internal - in-process run loop (for thread mode)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _run_loop(self, q: Queue, stop: threading.Event) -> None:

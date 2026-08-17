@@ -12,9 +12,9 @@ class BaseInferenceEngine(abc.ABC):
     @abc.abstractmethod
     def select_action(self, obs: np.ndarray) -> int:
         """
-        Takes a single bar's feature vector (1D array), updates internal rolling 
+        Takes a single bar's feature vector (1D array), updates internal rolling
         buffers or state, and returns an action.
-        
+
         Returns:
             int: 0=Buy, 1=Hold, 2=Sell
         """

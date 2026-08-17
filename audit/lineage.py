@@ -1,8 +1,9 @@
 """
-audit/lineage.py — data lineage, model registry records, decision trail.
+audit/lineage.py - data lineage, model registry records, decision trail.
 
 Standard-library only (runs in CI / recovery shells without heavy deps).
 """
+
 from __future__ import annotations
 
 import json
@@ -18,6 +19,7 @@ def _now_iso() -> str:
 @dataclass
 class LineageStep:
     """One processing step in the data → training pipeline."""
+
     step: str
     name: str
     params: dict[str, Any] = field(default_factory=dict)
@@ -37,7 +39,8 @@ class LineageStep:
 @dataclass
 class DecisionRecord:
     """One audited decision (promotion / rollback / risk / drift)."""
-    decision: str            # promote | rollback | risk_block | drift_alert ...
+
+    decision: str  # promote | rollback | risk_block | drift_alert ...
     model: str
     decision_made: bool
     details: dict[str, Any] = field(default_factory=dict)
@@ -66,8 +69,7 @@ class DataLineage:
         lineage.save(path)
     """
 
-    def __init__(self, dataset: str = "", dataset_version: str = "",
-                 dataset_hash: str = ""):
+    def __init__(self, dataset: str = "", dataset_version: str = "", dataset_hash: str = ""):
         self.dataset = dataset
         self.dataset_version = dataset_version
         self.dataset_hash = dataset_hash
@@ -75,16 +77,20 @@ class DataLineage:
         self.training_runs: list[dict[str, Any]] = []
         self.created_at: str = _now_iso()
 
-    def add_step(self, step: str, name: str, params: dict[str, Any] | None = None,
-                 data_hash: str = "") -> LineageStep:
+    def add_step(self, step: str, name: str, params: dict[str, Any] | None = None, data_hash: str = "") -> LineageStep:
         s = LineageStep(step=step, name=name, params=params or {}, data_hash=data_hash)
         self.steps.append(s)
         return s
 
-    def record_training_run(self, run_id: str, params: dict[str, Any] | None = None,
-                            seed: int | None = None, commit: str | None = None,
-                            env: dict[str, Any] | None = None,
-                            model: str = "unknown") -> dict[str, Any]:
+    def record_training_run(
+        self,
+        run_id: str,
+        params: dict[str, Any] | None = None,
+        seed: int | None = None,
+        commit: str | None = None,
+        env: dict[str, Any] | None = None,
+        model: str = "unknown",
+    ) -> dict[str, Any]:
         run = {
             "run_id": run_id,
             "model": model,
@@ -116,6 +122,7 @@ class DataLineage:
 
     def save(self, path: str) -> None:
         import os
+
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.to_json())
@@ -124,13 +131,16 @@ class DataLineage:
     def load(cls, path: str) -> DataLineage:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        lineage = cls(data.get("dataset", ""), data.get("dataset_version", ""),
-                      data.get("dataset_hash", ""))
+        lineage = cls(data.get("dataset", ""), data.get("dataset_version", ""), data.get("dataset_hash", ""))
         lineage.created_at = data.get("created_at", _now_iso())
         lineage.steps = [
-            LineageStep(step=s.get("step", ""), name=s.get("name", ""),
-                        params=s.get("params", {}), data_hash=s.get("data_hash", ""),
-                        timestamp=s.get("timestamp", _now_iso()))
+            LineageStep(
+                step=s.get("step", ""),
+                name=s.get("name", ""),
+                params=s.get("params", {}),
+                data_hash=s.get("data_hash", ""),
+                timestamp=s.get("timestamp", _now_iso()),
+            )
             for s in data.get("steps", [])
         ]
         lineage.training_runs = list(data.get("training_runs", []))
@@ -148,7 +158,7 @@ def ModelRegistryRecord(
     dataset_hash: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
-    """Model registry hook — a flat, queryable record of one model artifact."""
+    """Model registry hook - a flat, queryable record of one model artifact."""
     return {
         "model": model,
         "run_id": run_id,
@@ -175,8 +185,7 @@ def decision_trail(
     ``history`` may be an existing list of DecisionRecord dicts; returns a dict
     with the full trail so callers can store it (e.g. alongside checkpoints).
     """
-    record = DecisionRecord(decision=decision, model=model,
-                            decision_made=decision_made, details=details or {})
+    record = DecisionRecord(decision=decision, model=model, decision_made=decision_made, details=details or {})
     trail: list[dict[str, Any]] = []
     if history:
         for h in history:
@@ -195,6 +204,7 @@ def decision_trail(
     }
     if path:
         import os
+
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, default=str)

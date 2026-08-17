@@ -1,4 +1,5 @@
 """Smoke: build_model + forward for all 6 supervised architectures (CPU, no training)."""
+
 from __future__ import annotations
 
 import argparse

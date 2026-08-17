@@ -1,5 +1,5 @@
 """
-risk/risk_engine.py — Real-time risk engine (pre-trade, post-trade, circuit breakers)
+risk/risk_engine.py - Real-time risk engine (pre-trade, post-trade, circuit breakers)
 
 One source of truth: all limits default from config.settings.LIVE_RISK / RISK so
 paper, backtest, shadow, and live share identical logic. The engine is pure and
@@ -8,13 +8,13 @@ paper-trading loop, or tests.
 
 Responsibilities
 ----------------
-  * Pre-trade checks   — max position size, max notional, max daily loss,
+  * Pre-trade checks   - max position size, max notional, max daily loss,
                          max order frequency, single-instrument concentration.
-  * Post-trade monitor — drawdown limits, VaR (historical + parametric),
+  * Post-trade monitor - drawdown limits, VaR (historical + parametric),
                          Expected Shortfall / CVaR, exposure by currency and
                          pair, gap-risk flags.
-  * Circuit breakers   — auto-flatten or auto-standby when limits breach.
-  * Audit log          — every risk decision (timestamp, rule, value, action).
+  * Circuit breakers   - auto-flatten or auto-standby when limits breach.
+  * Audit log          - every risk decision (timestamp, rule, value, action).
 
 Usage
 -----
@@ -65,20 +65,21 @@ def _clip_currency(currency: str) -> str:
 @dataclass
 class RiskConfig:
     """All engine limits; mirrors LIVE_RISK defaults when not supplied."""
-    max_position_pct:    float = float(_LR.get("max_position_pct", 0.05))
-    max_total_lots:      float = float(_LR.get("max_total_lots", 3.0))
-    max_notional_usd:    float = float(_LR.get("max_notional_usd", 250_000.0))
-    max_daily_loss_pct:  float = float(_LR.get("daily_loss_limit", 0.03))
+
+    max_position_pct: float = float(_LR.get("max_position_pct", 0.05))
+    max_total_lots: float = float(_LR.get("max_total_lots", 3.0))
+    max_notional_usd: float = float(_LR.get("max_notional_usd", 250_000.0))
+    max_daily_loss_pct: float = float(_LR.get("daily_loss_limit", 0.03))
     max_consecutive_losses: int = int(_LR.get("max_consecutive_losses", 5))
     max_order_freq_per_min: int = int(_LR.get("max_order_freq_per_min", 10))
-    max_drawdown_halt:   float = float(_LR.get("max_drawdown_halt", 0.10))
+    max_drawdown_halt: float = float(_LR.get("max_drawdown_halt", 0.10))
     soft_drawdown_reduce: float = float(_LR.get("soft_drawdown_reduce", 0.05))
     max_instrument_concentration: float = float(_LR.get("max_instrument_concentration", 0.50))
-    var_confidence:      float = float(_LR.get("var_confidence", 0.99))
-    var_window:          int = int(_LR.get("var_window", 500))
-    cvar_multiplier:     float = float(_LR.get("cvar_multiplier", 1.5))
-    gap_move_threshold:  float = float(_LR.get("gap_move_threshold", 0.02))
-    require_approval:    bool = bool(_LR.get("require_approval_on_flatten", False))
+    var_confidence: float = float(_LR.get("var_confidence", 0.99))
+    var_window: int = int(_LR.get("var_window", 500))
+    cvar_multiplier: float = float(_LR.get("cvar_multiplier", 1.5))
+    gap_move_threshold: float = float(_LR.get("gap_move_threshold", 0.02))
+    require_approval: bool = bool(_LR.get("require_approval_on_flatten", False))
 
     @classmethod
     def from_dict(cls, data: dict | None = None, **overrides: float) -> RiskConfig:
@@ -87,7 +88,7 @@ class RiskConfig:
         the RISK / LIVE_RISK defaults embedded above.
         """
         data = data or {}
-        valid = {f for f in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         filtered = {k: v for k, v in data.items() if k in valid}
         filtered.update({k: v for k, v in overrides.items() if k in valid})
         return cls(**filtered)
@@ -127,7 +128,7 @@ class RiskEngine:
         self.start_equity = float(equity)
         self.daily_start_equity = float(equity)
 
-        self.positions: dict[str, dict] = {}          # pair -> {"lots":..., "entry_price":..., "direction":...}
+        self.positions: dict[str, dict] = {}  # pair -> {"lots":..., "entry_price":..., "direction":...}
         self.realized_pnl: float = 0.0
         self.day_realized_pnl: float = 0.0
         self.consecutive_losses: int = 0
@@ -165,50 +166,84 @@ class RiskEngine:
         now = now or _now_iso()
         pair = _clip_currency(pair)
         notional_usd = notional_usd if notional_usd is not None else float(lots) * float(price) * 100_000
-        position_size_pct = position_size_pct if position_size_pct is not None else (
-            notional_usd / max(self.equity, 1.0)
+        position_size_pct = (
+            position_size_pct if position_size_pct is not None else (notional_usd / max(self.equity, 1.0))
         )
 
         if self._halted:
-            d = RiskDecision(False, "circuit_breaker", 0.0, self.cfg.max_drawdown_halt,
-                             action="standby", reason="circuit breaker active",
-                             details={"halted": True})
+            d = RiskDecision(
+                False,
+                "circuit_breaker",
+                0.0,
+                self.cfg.max_drawdown_halt,
+                action="standby",
+                reason="circuit breaker active",
+                details={"halted": True},
+            )
             self._log(d, now)
             return d
 
         current_lots = sum(abs(p.get("lots", 0.0)) for p in self.positions.values())
         total_lots = current_lots + abs(lots)
-        
-        current_notional = sum(abs(p.get("lots", 0.0)) * p.get("entry_price", 1.0) * 100_000 for p in self.positions.values())
+
+        current_notional = sum(
+            abs(p.get("lots", 0.0)) * p.get("entry_price", 1.0) * 100_000 for p in self.positions.values()
+        )
         total_notional = current_notional + notional_usd
-        
-        total_position_pct = total_notional / max(self.equity, 1.0)
+
+        total_notional / max(self.equity, 1.0)
 
         checks = [
             # Use caller's position_size_pct for max_position_pct (backward-compat)
             # Use total_notional/equity for max_notional_usd
-            self._check("max_position_pct", position_size_pct, self.cfg.max_position_pct,
-                        allowed_fn=lambda v, lim: v <= lim,
-                        reason="cumulative position size exceeds max_position_pct"),
-            self._check("max_total_lots", total_lots, self.cfg.max_total_lots,
-                        allowed_fn=lambda v, lim: v <= lim,
-                        reason="cumulative lots exceed max_total_lots"),
-            self._check("max_notional_usd", total_notional, self.cfg.max_notional_usd,
-                        allowed_fn=lambda v, lim: v <= lim,
-                        reason="cumulative notional exceeds max_notional_usd"),
-            self._check("daily_loss", abs(self.day_realized_pnl) if self.day_realized_pnl < 0 else 0.0,
-                        max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct,
-                        allowed_fn=lambda v, lim: v <= lim,
-                        reason="daily loss limit breached"),
-            self._check("concentration", lots, self._max_lots_for_instrument(pair, self.cfg.max_instrument_concentration),
-                        allowed_fn=lambda v, lim: v <= lim,
-                        reason="single-instrument concentration cap"),
+            self._check(
+                "max_position_pct",
+                position_size_pct,
+                self.cfg.max_position_pct,
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="cumulative position size exceeds max_position_pct",
+            ),
+            self._check(
+                "max_total_lots",
+                total_lots,
+                self.cfg.max_total_lots,
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="cumulative lots exceed max_total_lots",
+            ),
+            self._check(
+                "max_notional_usd",
+                total_notional,
+                self.cfg.max_notional_usd,
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="cumulative notional exceeds max_notional_usd",
+            ),
+            self._check(
+                "daily_loss",
+                abs(self.day_realized_pnl) if self.day_realized_pnl < 0 else 0.0,
+                max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct,
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="daily loss limit breached",
+            ),
+            self._check(
+                "concentration",
+                lots,
+                self._max_lots_for_instrument(pair, self.cfg.max_instrument_concentration),
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="single-instrument concentration cap",
+            ),
         ]
         # order frequency
         if self._freq_blocked():
-            checks.append(RiskDecision(False, "max_order_freq", float(len(self._order_times)),
-                                       float(self.cfg.max_order_freq_per_min),
-                                       action="block", reason="order frequency cap"))
+            checks.append(
+                RiskDecision(
+                    False,
+                    "max_order_freq",
+                    float(len(self._order_times)),
+                    float(self.cfg.max_order_freq_per_min),
+                    action="block",
+                    reason="order frequency cap",
+                )
+            )
 
         for d in checks:
             self._log(d, now)
@@ -283,10 +318,15 @@ class RiskEngine:
         self._portfolio_returns.append(ret)
 
         if self.consecutive_losses >= self.cfg.max_consecutive_losses:
-            d = RiskDecision(False, "max_consecutive_losses", float(self.consecutive_losses),
-                             float(self.cfg.max_consecutive_losses),
-                             action="reduce_size", reason="consecutive losses exceed limit",
-                             details={"direction": direction})
+            d = RiskDecision(
+                False,
+                "max_consecutive_losses",
+                float(self.consecutive_losses),
+                float(self.cfg.max_consecutive_losses),
+                action="reduce_size",
+                reason="consecutive losses exceed limit",
+                details={"direction": direction},
+            )
             self._log(d, now)
             return d
         return None
@@ -302,7 +342,10 @@ class RiskEngine:
         breach: list[str] = []
         if dd >= self.cfg.max_drawdown_halt:
             breach.append("max_drawdown_halt")
-        if self.day_realized_pnl < 0 and abs(self.day_realized_pnl) >= max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct:
+        if (
+            self.day_realized_pnl < 0
+            and abs(self.day_realized_pnl) >= max(self.daily_start_equity, 1.0) * self.cfg.max_daily_loss_pct
+        ):
             breach.append("daily_loss_limit")
 
         var = self.portfolio_var()
@@ -312,17 +355,30 @@ class RiskEngine:
         if breach:
             self._halted = True
             action = "flatten" if not self.cfg.require_approval else "standby_approval"
-            decision = RiskDecision(False, "circuit_breaker", round(dd, 6),
-                                    self.cfg.max_drawdown_halt, action=action,
-                                    reason=",".join(breach),
-                                    details={"var_usd": var.get("var_usd"), "gap_flagged": gap})
+            decision = RiskDecision(
+                False,
+                "circuit_breaker",
+                round(dd, 6),
+                self.cfg.max_drawdown_halt,
+                action=action,
+                reason=",".join(breach),
+                details={"var_usd": var.get("var_usd"), "gap_flagged": gap},
+            )
             self._log(decision, now)
 
         if dd >= self.cfg.soft_drawdown_reduce and not self._halted:
             self._soft_reduce = True
-            self._log(RiskDecision(True, "soft_drawdown_reduce", round(dd, 6),
-                                   self.cfg.soft_drawdown_reduce, action="reduce_size",
-                                   reason="soft drawdown threshold hit"), now)
+            self._log(
+                RiskDecision(
+                    True,
+                    "soft_drawdown_reduce",
+                    round(dd, 6),
+                    self.cfg.soft_drawdown_reduce,
+                    action="reduce_size",
+                    reason="soft drawdown threshold hit",
+                ),
+                now,
+            )
 
         return {
             "ts": now,
@@ -361,9 +417,15 @@ class RiskEngine:
         detail = {"flattened_pairs": pairs, "halted": True}
         self._halted = True
         self.positions.clear()
-        d = RiskDecision(False, "flatten_all", float(len(pairs)), 0.0,
-                         action="flatten", reason="circuit breaker flatten",
-                         details=detail)
+        d = RiskDecision(
+            False,
+            "flatten_all",
+            float(len(pairs)),
+            0.0,
+            action="flatten",
+            reason="circuit breaker flatten",
+            details=detail,
+        )
         self._log(d)
         return d.to_audit()
 
@@ -407,6 +469,7 @@ class RiskEngine:
             return {"var_pct": 0.0, "cvar_pct": 0.0}
         try:
             from scipy.stats import norm
+
             z = norm.ppf(conf)
             cvar_z = norm.pdf(z) / (1.0 - conf)
         except ImportError:

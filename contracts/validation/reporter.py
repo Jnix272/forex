@@ -12,13 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from contracts.validation.gates import PipelineStageValidator, GateResult, ValidationResult
-from contracts.validation.drift import SchemaDriftDetector, DriftReport
+from contracts.validation.drift import DriftReport
+from contracts.validation.gates import PipelineStageValidator
 
 
 @dataclass
 class ValidationReport:
     """Comprehensive validation report for a pipeline run"""
+
     run_id: str
     timestamp: datetime
     pair: str | None
@@ -29,7 +30,7 @@ class ValidationReport:
     total_passed: int = 0
     total_warnings: int = 0
     total_failed: int = 0
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
@@ -43,12 +44,12 @@ class ValidationReport:
             "total_warnings": self.total_warnings,
             "total_failed": self.total_failed,
         }
-    
+
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
-    
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ValidationReport":
+    def from_dict(cls, data: dict[str, Any]) -> ValidationReport:
         return cls(
             run_id=data["run_id"],
             timestamp=datetime.fromisoformat(data["timestamp"]),
@@ -65,11 +66,11 @@ class ValidationReport:
 
 class ValidationReporter:
     """Generates and manages validation reports"""
-    
+
     def __init__(self, output_dir: str | Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def generate_report(
         self,
         stage_validators: dict[str, PipelineStageValidator],
@@ -78,27 +79,27 @@ class ValidationReporter:
         pair: str | None = None,
     ) -> ValidationReport:
         """Generate comprehensive validation report"""
-        
+
         run_id = run_id or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
+
         stages = {}
         total_gates = 0
         total_passed = 0
         total_warnings = 0
         total_failed = 0
-        
+
         for stage_name, validator in stage_validators.items():
             summary = validator.get_summary()
             stages[stage_name] = {
                 "summary": summary,
                 "gates": [r.to_dict() for r in validator.results],
             }
-            
+
             total_gates += summary["total_gates"]
             total_passed += summary["passed"]
             total_warnings += summary["warnings"]
             total_failed += summary["failed"]
-        
+
         # Overall status
         if total_failed > 0:
             overall_status = "fail"
@@ -106,7 +107,7 @@ class ValidationReporter:
             overall_status = "warn"
         else:
             overall_status = "pass"
-        
+
         report = ValidationReport(
             run_id=run_id,
             timestamp=datetime.now(),
@@ -119,31 +120,31 @@ class ValidationReporter:
             total_warnings=total_warnings,
             total_failed=total_failed,
         )
-        
+
         return report
-    
+
     def save_report(self, report: ValidationReport, filename: str | None = None) -> Path:
         """Save report to JSON file"""
         filename = filename or f"validation_report_{report.run_id}.json"
         filepath = self.output_dir / filename
-        
+
         with open(filepath, "w") as f:
             f.write(report.to_json())
-        
+
         return filepath
-    
+
     def save_html_report(self, report: ValidationReport, filename: str | None = None) -> Path:
         """Save report as HTML for easy viewing"""
         filename = filename or f"validation_report_{report.run_id}.html"
         filepath = self.output_dir / filename
-        
+
         html = self._generate_html(report)
-        
+
         with open(filepath, "w") as f:
             f.write(html)
-        
+
         return filepath
-    
+
     def _generate_html(self, report: ValidationReport) -> str:
         """Generate HTML report"""
         status_colors = {
@@ -152,9 +153,9 @@ class ValidationReporter:
             "fail": "#dc3545",
             "unknown": "#6c757d",
         }
-        
+
         color = status_colors.get(report.overall_status, "#6c757d")
-        
+
         html = f"""
 <!DOCTYPE html>
 <html>
@@ -191,7 +192,7 @@ class ValidationReporter:
         <p>Pair: {report.pair or "All"}</p>
         <p>Overall Status: <span style="font-size: 1.5em; font-weight: bold;">{report.overall_status.upper()}</span></p>
     </div>
-    
+
     <div class="summary">
         <div class="summary-box summary-total">
             <h3>{report.total_gates}</h3>
@@ -211,12 +212,12 @@ class ValidationReporter:
         </div>
     </div>
 """
-        
+
         # Stages
         for stage_name, stage_data in report.stages.items():
             html += f"""
     <div class="stage">
-        <div class="stage-header">{stage_name} (Overall: {stage_data['summary']['overall']})</div>
+        <div class="stage-header">{stage_name} (Overall: {stage_data["summary"]["overall"]})</div>
         <table>
             <tr><th>Gate</th><th>Result</th><th>Message</th><th>Duration (ms)</th></tr>
 """
@@ -224,17 +225,17 @@ class ValidationReporter:
                 result_class = f"gate-{gate['result']}"
                 html += f"""
             <tr class="{result_class}">
-                <td>{gate['gate_name']}</td>
-                <td>{gate['result'].upper()}</td>
-                <td>{gate['message']}</td>
-                <td>{gate['duration_ms']:.1f}</td>
+                <td>{gate["gate_name"]}</td>
+                <td>{gate["result"].upper()}</td>
+                <td>{gate["message"]}</td>
+                <td>{gate["duration_ms"]:.1f}</td>
             </tr>
 """
             html += """
         </table>
     </div>
 """
-        
+
         # Drift reports
         if report.drift_reports:
             html += """
@@ -246,34 +247,38 @@ class ValidationReporter:
     <div class="drift-report {drift_class}">
         <h3>{stage_name}</h3>
         <p>Drift Type: {drift.drift_type}</p>
-        <p>Schema Hash: {drift.schema_hash} (ref: {drift.reference_schema_hash or 'N/A'})</p>
-        <p>Data Hash: {drift.data_hash} (ref: {drift.reference_data_hash or 'N/A'})</p>
+        <p>Schema Hash: {drift.schema_hash} (ref: {drift.reference_schema_hash or "N/A"})</p>
+        <p>Data Hash: {drift.data_hash} (ref: {drift.reference_data_hash or "N/A"})</p>
 """
                 if drift.added_columns:
                     html += f"<p>Added Columns: {', '.join(drift.added_columns)}</p>"
                 if drift.removed_columns:
                     html += f"<p>Removed Columns: {', '.join(drift.removed_columns)}</p>"
                 if drift.type_changes:
-                    html += "<p>Type Changes: " + ", ".join(f"{k}: {v[0]} → {v[1]}" for k, v in drift.type_changes.items()) + "</p>"
+                    html += (
+                        "<p>Type Changes: "
+                        + ", ".join(f"{k}: {v[0]} → {v[1]}" for k, v in drift.type_changes.items())
+                        + "</p>"
+                    )
                 if drift.high_psi_columns:
                     html += f"<p>High PSI Columns: {', '.join(drift.high_psi_columns)}</p>"
-                
+
                 html += """
     </div>
 """
-        
+
         html += """
 </body>
 </html>
 """
         return html
-    
+
     def load_report(self, filepath: str | Path) -> ValidationReport:
         """Load report from JSON file"""
         with open(filepath) as f:
             data = json.load(f)
         return ValidationReport.from_dict(data)
-    
+
     def list_reports(self) -> list[Path]:
         """List all validation reports in output directory"""
         return sorted(self.output_dir.glob("validation_report_*.json"))

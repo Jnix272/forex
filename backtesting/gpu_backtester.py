@@ -6,13 +6,22 @@ trading strategies across millions of ticks instantly on the GPU.
 """
 
 import logging
+from typing import Any
 
 import numpy as np
 
 try:
-    import cupy as cp
-except ImportError:
+    import cupy as cp  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional dependency
     cp = None
+
+
+def _to_numpy(array: Any) -> np.ndarray:
+    """Convert a NumPy or CuPy array back to a NumPy array when available."""
+    if cp is not None and hasattr(array, "get"):
+        return np.asarray(array.get())
+    return np.asarray(array)
+
 
 class GPUBacktester:
     def __init__(self, use_gpu: bool = True):
@@ -22,11 +31,12 @@ class GPUBacktester:
             self.logger.info("GPU Backtester initialized with CuPy.")
         else:
             self.xp = np
-            self.logger.warning("CuPy not found or use_gpu=False. Falling back to NumPy (CPU).")
+            if use_gpu:
+                self.logger.warning("CuPy not found or use_gpu=False. Falling back to NumPy (CPU).")
 
     def run_vectorized_backtest(self, prices: np.ndarray, signals: np.ndarray, spread: float = 0.0001):
         """
-        Run a massive vectorized backtest. 
+        Run a massive vectorized backtest.
         `prices` and `signals` should be 1D arrays of equal length.
         """
         # Transfer data to GPU
@@ -36,7 +46,7 @@ class GPUBacktester:
         # Calculate returns: return[i] = (price[i+1] - price[i]) / price[i]
         d_returns = self.xp.diff(d_prices) / d_prices[:-1]
 
-        # BUG-007: Proper 1-bar lag — signal[i] trades return[i+1], not return[i].
+        # BUG-007: Proper 1-bar lag - signal[i] trades return[i+1], not return[i].
         # d_returns[i] is the return from bar i to i+1. signal[i] is the signal from bar i.
         # To execute at bar i+1 open, we need return from i+1 to i+2 = d_returns[i+1]
         d_positions = d_signals[:-2]
@@ -58,6 +68,6 @@ class GPUBacktester:
         # Transfer results back to CPU
         return {
             "total_return": float((d_equity[-1] - 1) * 100) if len(d_equity) > 0 else 0.0,
-            "equity_curve": self.xp.asnumpy(d_equity) if hasattr(d_equity, 'get') else d_equity,
-            "num_trades": int(self.xp.sum(d_trades))
+            "equity_curve": _to_numpy(d_equity),
+            "num_trades": int(self.xp.sum(d_trades)),
         }

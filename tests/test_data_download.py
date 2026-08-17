@@ -37,12 +37,13 @@ from data.sources import (
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _make_bi5_bytes(n_ticks: int = 5, pair: str = "EURUSD") -> bytes:
     """Build a synthetic .bi5 (raw, uncompressed) byte payload."""
     point = 100_000  # non-JPY
     records = []
     for i in range(n_ticks):
-        ms_offset = i * 500          # one tick every 500 ms
+        ms_offset = i * 500  # one tick every 500 ms
         ask_scaled = int((1.08500 + i * 0.00001) * point)
         bid_scaled = int((1.08490 + i * 0.00001) * point)
         ask_vol = 1.5
@@ -59,6 +60,7 @@ def _make_bi5_lzma(n_ticks: int = 5) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # _parse_bi5_hour
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestParseBi5Hour:
     DT = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
@@ -117,13 +119,17 @@ class TestParseBi5Hour:
 # _enforce_schema
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestEnforceSchema:
     def _base_df(self, n: int = 5) -> pd.DataFrame:
         idx = pd.date_range("2024-01-02 08:00", periods=n, freq="1s", tz="UTC")
-        return pd.DataFrame({
-            "bid": np.linspace(1.0849, 1.0854, n),
-            "ask": np.linspace(1.0850, 1.0855, n),
-        }, index=idx)
+        return pd.DataFrame(
+            {
+                "bid": np.linspace(1.0849, 1.0854, n),
+                "ask": np.linspace(1.0850, 1.0855, n),
+            },
+            index=idx,
+        )
 
     def test_all_tick_columns_present(self):
         df = _enforce_schema(self._base_df(), "EURUSD", "dukascopy")
@@ -176,6 +182,7 @@ class TestEnforceSchema:
 # DUKA_PAIR_MAP / PIP_SIZES
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestPairConfig:
     EXPECTED_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
 
@@ -195,14 +202,15 @@ class TestPairConfig:
             assert PIP_SIZES[pair] == pytest.approx(0.0001), f"Wrong pip size for {pair}"
 
     def test_pair_map_values_uppercase_no_slash(self):
-        for k, v in DUKA_PAIR_MAP.items():
+        for _k, v in DUKA_PAIR_MAP.items():
             assert "/" not in v
             assert v == v.upper()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DukascopyLoader — cache / path helpers
+# DukascopyLoader - cache / path helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestDukascopyLoaderCachePath:
     def test_cache_path_structure(self, tmp_path):
@@ -222,8 +230,9 @@ class TestDukascopyLoaderCachePath:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DukascopyLoader.load — mocked network
+# DukascopyLoader.load - mocked network
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestDukascopyLoaderLoad:
     """
@@ -302,7 +311,6 @@ class TestDukascopyLoaderLoad:
         _make_bi5_lzma(n_ticks=5)
         call_count = 0
 
-
         async def counting_fetch(session, semaphore, pair, dt):
             nonlocal call_count
             call_count += 1
@@ -311,7 +319,7 @@ class TestDukascopyLoaderLoad:
         loader._fetch_hour_async = counting_fetch
 
         loader.load("EURUSD", start="2024-01-02", end="2024-01-02", hours=[8, 9], auto_redownload=False)
-        assert call_count == 2  # one day × 2 hours
+        assert call_count == 2  # one day x 2 hours
 
     def test_load_cache_used_on_second_call(self, tmp_path):
         """After a successful fetch+write, the second call should hit the parquet cache."""
@@ -327,11 +335,11 @@ class TestDukascopyLoaderLoad:
 
         loader._fetch_hour_async = tracking_fetch
 
-        # First load — should trigger a network fetch
+        # First load - should trigger a network fetch
         loader.load("EURUSD", start="2024-01-02", end="2024-01-02", hours=[8])
         first_count = len(fetch_calls)
 
-        # Second load — should use cached parquet (no new fetches)
+        # Second load - should use cached parquet (no new fetches)
         loader.load("EURUSD", start="2024-01-02", end="2024-01-02", hours=[8])
         second_count = len(fetch_calls) - first_count
 
@@ -433,8 +441,9 @@ class TestDukascopyLoaderLoad:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DukascopyLoader.load_multiple — multiple pairs
+# DukascopyLoader.load_multiple - multiple pairs
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestDukascopyLoaderMultiplePairs:
     PAIRS = ["EURUSD", "GBPUSD", "USDJPY"]
@@ -522,6 +531,7 @@ class TestDukascopyLoaderMultiplePairs:
 # Data integrity checks on parsed output
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestDataIntegrity:
     def test_no_nan_in_parsed_ticks(self):
         raw = _make_bi5_bytes(n_ticks=10)
@@ -539,10 +549,13 @@ class TestDataIntegrity:
 
     def test_schema_spread_always_positive_after_enforce(self):
         idx = pd.date_range("2024-01-02 08:00", periods=20, freq="1s", tz="UTC")
-        df = pd.DataFrame({
-            "bid": np.random.uniform(1.0840, 1.0850, 20),
-            "ask": np.random.uniform(1.0851, 1.0860, 20),
-        }, index=idx)
+        df = pd.DataFrame(
+            {
+                "bid": np.random.uniform(1.0840, 1.0850, 20),
+                "ask": np.random.uniform(1.0851, 1.0860, 20),
+            },
+            index=idx,
+        )
         out = _enforce_schema(df, "EURUSD", "dukascopy")
         assert (out["spread"] > 0).all()
 

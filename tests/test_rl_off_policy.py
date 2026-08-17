@@ -1,6 +1,7 @@
 """
 Tests for off-policy reward wiring (Improvement #5) in models.rl_agents.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -29,6 +30,7 @@ def test_estimate_off_policy_rewards_ppo(ppo_agent):
 
 def test_estimate_off_policy_rewards_dqn_returns_none():
     from models.rl_agents import DQNAgent
+
     dqn = DQNAgent(obs_size=16, n_actions=3, device="cpu")
     rng = np.random.default_rng(1)
     obs = rng.normal(size=(20, 16))

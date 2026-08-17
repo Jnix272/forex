@@ -2,9 +2,9 @@
 data/eodhd.py
 =============
 EODHD (End-of-Day Historical Data) loader for:
-  1) Forex pairs  — daily OHLCV via EODHD's /eod/ endpoint (EURUSD.FOREX etc.)
-  2) Intraday     — 1m / 5m / 1h bars via /intraday/ endpoint (paid plan)
-  3) Cross-asset  — equities, commodities, crypto, bond yields
+  1) Forex pairs  - daily OHLCV via EODHD's /eod/ endpoint (EURUSD.FOREX etc.)
+  2) Intraday     - 1m / 5m / 1h bars via /intraday/ endpoint (paid plan)
+  3) Cross-asset  - equities, commodities, crypto, bond yields
 
 Authentication
 --------------
@@ -47,6 +47,7 @@ import pandas as pd
 # Load .env automatically (same pattern as config/settings.py)
 try:
     from dotenv import load_dotenv as _load_dotenv
+
     _load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 except ImportError:
     pass
@@ -59,7 +60,7 @@ from data.sources import (
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-EODHD_BASE_URL    = "https://eodhd.com/api"
+EODHD_BASE_URL = "https://eodhd.com/api"
 DEFAULT_EODHD_CACHE_DIR = str(_DATA_DIR / "raw" / "eodhd")
 
 # ── Forex pair -> EODHD ticker mapping ────────────────────────────────────────
@@ -108,53 +109,54 @@ def _pair_half_spread(pair: str) -> float:
 # ── Cross-asset EODHD symbols ──────────────────────────────────────────────────
 # Maps the project's cross-asset asset name -> EODHD ticker (code.EXCHANGE).
 # Exchanges used:
-#   .INDX  — indices (S&P500, VIX, DXY, etc.)
-#   .COMM  — commodities (oil, copper)
-#   .FOREX — FX-quoted spot prices (gold, silver)
-#   .CC    — crypto
-#   .GBOND — government bond yields
+#   .INDX  - indices (S&P500, VIX, DXY, etc.)
+#   .COMM  - commodities (oil, copper)
+#   .FOREX - FX-quoted spot prices (gold, silver)
+#   .CC    - crypto
+#   .GBOND - government bond yields
 EODHD_CROSS_ASSET: dict[str, str] = {
     # Commodities
-    "WTI":        "OILCRUDEWTI.COMM",
-    "GOLD":       "XAUUSD.FOREX",
-    "COPPER":     "HG.COMM",
-    "NATGAS":     "NATURALGAS.COMM",
-    "SILVER":     "XAGUSD.FOREX",
+    "WTI": "OILCRUDEWTI.COMM",
+    "GOLD": "XAUUSD.FOREX",
+    "COPPER": "HG.COMM",
+    "NATGAS": "NATURALGAS.COMM",
+    "SILVER": "XAGUSD.FOREX",
     # FX / Dollar index
-    "DXY":        "DXY.INDX",
-    # Equities — global
-    "SPX":        "GSPC.INDX",
-    "NASDAQ100":  "NDX.INDX",
-    "VIX":        "VIX.INDX",
-    "DAX":        "GDAXI.INDX",        # Germany  — EUR signal
-    "FTSE100":    "FTSE.INDX",         # UK       — GBP signal
-    "NIKKEI225":  "N225.INDX",         # Japan    — JPY risk-on/off
-    "ASX200":     "AXJO.INDX",         # Australia — AUD signal
+    "DXY": "DXY.INDX",
+    # Equities - global
+    "SPX": "GSPC.INDX",
+    "NASDAQ100": "NDX.INDX",
+    "VIX": "VIX.INDX",
+    "DAX": "GDAXI.INDX",  # Germany  - EUR signal
+    "FTSE100": "FTSE.INDX",  # UK       - GBP signal
+    "NIKKEI225": "N225.INDX",  # Japan    - JPY risk-on/off
+    "ASX200": "AXJO.INDX",  # Australia - AUD signal
     # Broad EM risk
-    "EEM":        "EEM.US",            # MSCI EM ETF — risk appetite
+    "EEM": "EEM.US",  # MSCI EM ETF - risk appetite
     # Crypto
-    "BTC":        "BTC-USD.CC",
+    "BTC": "BTC-USD.CC",
     # US yields
-    "US10Y":      "US10Y.GBOND",
-    "US2Y":       "US2Y.GBOND",
+    "US10Y": "US10Y.GBOND",
+    "US2Y": "US2Y.GBOND",
     # International yields
-    "DE10Y":      "DE10Y.GBOND",
-    "JP10Y":      "JP10Y.GBOND",
-    "GB10Y":      "GB10Y.GBOND",
-    "AU10Y":      "AU10Y.GBOND",
-    "CA10Y":      "CA10Y.GBOND",
-    "NZ10Y":      "NZ10Y.GBOND",       # New Zealand — NZD carry
-    "CH10Y":      "CH10Y.GBOND",       # Switzerland — CHF safe-haven
+    "DE10Y": "DE10Y.GBOND",
+    "JP10Y": "JP10Y.GBOND",
+    "GB10Y": "GB10Y.GBOND",
+    "AU10Y": "AU10Y.GBOND",
+    "CA10Y": "CA10Y.GBOND",
+    "NZ10Y": "NZ10Y.GBOND",  # New Zealand - NZD carry
+    "CH10Y": "CH10Y.GBOND",  # Switzerland - CHF safe-haven
 }
 
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
 
+
 def _eodhd_get(
-    endpoint:  str,
-    params:    dict[str, str],
-    api_key:   str,
-    timeout:   int = 30,
+    endpoint: str,
+    params: dict[str, str],
+    api_key: str,
+    timeout: int = 30,
     max_retry: int = 3,
 ) -> list | None:
     """
@@ -166,7 +168,7 @@ def _eodhd_get(
     import urllib.request
 
     params["api_token"] = api_key
-    params["fmt"]       = "json"
+    params["fmt"] = "json"
     url = f"{EODHD_BASE_URL}/{endpoint}?{urllib.parse.urlencode(params)}"
 
     for attempt in range(max_retry):
@@ -181,7 +183,7 @@ def _eodhd_get(
         except Exception as exc:
             code = getattr(getattr(exc, "code", None), "real", None) or getattr(exc, "code", 0)
             if code == 429 and attempt < max_retry - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             if attempt == max_retry - 1:
                 return None
@@ -189,6 +191,7 @@ def _eodhd_get(
 
 
 # ── Parsing helpers ───────────────────────────────────────────────────────────
+
 
 def _parse_eod_response(data: list, pair: str) -> pd.DataFrame:
     """
@@ -201,19 +204,21 @@ def _parse_eod_response(data: list, pair: str) -> pd.DataFrame:
         return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
 
     records = []
-    half    = _pair_half_spread(pair)
+    half = _pair_half_spread(pair)
     for row in data:
         try:
-            ts    = pd.Timestamp(row["date"], tz="UTC")
+            ts = pd.Timestamp(row["date"], tz="UTC")
             close = float(row.get("adjusted_close") or row.get("close") or 0)
             if close <= 0:
                 continue
-            records.append({
-                "timestamp": ts,
-                "bid":       close - half,
-                "ask":       close + half,
-                "volume":    float(row.get("volume") or 1.0),
-            })
+            records.append(
+                {
+                    "timestamp": ts,
+                    "bid": close - half,
+                    "ask": close + half,
+                    "volume": float(row.get("volume") or 1.0),
+                }
+            )
         except (KeyError, ValueError, TypeError):
             continue
 
@@ -234,20 +239,22 @@ def _parse_intraday_response(data: list, pair: str) -> pd.DataFrame:
         return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
 
     records = []
-    half    = _pair_half_spread(pair)
+    half = _pair_half_spread(pair)
     for row in data:
         try:
             # 'timestamp' is unix epoch seconds
-            ts    = pd.Timestamp(int(row["timestamp"]), unit="s", tz="UTC")
+            ts = pd.Timestamp(int(row["timestamp"]), unit="s", tz="UTC")
             close = float(row.get("close") or 0)
             if close <= 0:
                 continue
-            records.append({
-                "timestamp": ts,
-                "bid":       close - half,
-                "ask":       close + half,
-                "volume":    float(row.get("volume") or 1.0),
-            })
+            records.append(
+                {
+                    "timestamp": ts,
+                    "bid": close - half,
+                    "ask": close + half,
+                    "volume": float(row.get("volume") or 1.0),
+                }
+            )
         except (KeyError, ValueError, TypeError):
             continue
 
@@ -265,11 +272,11 @@ def _parse_cross_asset_response(data: list, asset: str) -> pd.Series | None:
     if not data:
         return None
 
-    dates  = []
+    dates = []
     values = []
     for row in data:
         try:
-            ts  = pd.Timestamp(row["date"], tz="UTC") + pd.Timedelta(days=1)
+            ts = pd.Timestamp(row["date"], tz="UTC") + pd.Timedelta(days=1)
             val = float(row.get("adjusted_close") or row.get("close") or 0)
             if val > 0:
                 dates.append(ts)
@@ -285,6 +292,7 @@ def _parse_cross_asset_response(data: list, asset: str) -> pd.Series | None:
 
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
+
 
 def _cache_path_for_pair(cache_dir: str, pair: str, suffix: str = "daily") -> Path:
     return Path(cache_dir) / pair / f"{pair}_{suffix}.parquet"
@@ -318,7 +326,7 @@ def _cache_read_cross(path: Path) -> pd.Series | None:
     if not path.exists():
         return None
     try:
-        df  = pd.read_csv(path)
+        df = pd.read_csv(path)
         idx = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         val = pd.to_numeric(df["value"], errors="coerce")
         ser = pd.Series(val.values, index=idx).dropna()
@@ -330,15 +338,18 @@ def _cache_read_cross(path: Path) -> pd.Series | None:
 def _cache_write_cross(path: Path, ser: pd.Series) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({
-            "timestamp": ser.index.astype(str),
-            "value":     ser.values,
-        }).to_csv(path, index=False)
+        pd.DataFrame(
+            {
+                "timestamp": ser.index.astype(str),
+                "value": ser.values,
+            }
+        ).to_csv(path, index=False)
     except Exception:
         pass
 
 
 # ── Main loader class ─────────────────────────────────────────────────────────
+
 
 class EODHDLoader:
     """
@@ -361,13 +372,13 @@ class EODHDLoader:
 
     def __init__(
         self,
-        api_key:   str = "",
+        api_key: str = "",
         cache_dir: str = DEFAULT_EODHD_CACHE_DIR,
-        verbose:   bool = True,
+        verbose: bool = True,
     ):
-        self.api_key   = api_key or os.getenv("EODHD_API_KEY", "")
+        self.api_key = api_key or os.getenv("EODHD_API_KEY", "")
         self.cache_dir = Path(cache_dir)
-        self.verbose   = verbose
+        self.verbose = verbose
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _require_key(self) -> str:
@@ -383,9 +394,9 @@ class EODHDLoader:
 
     def load(
         self,
-        pair:  str,
+        pair: str,
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
         use_cache: bool = True,
     ) -> pd.DataFrame:
         """
@@ -401,33 +412,32 @@ class EODHDLoader:
         end       : ISO date "YYYY-MM-DD" (default: today)
         use_cache : Return cached Parquet if available and date range is covered.
         """
-        pair   = pair.upper().replace("/", "")
+        pair = pair.upper().replace("/", "")
         ticker = EODHD_FOREX_PAIRS.get(pair)
         if not ticker:
             if self.verbose:
                 print(f"[EODHD] No ticker mapping for {pair}")
             return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
 
-        key    = self._require_key()
-        start  = start or "2000-01-01"
-        end    = end   or str(pd.Timestamp.now(tz="UTC").date())
+        key = self._require_key()
+        start = start or "2000-01-01"
+        end = end or str(pd.Timestamp.now(tz="UTC").date())
 
         cpath = _cache_path_for_pair(str(self.cache_dir), pair)
         if use_cache:
             cached = _cache_read_parquet(cpath)
             if cached is not None:
                 cached_start = str(cached.index.min().date())
-                cached_end   = str(cached.index.max().date())
+                cached_end = str(cached.index.max().date())
                 if cached_start <= start and cached_end >= end:
                     df = cached
-                    df = df[(df.index >= pd.Timestamp(start, tz="UTC")) &
-                            (df.index <= pd.Timestamp(end,   tz="UTC"))]
+                    df = df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
                     if self.verbose:
                         print(f"[EODHD] {pair}: {len(df):,} bars (cache)")
                     return df
 
         # Fetch from API
-        code, exchange = ticker.split(".", 1)
+        _code, _exchange = ticker.split(".", 1)
         data = _eodhd_get(
             f"eod/{ticker}",
             {"from": start, "to": end},
@@ -448,34 +458,29 @@ class EODHDLoader:
         if self.verbose:
             print(f"[EODHD] {pair}: {len(df):,} bars ({df.index[0].date()} -> {df.index[-1].date()})")
 
-        return df[
-            (df.index >= pd.Timestamp(start, tz="UTC")) &
-            (df.index <= pd.Timestamp(end,   tz="UTC"))
-        ]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def load_multiple(
         self,
         pairs: list[str],
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
         use_cache: bool = True,
     ) -> dict[str, pd.DataFrame]:
         """Load multiple pairs. Returns dict of pair -> DataFrame."""
         results = {}
         for pair in pairs:
-            results[pair.upper().replace("/", "")] = self.load(
-                pair, start=start, end=end, use_cache=use_cache
-            )
+            results[pair.upper().replace("/", "")] = self.load(pair, start=start, end=end, use_cache=use_cache)
         return results
 
     # ── Forex intraday (paid plan) ────────────────────────────────────────────
 
     def load_intraday(
         self,
-        pair:      str,
-        interval:  str = "1h",
-        start:     str | None = None,
-        end:       str | None = None,
+        pair: str,
+        interval: str = "1h",
+        start: str | None = None,
+        end: str | None = None,
         use_cache: bool = True,
     ) -> pd.DataFrame:
         """
@@ -488,16 +493,16 @@ class EODHDLoader:
         start    : ISO date "YYYY-MM-DD"
         end      : ISO date "YYYY-MM-DD"
         """
-        pair   = pair.upper().replace("/", "")
+        pair = pair.upper().replace("/", "")
         ticker = EODHD_FOREX_PAIRS.get(pair)
         if not ticker:
             if self.verbose:
                 print(f"[EODHD] No ticker mapping for {pair}")
             return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
 
-        key   = self._require_key()
+        key = self._require_key()
         start = start or str((pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365)).date())
-        end   = end   or str(pd.Timestamp.now(tz="UTC").date())
+        end = end or str(pd.Timestamp.now(tz="UTC").date())
 
         cpath = _cache_path_for_pair(str(self.cache_dir), pair, suffix=f"intraday_{interval}")
         if use_cache:
@@ -506,15 +511,12 @@ class EODHDLoader:
                 if self.verbose:
                     print(f"[EODHD] {pair} {interval}: {len(cached):,} bars (cache)")
                 df = cached
-                return df[
-                    (df.index >= pd.Timestamp(start, tz="UTC")) &
-                    (df.index <= pd.Timestamp(end,   tz="UTC"))
-                ]
+                return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
         params = {
             "interval": interval,
-            "from":     str(int(pd.Timestamp(start, tz="UTC").timestamp())),
-            "to":       str(int(pd.Timestamp(end,   tz="UTC").timestamp())),
+            "from": str(int(pd.Timestamp(start, tz="UTC").timestamp())),
+            "to": str(int(pd.Timestamp(end, tz="UTC").timestamp())),
         }
         data = _eodhd_get(f"intraday/{ticker}", params, api_key=key)
         if not data:
@@ -526,23 +528,17 @@ class EODHDLoader:
         if not df.empty:
             _cache_write_parquet(cpath, df)
             if self.verbose:
-                print(
-                    f"[EODHD] {pair} {interval}: {len(df):,} bars "
-                    f"({df.index[0].date()} -> {df.index[-1].date()})"
-                )
+                print(f"[EODHD] {pair} {interval}: {len(df):,} bars ({df.index[0].date()} -> {df.index[-1].date()})")
 
-        return df[
-            (df.index >= pd.Timestamp(start, tz="UTC")) &
-            (df.index <= pd.Timestamp(end,   tz="UTC"))
-        ]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     # ── Cross-asset ───────────────────────────────────────────────────────────
 
     def load_cross_asset(
         self,
-        start:     str | None = None,
-        end:       str | None = None,
-        assets:    list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        assets: list[str] | None = None,
         use_cache: bool = True,
     ) -> dict[str, pd.Series]:
         """
@@ -559,13 +555,13 @@ class EODHDLoader:
         -------
         dict of asset_name -> pd.Series with UTC DatetimeIndex
         """
-        key   = self._require_key()
+        key = self._require_key()
         start = start or "2000-01-01"
-        end   = end   or str(pd.Timestamp.now(tz="UTC").date())
+        end = end or str(pd.Timestamp.now(tz="UTC").date())
 
         target_assets = assets or list(EODHD_CROSS_ASSET.keys())
         start_ts = pd.Timestamp(start, tz="UTC")
-        end_ts   = pd.Timestamp(end,   tz="UTC")
+        end_ts = pd.Timestamp(end, tz="UTC")
 
         out: dict[str, pd.Series] = {}
 
@@ -613,10 +609,8 @@ class EODHDLoader:
 
         # Derived: yield curve slope
         if "US10Y" in out and "US2Y" in out:
-            us10  = out["US10Y"].reindex(
-                out["US10Y"].index.union(out["US2Y"].index)
-            ).ffill()
-            us2   = out["US2Y"].reindex(us10.index).ffill()
+            us10 = out["US10Y"].reindex(out["US10Y"].index.union(out["US2Y"].index)).ffill()
+            us2 = out["US2Y"].reindex(us10.index).ffill()
             slope = (us10 - us2).dropna()
             if not slope.empty:
                 clip = slope[(slope.index >= start_ts) & (slope.index <= end_ts)]

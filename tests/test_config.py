@@ -22,4 +22,6 @@ def test_run_yaml_parses():
     assert checkpoint_dir is not None, "Missing checkpoint_dir in paths"
 
     resolved_path = Path(checkpoint_dir).expanduser().resolve()
-    assert resolved_path.parent.exists() or resolved_path.exists() or str(resolved_path).startswith(str(Path.home())), "Checkpoint dir parent should exist or be under home"
+    assert resolved_path.parent.exists() or resolved_path.exists() or str(resolved_path).startswith(str(Path.home())), (
+        "Checkpoint dir parent should exist or be under home"
+    )

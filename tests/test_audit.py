@@ -2,6 +2,7 @@
 Tests for audit package (Improvement #6): data lineage, model registry records,
 decision trail, and reproducibility manifests.
 """
+
 from __future__ import annotations
 
 import json
@@ -43,6 +44,7 @@ def ckpt_dir(tmp_path):
 # Data lineage
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_lineage_chain():
     lineage = DataLineage(dataset="EURUSD_1m", dataset_version="2026.07")
     lineage.add_step("preprocess", "clean_v2", params={"outliers": "mad"})
@@ -75,9 +77,7 @@ def test_lineage_step_to_dict():
 
 
 def test_model_registry_record():
-    rec = ModelRegistryRecord(model="mamba", run_id="r1", seed=7,
-                              data_hash="d1", code_commit="c1",
-                              dataset_hash="ds1")
+    rec = ModelRegistryRecord(model="mamba", run_id="r1", seed=7, data_hash="d1", code_commit="c1", dataset_hash="ds1")
     assert rec["model"] == "mamba"
     assert rec["seed"] == 7
     assert rec["code_commit"] == "c1"
@@ -87,8 +87,9 @@ def test_decision_trail_appends():
     trail = decision_trail(model="haelt", decision="promote", decision_made=True)
     assert trail["decision_made"] is True
     assert len(trail["trail"]) == 1
-    trail2 = decision_trail(model="haelt", decision="rollback",
-                            decision_made=True, history=[DecisionRecord("promote", "haelt", True)])
+    trail2 = decision_trail(
+        model="haelt", decision="rollback", decision_made=True, history=[DecisionRecord("promote", "haelt", True)]
+    )
     assert len(trail2["trail"]) == 2
     assert trail2["trail"][0]["decision"] == "promote"
 
@@ -103,6 +104,7 @@ def test_decision_trail_persists(tmp_path):
 # ═════════════════════════════════════════════════════════════════════════════
 # Manifests
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_compute_file_hash_deterministic():
     h1 = compute_file_hash("audit/manifest.py")
@@ -138,8 +140,11 @@ def test_git_info_runs():
 
 def test_generate_manifest_shape(ckpt_dir):
     m = generate_manifest(
-        run_dir=str(ckpt_dir), run_id="r1", model="haelt",
-        params={"lr": 1e-4}, seed=42,
+        run_dir=str(ckpt_dir),
+        run_id="r1",
+        model="haelt",
+        params={"lr": 1e-4},
+        seed=42,
         dataset={"name": "EURUSD", "version": "1.0"},
         artifacts={"production_best.pt": str(ckpt_dir / "production_best.pt")},
     )
@@ -151,8 +156,9 @@ def test_generate_manifest_shape(ckpt_dir):
 
 
 def test_write_and_verify_manifest(ckpt_dir):
-    m = generate_manifest(run_dir=str(ckpt_dir), run_id="r1", model="haelt",
-                          artifacts={"production_best.pt": "production_best.pt"})
+    m = generate_manifest(
+        run_dir=str(ckpt_dir), run_id="r1", model="haelt", artifacts={"production_best.pt": "production_best.pt"}
+    )
     path = write_manifest(m, str(ckpt_dir))
     assert os.path.exists(path)
     report = verify_manifest(m, run_dir=str(ckpt_dir))
@@ -162,8 +168,9 @@ def test_write_and_verify_manifest(ckpt_dir):
 
 
 def test_verify_manifest_catches_tampering(ckpt_dir):
-    m = generate_manifest(run_dir=str(ckpt_dir), run_id="r1", model="haelt",
-                          artifacts={"production_best.pt": "production_best.pt"})
+    m = generate_manifest(
+        run_dir=str(ckpt_dir), run_id="r1", model="haelt", artifacts={"production_best.pt": "production_best.pt"}
+    )
     # modify the artifact on disk
     (ckpt_dir / "production_best.pt").write_bytes(b"tampered")
     report = verify_manifest(m, run_dir=str(ckpt_dir))
@@ -180,15 +187,21 @@ def test_verify_manifest_catches_hash_change():
 
 
 def test_regenerate_manifest_preserves_lineage(ckpt_dir):
-    first = generate_manifest(run_dir=str(ckpt_dir), run_id="orig", model="haelt",
-                              params={"lr": 1e-4},
-                              artifacts={"production_best.pt": "production_best.pt"})
+    first = generate_manifest(
+        run_dir=str(ckpt_dir),
+        run_id="orig",
+        model="haelt",
+        params={"lr": 1e-4},
+        artifacts={"production_best.pt": "production_best.pt"},
+    )
     write_manifest(first, str(ckpt_dir))
     rebuilt = regenerate_manifest(str(ckpt_dir))
     assert rebuilt["run_id"] == "orig"
     assert rebuilt["model"] == "haelt"
     assert rebuilt["params"]["lr"] == 1e-4
-    assert rebuilt["artifacts"]["production_best.pt"]["sha256"] == compute_file_hash(str(ckpt_dir / "production_best.pt"))
+    assert rebuilt["artifacts"]["production_best.pt"]["sha256"] == compute_file_hash(
+        str(ckpt_dir / "production_best.pt")
+    )
 
 
 def test_verify_manifests_in_tree(ckpt_dir, tmp_path):
@@ -199,10 +212,12 @@ def test_verify_manifests_in_tree(ckpt_dir, tmp_path):
     d2.mkdir(parents=True)
     (d1 / "model.pt").write_bytes(b"a")
     (d2 / "model.pt").write_bytes(b"b")
-    write_manifest(generate_manifest(run_dir=str(d1), run_id="a", model="m",
-                                     artifacts={"model.pt": "model.pt"}), str(d1))
-    write_manifest(generate_manifest(run_dir=str(d2), run_id="b", model="m",
-                                     artifacts={"model.pt": "model.pt"}), str(d2))
+    write_manifest(
+        generate_manifest(run_dir=str(d1), run_id="a", model="m", artifacts={"model.pt": "model.pt"}), str(d1)
+    )
+    write_manifest(
+        generate_manifest(run_dir=str(d2), run_id="b", model="m", artifacts={"model.pt": "model.pt"}), str(d2)
+    )
     reports = verify_manifests_in_tree(str(root))
     assert len(reports) == 2
     assert all(r["reproducible"] for r in reports)

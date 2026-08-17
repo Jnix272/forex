@@ -4,8 +4,8 @@ training/health_check.py
 Comprehensive training health check and logging system.
 
 Provides a single ``HealthCheck`` class that validates the training pipeline
-at multiple phases — preflight, batch-level, epoch-level, RL episode, ensemble,
-and pretraining — and produces a structured JSON report per run.
+at multiple phases - preflight, batch-level, epoch-level, RL episode, ensemble,
+and pretraining - and produces a structured JSON report per run.
 
 Usage
 -----
@@ -40,17 +40,16 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import pathlib
-import time
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 
 try:
     import torch
     import torch.nn as nn
+
     _TORCH = True
 except ImportError:
     _TORCH = False
@@ -61,6 +60,7 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Custom Exception
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TrainingHealthError(RuntimeError):
     """Raised when a critical training health check fails.
@@ -75,13 +75,14 @@ class TrainingHealthError(RuntimeError):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CRITICAL = "CRITICAL"
-_WARNING  = "WARNING"
-_INFO     = "INFO"
+_WARNING = "WARNING"
+_INFO = "INFO"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main HealthCheck class
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class HealthCheck:
     """
@@ -117,7 +118,7 @@ class HealthCheck:
         self.raise_on_nan_data = raise_on_nan_data
         self.raise_on_shape_mismatch = raise_on_shape_mismatch
 
-        self._started = datetime.now(timezone.utc).isoformat()
+        self._started = datetime.now(UTC).isoformat()
         self._warnings: list[dict] = []
         self._errors: list[dict] = []
         self._infos: list[dict] = []
@@ -150,7 +151,7 @@ class HealthCheck:
             "level": level,
             "source": source,
             "message": message,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
         }
         if details:
             entry["details"] = details
@@ -248,8 +249,7 @@ class HealthCheck:
             # Check alignment
             row_counts = list(n_rows.values())
             if len(set(row_counts)) > 1:
-                self._fail(src, f"Zarr array row counts are misaligned: {n_rows}",
-                          details=n_rows)
+                self._fail(src, f"Zarr array row counts are misaligned: {n_rows}", details=n_rows)
             else:
                 total = row_counts[0] if row_counts else 0
                 self._info(src, f"All arrays aligned: {total} rows")
@@ -272,9 +272,11 @@ class HealthCheck:
             n_feat_manifest = manifest.get("n_features")
             if n_feat_schema is not None and n_feat_manifest is not None:
                 if n_feat_schema != n_feat_manifest:
-                    self._fail(src,
+                    self._fail(
+                        src,
                         f"Feature schema has {n_feat_schema} features but manifest says {n_feat_manifest}",
-                        details={"schema_count": n_feat_schema, "manifest_count": n_feat_manifest})
+                        details={"schema_count": n_feat_schema, "manifest_count": n_feat_manifest},
+                    )
                 else:
                     self._info(src, f"Schema binding: {n_feat_schema} features match manifest")
                     self._schema_ok = True
@@ -282,15 +284,18 @@ class HealthCheck:
             # If caller provided a runtime schema, check it matches disk schema
             if feature_schema is not None and isinstance(schema_on_disk, list):
                 if feature_schema != schema_on_disk:
-                    mismatches = [(i, a, b) for i, (a, b) in enumerate(
-                        zip(feature_schema, schema_on_disk)) if a != b][:5]
+                    mismatches = [(i, a, b) for i, (a, b) in enumerate(zip(feature_schema, schema_on_disk, strict=False)) if a != b][
+                        :5
+                    ]
                     extra_runtime = set(feature_schema) - set(schema_on_disk)
                     extra_disk = set(schema_on_disk) - set(feature_schema)
-                    self._warn(src,
+                    self._warn(
+                        src,
                         f"Runtime feature schema differs from disk schema. "
                         f"First mismatches: {mismatches}. "
                         f"Runtime-only: {list(extra_runtime)[:5]}. "
-                        f"Disk-only: {list(extra_disk)[:5]}.")
+                        f"Disk-only: {list(extra_disk)[:5]}.",
+                    )
                 else:
                     self._info(src, "Runtime schema matches disk schema exactly.")
         else:
@@ -299,10 +304,12 @@ class HealthCheck:
         # ── 5. Scaler presence ────────────────────────────────────────────
         self._scaler_present = scaler is not None
         if not self._scaler_present:
-            self._warn(src,
+            self._warn(
+                src,
                 "No scaler provided to HealthCheck. If models were trained with a scaler, "
-                "MemmapSequenceDataset will feed RAW unscaled data — prediction quality will degrade. "
-                "Pass scaler=fitted_scaler to HealthCheck.preflight() and to MemmapSequenceDataset().")
+                "MemmapSequenceDataset will feed RAW unscaled data - prediction quality will degrade. "
+                "Pass scaler=fitted_scaler to HealthCheck.preflight() and to MemmapSequenceDataset().",
+            )
         else:
             self._info(src, f"Scaler present: {type(scaler).__name__}")
 
@@ -319,8 +326,7 @@ class HealthCheck:
 
         self._preflight_passed = len(self._errors) == 0
         status = "PASSED" if self._preflight_passed else "FAILED"
-        self._info(src, f"Preflight complete — {status}. "
-                   f"Warnings: {len(self._warnings)}, Errors: {len(self._errors)}")
+        self._info(src, f"Preflight complete - {status}. Warnings: {len(self._warnings)}, Errors: {len(self._errors)}")
 
     def _check_cache_nan_rate(self, cache_path: pathlib.Path, src: str) -> None:
         """Sample up to 64 rows from X array and compute NaN/Inf rate."""
@@ -334,8 +340,11 @@ class HealthCheck:
             # Try to read a small sample without importing zarr (use raw chunk 0)
             # by checking the manifest-reported NaN rate if available
             # (We can't import zarr here without making it a hard dep)
-            self._info(src, f"X array: {n_rows} rows, shape={shape}. NaN/Inf spot-check skipped "
-                       "(zarr not imported at health-check time; run cache_integrity for full check).")
+            self._info(
+                src,
+                f"X array: {n_rows} rows, shape={shape}. NaN/Inf spot-check skipped "
+                "(zarr not imported at health-check time; run cache_integrity for full check).",
+            )
         except Exception as e:
             self._warn(src, f"Could not read X .zarray metadata: {e}")
 
@@ -367,8 +376,9 @@ class HealthCheck:
             n_params = sum(p.numel() for p in model.parameters())
             self._model_meta["n_params"] = n_params
             self._model_meta["architecture"] = type(model).__name__
-            self._info(src, f"Model shape OK: input=(B,{cache_seq},{cache_feat}) → output={out_shape}. "
-                       f"Params: {n_params:,}")
+            self._info(
+                src, f"Model shape OK: input=(B,{cache_seq},{cache_feat}) → output={out_shape}. Params: {n_params:,}"
+            )
         except Exception as e:
             msg = f"Model forward() failed on dummy input (B,{cache_seq},{cache_feat}): {e}"
             if self.raise_on_shape_mismatch:
@@ -379,11 +389,11 @@ class HealthCheck:
     def _check_gpu_memory(self, manifest: dict, args: Any, model: Any, src: str) -> None:
         """Estimate GPU memory requirements and warn if insufficient."""
         if not torch.cuda.is_available():
-            self._info(src, "No CUDA device — GPU memory check skipped.")
+            self._info(src, "No CUDA device - GPU memory check skipped.")
             return
         try:
             free_bytes = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-            free_gb = free_bytes / 1024 ** 3
+            free_gb = free_bytes / 1024**3
 
             seq = manifest.get("seq_len", 80)
             feat = manifest.get("n_features", 100)
@@ -393,16 +403,18 @@ class HealthCheck:
             elif args is not None:
                 batch = int(getattr(args, "batch_size", 64))
 
-            # Very rough estimate: 4 bytes per float32, 3× for activations + grads
+            # Very rough estimate: 4 bytes per float32, 3x for activations + grads
             est_bytes = batch * seq * feat * 4 * 3
-            est_gb = est_bytes / 1024 ** 3
+            est_gb = est_bytes / 1024**3
             self._info(src, f"GPU: {free_gb:.1f} GB free. Estimated batch footprint: ~{est_gb:.2f} GB")
 
             if est_gb > free_gb * 0.8:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Estimated batch memory ({est_gb:.2f} GB) exceeds 80% of free GPU memory "
                     f"({free_gb:.1f} GB). Consider reducing batch_size or seq_len.",
-                    details={"estimated_gb": round(est_gb, 3), "free_gb": round(free_gb, 3)})
+                    details={"estimated_gb": round(est_gb, 3), "free_gb": round(free_gb, 3)},
+                )
         except Exception as e:
             self._warn(src, f"GPU memory check failed: {e}")
 
@@ -475,16 +487,14 @@ class HealthCheck:
 
         if nan_count > 0:
             self._nan_batch_count += 1
-            msg = (f"NaN detected in X at batch {batch_idx}: "
-                   f"{nan_count}/{total} values ({100*nan_count/total:.2f}%)")
+            msg = f"NaN detected in X at batch {batch_idx}: {nan_count}/{total} values ({100 * nan_count / total:.2f}%)"
             if self.raise_on_nan_data:
                 self._fail(src, msg, {"nan_count": nan_count, "total": total})
             else:
                 self._warn(src, msg, {"nan_count": nan_count, "total": total})
 
         if inf_count > 0:
-            msg = (f"Inf detected in X at batch {batch_idx}: "
-                   f"{inf_count}/{total} values ({100*inf_count/total:.2f}%)")
+            msg = f"Inf detected in X at batch {batch_idx}: {inf_count}/{total} values ({100 * inf_count / total:.2f}%)"
             if self.raise_on_nan_data:
                 self._fail(src, msg, {"inf_count": inf_count, "total": total})
             else:
@@ -493,14 +503,16 @@ class HealthCheck:
         # ── Value range check (post-scaling sanity) ───────────────────────
         abs_max = float(np.abs(X_np[np.isfinite(X_np)]).max()) if np.isfinite(X_np).any() else 0.0
         if abs_max > 100.0:
-            self._warn(src,
+            self._warn(
+                src,
                 f"X max absolute value is {abs_max:.1f} at batch {batch_idx}. "
                 "Values >100 after scaling suggest the scaler was not applied or data is unnormalised.",
-                {"abs_max": abs_max})
+                {"abs_max": abs_max},
+            )
 
         # ── Zero-variance feature check ───────────────────────────────────
         if X_np.ndim == 3:
-            # (B, T, F) — check variance over B dimension at last timestep
+            # (B, T, F) - check variance over B dimension at last timestep
             feat_std = X_np[:, -1, :].std(axis=0)
         elif X_np.ndim == 2:
             feat_std = X_np.std(axis=0)
@@ -510,9 +522,11 @@ class HealthCheck:
         if feat_std is not None:
             zero_var = int((feat_std < 1e-8).sum())
             if zero_var > 0:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"{zero_var} feature columns have zero variance in batch {batch_idx}. "
-                    "Constant features may indicate a data pipeline issue.")
+                    "Constant features may indicate a data pipeline issue.",
+                )
 
         # ── Label checks ─────────────────────────────────────────────────
         if y_np is not None:
@@ -528,10 +542,12 @@ class HealthCheck:
                     skew = float(counts.max()) / counts.sum()
                     if skew > 0.92:
                         dominant = unique[counts.argmax()]
-                        self._warn(src,
+                        self._warn(
+                            src,
                             f"Severe label skew in y_cls at batch {batch_idx}: "
                             f"{skew:.1%} of samples are class {dominant:.0f}. "
-                            "Model may predict only one class.")
+                            "Model may predict only one class.",
+                        )
 
     # ─────────────────────────────────────────────────────────────────────
     # 3. check_epoch()
@@ -560,11 +576,17 @@ class HealthCheck:
 
         # ── Loss finite check ─────────────────────────────────────────────
         if not math.isfinite(train_loss):
-            self._fail(src, f"train_loss is {train_loss} at epoch {epoch}. Training diverged.",
-                       {"epoch": epoch, "train_loss": train_loss})
+            self._fail(
+                src,
+                f"train_loss is {train_loss} at epoch {epoch}. Training diverged.",
+                {"epoch": epoch, "train_loss": train_loss},
+            )
         if not math.isfinite(val_loss):
-            self._fail(src, f"val_loss is {val_loss} at epoch {epoch}. Validation diverged.",
-                       {"epoch": epoch, "val_loss": val_loss})
+            self._fail(
+                src,
+                f"val_loss is {val_loss} at epoch {epoch}. Validation diverged.",
+                {"epoch": epoch, "val_loss": val_loss},
+            )
 
         self._train_losses.append(train_loss)
         self._val_losses.append(val_loss)
@@ -572,10 +594,12 @@ class HealthCheck:
         # ── Overfitting check ─────────────────────────────────────────────
         if val_loss > train_loss * 1.5 and epoch > 2:
             gap = val_loss - train_loss
-            self._warn(src,
+            self._warn(
+                src,
                 f"Overfitting detected at epoch {epoch}: "
                 f"val_loss={val_loss:.4f}, train_loss={train_loss:.4f}, gap={gap:.4f}",
-                {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "gap": gap})
+                {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "gap": gap},
+            )
 
         # ── Gradient norm check ───────────────────────────────────────────
         if grad_norms:
@@ -583,40 +607,49 @@ class HealthCheck:
             min_gn = min(grad_norms)
             self._grad_norms.extend(grad_norms)
             if any(not math.isfinite(g) for g in grad_norms):
-                self._fail(src, f"Non-finite gradient norm at epoch {epoch}: {grad_norms[:5]}",
-                           {"epoch": epoch, "grad_norms_sample": grad_norms[:10]})
+                self._fail(
+                    src,
+                    f"Non-finite gradient norm at epoch {epoch}: {grad_norms[:5]}",
+                    {"epoch": epoch, "grad_norms_sample": grad_norms[:10]},
+                )
             if max_gn > 10.0:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Exploding gradients at epoch {epoch}: max_grad_norm={max_gn:.3f}. "
                     "Consider reducing learning rate or tightening clip_grad_norm.",
-                    {"epoch": epoch, "max_grad_norm": max_gn})
+                    {"epoch": epoch, "max_grad_norm": max_gn},
+                )
             if min_gn < 1e-6 and epoch > 5:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Vanishing gradients at epoch {epoch}: min_grad_norm={min_gn:.2e}. "
                     "Check activation functions, weight init, and learning rate schedule.",
-                    {"epoch": epoch, "min_grad_norm": min_gn})
+                    {"epoch": epoch, "min_grad_norm": min_gn},
+                )
 
         # ── LR sanity ─────────────────────────────────────────────────────
         if lr is not None:
             self._lrs.append(lr)
             if lr < 1e-9:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Learning rate is effectively zero ({lr:.2e}) at epoch {epoch}. "
-                    "Scheduler may have decayed too aggressively.")
+                    "Scheduler may have decayed too aggressively.",
+                )
             if lr > 1.0:
-                self._warn(src,
-                    f"Learning rate is very large ({lr:.4f}) at epoch {epoch}. "
-                    "This may cause instability.")
+                self._warn(src, f"Learning rate is very large ({lr:.4f}) at epoch {epoch}. This may cause instability.")
 
         # ── Loss plateau check ────────────────────────────────────────────
         if len(self._train_losses) >= 6:
             recent = self._train_losses[-6:]
             improvement = recent[0] - min(recent)
             if improvement < 1e-5:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Loss plateau detected: no improvement > 1e-5 over last 6 epochs "
                     f"(best={min(recent):.6f}, start={recent[0]:.6f}).",
-                    {"last_6_train_losses": [round(x, 6) for x in recent]})
+                    {"last_6_train_losses": [round(x, 6) for x in recent]},
+                )
 
     # ─────────────────────────────────────────────────────────────────────
     # 4. check_rl_episode()
@@ -639,7 +672,7 @@ class HealthCheck:
         ------
         - total_reward is finite
         - equity hasn't dropped below 0 (broker margin call territory)
-        - equity hasn't exploded (> 10× initial = likely a reward scale bug)
+        - equity hasn't exploded (> 10x initial = likely a reward scale bug)
         - zero-trade episodes warn (agent learned to do nothing)
         - reward / step ratio sanity (per-step reward > 10 suggests scale error)
         """
@@ -652,29 +685,37 @@ class HealthCheck:
         self._rl_equities.append(final_equity)
 
         if final_equity < 0:
-            self._warn(src,
+            self._warn(
+                src,
                 f"Episode {episode_idx}: final_equity={final_equity:.2f} is negative. "
                 "Equity below zero indicates uncapped losses or a reward scale bug.",
-                {"episode": episode_idx, "final_equity": final_equity})
+                {"episode": episode_idx, "final_equity": final_equity},
+            )
 
         if final_equity > initial_equity * 10:
-            self._warn(src,
-                f"Episode {episode_idx}: final_equity={final_equity:.2f} is >10× initial. "
+            self._warn(
+                src,
+                f"Episode {episode_idx}: final_equity={final_equity:.2f} is >10x initial. "
                 "Likely a reward scale or position sizing bug.",
-                {"episode": episode_idx, "final_equity": final_equity, "initial_equity": initial_equity})
+                {"episode": episode_idx, "final_equity": final_equity, "initial_equity": initial_equity},
+            )
 
         if n_trades == 0 and episode_len > 20:
-            self._warn(src,
+            self._warn(
+                src,
                 f"Episode {episode_idx}: zero trades over {episode_len} steps. "
-                "Agent may have learned a do-nothing policy.")
+                "Agent may have learned a do-nothing policy.",
+            )
 
         if episode_len > 0:
             reward_per_step = abs(total_reward) / episode_len
             if reward_per_step > 10.0:
-                self._warn(src,
+                self._warn(
+                    src,
                     f"Episode {episode_idx}: reward/step={reward_per_step:.2f} seems large. "
-                    "Check reward scale — values >>1 per step can destabilize PPO/DQN.",
-                    {"reward_per_step": reward_per_step})
+                    "Check reward scale - values >>1 per step can destabilize PPO/DQN.",
+                    {"reward_per_step": reward_per_step},
+                )
 
     # ─────────────────────────────────────────────────────────────────────
     # 5. check_ensemble()
@@ -713,7 +754,7 @@ class HealthCheck:
 
         # ── Weight entropy (collapse detection) ───────────────────────────
         if w_np.ndim == 2:
-            # (B, n_models) — mean over batch
+            # (B, n_models) - mean over batch
             w_mean = w_np.mean(axis=0)
         else:
             w_mean = w_np
@@ -725,11 +766,13 @@ class HealthCheck:
 
         if entropy < 0.3 and step > 100:
             dominant_idx = int(np.argmax(w_mean))
-            self._warn(src,
+            self._warn(
+                src,
                 f"Ensemble weight collapse at step {step}: entropy={entropy:.3f} "
                 f"(max={max_entropy:.3f}). Model {dominant_idx} dominates "
                 f"({w_mean[dominant_idx]:.1%} weight).",
-                {"entropy": entropy, "max_entropy": max_entropy, "weights": w_mean.tolist()})
+                {"entropy": entropy, "max_entropy": max_entropy, "weights": w_mean.tolist()},
+            )
 
         # ── Base prediction NaN check ─────────────────────────────────────
         if base_preds is not None:
@@ -737,10 +780,11 @@ class HealthCheck:
             if bp_np is not None:
                 nan_models = int(np.isnan(bp_np).any(axis=0).sum()) if bp_np.ndim == 2 else 0
                 if nan_models > 0:
-                    self._warn(src,
-                        f"NaN in base model predictions at step {step}: "
-                        f"{nan_models} models output NaN.",
-                        {"nan_model_count": nan_models})
+                    self._warn(
+                        src,
+                        f"NaN in base model predictions at step {step}: {nan_models} models output NaN.",
+                        {"nan_model_count": nan_models},
+                    )
 
     # ─────────────────────────────────────────────────────────────────────
     # 6. check_pretrain()
@@ -765,29 +809,35 @@ class HealthCheck:
         src = f"check_pretrain[{method}/{epoch}]"
 
         if not math.isfinite(loss):
-            self._fail(src, f"Pretrain loss is {loss} at epoch {epoch}. Diverged.",
-                       {"epoch": epoch, "loss": loss, "method": method})
+            self._fail(
+                src,
+                f"Pretrain loss is {loss} at epoch {epoch}. Diverged.",
+                {"epoch": epoch, "loss": loss, "method": method},
+            )
 
         self._pretrain_losses.append(loss)
 
         # ── Representation collapse ───────────────────────────────────────
-        if representation_std is not None:
-            if representation_std < 0.01:
-                self._warn(src,
-                    f"Representation collapse at epoch {epoch}: embedding std={representation_std:.5f}. "
-                    "All representations are nearly identical — the encoder has collapsed. "
-                    "Check learning rate, projection head, and augmentation strength.",
-                    {"embedding_std": representation_std, "epoch": epoch})
+        if representation_std is not None and representation_std < 0.01:
+            self._warn(
+                src,
+                f"Representation collapse at epoch {epoch}: embedding std={representation_std:.5f}. "
+                "All representations are nearly identical - the encoder has collapsed. "
+                "Check learning rate, projection head, and augmentation strength.",
+                {"embedding_std": representation_std, "epoch": epoch},
+            )
 
         # ── Plateau check ─────────────────────────────────────────────────
         if len(self._pretrain_losses) >= 10:
             recent = self._pretrain_losses[-10:]
             improvement = recent[0] - min(recent)
             if improvement < 1e-5:
-                self._warn(src,
-                    f"Pretrain loss plateau: no improvement > 1e-5 over last 10 epochs. "
-                    f"Consider adjusting learning rate or augmentation.",
-                    {"last_10_losses": [round(x, 6) for x in recent]})
+                self._warn(
+                    src,
+                    "Pretrain loss plateau: no improvement > 1e-5 over last 10 epochs. "
+                    "Consider adjusting learning rate or augmentation.",
+                    {"last_10_losses": [round(x, 6) for x in recent]},
+                )
 
     # ─────────────────────────────────────────────────────────────────────
     # 7. finalize()
@@ -813,7 +863,7 @@ class HealthCheck:
         dict
             The full health report.
         """
-        finished = datetime.now(timezone.utc).isoformat()
+        finished = datetime.now(UTC).isoformat()
         passed = len(self._errors) == 0
 
         # Model summary
@@ -826,14 +876,13 @@ class HealthCheck:
         training_stats = {}
         if self._train_losses:
             training_stats["final_train_loss"] = round(self._train_losses[-1], 6)
-            training_stats["best_train_loss"]  = round(min(self._train_losses), 6)
+            training_stats["best_train_loss"] = round(min(self._train_losses), 6)
             training_stats["n_epochs"] = len(self._train_losses)
         if self._val_losses:
             training_stats["final_val_loss"] = round(self._val_losses[-1], 6)
-            training_stats["best_val_loss"]  = round(min(self._val_losses), 6)
+            training_stats["best_val_loss"] = round(min(self._val_losses), 6)
         if self._train_losses and self._val_losses:
-            training_stats["final_train_val_gap"] = round(
-                self._val_losses[-1] - self._train_losses[-1], 6)
+            training_stats["final_train_val_gap"] = round(self._val_losses[-1] - self._train_losses[-1], 6)
 
         # Gradient stats
         grad_stats = {}
@@ -846,22 +895,22 @@ class HealthCheck:
         rl_stats = {}
         if self._rl_rewards:
             rl_stats["mean_episode_reward"] = round(float(np.mean(self._rl_rewards)), 4)
-            rl_stats["std_episode_reward"]  = round(float(np.std(self._rl_rewards)), 4)
+            rl_stats["std_episode_reward"] = round(float(np.std(self._rl_rewards)), 4)
             rl_stats["n_episodes"] = len(self._rl_rewards)
         if self._rl_equities:
-            rl_stats["mean_final_equity"]   = round(float(np.mean(self._rl_equities)), 2)
+            rl_stats["mean_final_equity"] = round(float(np.mean(self._rl_equities)), 2)
 
         # Ensemble stats
         ensemble_stats = {}
         if self._ensemble_entropies:
             ensemble_stats["mean_weight_entropy"] = round(float(np.mean(self._ensemble_entropies)), 4)
-            ensemble_stats["min_weight_entropy"]  = round(float(min(self._ensemble_entropies)), 4)
+            ensemble_stats["min_weight_entropy"] = round(float(min(self._ensemble_entropies)), 4)
 
         # Pretrain stats
         pretrain_stats = {}
         if self._pretrain_losses:
             pretrain_stats["final_pretrain_loss"] = round(self._pretrain_losses[-1], 6)
-            pretrain_stats["best_pretrain_loss"]  = round(min(self._pretrain_losses), 6)
+            pretrain_stats["best_pretrain_loss"] = round(min(self._pretrain_losses), 6)
 
         report = {
             "run_id": self.run_id,
@@ -893,7 +942,7 @@ class HealthCheck:
         }
 
         # Write JSON report
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         out_path = self.log_dir / f"health_{self.run_id}_{ts}.json"
         try:
             out_path.write_text(json.dumps(report, indent=2, default=str))
@@ -921,6 +970,7 @@ class HealthCheck:
 # Convenience factory
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def make_health_check(
     args: Any = None,
     run_id: str | None = None,
@@ -932,7 +982,7 @@ def make_health_check(
     Parameters
     ----------
     args : argparse.Namespace or dict, optional
-        Training arguments — used to extract run_id if not provided.
+        Training arguments - used to extract run_id if not provided.
     run_id : str, optional
         Explicit run identifier. Falls back to args.run_id or a timestamp.
     log_dir : str
@@ -945,13 +995,14 @@ def make_health_check(
             else:
                 run_id = str(getattr(args, "run_id", ""))
         if not run_id:
-            run_id = datetime.now(timezone.utc).strftime("run_%Y%m%d_%H%M%S")
+            run_id = datetime.now(UTC).strftime("run_%Y%m%d_%H%M%S")
     return HealthCheck(run_id=run_id, log_dir=log_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test (run with: python -m training.health_check)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _self_test():
     """Quick smoke-test of the HealthCheck system without any real data."""

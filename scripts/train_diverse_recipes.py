@@ -14,18 +14,22 @@ def main():
 
     models = ["haelt", "mamba", "tft"]
     base_cmd = [
-        sys.executable, "training/train_gpu.py",
-        "--epochs", str(args.epochs),
-        "--data-source", args.data_source,
-        "--checkpoint-dir", args.checkpoint_dir,
-        "--force-rebuild"
+        sys.executable,
+        "training/train_gpu.py",
+        "--epochs",
+        str(args.epochs),
+        "--data-source",
+        args.data_source,
+        "--checkpoint-dir",
+        args.checkpoint_dir,
+        "--force-rebuild",
     ]
 
     results = {}
 
     for model in models:
-        print(f"\n{'='*50}\nTraining Model Recipe: {model.upper()}\n{'='*50}")
-        cmd = base_cmd + ["--model", model]
+        print(f"\n{'=' * 50}\nTraining Model Recipe: {model.upper()}\n{'=' * 50}")
+        cmd = [*base_cmd, "--model", model]
 
         # Run training
         try:
@@ -45,9 +49,10 @@ def main():
             print(f"[Failed] {model} failed with exit code {e.returncode}")
             results[model] = "Failed"
 
-    print(f"\n{'='*50}\nDiverse Recipes Results\n{'='*50}")
+    print(f"\n{'=' * 50}\nDiverse Recipes Results\n{'=' * 50}")
     for m, score in results.items():
         print(f"Model: {m.ljust(10)} | Val Sharpe: {score}")
+
 
 if __name__ == "__main__":
     main()

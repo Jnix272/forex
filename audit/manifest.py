@@ -1,5 +1,5 @@
 """
-audit/manifest.py — generate / verify / regenerate reproducibility manifests.
+audit/manifest.py - generate / verify / regenerate reproducibility manifests.
 
 A manifest is a JSON snapshot of every artifact + input + environment for a
 training run. It is stored as ``manifest.json`` alongside the run's checkpoints
@@ -7,6 +7,7 @@ and is verified by the promotion auditor (``validation/promotion_audit.py``).
 
 Standard-library only.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -72,17 +73,18 @@ def git_info(repo_root: str | None = None) -> dict[str, str]:
     info: dict[str, str] = {}
     cwd = repo_root or os.getcwd()
     try:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL
-        ).decode().strip()
+        commit = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL).decode().strip()
+        )
         info["commit"] = commit
     except Exception:
         info["commit"] = ""
     try:
-        branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd,
-            stderr=subprocess.DEVNULL
-        ).decode().strip()
+        branch = (
+            subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
         info["branch"] = branch
     except Exception:
         info["branch"] = ""
@@ -98,9 +100,21 @@ def capture_env(include_gpu: bool = True) -> dict[str, Any]:
     }
     try:
         import importlib.metadata as md
+
         libs: dict[str, str] = {}
-        for name in ("numpy", "pandas", "polars", "scipy", "torch",
-                     "sklearn", "shap", "river", "xgboost", "lightgbm", "catboost"):
+        for name in (
+            "numpy",
+            "pandas",
+            "polars",
+            "scipy",
+            "torch",
+            "sklearn",
+            "shap",
+            "river",
+            "xgboost",
+            "lightgbm",
+            "catboost",
+        ):
             try:
                 libs[name] = md.version(name)
             except Exception:
@@ -110,10 +124,14 @@ def capture_env(include_gpu: bool = True) -> dict[str, Any]:
         env["libs"] = {}
     if include_gpu:
         try:
-            out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                stderr=subprocess.DEVNULL
-            ).decode().strip().splitlines()
+            out = (
+                subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], stderr=subprocess.DEVNULL
+                )
+                .decode()
+                .strip()
+                .splitlines()
+            )
             env["gpu"] = out[0] if out else ""
         except Exception:
             env["gpu"] = ""
@@ -121,7 +139,7 @@ def capture_env(include_gpu: bool = True) -> dict[str, Any]:
 
 
 def generate_manifest(
-    run_dir: str,
+    run_dir: str | os.PathLike[str],
     run_id: str,
     model: str,
     params: dict[str, Any] | None = None,
@@ -144,14 +162,14 @@ def generate_manifest(
     artifacts  : Map of logical name → path (absolute or relative to run_dir).
     inputs     : Any other input key/values folded into the manifest.
     """
-    run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(run_dir)
+    root.mkdir(parents=True, exist_ok=True)
 
     artifact_hashes: dict[str, dict[str, str]] = {}
     for name, path in (artifacts or {}).items():
         p = Path(path)
         if not p.is_absolute():
-            p = run_dir / p
+            p = root / p
         if p.exists() and p.is_file():
             artifact_hashes[name] = {"path": str(p), "sha256": compute_file_hash(str(p))}
         else:
@@ -180,17 +198,17 @@ def generate_manifest(
     return manifest
 
 
-def write_manifest(manifest: dict[str, Any], run_dir: str, filename: str = MANIFEST_FILENAME) -> str:
+def write_manifest(manifest: dict[str, Any], run_dir: str | os.PathLike[str], filename: str = MANIFEST_FILENAME) -> str:
     """Write a manifest JSON next to the run's checkpoints."""
-    run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    out = run_dir / filename
+    root = Path(run_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    out = root / filename
     with open(out, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, default=str)
     return str(out)
 
 
-def verify_manifest(manifest: dict[str, Any], run_dir: str | None = None) -> dict[str, Any]:
+def verify_manifest(manifest: dict[str, Any], run_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     """Verify a manifest's self-hash and artifact hashes.
 
     Returns a report with gates: ``hash_ok``, ``artifacts_ok`` and a boolean
@@ -208,11 +226,11 @@ def verify_manifest(manifest: dict[str, Any], run_dir: str | None = None) -> dic
 
     artifact_gates: dict[str, bool] = {}
     if run_dir is not None:
-        run_dir = Path(run_dir)
+        root = Path(run_dir)
         for name, entry in manifest.get("artifacts", {}).items():
             path = Path(entry.get("path", ""))
             if not path.is_absolute():
-                path = run_dir / path
+                path = root / path
             if not path.is_file():
                 artifact_gates[name] = False
                 continue
@@ -237,8 +255,15 @@ def verify_manifest(manifest: dict[str, Any], run_dir: str | None = None) -> dic
 
 def _default_artifacts(run_dir: Path) -> dict[str, str]:
     """Guess artifact paths inside a checkpoint dir for regeneration."""
-    names = ["production_best.pt", "production_prev.pt", "best_model.pt",
-             "model_best.pt", "final.pt", "config.yaml", "train_summary.json"]
+    names = [
+        "production_best.pt",
+        "production_prev.pt",
+        "best_model.pt",
+        "model_best.pt",
+        "final.pt",
+        "config.yaml",
+        "train_summary.json",
+    ]
     artifacts = {}
     for n in names:
         p = run_dir / n
@@ -247,27 +272,28 @@ def _default_artifacts(run_dir: Path) -> dict[str, str]:
     return artifacts
 
 
-def regenerate_manifest(run_dir: str, run_id: str = "", model: str = "unknown",
-                        **kwargs: Any) -> dict[str, Any]:
+def regenerate_manifest(
+    run_dir: str | os.PathLike[str], run_id: str = "", model: str = "unknown", **kwargs: Any
+) -> dict[str, Any]:
     """CLI/helper: rebuild a run's manifest from an existing checkpoint dir.
 
     Reuses existing inputs where a manifest is already present (so regenerating
     preserves the original lineage) and re-hashes artifacts on disk.
     """
-    run_dir = Path(run_dir)
-    manifest_path = run_dir / MANIFEST_FILENAME
+    root = Path(run_dir)
+    manifest_path = root / MANIFEST_FILENAME
     existing: dict[str, Any] = {}
     if manifest_path.is_file():
         with open(manifest_path, encoding="utf-8") as f:
             existing = json.load(f)
 
-    artifacts = _default_artifacts(run_dir)
+    artifacts = _default_artifacts(root)
     inputs = dict(existing.get("inputs", {}))
     inputs.update(kwargs.get("inputs", {}) or {})
     dataset = existing.get("dataset") or kwargs.get("dataset")
 
     manifest = generate_manifest(
-        run_dir=str(run_dir),
+        run_dir=root,
         run_id=run_id or existing.get("run_id", ""),
         model=model if model and model != "unknown" else existing.get("model", model or "unknown"),
         params=existing.get("params") or kwargs.get("params"),
@@ -281,11 +307,11 @@ def regenerate_manifest(run_dir: str, run_id: str = "", model: str = "unknown",
     return manifest
 
 
-def verify_manifests_in_tree(root: str) -> list[dict[str, Any]]:
+def verify_manifests_in_tree(root: str | os.PathLike[str]) -> list[dict[str, Any]]:
     """Verify every manifest.json found under ``root`` (recursively)."""
     reports: list[dict[str, Any]] = []
-    root = Path(root)
-    for m in sorted(root.rglob(MANIFEST_FILENAME)):
+    root_path = Path(root)
+    for m in sorted(root_path.rglob(MANIFEST_FILENAME)):
         try:
             with open(m, encoding="utf-8") as f:
                 manifest = json.load(f)
@@ -293,9 +319,11 @@ def verify_manifests_in_tree(root: str) -> list[dict[str, Any]]:
             report["manifest_path"] = str(m)
             reports.append(report)
         except Exception as e:
-            reports.append({
-                "manifest_path": str(m),
-                "reproducible": False,
-                "error": str(e),
-            })
+            reports.append(
+                {
+                    "manifest_path": str(m),
+                    "reproducible": False,
+                    "error": str(e),
+                }
+            )
     return reports

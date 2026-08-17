@@ -55,28 +55,35 @@ def _fold_stability(model_name: str, ckpt_path: str) -> dict:
     if sharpes:
         arr = np.asarray(sharpes, dtype=np.float64)
         pass_threshold = 0.0
-        out.update({
-            "fold_sharpe_mean": float(arr.mean()),
-            "fold_sharpe_std": float(arr.std()),
-            "fold_sharpe_min": float(arr.min()),
-            "fold_sharpe_worst": float(arr.min()),
-            "fold_pass_rate": float((arr >= pass_threshold).mean()),
-            "fold_governance_threshold": pass_threshold,
-            "fold_implausibly_smooth": bool(len(arr) >= 3 and float(arr.std()) < 0.02),
-        })
+        out.update(
+            {
+                "fold_sharpe_mean": float(arr.mean()),
+                "fold_sharpe_std": float(arr.std()),
+                "fold_sharpe_min": float(arr.min()),
+                "fold_sharpe_worst": float(arr.min()),
+                "fold_pass_rate": float((arr >= pass_threshold).mean()),
+                "fold_governance_threshold": pass_threshold,
+                "fold_implausibly_smooth": bool(len(arr) >= 3 and float(arr.std()) < 0.02),
+            }
+        )
     if losses:
         arr = np.asarray(losses, dtype=np.float64)
-        out.update({
-            "fold_loss_mean": float(arr.mean()),
-            "fold_loss_std": float(arr.std()),
-        })
+        out.update(
+            {
+                "fold_loss_mean": float(arr.mean()),
+                "fold_loss_std": float(arr.std()),
+            }
+        )
     if train_val_gaps:
         arr = np.asarray(train_val_gaps, dtype=np.float64)
-        out.update({
-            "train_val_loss_gap_mean": float(arr.mean()),
-            "train_val_loss_gap_max": float(arr.max()),
-        })
+        out.update(
+            {
+                "train_val_loss_gap_mean": float(arr.mean()),
+                "train_val_loss_gap_max": float(arr.max()),
+            }
+        )
     return out
+
 
 def _checkpoint_state_dict(checkpoint):
     if isinstance(checkpoint, dict):
@@ -116,7 +123,10 @@ def _param_count(model, model_name: str) -> int:
     except Exception:
         return 0
 
-def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size=512, min_confidence=0.60, min_gap_bars=3):
+
+def run_evaluation(
+    model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size=512, min_confidence=0.60, min_gap_bars=3
+):
     print(f"Evaluating {model_name}...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_key = str(model_name).lower()
@@ -149,9 +159,7 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
             self.momentum_window = 20
             self._n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or 1)
             self._f_per_pair = int(
-                cfg.get("_f_per_pair")
-                or cfg.get("f_per_pair")
-                or max(1, n_features // max(1, self._n_pairs))
+                cfg.get("_f_per_pair") or cfg.get("f_per_pair") or max(1, n_features // max(1, self._n_pairs))
             )
 
     try:
@@ -223,7 +231,7 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
             conf = probs.max(axis=1)
             all_conf.extend(conf.astype(float).tolist())
 
-            last_trade_i = -10**9
+            last_trade_i = -(10**9)
             for offset, c in enumerate(cls_idx):
                 i = start + offset
                 price = float(bars.close.iloc[i])
@@ -244,14 +252,16 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
                 if action != 0:
                     last_trade_i = i
                     trade_conf.append(float(conf[offset]))
-                    signals.append({
-                        "timestamp": bars.index[i],
-                        "action": action,
-                        "lots": 0.1,
-                        "stop_loss": sl,
-                        "take_profit": tp,
-                        "confidence": conf[offset]
-                    })
+                    signals.append(
+                        {
+                            "timestamp": bars.index[i],
+                            "action": action,
+                            "lots": 0.1,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "confidence": conf[offset],
+                        }
+                    )
     if device.type == "cuda":
         torch.cuda.synchronize()
     infer_s = max(time.perf_counter() - infer_t0, 1e-9)
@@ -271,28 +281,32 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
         "max_drawdown": float(raw_metrics.get("max_drawdown", raw_metrics.get("max_drawdown_pct", 0.0)) or 0.0),
         "total_return_pct": float(raw_metrics.get("total_return_pct", 0.0) or 0.0),
     }
-    metrics.update({
-        "latency_ms_per_window": float(infer_s * 1000.0 / max(n_windows, 1)),
-        "windows_per_second": float(n_windows / infer_s),
-        "turnover_per_1000_bars": float(metrics["n_trades"] * 1000.0 / max(len(bars), 1)),
-        "return_per_trade_pct": float(metrics["total_return_pct"] / max(metrics["n_trades"], 1)),
-        "sharpe_per_turnover": float(metrics["sharpe"] / max(metrics["n_trades"] / max(len(bars), 1), 1e-9)),
-    })
+    metrics.update(
+        {
+            "latency_ms_per_window": float(infer_s * 1000.0 / max(n_windows, 1)),
+            "windows_per_second": float(n_windows / infer_s),
+            "turnover_per_1000_bars": float(metrics["n_trades"] * 1000.0 / max(len(bars), 1)),
+            "return_per_trade_pct": float(metrics["total_return_pct"] / max(metrics["n_trades"], 1)),
+            "sharpe_per_turnover": float(metrics["sharpe"] / max(metrics["n_trades"] / max(len(bars), 1), 1e-9)),
+        }
+    )
     conf_arr = np.asarray(all_conf, dtype=np.float64) if all_conf else np.asarray([0.0])
     trade_conf_arr = np.asarray(trade_conf, dtype=np.float64) if trade_conf else np.asarray([0.0])
     meta = _model_metadata(model_name, ckpt_path)
-    metrics.update({
-        "params": _param_count(model, model_name),
-        "train_time_s": float(meta.get("train_time_s", meta.get("train_seconds", 0.0)) or 0.0),
-        "validation_sharpe": float(meta.get("best_val_sharpe_proxy", meta.get("validation_sharpe", 0.0)) or 0.0),
-        "validation_loss": float(meta.get("best_val_loss", meta.get("validation_loss", 0.0)) or 0.0),
-        "confidence_mean": float(conf_arr.mean()),
-        "confidence_std": float(conf_arr.std()),
-        "confidence_p10": float(np.quantile(conf_arr, 0.10)),
-        "confidence_p90": float(np.quantile(conf_arr, 0.90)),
-        "trade_confidence_mean": float(trade_conf_arr.mean()),
-        "trade_confidence_std": float(trade_conf_arr.std()),
-    })
+    metrics.update(
+        {
+            "params": _param_count(model, model_name),
+            "train_time_s": float(meta.get("train_time_s", meta.get("train_seconds", 0.0)) or 0.0),
+            "validation_sharpe": float(meta.get("best_val_sharpe_proxy", meta.get("validation_sharpe", 0.0)) or 0.0),
+            "validation_loss": float(meta.get("best_val_loss", meta.get("validation_loss", 0.0)) or 0.0),
+            "confidence_mean": float(conf_arr.mean()),
+            "confidence_std": float(conf_arr.std()),
+            "confidence_p10": float(np.quantile(conf_arr, 0.10)),
+            "confidence_p90": float(np.quantile(conf_arr, 0.90)),
+            "trade_confidence_mean": float(trade_conf_arr.mean()),
+            "trade_confidence_std": float(trade_conf_arr.std()),
+        }
+    )
     metrics.update(_fold_stability(model_name, ckpt_path))
 
     # Sanity guards for invalid combinations.
@@ -317,13 +331,22 @@ def run_evaluation(model_name, ckpt_path, bars, X_tensor, seq_len=60, batch_size
 
     return {"results": res, "metrics": metrics, "equity": bt.get_equity_curve()}
 
+
 if __name__ == "__main__":
     import zarr
 
-    ZARR_PATH = _ROOT / "data" / "processed" / \
-        "dataset_AUDUSD-EURGBP-EURJPY-EURUSD-GBPJPY-GBPUSD-NZDUSD-USDCAD-USDCHF-USDJPY_20000000_dukascopy_60_rl_reward.zarr"
-    SCALER_PATH = _ROOT / "data" / "processed" / \
-        "dataset_AUDUSD-EURGBP-EURJPY-EURUSD-GBPJPY-GBPUSD-NZDUSD-USDCAD-USDCHF-USDJPY_20000000_dukascopy_60_rl_reward_scaler.npz"
+    ZARR_PATH = (
+        _ROOT
+        / "data"
+        / "processed"
+        / "dataset_AUDUSD-EURGBP-EURJPY-EURUSD-GBPJPY-GBPUSD-NZDUSD-USDCAD-USDCHF-USDJPY_20000000_dukascopy_60_rl_reward.zarr"
+    )
+    SCALER_PATH = (
+        _ROOT
+        / "data"
+        / "processed"
+        / "dataset_AUDUSD-EURGBP-EURJPY-EURUSD-GBPJPY-GBPUSD-NZDUSD-USDCAD-USDCHF-USDJPY_20000000_dukascopy_60_rl_reward_scaler.npz"
+    )
 
     print(f"[Compare] Loading cached Zarr dataset from:\n  {ZARR_PATH}")
     z = zarr.open(str(ZARR_PATH), mode="r")
@@ -339,18 +362,20 @@ if __name__ == "__main__":
     # Build a synthetic bars DataFrame for the backtester
     idx = pd.date_range("2023-01-01", periods=len(X_arr), freq="1min", tz="UTC")
     if close_prices is not None:
-        base_bars = pd.DataFrame({"close": close_prices[:, 0] if close_prices.ndim > 1 else close_prices}, index=idx[:len(X_arr)])
+        base_bars = pd.DataFrame(
+            {"close": close_prices[:, 0] if close_prices.ndim > 1 else close_prices}, index=idx[: len(X_arr)]
+        )
     else:
-        base_bars = pd.DataFrame({"close": np.random.uniform(1.08, 1.10, len(X_arr))}, index=idx[:len(X_arr)])
-    base_bars["open"]   = base_bars["close"].shift(1).bfill()
-    base_bars["high"]   = base_bars["close"] * 1.0002
-    base_bars["low"]    = base_bars["close"] * 0.9998
+        base_bars = pd.DataFrame({"close": np.random.uniform(1.08, 1.10, len(X_arr))}, index=idx[: len(X_arr)])
+    base_bars["open"] = base_bars["close"].shift(1).bfill()
+    base_bars["high"] = base_bars["close"] * 1.0002
+    base_bars["low"] = base_bars["close"] * 0.9998
     base_bars["volume"] = 1000.0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     X_tensor = torch.tensor(X_arr, dtype=torch.float32, device=device)
 
-    print(f"[Compare] Dataset loaded: {X_arr.shape[0]:,} bars × {X_arr.shape[1]} features | device={device}")
+    print(f"[Compare] Dataset loaded: {X_arr.shape[0]:,} bars x {X_arr.shape[1]} features | device={device}")
 
     models_to_test = {
         "xgboost": _ROOT / "checkpoints" / "xgboost_best.json",
@@ -358,8 +383,8 @@ if __name__ == "__main__":
         "mamba": _ROOT / "checkpoints" / "mamba" / "mamba_best.pt",
         "transformer": _ROOT / "checkpoints" / "transformer" / "transformer_best.pt",
         "ensemble": _ROOT / "checkpoints" / "ensemble" / "ensemble_meta_best.pt",
-        "tft":   _ROOT / "checkpoints" / "tft"   / "tft_fold0_best.pt",
-        "gnn":   _ROOT / "checkpoints" / "gnn"   / "gnn_best.pt",
+        "tft": _ROOT / "checkpoints" / "tft" / "tft_fold0_best.pt",
+        "gnn": _ROOT / "checkpoints" / "gnn" / "gnn_best.pt",
     }
 
     results = {}
@@ -381,16 +406,19 @@ if __name__ == "__main__":
                 if res:
                     results[name] = res
                     m = res["metrics"]
-                    print(f"  Sharpe: {m.get('sharpe', 0):.2f} | "
-                          f"Return: {m.get('total_return_pct', 0):.2f}% | "
-                          f"Ret/Trade: {m.get('return_per_trade_pct', 0):.4f}% | "
-                          f"Latency: {m.get('latency_ms_per_window', 0):.3f} ms/window | "
-                          f"Win Rate: {m.get('win_rate', 0):.1f}% | "
-                          f"Trades: {m.get('n_trades', 0)}")
+                    print(
+                        f"  Sharpe: {m.get('sharpe', 0):.2f} | "
+                        f"Return: {m.get('total_return_pct', 0):.2f}% | "
+                        f"Ret/Trade: {m.get('return_per_trade_pct', 0):.4f}% | "
+                        f"Latency: {m.get('latency_ms_per_window', 0):.3f} ms/window | "
+                        f"Win Rate: {m.get('win_rate', 0):.1f}% | "
+                        f"Trades: {m.get('n_trades', 0)}"
+                    )
                     if m.get("sanity_flags"):
                         print(f"  [Sanity] flags={m['sanity_flags']}")
             except Exception as e:
                 import traceback
+
                 print(f"  ✗ Failed: {e}")
                 traceback.print_exc()
         else:
@@ -405,7 +433,7 @@ if __name__ == "__main__":
     for name, data in results.items():
         eq = data["equity"]
         sharpe = data["metrics"].get("sharpe", 0)
-        ret    = data["metrics"].get("total_return_pct", 0)
+        ret = data["metrics"].get("total_return_pct", 0)
         plt.plot(eq.index, eq.values, label=f"{name.upper()} | Sharpe={sharpe:.2f} | Ret={ret:.1f}%")
 
     out_dir = _ROOT / "compare_models"
@@ -437,10 +465,9 @@ if __name__ == "__main__":
     for name, metrics in metrics_summary.items():
         beats = None
         if baseline and name != "xgboost":
-            beats = (
-                metrics.get("sharpe", 0.0) > baseline.get("sharpe", 0.0)
-                and metrics.get("max_drawdown", 0.0) <= baseline.get("max_drawdown", float("inf"))
-            )
+            beats = metrics.get("sharpe", 0.0) > baseline.get("sharpe", 0.0) and metrics.get(
+                "max_drawdown", 0.0
+            ) <= baseline.get("max_drawdown", float("inf"))
         comparison_report["models"][name] = {
             "params": metrics.get("params", 0),
             "train_time_s": metrics.get("train_time_s", 0.0),
@@ -473,24 +500,30 @@ if __name__ == "__main__":
     print(f"[Compare] Saved report -> {report_path}")
 
     print("\n" + "-" * 146)
-    print(f"{'Model':<12} {'Params':>10} {'ValSh':>8} {'BtSh':>8} {'MaxDD%':>8} {'Ret/Tr%':>9} {'T/1k':>7} {'Lat ms':>8} {'ConfMu':>8} {'ConfSd':>8} {'FoldStd':>8} {'Trades':>8}")
+    print(
+        f"{'Model':<12} {'Params':>10} {'ValSh':>8} {'BtSh':>8} {'MaxDD%':>8} {'Ret/Tr%':>9} {'T/1k':>7} {'Lat ms':>8} {'ConfMu':>8} {'ConfSd':>8} {'FoldStd':>8} {'Trades':>8}"
+    )
     print("-" * 146)
     for name, data in results.items():
         m = data["metrics"]
-        print(f"{name.upper():<12} "
-              f"{m.get('params', 0):>10} "
-              f"{m.get('validation_sharpe', 0):>8.2f} "
-              f"{m.get('sharpe', 0):>8.2f} "
-              f"{m.get('max_drawdown', 0):>8.2f} "
-              f"{m.get('return_per_trade_pct', 0):>9.4f} "
-              f"{m.get('turnover_per_1000_bars', 0):>7.2f} "
-              f"{m.get('latency_ms_per_window', 0):>8.3f} "
-              f"{m.get('confidence_mean', 0):>8.3f} "
-              f"{m.get('confidence_std', 0):>8.3f} "
-              f"{m.get('fold_sharpe_std', 0):>8.3f} "
-              f"{m.get('n_trades', 0):>8}")
+        print(
+            f"{name.upper():<12} "
+            f"{m.get('params', 0):>10} "
+            f"{m.get('validation_sharpe', 0):>8.2f} "
+            f"{m.get('sharpe', 0):>8.2f} "
+            f"{m.get('max_drawdown', 0):>8.2f} "
+            f"{m.get('return_per_trade_pct', 0):>9.4f} "
+            f"{m.get('turnover_per_1000_bars', 0):>7.2f} "
+            f"{m.get('latency_ms_per_window', 0):>8.3f} "
+            f"{m.get('confidence_mean', 0):>8.3f} "
+            f"{m.get('confidence_std', 0):>8.3f} "
+            f"{m.get('fold_sharpe_std', 0):>8.3f} "
+            f"{m.get('n_trades', 0):>8}"
+        )
     print("-" * 146)
-    print("[Compare] Promote only models that add a distinct role: baseline, production, fast, or cross-asset specialist.")
+    print(
+        "[Compare] Promote only models that add a distinct role: baseline, production, fast, or cross-asset specialist."
+    )
     print("[Compare] Done!")
     sys.exit(0)
     print(f"[Compare] Saved metrics → {metrics_path}")
@@ -501,11 +534,13 @@ if __name__ == "__main__":
     print("─" * 65)
     for name, data in results.items():
         m = data["metrics"]
-        print(f"{name.upper():<10} "
-              f"{m.get('sharpe', 0):>8.2f} "
-              f"{m.get('total_return_pct', 0):>9.2f} "
-              f"{m.get('win_rate', 0):>10.1f} "
-              f"{m.get('n_trades', 0):>8} "
-              f"{m.get('max_drawdown', 0):>8.2f}")
+        print(
+            f"{name.upper():<10} "
+            f"{m.get('sharpe', 0):>8.2f} "
+            f"{m.get('total_return_pct', 0):>9.2f} "
+            f"{m.get('win_rate', 0):>10.1f} "
+            f"{m.get('n_trades', 0):>8} "
+            f"{m.get('max_drawdown', 0):>8.2f}"
+        )
     print("─" * 65)
     print("[Compare] Done!")

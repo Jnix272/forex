@@ -23,7 +23,7 @@ if str(_ROOT) not in sys.path:
 from data.sources import DUKA_PAIR_MAP, DukascopyLoader
 
 PAIRS = list(DUKA_PAIR_MAP.keys())
-YEARS = list(range(2010, 2026))   # 2010 inclusive, 2025 inclusive
+YEARS = list(range(2010, 2026))  # 2010 inclusive, 2025 inclusive
 TRADING_DAYS_PER_YEAR = 260
 
 
@@ -60,7 +60,7 @@ def run():
 
     for year in YEARS:
         sample_date = sample_dates[year]
-        date_str    = str(sample_date)
+        date_str = str(sample_date)
 
         # Load all pairs for this sample day (all 24 hours)
         results = loader.load_multiple(PAIRS, start=date_str, end=date_str)
@@ -69,14 +69,13 @@ def run():
         breakdown_parts = []
         for pair in PAIRS:
             df = results.get(pair)
-            n  = len(df) if df is not None and not df.empty else 0
+            n = len(df) if df is not None and not df.empty else 0
             pair_year_ticks[pair][year] = n
             day_total += n
             breakdown_parts.append(f"{pair}={n:,}")
 
         year_totals[year] = day_total
-        print(f"{year:<6} {date_str:<12} {len(PAIRS):<6} {day_total:>10,}  "
-              + "  ".join(breakdown_parts))
+        print(f"{year:<6} {date_str:<12} {len(PAIRS):<6} {day_total:>10,}  " + "  ".join(breakdown_parts))
 
     elapsed = time.perf_counter() - t_global
 
@@ -89,7 +88,7 @@ def run():
 
     cumulative = 0
     for year in YEARS:
-        tpd   = year_totals[year]
+        tpd = year_totals[year]
         annual = tpd * TRADING_DAYS_PER_YEAR
         cumulative += annual
         print(f"{year:<6} {TRADING_DAYS_PER_YEAR:>8,} {tpd:>10,} {annual:>14,} {cumulative:>16,}")
@@ -111,8 +110,8 @@ def run():
     print(f"  {'Pair':<8} {'Avg ticks/day':>14} {'Est. 15yr total':>18}")
     print("  " + "-" * 44)
     for pair in PAIRS:
-        avg  = sum(pair_year_ticks[pair].values()) / len(YEARS)
-        est  = int(avg * TRADING_DAYS_PER_YEAR * len(YEARS))
+        avg = sum(pair_year_ticks[pair].values()) / len(YEARS)
+        est = int(avg * TRADING_DAYS_PER_YEAR * len(YEARS))
         print(f"  {pair:<8} {avg:>14,.0f} {est:>18,}")
     print()
 

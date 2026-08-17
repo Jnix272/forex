@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
     print("\nSimulating 50 bars of data...")
     equity = 10_000.0
-    for i in range(50):
+    for i in range(50):  # noqa: B007
         pnl    = float(rng.normal(10, 80))
         equity = max(equity + pnl, 1.0)
         exp.update_equity(equity)

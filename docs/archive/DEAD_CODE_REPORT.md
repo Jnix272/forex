@@ -37,11 +37,11 @@ Five imports in `main.py:25` point to feature classes that are imported but **ne
 ```python
 # main.py:25 — all unused:
 from features.advanced_features import (
-    CorrelationRegimeDetector,   # unused — regime detection stub
-    COTFeatures,                  # unused — COT data integration stub
-    L2OrderBookFeatures,          # unused — real L2 OBI stub (see DS-009)
-    OptionsSkewFeatures,          # unused — options market stub
-    rolling_hurst_fractal,        # unused — Hurst exponent stub
+    CorrelationRegimeDetector,  # unused — regime detection stub
+    COTFeatures,  # unused — COT data integration stub
+    L2OrderBookFeatures,  # unused — real L2 OBI stub (see DS-009)
+    OptionsSkewFeatures,  # unused — options market stub
+    rolling_hurst_fractal,  # unused — Hurst exponent stub
 )
 ```
 
@@ -100,7 +100,7 @@ Both tree model trainers import their model class twice — the first import is 
 
 ```python
 # train_catboost.py:32 — first import (unused, immediately overwritten)
-from models.catboost_model import CatBoostForecaster  
+from models.catboost_model import CatBoostForecaster
 
 # ... 300 lines later ...
 
@@ -116,8 +116,8 @@ Same pattern in `train_xgboost.py:32` and `:344`. The top-level import is a dead
 
 ```python
 # features/advanced_features.py:287-289 — computed but never used
-ofi_z_fast = ...        # 100% confidence unused
-ofi_z_slow = ...        # 100% confidence unused
+ofi_z_fast = ...  # 100% confidence unused
+ofi_z_slow = ...  # 100% confidence unused
 tbm_default_horizon = ...  # 100% confidence unused
 ```
 
@@ -129,12 +129,12 @@ Same pattern duplicated in `features/multipair.py:144-146`.
 
 ```python
 # training/scale_model.py — 6 unused imports:
-import gc                                       # unused
-import time                                     # unused
+import gc  # unused
+import time  # unused
 from training.train_gpu import MemmapSequenceDataset  # unused
-from training.train_gpu import _log_error        # unused
-from training.train_gpu import _log_info         # unused
-from training.train_gpu import _log_oom          # unused
+from training.train_gpu import _log_error  # unused
+from training.train_gpu import _log_info  # unused
+from training.train_gpu import _log_oom  # unused
 ```
 
 ---
@@ -165,7 +165,7 @@ This variable is computed but then the result is discarded. If it was intended t
 
 ```python
 # retraining/pipeline.py:26-28 — both unused:
-from data.feature_store import FeatureSpec          # unused
+from data.feature_store import FeatureSpec  # unused
 from data.feature_store import run_full_materialization  # unused
 ```
 

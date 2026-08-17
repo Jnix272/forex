@@ -63,6 +63,7 @@ def _make_dukascopy_df(n: int = 500) -> pl.DataFrame:
 # Timestamp detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_load_tick_data_dukascopy_index_col(tmp_path):
     path = tmp_path / "02_07.parquet"
     _make_dukascopy_df().write_parquet(path)
@@ -100,16 +101,14 @@ def test_load_tick_data_time_range_filter(tmp_path):
 # Bad-tick cleaning (MAD)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_clean_bad_ticks_replaces_outliers():
     df = generate_synthetic_tick_data(n_rows=5000)
     # Inject a few absurd jumps relative to local MAD.
     mask = np.zeros(len(df), dtype=bool)
     mask[[1000, 2500, 4000]] = True
     df = df.with_columns(
-        pl.when(pl.Series("_mask", mask))
-        .then(pl.col("mid") * 100.0)
-        .otherwise(pl.col("mid"))
-        .alias("mid")
+        pl.when(pl.Series("_mask", mask)).then(pl.col("mid") * 100.0).otherwise(pl.col("mid")).alias("mid")
     )
     cleaned = clean_bad_ticks(df)
     assert len(cleaned) == len(df)  # remediation replaces, not drops
@@ -139,6 +138,7 @@ def test_clean_bad_ticks_preserves_wide_spread_news_ticks():
 # Information bars
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_tick_bars_partition_input():
     ticks = generate_synthetic_tick_data(n_rows=1000)
     bars = resample_to_tick_bars(ticks, n_ticks=100)
@@ -164,14 +164,14 @@ def test_dollar_bars_ok_on_synthetic():
 # Market holiday filtering
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_pipeline_drops_weekend_and_holiday():
     # 2024-01-01 is New Year's Day (Monday) -> market holiday; synthetic
     # weekday filter alone should also remove Saturday/Sunday.
     ticks = generate_synthetic_tick_data(n_rows=30_000)
     # Fast-forward: generator starts 2024-01-02 (Tuesday), so verify weekday
     # filtering keeps only Mon-Fri using a wider window.
-    p = ForexDataPipeline(bar_freq="30min", session_filter=False,
-                          apply_frac_diff=False)
+    p = ForexDataPipeline(bar_freq="30min", session_filter=False, apply_frac_diff=False)
     bars = p.run(ticks)
     assert bars["timestamp_utc"].dt.weekday().max() <= 5
     assert bars["timestamp_utc"].dt.weekday().min() >= 1
@@ -180,6 +180,7 @@ def test_pipeline_drops_weekend_and_holiday():
 # ─────────────────────────────────────────────────────────────────────────────
 # Gap detection / fill
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_detect_bar_gaps_finds_missing_rows():
     bars = pl.DataFrame(
@@ -235,6 +236,7 @@ def test_fill_gaps_drop_and_ffill():
 # Lomb-Scargle tick sampling
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_detect_tick_sampling_regular_1s():
     df = generate_synthetic_tick_data(n_rows=1000)
     info = detect_tick_sampling(df)
@@ -258,11 +260,12 @@ def test_detect_tick_sampling_irregular():
 # DST-aware sessions
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_pipeline_dst_session_labels_full_day():
     ticks = generate_synthetic_tick_data(n_rows=100_000)  # ~27h @1s
-    p = ForexDataPipeline(bar_freq="5min", session_filter=True,
-                          session_mode="dst", add_session_label=True,
-                          apply_frac_diff=False)
+    p = ForexDataPipeline(
+        bar_freq="5min", session_filter=True, session_mode="dst", add_session_label=True, apply_frac_diff=False
+    )
     bars = p.run(ticks)
     assert "session_label" in bars.columns
     labels = set(bars["session_label"].unique().to_list())
@@ -275,9 +278,9 @@ def test_pipeline_dst_session_labels_full_day():
 
 def test_pipeline_dst_session_filter_keeps_only_sessions():
     ticks = generate_synthetic_tick_data(n_rows=100_000)
-    p = ForexDataPipeline(bar_freq="5min", session_filter=True,
-                          session_mode="dst", add_session_label=False,
-                          apply_frac_diff=False)
+    p = ForexDataPipeline(
+        bar_freq="5min", session_filter=True, session_mode="dst", add_session_label=False, apply_frac_diff=False
+    )
     bars = p.run(ticks)
     assert "session_label" not in bars.columns
     assert len(bars) > 0
@@ -287,11 +290,11 @@ def test_pipeline_dst_session_filter_keeps_only_sessions():
 # Pipeline end-to-end (all bar types / gap policies)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.parametrize("bar_type", ["time", "tick", "volume", "dollar"])
 def test_pipeline_all_bar_types(bar_type):
     ticks = generate_synthetic_tick_data(n_rows=5000)
-    p = ForexDataPipeline(bar_freq="1min", bar_type=bar_type,
-                          session_filter=False, apply_frac_diff=False)
+    p = ForexDataPipeline(bar_freq="1min", bar_type=bar_type, session_filter=False, apply_frac_diff=False)
     bars = p.run(ticks)
     assert len(bars) > 0
     assert {"open", "high", "low", "close"} <= set(bars.columns)
@@ -299,7 +302,6 @@ def test_pipeline_all_bar_types(bar_type):
 
 def test_pipeline_gap_policy_interpolate():
     ticks = generate_synthetic_tick_data(n_rows=5000)
-    p = ForexDataPipeline(bar_freq="1min", session_filter=False,
-                          apply_frac_diff=False, gap_policy="interpolate")
+    p = ForexDataPipeline(bar_freq="1min", session_filter=False, apply_frac_diff=False, gap_policy="interpolate")
     bars = p.run(ticks)
     assert len(bars) > 0

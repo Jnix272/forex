@@ -21,13 +21,11 @@ def generate_synthetic_2008():
     # Generate 5 batches of 5 = 25 headlines to represent the year
     try:
         for i in range(5):
-            print(f"Generating batch {i+1}/5...")
-            resp = requests.post("http://localhost:11434/api/generate", json={
-                "model": "gemma4:e2b",
-                "prompt": prompt,
-                "stream": False,
-                "format": "json"
-            })
+            print(f"Generating batch {i + 1}/5...")
+            resp = requests.post(
+                "http://localhost:11434/api/generate",
+                json={"model": "gemma4:e2b", "prompt": prompt, "stream": False, "format": "json"},
+            )
             if resp.status_code == 200:
                 try:
                     batch = json.loads(resp.json()["response"])
@@ -43,7 +41,7 @@ def generate_synthetic_2008():
             "Dow Jones plummets 777 points following bailout rejection",
             "AIG receives $85 billion emergency loan from the Federal Reserve",
             "Global stock markets tumble amid fears of widespread banking collapse",
-            "U.S. government nationalizes Fannie Mae and Freddie Mac"
+            "U.S. government nationalizes Fannie Mae and Freddie Mac",
         ] * 5
 
     if not headlines:
@@ -56,18 +54,20 @@ def generate_synthetic_2008():
         days_offset = random.randint(0, 364)
         ts = start_date + timedelta(days=days_offset)
 
-        rows.append({
-            "timestamp_utc": ts.strftime("%Y-%m-%dT00:00:00Z"),
-            "event_type": "headline",
-            "currency": "USD",
-            "impact": "high",
-            "headline": hl,
-            "actual": "",
-            "forecast": "",
-            "source": "synthetic_ollama",
-            "url": "",
-            "event_category": "crisis"
-        })
+        rows.append(
+            {
+                "timestamp_utc": ts.strftime("%Y-%m-%dT00:00:00Z"),
+                "event_type": "headline",
+                "currency": "USD",
+                "impact": "high",
+                "headline": hl,
+                "actual": "",
+                "forecast": "",
+                "source": "synthetic_ollama",
+                "url": "",
+                "event_category": "crisis",
+            }
+        )
 
     df_2008 = pd.DataFrame(rows)
     df_2008 = df_2008.sort_values("timestamp_utc")
@@ -76,6 +76,7 @@ def generate_synthetic_2008():
     main_path = "data/raw/news/historical_news_combined.parquet"
     if os.path.exists(main_path):
         import polars as pl
+
         print(f"Appending {len(df_2008)} synthetic 2008 headlines to {main_path}...")
 
         main_df = pl.read_parquet(main_path)
@@ -95,6 +96,7 @@ def generate_synthetic_2008():
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         df_2008.to_csv(out_path, index=False)
         print(f"Saved {len(df_2008)} 2008 headlines to {out_path}")
+
 
 if __name__ == "__main__":
     generate_synthetic_2008()

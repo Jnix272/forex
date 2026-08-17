@@ -14,6 +14,7 @@ the time dimension for each feature:
 This gives CatBoost temporal awareness while keeping the input size manageable,
 while maintaining CatBoost's robust protection against target leakage.
 """
+
 import warnings
 from typing import Union
 
@@ -23,6 +24,7 @@ import numpy as np
 try:
     import torch
     import torch.nn as nn
+
     TORCH = True
 except ImportError:
     TORCH = False
@@ -76,12 +78,12 @@ class CatBoostForecaster(nn.Module if TORCH else object):
         Statistics per feature across the T time steps:
           mean, std, min, max, last-bar value, range (max-min)
         """
-        mean = x.mean(axis=1)       # (B, F)
-        std  = x.std(axis=1)        # (B, F)
-        xmin = x.min(axis=1)        # (B, F)
-        xmax = x.max(axis=1)        # (B, F)
-        last = x[:, -1, :]          # (B, F)
-        rng  = xmax - xmin          # (B, F)
+        mean = x.mean(axis=1)  # (B, F)
+        std = x.std(axis=1)  # (B, F)
+        xmin = x.min(axis=1)  # (B, F)
+        xmax = x.max(axis=1)  # (B, F)
+        last = x[:, -1, :]  # (B, F)
+        rng = xmax - xmin  # (B, F)
         return np.concatenate([mean, std, xmin, xmax, last, rng], axis=1)
 
     def _prepare_inputs(self, x: Union[np.ndarray, "torch.Tensor"]) -> np.ndarray:
@@ -114,10 +116,7 @@ class CatBoostForecaster(nn.Module if TORCH else object):
             else:
                 preds = self.model.predict(x_np)
         except cb.CatBoostError as e:
-            warnings.warn(
-                f"CatBoost predict failed (model might not be fitted). "
-                f"Returning zeros. Error: {e}"
-            )
+            warnings.warn(f"CatBoost predict failed (model might not be fitted). Returning zeros. Error: {e}", stacklevel=2)
             if self._is_classifier:
                 preds = np.zeros((x_np.shape[0], self.num_classes))
                 preds[:, 1] = 1.0  # Default to "Flat/Hold"

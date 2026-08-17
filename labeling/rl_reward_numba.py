@@ -1,22 +1,28 @@
 """
 Numba-accelerated barrier scan for RL reward labeling.
 
-Replaces the pure-Python O(n × lookahead) loops in rl_reward_labeling.py
-with compiled parallel code for 10-50× speedup.
+Replaces the pure-Python O(n x lookahead) loops in rl_reward_labeling.py
+with compiled parallel code for 10-50x speedup.
 """
 
 import numpy as np
 
 try:
     from numba import njit, prange
+
     _NUMBA_OK = True
 except ImportError:
     _NUMBA_OK = False
+
     # No-op decorators so the module still imports
     def njit(*args, **kwargs):
-        def dec(f): return f
+        def dec(f):
+            return f
+
         return dec
-    def prange(n): return range(n)
+
+    def prange(n):
+        return range(n)
 
 
 @njit(parallel=False, fastmath=True, cache=True)
@@ -63,8 +69,8 @@ def _scan_barriers_simple(
         sl_s = es + stop_atr_mult * a
 
         end = entry_i + 1 + lookahead_bars
-        horizon_l = exit_long_path[entry_i + 1:end]
-        horizon_s = exit_short_path[entry_i + 1:end]
+        horizon_l = exit_long_path[entry_i + 1 : end]
+        horizon_s = exit_short_path[entry_i + 1 : end]
 
         if len(horizon_l) == 0 or len(horizon_s) == 0:
             continue
@@ -130,10 +136,10 @@ def _scan_barriers_regime(
     atr: np.ndarray,
     valid_market: np.ndarray,
     # Pre-computed per-bar barrier parameters
-    tp_mult: np.ndarray,      # shape (n,) — take-profit ATR multiplier
-    sl_mult: np.ndarray,      # shape (n,) — stop-loss ATR multiplier
-    horizon_arr: np.ndarray,  # shape (n,) — lookahead bars per entry
-    tx_pips_arr: np.ndarray,   # shape (n,) — transaction cost in pips
+    tp_mult: np.ndarray,  # shape (n,) - take-profit ATR multiplier
+    sl_mult: np.ndarray,  # shape (n,) - stop-loss ATR multiplier
+    horizon_arr: np.ndarray,  # shape (n,) - lookahead bars per entry
+    tx_pips_arr: np.ndarray,  # shape (n,) - transaction cost in pips
     pip_size: float,
     delay: int,
     max_horizon: int,
@@ -177,8 +183,8 @@ def _scan_barriers_regime(
         sl_s = es + sl_m * a
 
         end = entry_i + 1 + h
-        horizon_l = exit_long_path[entry_i + 1:end]
-        horizon_s = exit_short_path[entry_i + 1:end]
+        horizon_l = exit_long_path[entry_i + 1 : end]
+        horizon_s = exit_short_path[entry_i + 1 : end]
 
         if len(horizon_l) == 0:
             continue
@@ -207,8 +213,10 @@ def _scan_barriers_regime(
         for j, p in enumerate(horizon_l):
             mae = (el - p) / pip_size
             mfe = (p - el) / pip_size
-            if mae > mae_l: mae_l = mae
-            if mfe > mfe_l: mfe_l = mfe
+            if mae > mae_l:
+                mae_l = mae
+            if mfe > mfe_l:
+                mfe_l = mfe
             if p >= tp_l:
                 pnl_l = (tp_l - el) / pip_size
                 exit_bar_l = j + 1
@@ -242,8 +250,10 @@ def _scan_barriers_regime(
         for j, p in enumerate(horizon_s):
             mae = (p - es) / pip_size
             mfe = (es - p) / pip_size
-            if mae > mae_s: mae_s = mae
-            if mfe > mfe_s: mfe_s = mfe
+            if mae > mae_s:
+                mae_s = mae
+            if mfe > mfe_s:
+                mfe_s = mfe
             if p <= tp_s:
                 pnl_s = (es - tp_s) / pip_size
                 exit_bar_s = j + 1

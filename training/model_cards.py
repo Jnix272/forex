@@ -72,15 +72,9 @@ class ModelCardGenerator:
                 "label_method": str(label_method),
             },
             "performance": {
-                "validation_sharpe": round(
-                    _finite_float(val_sharpe, name="val_sharpe"), 4
-                ),
-                "validation_loss": round(
-                    _finite_float(val_loss, name="val_loss"), 4
-                ),
-                "forward_holdout_pnl": round(
-                    _finite_float(forward_holdout_pnl, name="forward_holdout_pnl"), 2
-                ),
+                "validation_sharpe": round(_finite_float(val_sharpe, name="val_sharpe"), 4),
+                "validation_loss": round(_finite_float(val_loss, name="val_loss"), 4),
+                "forward_holdout_pnl": round(_finite_float(forward_holdout_pnl, name="forward_holdout_pnl"), 2),
             },
             "known_weaknesses": list(weaknesses or []),
             "promotion_status": str(promotion_status),

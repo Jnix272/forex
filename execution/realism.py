@@ -4,6 +4,7 @@ The simulator is deliberately conservative: decisions made on bar ``t`` enter
 on a later bar, longs liquidate on bid, shorts liquidate on ask, and an
 ambiguous bar that touches both stop and target resolves stop-first.
 """
+
 from __future__ import annotations
 
 import zlib
@@ -30,8 +31,13 @@ class EmpiricalFillModel:
     fill_fraction,rejected``. Missing conditioning columns are simply ignored.
     """
 
-    def __init__(self, samples: pd.DataFrame | None = None, seed: int = 17,
-                 base_slippage_pips: float = 0.5, randomize: bool = True):
+    def __init__(
+        self,
+        samples: pd.DataFrame | None = None,
+        seed: int = 17,
+        base_slippage_pips: float = 0.5,
+        randomize: bool = True,
+    ):
         self.samples = samples.copy() if samples is not None else pd.DataFrame()
         self.seed = int(seed)
         self.base_slippage_pips = float(base_slippage_pips)
@@ -42,8 +48,16 @@ class EmpiricalFillModel:
         p = Path(path) if path else None
         return cls(pd.read_csv(p) if p and p.is_file() else None, **kwargs)
 
-    def sample(self, *, timestamp, pair: str, side: str, spread_pips: float,
-               volatility_ratio: float = 1.0, latency_ms: float = 50.0) -> ExecutionScenario:
+    def sample(
+        self,
+        *,
+        timestamp,
+        pair: str,
+        side: str,
+        spread_pips: float,
+        volatility_ratio: float = 1.0,
+        latency_ms: float = 50.0,
+    ) -> ExecutionScenario:
         ts = pd.Timestamp(timestamp)
         pool = self.samples
         if not pool.empty:
@@ -68,8 +82,10 @@ class EmpiricalFillModel:
         else:
             key = f"{self.seed}|{int(ts.value)}|{pair}|{side}".encode()
             rng = np.random.default_rng(zlib.crc32(key))
-            scale = max(0.15, self.base_slippage_pips * (1 + .35 * max(0, volatility_ratio - 1)
-                                                        + .25 * max(0, spread_pips - 1)))
+            scale = max(
+                0.15,
+                self.base_slippage_pips * (1 + 0.35 * max(0, volatility_ratio - 1) + 0.25 * max(0, spread_pips - 1)),
+            )
             slip = float(max(0, rng.lognormal(np.log(scale), 0.35)))
         return ExecutionScenario(slippage_pips=slip, latency_ms=latency_ms)
 
@@ -100,50 +116,89 @@ def executable_quotes(bars: pd.DataFrame, pip_size: float, spread_pips: np.ndarr
     }
 
 
-def _path_pnl(side: str, entry: float, start: int, end: int, q: dict[str, np.ndarray],
-              tp: float, sl: float, pip_size: float) -> tuple[float, float, int]:
+def _path_pnl(
+    side: str, entry: float, start: int, end: int, q: dict[str, np.ndarray], tp: float, sl: float, pip_size: float
+) -> tuple[float, float, int]:
     """Executable PnL, MAE and exit offset; ambiguous bars are stop-first."""
     mae = 0.0
     for j in range(start, end):
         if side == "long":
             mae = max(mae, (entry - q["bid_low"][j]) / pip_size)
             stop_hit, target_hit = q["bid_low"][j] <= sl, q["bid_high"][j] >= tp
-            if stop_hit: return (sl - entry) / pip_size, mae, j - start + 1
-            if target_hit: return (tp - entry) / pip_size, mae, j - start + 1
+            if stop_hit:
+                return (sl - entry) / pip_size, mae, j - start + 1
+            if target_hit:
+                return (tp - entry) / pip_size, mae, j - start + 1
         else:
             mae = max(mae, (q["ask_high"][j] - entry) / pip_size)
             stop_hit, target_hit = q["ask_high"][j] >= sl, q["ask_low"][j] <= tp
-            if stop_hit: return (entry - sl) / pip_size, mae, j - start + 1
-            if target_hit: return (entry - tp) / pip_size, mae, j - start + 1
+            if stop_hit:
+                return (entry - sl) / pip_size, mae, j - start + 1
+            if target_hit:
+                return (entry - tp) / pip_size, mae, j - start + 1
     exit_price = q["bid_close"][end - 1] if side == "long" else q["ask_close"][end - 1]
     pnl = (exit_price - entry) / pip_size if side == "long" else (entry - exit_price) / pip_size
     return pnl, mae, end - start
 
 
-def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_col: str = "atr_6",
-                             lookahead_bars: int = 30, pip_size: float = .0001,
-                             execution_delay_bars: int = 1, pair: str = "EURUSD",
-                             fill_model: EmpiricalFillModel | None = None,
-                             edge_margin_pips: float = .25, rejection_penalty_pips: float = 1.0,
-                             latency_col: str | None = None, no_trade_col: str | None = None,
-                             profit_target_atr: float = 1.2, stop_loss_atr: float = 0.8,
-                             no_trade_threshold: float = 0.67) -> pd.DataFrame:
+def realistic_utility_labels(
+    bars: pd.DataFrame,
+    features: pd.DataFrame,
+    *,
+    atr_col: str = "atr_6",
+    lookahead_bars: int = 30,
+    pip_size: float = 0.0001,
+    execution_delay_bars: int = 1,
+    pair: str = "EURUSD",
+    fill_model: EmpiricalFillModel | None = None,
+    edge_margin_pips: float = 0.25,
+    rejection_penalty_pips: float = 1.0,
+    latency_col: str | None = None,
+    no_trade_col: str | None = None,
+    profit_target_atr: float = 1.2,
+    stop_loss_atr: float = 0.8,
+    no_trade_threshold: float = 0.67,
+) -> pd.DataFrame:
     """Generate long/hold/short utilities using delayed executable prices."""
     b = bars.reindex(features.index).ffill()
-    n = len(b); delay = max(1, int(execution_delay_bars)); horizon = max(1, int(lookahead_bars))
-    atr = features.get(atr_col, pd.Series(.0005, index=features.index)).astype(float).to_numpy()
-    spread = features.get("spread_pips", pd.Series(.5, index=features.index)).fillna(.5).to_numpy(float)
-    latency = features.get(latency_col, pd.Series(50.0, index=features.index)).fillna(50.0).to_numpy(float) if latency_col else np.full(n, 50.0)
+    n = len(b)
+    delay = max(1, int(execution_delay_bars))
+    horizon = max(1, int(lookahead_bars))
+    atr = features.get(atr_col, pd.Series(0.0005, index=features.index)).astype(float).to_numpy()
+    spread = features.get("spread_pips", pd.Series(0.5, index=features.index)).fillna(0.5).to_numpy(float)
+    latency = (
+        features.get(latency_col, pd.Series(50.0, index=features.index)).fillna(50.0).to_numpy(float)
+        if latency_col
+        else np.full(n, 50.0)
+    )
     q = executable_quotes(b, pip_size, spread)
     model = fill_model or EmpiricalFillModel(randomize=False)
-    long_u = np.full(n, np.nan, np.float32); short_u = long_u.copy(); pq = long_u.copy(); conf = long_u.copy()
+    long_u = np.full(n, np.nan, np.float32)
+    short_u = long_u.copy()
+    pq = long_u.copy()
+    conf = long_u.copy()
     for i in range(n):
         entry_i = i + delay
         end = min(n, entry_i + horizon)
-        if entry_i >= n or end <= entry_i: continue
-        vol_ratio = atr[i] / max(np.nanmedian(atr[max(0, i-120):i+1]), 1e-12)
-        ls = model.sample(timestamp=features.index[i], pair=pair, side="long", spread_pips=spread[i], volatility_ratio=vol_ratio, latency_ms=latency[i])
-        ss = model.sample(timestamp=features.index[i], pair=pair, side="short", spread_pips=spread[i], volatility_ratio=vol_ratio, latency_ms=latency[i])
+        if entry_i >= n or end <= entry_i:
+            continue
+        vol_ratio = atr[i] / max(np.nanmedian(atr[max(0, i - 120) : i + 1]), 1e-12)
+        ls = model.sample(
+            timestamp=features.index[i],
+            pair=pair,
+            side="long",
+            spread_pips=spread[i],
+            volatility_ratio=vol_ratio,
+            latency_ms=latency[i],
+        )
+        ss = model.sample(
+            timestamp=features.index[i],
+            pair=pair,
+            side="short",
+            spread_pips=spread[i],
+            volatility_ratio=vol_ratio,
+            latency_ms=latency[i],
+        )
         el = q["ask_open"][entry_i] + ls.slippage_pips * pip_size
         es = q["bid_open"][entry_i] - ss.slippage_pips * pip_size
         tp_dist, sl_dist = profit_target_atr * atr[i], stop_loss_atr * atr[i]
@@ -165,8 +220,20 @@ def realistic_utility_labels(bars: pd.DataFrame, features: pd.DataFrame, *, atr_
         choice[features[no_trade_col].fillna(0).to_numpy(float) > no_trade_threshold] = 1
     label = np.array([-1, 0, 1], dtype=np.int8)[choice]
     optimal = np.array(["short", "hold", "long"], dtype=object)[choice]
-    out = pd.DataFrame({"reward_long": long_u, "reward_short": short_u, "utility_long": long_u,
-                        "utility_hold": hold_u, "utility_short": short_u, "reward": best, "label": label,
-                        "path_quality": pq, "confidence_target": conf,
-                        "no_trade": (choice == 1).astype(np.int8), "optimal_side": optimal}, index=features.index)
+    out = pd.DataFrame(
+        {
+            "reward_long": long_u,
+            "reward_short": short_u,
+            "utility_long": long_u,
+            "utility_hold": hold_u,
+            "utility_short": short_u,
+            "reward": best,
+            "label": label,
+            "path_quality": pq,
+            "confidence_target": conf,
+            "no_trade": (choice == 1).astype(np.int8),
+            "optimal_side": optimal,
+        },
+        index=features.index,
+    )
     return out.loc[valid]

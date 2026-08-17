@@ -11,13 +11,17 @@ from training.train_gpu import validate_epoch
 
 def test_triple_barrier_accepts_trainer_execution_keywords():
     idx = pd.date_range("2025-01-01", periods=30, freq="min", tz="UTC")
-    close = 1.1 + np.arange(30) * .00001
-    bars = pd.DataFrame({"close": close, "bid_close": close - .00005,
-                         "ask_close": close + .00005}, index=idx)
-    feats = pd.DataFrame({"atr_6": .0002, "spread_pips": 1.0}, index=idx)
+    close = 1.1 + np.arange(30) * 0.00001
+    bars = pd.DataFrame({"close": close, "bid_close": close - 0.00005, "ask_close": close + 0.00005}, index=idx)
+    feats = pd.DataFrame({"atr_6": 0.0002, "spread_pips": 1.0}, index=idx)
     out = compute_triple_barrier_labels(
-        bars, feats, vertical_bars=5, execution_delay_bars=2, pair="EURUSD",
-        use_numba=False, parallel=False,
+        bars,
+        feats,
+        vertical_bars=5,
+        execution_delay_bars=2,
+        pair="EURUSD",
+        use_numba=False,
+        parallel=False,
     )
     assert not out.empty
     assert len(out) == len(idx) - 7
@@ -32,7 +36,7 @@ def test_discord_methods_accept_active_trainer_payload(monkeypatch):
         lambda kind, fields=None, force=False, **kwargs: sent.append((kind, fields)) or True,
     )
     alerter.send_training_started(model="MAMBA", run_name="run-1", pairs=["EURUSD"], data_window="2020 to 2025")
-    alerter.send_training_completed(model="mamba", fold=2, metric="sharpe", score=.42)
+    alerter.send_training_completed(model="mamba", fold=2, metric="sharpe", score=0.42)
     assert sent[0][1]["Model"] == "MAMBA"
     assert sent[1][1]["Score"] == "0.4200"
 
@@ -54,8 +58,13 @@ def test_multitask_loss_skips_incompatible_reconstruction_width():
     recon_tgt = torch.randn(batch, 966)
 
     loss = MultiTaskLoss()(
-        logits, ret_hat, conf, y_cls, y_cont,
-        recon_hat=recon_hat, recon_tgt=recon_tgt,
+        logits,
+        ret_hat,
+        conf,
+        y_cls,
+        y_cont,
+        recon_hat=recon_hat,
+        recon_tgt=recon_tgt,
     )
 
     assert torch.isfinite(loss)
@@ -112,3 +121,26 @@ def test_validate_epoch_rl_reward_uses_direction_sidecar_for_sharpe():
     )
 
     assert sharpe > 0
+
+
+def test_strict_load_report_returns_load_summary_dict():
+    from training.model_factory import _strict_load_report
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = torch.nn.Linear(2, 2)
+
+    model = TinyModel()
+    state = {
+        "layer.weight": model.layer.weight.detach().clone(),
+        "layer.bias": model.layer.bias.detach().clone(),
+    }
+
+    report = _strict_load_report(model, state, context_name="TestLoad", min_frac_loaded=0.6)
+
+    assert isinstance(report, dict)
+    assert report["missing"] == []
+    assert report["unexpected"] == []
+    assert report["frac_loaded"] >= 0.6
+    assert report["n_target"] > 0

@@ -11,7 +11,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -89,10 +89,9 @@ def load_pytorch_model(
 
     Returns
     -------
-    ``(model, n_features, seq_len, arch_name, scaler)`` — the scaler is
+    ``(model, n_features, seq_len, arch_name, scaler)`` - the scaler is
     ``None`` when no scaler file was found (RL encoder-only path / demo).
     """
-    import torch
 
     ckpt_path = Path(checkpoint_path)
     if not ckpt_path.is_file():
@@ -109,6 +108,7 @@ def load_pytorch_model(
     if sidecar_model == "xgboost":
         # Skip torch.load entirely for XGBoost JSON models
         from models.xgboost_model import XGBoostForecaster
+
         n_features = int(cfg.get("n_features", n_features or 64))
         seq_len = int(cfg.get("seq_len", seq_len))
         model = XGBoostForecaster(num_classes=1, flatten_sequence=False)
@@ -127,16 +127,13 @@ def load_pytorch_model(
     if n_features is None:
         n_features = _infer_features_from_state(state_dict)
     if n_features is None:
-        raise ValueError(
-            f"Cannot infer n_features for {ckpt_path.name}. "
-            "Pass --n-feat or retrain with sidecar config."
-        )
+        raise ValueError(f"Cannot infer n_features for {ckpt_path.name}. Pass --n-feat or retrain with sidecar config.")
 
     # ── Train/live scaler + schema-hash parity ──────────────────────────────
     # Audit 2026-08-07, finding #1: the supervised pipeline z-scores features
     # but inference fed raw features to the model. We now load the persisted
     # StandardScaler (when discoverable) and assert that the scaler's
-    # n_features matches the sidecar's n_features — schema-hash drift is a
+    # n_features matches the sidecar's n_features - schema-hash drift is a
     # hard failure.
     resolved_cache_path = cache_path or cfg.get("cache_path")
     scaler = load_inference_scaler(resolved_cache_path)
@@ -146,7 +143,7 @@ def load_pytorch_model(
             raise RuntimeError(
                 f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
                 f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
-                "feature-mask has drifted from when this checkpoint was trained — "
+                "feature-mask has drifted from when this checkpoint was trained - "
                 "either re-train against the new cache or rebuild the cache with "
                 "the original feature_mask."
             )
@@ -176,14 +173,19 @@ def load_pytorch_model(
             )
             if manifest_ckpt is not None and not manifest_ckpt.is_absolute():
                 manifest_ckpt = (ckpt_path.parent / manifest_ckpt).resolve()
-            base_ckpt = manifest_ckpt if manifest_ckpt is not None and manifest_ckpt.exists() else resolve_checkpoint(name, ckpt_root)
+            base_ckpt = (
+                manifest_ckpt
+                if manifest_ckpt is not None and manifest_ckpt.exists()
+                else resolve_checkpoint(name, ckpt_root)
+            )
             if base_ckpt is None:
                 raise FileNotFoundError(f"Missing base checkpoint for ensemble member {name}")
             base, _ = load_base_model(name, base_ckpt, int(n_features), int(seq_len), dev)
             base.eval()
             bases.append(base)
 
-        model = EnsembleMetaLearner(
+        ensemble_ctor = cast(Any, EnsembleMetaLearner)
+        model = ensemble_ctor(
             bases,
             context_dim=int(meta.get("context_dim", 32)),
             hidden=int(meta.get("hidden", 64)),
@@ -197,15 +199,21 @@ def load_pytorch_model(
     if cfg:
         from training.train_gpu import build_model as build_training_model
 
-        model_args = _make_training_args(
-            sidecar_model, cfg, state_dict, int(n_features), seq_len
-        )
+        model_args = _make_training_args(sidecar_model, cfg, state_dict, int(n_features), seq_len)
         seq_len = int(model_args.seq_len)
-        model = build_training_model(sidecar_model, int(n_features), model_args)
+        model = cast(
+            Any,
+            build_training_model(
+                sidecar_model,
+                int(n_features),
+                seq_len=int(model_args.seq_len),
+                **{k: v for k, v in vars(model_args).items() if k != "seq_len"},
+            ),
+        )
     else:
         from models.architectures import build_model
 
-        model = build_model(sidecar_model, input_size=int(n_features), seq_len=seq_len)
+        model = cast(Any, build_model(sidecar_model, input_size=int(n_features), seq_len=seq_len))
 
     model.load_state_dict(state_dict, strict=False)
     model = _wrap_logits_output(model)
@@ -213,11 +221,12 @@ def load_pytorch_model(
     if isinstance(ckpt, dict) and "temperature" in ckpt:
         from models.architectures import TemperatureScaler
 
-        model = TemperatureScaler(model)
+        temp_ctor = cast(Any, TemperatureScaler)
+        model = temp_ctor(model)
         model.temperature.data.fill_(float(ckpt["temperature"]))
 
     dev = device or _resolve_device()
-    model.to(dev)
+    model = cast(Any, model).to(dev)
     model.eval()
     return model, int(n_features), int(seq_len), sidecar_model, scaler
 
@@ -243,15 +252,13 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         self._obs_buffer = deque(maxlen=int(seq_len))
         self.device = device or _resolve_device()
 
-        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = (
-            load_pytorch_model(
-                self.checkpoint_path,
-                self.model_name,
-                seq_len=seq_len,
-                n_features=n_features,
-                device=self.device,
-                cache_path=cache_path,
-            )
+        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = load_pytorch_model(
+            self.checkpoint_path,
+            self.model_name,
+            seq_len=seq_len,
+            n_features=n_features,
+            device=self.device,
+            cache_path=cache_path,
         )
         self._obs_buffer = deque(self._obs_buffer, maxlen=int(self.seq_len))
         self._torch = torch
@@ -288,9 +295,7 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
 
     def predict_proba(self, window: np.ndarray) -> np.ndarray:
         scaled = self._transform_window(window)
-        x = self._torch.as_tensor(
-            scaled[np.newaxis], dtype=self._torch.float32, device=self.device
-        )
+        x = self._torch.as_tensor(scaled[np.newaxis], dtype=self._torch.float32, device=self.device)
         with self._torch.no_grad():
             logits = self.model(x)
             if isinstance(logits, (tuple, list)):
@@ -312,15 +317,13 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
     ) -> None:
         path = checkpoint_path or self.checkpoint_path
         name = model_name or self.model_name
-        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = (
-            load_pytorch_model(
-                path,
-                name,
-                seq_len=seq_len or self.seq_len,
-                n_features=n_features or self.n_features,
-                device=self.device,
-                cache_path=cache_path,
-            )
+        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = load_pytorch_model(
+            path,
+            name,
+            seq_len=seq_len or self.seq_len,
+            n_features=n_features or self.n_features,
+            device=self.device,
+            cache_path=cache_path,
         )
         self.checkpoint_path = str(path)
         self.model_name = name

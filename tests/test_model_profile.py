@@ -1,4 +1,5 @@
 """Unit tests for per-architecture profile merging."""
+
 from __future__ import annotations
 
 import argparse
@@ -16,20 +17,20 @@ def _approx(a: float, b: float, tol: float = 1e-12) -> bool:
 
 
 def _base_args(**overrides) -> argparse.Namespace:
-    defaults = dict(
-        model="haelt",
-        lr=2e-5,
-        dropout=0.25,
-        hidden_size=256,
-        d_model=256,
-        nhead=8,
-        num_layers=3,
-        seq_len=60,
-        weight_decay=1e-4,
-        batch_size=256,
-        model_profile=True,
-        _cli_profile_overrides=frozenset(),
-    )
+    defaults = {
+        "model": "haelt",
+        "lr": 2e-5,
+        "dropout": 0.25,
+        "hidden_size": 256,
+        "d_model": 256,
+        "nhead": 8,
+        "num_layers": 3,
+        "seq_len": 60,
+        "weight_decay": 1e-4,
+        "batch_size": 256,
+        "model_profile": True,
+        "_cli_profile_overrides": frozenset(),
+    }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 

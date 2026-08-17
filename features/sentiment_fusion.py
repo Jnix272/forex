@@ -32,49 +32,105 @@ import numpy as np
 import polars as pl
 
 # ════════════════════════════════════════════════════════════════════════════
-# 1. Financial NER — lightweight pattern extractor
+# 1. Financial NER - lightweight pattern extractor
 # ════════════════════════════════════════════════════════════════════════════
 
 NER_CATEGORIES = [
-    "rate_hike", "rate_cut", "rate_hold", "cpi", "nfp",
-    "gdp", "dovish", "hawkish", "pair_mentions", "cb_mentions",
+    "rate_hike",
+    "rate_cut",
+    "rate_hold",
+    "cpi",
+    "nfp",
+    "gdp",
+    "dovish",
+    "hawkish",
+    "pair_mentions",
+    "cb_mentions",
 ]
 
 _CURRENCY_PAIRS = [
-    "EUR/USD", "EURUSD", "GBP/USD", "GBPUSD", "USD/JPY", "USDJPY",
-    "USD/CHF", "USDCHF", "AUD/USD", "AUDUSD", "NZD/USD", "NZDUSD",
-    "USD/CAD", "USDCAD", "EUR/JPY", "EURJPY", "EUR/GBP", "EURGBP",
-    "GBP/JPY", "GBPJPY", "AUD/JPY", "AUDJPY", "CAD/JPY", "CADJPY",
+    "EUR/USD",
+    "EURUSD",
+    "GBP/USD",
+    "GBPUSD",
+    "USD/JPY",
+    "USDJPY",
+    "USD/CHF",
+    "USDCHF",
+    "AUD/USD",
+    "AUDUSD",
+    "NZD/USD",
+    "NZDUSD",
+    "USD/CAD",
+    "USDCAD",
+    "EUR/JPY",
+    "EURJPY",
+    "EUR/GBP",
+    "EURGBP",
+    "GBP/JPY",
+    "GBPJPY",
+    "AUD/JPY",
+    "AUDJPY",
+    "CAD/JPY",
+    "CADJPY",
 ]
 _CENTRAL_BANKS = [
-    r"\bFed\b", r"\bFederal Reserve\b", r"\bFOMC\b", r"\bECB\b",
-    r"\bEuropean Central Bank\b", r"\bBOJ\b", r"\bBank of Japan\b",
-    r"\bBOE\b", r"\bBank of England\b", r"\bSNB\b", r"\bSwiss National Bank\b",
-    r"\bRBA\b", r"\bReserve Bank of Australia\b", r"\bRBNZ\b",
-    r"\bBank of Canada\b", r"\bBOC\b", r"\bPBOC\b", r"\bPeople's Bank of China\b",
+    r"\bFed\b",
+    r"\bFederal Reserve\b",
+    r"\bFOMC\b",
+    r"\bECB\b",
+    r"\bEuropean Central Bank\b",
+    r"\bBOJ\b",
+    r"\bBank of Japan\b",
+    r"\bBOE\b",
+    r"\bBank of England\b",
+    r"\bSNB\b",
+    r"\bSwiss National Bank\b",
+    r"\bRBA\b",
+    r"\bReserve Bank of Australia\b",
+    r"\bRBNZ\b",
+    r"\bBank of Canada\b",
+    r"\bBOC\b",
+    r"\bPBOC\b",
+    r"\bPeople's Bank of China\b",
 ]
 
 _PATTERNS: dict[str, list[re.Pattern]] = {
-    "rate_hike": [re.compile(r"\b(?:rate|interest)\s+hikes?\b", re.I),
-                  re.compile(r"\bhikes?\s+(?:interest\s+)?rates\b", re.I),
-                  re.compile(r"\b(?:hiked|raising|raise|raises)\s+(?:interest\s+)?rates\b", re.I),
-                  re.compile(r"\btighten(?:ing)?\b", re.I)],
-    "rate_cut": [re.compile(r"\b(?:rate|interest)\s+cuts?\b", re.I),
-                 re.compile(r"\bcuts?\s+(?:interest\s+)?rates\b", re.I),
-                 re.compile(r"\b(?:cut|lower|lowered|lowering|trims?)\s+(?:interest\s+)?rates\b", re.I),
-                 re.compile(r"\bloosen(?:ing)?\b", re.I)],
-    "rate_hold": [re.compile(r"\bhold(?:ing|s)?\s+(?:interest\s+)?rates\b", re.I),
-                  re.compile(r"\bon\s+hold\b", re.I),
-                  re.compile(r"\bno\s+change\b", re.I)],
-    "cpi": [re.compile(r"\bCPI\b", re.I), re.compile(r"\binflation\b", re.I),
-            re.compile(r"\bprice\s+index\b", re.I)],
-    "nfp": [re.compile(r"\bNFP\b", re.I), re.compile(r"\b(non[- ]farm|payroll|jobs)\b", re.I),
-            re.compile(r"\bunemployment\b", re.I)],
+    "rate_hike": [
+        re.compile(r"\b(?:rate|interest)\s+hikes?\b", re.I),
+        re.compile(r"\bhikes?\s+(?:interest\s+)?rates\b", re.I),
+        re.compile(r"\b(?:hiked|raising|raise|raises)\s+(?:interest\s+)?rates\b", re.I),
+        re.compile(r"\btighten(?:ing)?\b", re.I),
+    ],
+    "rate_cut": [
+        re.compile(r"\b(?:rate|interest)\s+cuts?\b", re.I),
+        re.compile(r"\bcuts?\s+(?:interest\s+)?rates\b", re.I),
+        re.compile(r"\b(?:cut|lower|lowered|lowering|trims?)\s+(?:interest\s+)?rates\b", re.I),
+        re.compile(r"\bloosen(?:ing)?\b", re.I),
+    ],
+    "rate_hold": [
+        re.compile(r"\bhold(?:ing|s)?\s+(?:interest\s+)?rates\b", re.I),
+        re.compile(r"\bon\s+hold\b", re.I),
+        re.compile(r"\bno\s+change\b", re.I),
+    ],
+    "cpi": [re.compile(r"\bCPI\b", re.I), re.compile(r"\binflation\b", re.I), re.compile(r"\bprice\s+index\b", re.I)],
+    "nfp": [
+        re.compile(r"\bNFP\b", re.I),
+        re.compile(r"\b(non[- ]farm|payroll|jobs)\b", re.I),
+        re.compile(r"\bunemployment\b", re.I),
+    ],
     "gdp": [re.compile(r"\bGDP\b", re.I), re.compile(r"\beconomic\s+growth\b", re.I)],
-    "dovish": [re.compile(r"\bdovish\b", re.I), re.compile(r"\b(dove|accommodative)\b", re.I),
-               re.compile(r"\bstimulus\b", re.I), re.compile(r"\bquantitative\s+easing\b", re.I)],
-    "hawkish": [re.compile(r"\bhawkish\b", re.I), re.compile(r"\b(taper|tapering)\b", re.I),
-                re.compile(r"\bquantitative\s+tightening\b", re.I)],
+    "dovish": [
+        re.compile(r"\bdovish\b", re.I),
+        re.compile(r"\b(dove|accommodative)\b", re.I),
+        re.compile(r"\bstimulus\b", re.I),
+        re.compile(r"\bquantitative\s+easing\b", re.I),
+    ],
+    "hawkish": [
+        re.compile(r"\bhawkish\b", re.I),
+        re.compile(r"\b(taper|tapering)\b", re.I),
+        re.compile(r"\bquantitative\s+tightening\b", re.I),
+    ],
 }
 
 _PAIR_RE = re.compile(r"\b(?:EUR|GBP|USD|JPY|CHF|AUD|NZD|CAD)/(?:EUR|GBP|USD|JPY|CHF|AUD|NZD|CAD)\b", re.I)
@@ -137,7 +193,7 @@ _BEARISH = [
 ]
 
 
-def _compile_lexicon() -> list[re.Pattern]:
+def _compile_lexicon() -> tuple[list[re.Pattern[str]], list[re.Pattern[str]]]:
     return [re.compile(p, re.I) for p in _BULLISH], [re.compile(p, re.I) for p in _BEARISH]
 
 
@@ -163,6 +219,7 @@ def lexicon_score(texts: Sequence[str]) -> np.ndarray:
 # ════════════════════════════════════════════════════════════════════════════
 # 3. Topic model (sklearn Tfidf + NMF, deterministic)
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def fit_topic_model(
     texts: Sequence[str],
@@ -226,6 +283,7 @@ def fit_topic_model(
 # 4. Bar aggregation helpers
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def _ewma(E: np.ndarray, lam: float, dt_sec: float) -> np.ndarray:
     """Per-column exponentially-weighted aggregate: A[t] = A[t-1]*g + E[t].
 
@@ -254,6 +312,7 @@ def _events_to_bars(
 # ════════════════════════════════════════════════════════════════════════════
 # 5. Orchestrator
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def build_sentiment_features(
     events: pl.DataFrame,
@@ -285,9 +344,9 @@ def build_sentiment_features(
     def _to_ns(items: Sequence) -> np.ndarray:
         out = np.empty(len(items), dtype=np.int64)
         for i, it in enumerate(items):
-            if hasattr(it, "value"):          # pd.Timestamp / polars scalar
+            if hasattr(it, "value"):  # pd.Timestamp / polars scalar
                 out[i] = int(it.value)
-            else:                              # datetime / date
+            else:  # datetime / date
                 out[i] = int(it.timestamp() * 1e9)
         return out
 
@@ -345,8 +404,9 @@ def build_sentiment_features(
     w_soc = np.where(soc_c > 0, np.clip(soc_c, 0.5, 50.0), 0.0)
     w_cot = np.ones(n) if cot_z is not None else np.zeros(n)
     wtot = w_news + w_soc + w_cot
-    fused = np.divide(w_news * news_mean + w_soc * soc_mean + w_cot * cot,
-                      wtot, out=np.zeros_like(wtot), where=wtot > 0)
+    fused = np.divide(
+        w_news * news_mean + w_soc * soc_mean + w_cot * cot, wtot, out=np.zeros_like(wtot), where=wtot > 0
+    )
     fused = np.clip(fused, -1.0, 1.0)
 
     mods = (news_c > 0).astype(float) + (soc_c > 0).astype(float) + float(cot_z is not None)
@@ -372,12 +432,16 @@ def build_sentiment_features(
         np.add.at(E, eidx[valid], W[valid])
         topic = _ewma(E, lam, dt_sec)
 
-    frames = {
-        "sent_news": news_mean, "sent_news_count": news_c,
-        "sent_social": soc_mean, "sent_social_count": soc_c,
+    frames: dict[str, np.ndarray] = {
+        "sent_news": news_mean,
+        "sent_news_count": news_c,
+        "sent_social": soc_mean,
+        "sent_social_count": soc_c,
         "sent_cot": cot,
-        "sent_fused": fused, "sent_agreement": agreement,
-        "sent_dispersion": disp, "sent_modalities": mods,
+        "sent_fused": fused,
+        "sent_agreement": agreement,
+        "sent_dispersion": disp,
+        "sent_modalities": mods,
     }
     for k in range(n_topics):
         frames[f"topic_{k}"] = topic[:, k]
@@ -390,11 +454,15 @@ def build_sentiment_features(
 
 def _empty_feature_cols(n: int, n_topics: int) -> pl.DataFrame:
     """Zeroed schema for the no-events case (stable column names)."""
-    cols: dict[str, pl.Series] = {
-        "sent_news": np.zeros(n), "sent_news_count": np.zeros(n),
-        "sent_social": np.zeros(n), "sent_social_count": np.zeros(n),
-        "sent_cot": np.zeros(n), "sent_fused": np.zeros(n),
-        "sent_agreement": np.zeros(n), "sent_dispersion": np.zeros(n),
+    cols: dict[str, np.ndarray] = {
+        "sent_news": np.zeros(n),
+        "sent_news_count": np.zeros(n),
+        "sent_social": np.zeros(n),
+        "sent_social_count": np.zeros(n),
+        "sent_cot": np.zeros(n),
+        "sent_fused": np.zeros(n),
+        "sent_agreement": np.zeros(n),
+        "sent_dispersion": np.zeros(n),
         "sent_modalities": np.zeros(n),
     }
     for k in range(n_topics):
@@ -408,6 +476,7 @@ def _empty_feature_cols(n: int, n_topics: int) -> pl.DataFrame:
 # ════════════════════════════════════════════════════════════════════════════
 # Convenience: append features to an existing bar frame
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def add_sentiment_features(
     bars: pl.DataFrame,

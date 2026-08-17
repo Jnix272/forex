@@ -3,23 +3,23 @@ Evaluation Module: Monte Carlo (Improvement #3)
 ===============================================
 Resampling-based robustness testing for backtest results:
 
-  1. block_bootstrap / BlockBootstrap        — fixed-length block resampling
-  2. stationary_bootstrap / StationaryBootstrap — Politis–Romano resampling
+  1. block_bootstrap / BlockBootstrap        - fixed-length block resampling
+  2. stationary_bootstrap / StationaryBootstrap - Politis–Romano resampling
      (geometric random block lengths)
-  3. PathMonteCarlo                          — replay a decision rule over
+  3. PathMonteCarlo                          - replay a decision rule over
      bootstrap-resampled market return paths; distribution of final equity,
      max drawdown, Sharpe
-  4. TradeSequenceMonteCarlo                 — keep the strategy's trade
+  4. TradeSequenceMonteCarlo                 - keep the strategy's trade
      sequence (entry/exit bars + signed size) fixed and resample the market
      path, so realized P&L depends on which market window trades hit
-  5. summarize_simulation                    — percentile CIs + tail metrics
+  5. summarize_simulation                    - percentile CIs + tail metrics
 
 Why this matters:
   A single backtest Sharpe of 2.0 may be an artifact of one lucky window.
   Bootstrap resampling shows the *sampling distribution* of performance
   metrics under alternative market paths while respecting the temporal
   dependence structure of returns (blocks) rather than assuming i.i.d.
-"""
+"""  # noqa: RUF002
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ warnings.filterwarnings("ignore")
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. Core resampling primitives (index generators)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def _as_float_array(data: Sequence[float]) -> np.ndarray:
     """Coerce input to a clean 1-D float64 array, dropping NaNs."""
@@ -101,7 +102,7 @@ def stationary_bootstrap_indices(
     Random block lengths follow a geometric distribution with mean
     ``avg_block_length``; block starting points are uniform on ``[0, n)``
     with circular wrap. Preserves stationarity of the underlying process.
-    """
+    """  # noqa: RUF002
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
     if avg_block_length < 1:
@@ -128,6 +129,7 @@ def stationary_bootstrap_indices(
 # ═════════════════════════════════════════════════════════════════════════════
 # 2. Polars-native resampling helpers
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def pl_block_bootstrap(
     series: Any,
@@ -158,20 +160,20 @@ def pl_block_bootstrap(
 
     arr = _as_float_array(series)
     _validate_length(len(arr), name="series")
-    idx = block_bootstrap_indices(
-        len(arr), block_length=block_length, n_bootstraps=n_bootstraps, seed=seed
-    )
+    idx = block_bootstrap_indices(len(arr), block_length=block_length, n_bootstraps=n_bootstraps, seed=seed)
     cols = {f"{prefix}_{i}": arr[row] for i, row in enumerate(idx)}
     return pl.DataFrame(cols)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 3. Path Monte Carlo — replay a decision rule over resampled paths
+# 3. Path Monte Carlo - replay a decision rule over resampled paths
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class SimResult:
     """Statistics for a single simulated equity path."""
+
     final_equity: float
     total_return: float
     max_drawdown: float
@@ -249,8 +251,10 @@ def summarize_simulation(
         "confidence": confidence,
         "n_simulations": len(results),
         "final_equity_mean": round(float(equity.mean()), 2),
-        "final_equity_ci": [round(float(np.percentile(equity, lo * 100.0)), 2),
-                            round(float(np.percentile(equity, hi * 100.0)), 2)],
+        "final_equity_ci": [
+            round(float(np.percentile(equity, lo * 100.0)), 2),
+            round(float(np.percentile(equity, hi * 100.0)), 2),
+        ],
         "total_return_mean": round(float(rets.mean()), 4),
         "total_return_ci": _band(rets),
         "max_drawdown_mean": round(float(mdd.mean()), 4),
@@ -333,10 +337,7 @@ class PathMonteCarlo:
             if self.strategy is not None:
                 pos = np.asarray(self.strategy(path), dtype=np.float64).reshape(-1)
                 if len(pos) != len(path):
-                    raise ValueError(
-                        f"strategy must return a position per bar "
-                        f"(expected {len(path)}, got {len(pos)})"
-                    )
+                    raise ValueError(f"strategy must return a position per bar (expected {len(path)}, got {len(pos)})")
                 path_returns = pos * path
             else:
                 path_returns = path
@@ -350,16 +351,18 @@ class PathMonteCarlo:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 4. Trade-sequence Monte Carlo — keep trades, resample the market path
+# 4. Trade-sequence Monte Carlo - keep trades, resample the market path
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class Trade:
     """A single trade: bar interval plus signed position size (fraction)."""
-    entry: int                # entry bar index (inclusive)
-    exit: int                 # exit bar index (exclusive)
-    size: float = 1.0         # signed fraction of equity (+ long / - short)
-    weight: float = 1.0       # per-trade scaling factor
+
+    entry: int  # entry bar index (inclusive)
+    exit: int  # exit bar index (exclusive)
+    size: float = 1.0  # signed fraction of equity (+ long / - short)
+    weight: float = 1.0  # per-trade scaling factor
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -462,6 +465,7 @@ class TradeSequenceMonteCarlo:
 # 5. Convenience API + export
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def monte_carlo_backtest(
     returns: Sequence[float],
     strategy: Callable[[np.ndarray], np.ndarray] | None = None,
@@ -517,7 +521,7 @@ def stationary_bootstrap(
     """Sample ``data`` with the Politis–Romano stationary bootstrap.
 
     Returns a (n_bootstraps, len(data)) array of resampled values.
-    """
+    """  # noqa: RUF002
     arr = _as_float_array(data)
     _validate_length(len(arr), name="data")
     idx = stationary_bootstrap_indices(len(arr), avg_block_length, n_bootstraps, seed)

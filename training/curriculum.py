@@ -28,9 +28,11 @@ from training.curriculum_controller import CurriculumController
 # 1. Difficulty Curriculum for Supervised Learning
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class DifficultyCurriculumConfig:
     """Configuration for difficulty-based curriculum."""
+
     # Difficulty levels (0=easiest, 1=hardest)
     n_levels: int = 10
     # Start from easiest level
@@ -50,10 +52,10 @@ class DifficultyCurriculumConfig:
 class DifficultyCurriculum:
     """
     Difficulty-based curriculum for supervised learning.
-    
+
     Orders training samples by difficulty and progressively includes
     harder samples as model competence improves.
-    
+
     Usage:
         curriculum = DifficultyCurriculum(config, difficulty_scores)
         for epoch in range(epochs):
@@ -102,15 +104,14 @@ class DifficultyCurriculum:
         self.current_level = self._pace(epoch)
 
         # Optionally adjust based on validation performance
-        if val_metric > 0 and self.config.min_competence > 0:
-            if val_metric < self.config.min_competence:
-                # Slow down if competence is low
-                self.current_level *= 0.9
+        if val_metric > 0 and self.config.min_competence > 0 and val_metric < self.config.min_competence:
+            # Slow down if competence is low
+            self.current_level *= 0.9
 
         self.current_level = min(self.current_level, self.config.max_level)
         return self.current_level
 
-    def get_inclusion_mask(self, epoch: int = None) -> np.ndarray:
+    def get_inclusion_mask(self, epoch: int | None = None) -> np.ndarray:
         """Boolean mask of samples to include at current level."""
         if epoch is not None:
             self.update(epoch)
@@ -119,7 +120,7 @@ class DifficultyCurriculum:
         n_include = max(1, min(n_include, n))
         return np.isin(self.indices, self.sorted_idx[:n_include])
 
-    def get_difficulty_weights(self, epoch: int = None) -> np.ndarray:
+    def get_difficulty_weights(self, epoch: int | None = None) -> np.ndarray:
         """Sample weights inversely proportional to difficulty (easier samples weighted more)."""
         if epoch is not None:
             self.update(epoch)
@@ -128,7 +129,7 @@ class DifficultyCurriculum:
         weights = np.clip(weights, 0.1, 1.0)  # minimum weight 0.1
         return weights
 
-    def get_sorted_indices(self, epoch: int = None) -> np.ndarray:
+    def get_sorted_indices(self, epoch: int | None = None) -> np.ndarray:
         """Return indices sorted by difficulty up to current level."""
         if epoch is not None:
             self.update(epoch)
@@ -142,9 +143,11 @@ class DifficultyCurriculum:
 # 2. Self-Paced Learning (Kumar et al., 2010)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class SelfPacedConfig:
     """Configuration for self-paced learning."""
+
     # Pacing function: "linear", "log", "root"
     pace: str = "linear"
     # Regularization parameter (controls pace)
@@ -162,16 +165,16 @@ class SelfPacedConfig:
 class SelfPacedLearning:
     """
     Self-paced learning (Kumar et al., 2010).
-    
+
     Jointly optimizes model parameters and sample inclusion:
     min_{w,v} sum_i v_i * L(x_i, y_i; w) + f(v; lambda)
-    
+
     where v_i in [0,1] are sample inclusion weights.
-    
+
     This implementation uses an alternating optimization:
     1. Fix v, update w (model training)
     2. Fix w, update v (easy samples first)
-    
+
     Usage:
         spl = SelfPacedLearning(config, losses_per_sample)
         for epoch in range(epochs):
@@ -198,7 +201,7 @@ class SelfPacedLearning:
     def update_weights(self, losses: np.ndarray) -> np.ndarray:
         """
         Update sample inclusion weights based on current losses.
-        
+
         SPL objective: v_i = 1 if L_i <= lambda, else 0 (hard)
         Soft version: v_i = exp(-L_i / tau)
         """
@@ -248,9 +251,11 @@ class SelfPacedLearning:
 # 3. Loss-Based Sample Weighting
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class LossWeightingConfig:
     """Configuration for loss-based sample weighting."""
+
     # Weighting scheme: "inverse", "focal", "threshold", "softmax"
     scheme: str = "focal"
     # Focal loss gamma
@@ -272,13 +277,13 @@ class LossWeightingConfig:
 class LossBasedWeighting:
     """
     Loss-based sample weighting for curriculum learning.
-    
+
     Supports multiple weighting schemes:
     - "inverse": weight = 1 / (loss + eps)
     - "focal": weight = (1 - exp(-loss))^gamma
     - "threshold": weight = 1 if loss > threshold else 0.1
     - "softmax": weight = exp(loss / T) / sum(exp(loss / T))
-    
+
     Usage:
         weighting = LossBasedWeighting(config)
         for epoch in range(epochs):
@@ -335,9 +340,11 @@ class LossBasedWeighting:
 # 4. Integrated Curriculum Manager
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class CurriculumManagerConfig:
     """Unified configuration for all curriculum components."""
+
     # Difficulty curriculum
     difficulty: DifficultyCurriculumConfig | None = None
     # Self-paced learning
@@ -361,7 +368,7 @@ class CurriculumManagerConfig:
 class CurriculumManager:
     """
     Unified curriculum manager combining all curriculum strategies.
-    
+
     Supports multiple modes:
     - "difficulty": Progressive difficulty inclusion
     - "self_paced": Self-paced learning with loss-based pacing
@@ -386,9 +393,8 @@ class CurriculumManager:
         self.loss_weighting = None
         self.adaptive_controller = None
 
-        if config.mode in ("difficulty", "combined") and config.difficulty:
-            if difficulty_scores is not None:
-                self.difficulty_curriculum = DifficultyCurriculum(config.difficulty, difficulty_scores)
+        if config.mode in ("difficulty", "combined") and config.difficulty and difficulty_scores is not None:
+            self.difficulty_curriculum = DifficultyCurriculum(config.difficulty, difficulty_scores)
 
         if config.mode in ("self_paced", "combined") and config.self_paced:
             self.self_paced = SelfPacedLearning(config.self_paced, n_samples)
@@ -402,7 +408,7 @@ class CurriculumManager:
     def update(
         self,
         epoch: int,
-        val_metrics: dict[str, float] = None,
+        val_metrics: dict[str, float] | None = None,
         losses: np.ndarray = None,
         forgetting_rate: float = 0.0,
         easy_ratio: float = 0.0,
@@ -420,9 +426,9 @@ class CurriculumManager:
         if self.difficulty_curriculum:
             # Get val_accuracy from val_metrics or default to 0
             val_acc = val_metrics.get("val_accuracy", 0.0) if val_metrics else 0.0
-            level = self.difficulty_curriculum.update(epoch, val_acc)
+            self.difficulty_curriculum.update(epoch, val_acc)
             mask = self.difficulty_curriculum.get_inclusion_mask()
-            diff_weights = self.difficulty_curriculum.get_difficulty_weights()
+            self.difficulty_curriculum.get_difficulty_weights()
             info["difficulty_level"] = self.difficulty_curriculum.current_level
             info["inclusion_rate"] = mask.mean()
 
@@ -430,18 +436,15 @@ class CurriculumManager:
             if forgetting_rate > self.config.forgetting_threshold:
                 info["curriculum_frozen"] = True
                 self._freeze_counter = getattr(self, "_freeze_counter", 0) + 1
-                if self._freeze_counter >= self.config.freeze_patience:
+                if self._freeze_counter >= self.config.freeze_patience:  # noqa: SIM102
                     # Hold at current level (don't advance)
                     if self.difficulty_curriculum:
-                        self.difficulty_curriculum.current_level = max(
-                            1, self.difficulty_curriculum.current_level - 1
-                        )
+                        self.difficulty_curriculum.current_level = max(1, self.difficulty_curriculum.current_level - 1)
             elif easy_ratio > self.config.easy_threshold:
                 info["curriculum_accelerated"] = True
                 if self.difficulty_curriculum:
                     self.difficulty_curriculum.current_level = min(
-                        self.difficulty_curriculum.max_level,
-                        self.difficulty_curriculum.current_level + 2
+                        self.difficulty_curriculum.max_level, self.difficulty_curriculum.current_level + 2
                     )
             else:
                 self._freeze_counter = 0
@@ -449,14 +452,16 @@ class CurriculumManager:
         # Update self-paced learning
         if self.self_paced and losses is not None:
             self.self_paced.update_weights(losses)
-            sp_weights = self.self_paced.get_weights(epoch)
+            self.self_paced.get_weights(epoch)
             info["self_paced_pace"] = self.self_paced.get_pace(epoch)
 
         # Update loss-based weighting
         if self.loss_weighting and losses is not None:
             lw_weights = self.loss_weighting.compute_weights(losses, epoch)
             info["loss_weighting_stats"] = {
-                "mean": float(self.loss_weighting.ema_losses.mean()) if self.loss_weighting.ema_losses is not None else 0,
+                "mean": float(self.loss_weighting.ema_losses.mean())
+                if self.loss_weighting.ema_losses is not None
+                else 0,
                 "weight_mean": float(lw_weights.mean()),
                 "weight_std": float(lw_weights.std()),
             }
@@ -520,10 +525,11 @@ class CurriculumManager:
 # 5. Integration with DataLoader
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class CurriculumDataLoader:
     """
     DataLoader wrapper that applies curriculum sample weights and inclusion masks.
-    
+
     Usage:
         curriculum = CurriculumManager(config, n_samples, difficulty_scores)
         loader = CurriculumDataLoader(dataset, curriculum, batch_size=32)
@@ -591,11 +597,10 @@ class CurriculumDataLoader:
         return (n_included + self.batch_size - 1) // self.batch_size
 
 
-
-
 # ════════════════════════════════════════════════════════════════════════════
 # 6. Difficulty Scoring Utilities
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def compute_difficulty_scores(
     features: np.ndarray,
@@ -605,7 +610,7 @@ def compute_difficulty_scores(
 ) -> np.ndarray:
     """
     Compute per-sample difficulty scores in [0, 1].
-    
+
     Methods:
     - "margin": 1 - |model_output_margin| (for classifier)
     - "loss": per-sample loss (requires model)
@@ -613,21 +618,21 @@ def compute_difficulty_scores(
     - "noise": label noise estimate
     - "distance": distance to decision boundary
     - "heuristic": feature-based (e.g., volatility, spread)
-    
+
     Returns:
         difficulty scores in [0, 1] (0=easiest, 1=hardest)
     """
-    n = len(labels)
+    len(labels)
     if method == "heuristic":
         # Feature-based difficulty for financial data:
         # Higher volatility (std across timesteps) = harder bar.
         # Works on both 2D (samples, features) and 3D (samples, time, features) inputs.
         if features.ndim == 3:
-            vol = features.std(axis=1).mean(axis=1)          # (N,)
+            vol = features.std(axis=1).mean(axis=1)  # (N,)
         elif features.ndim == 2:
-            vol = features.std(axis=1)                         # (N,)
+            vol = features.std(axis=1)  # (N,)
         else:
-            vol = np.abs(features).ravel()[:len(labels)]
+            vol = np.abs(features).ravel()[: len(labels)]
         vol = vol.astype(np.float64)
         rng = vol.max() - vol.min()
         if rng < 1e-9:
@@ -651,8 +656,7 @@ def compute_difficulty_scores(
             model.eval()
             criterion = nn.CrossEntropyLoss(reduction="none")
             losses = criterion(
-                model(torch.tensor(features, dtype=torch.float32)),
-                torch.tensor(labels, dtype=torch.long)
+                model(torch.tensor(features, dtype=torch.float32)), torch.tensor(labels, dtype=torch.long)
             )
             difficulty = losses.numpy()
             # Normalize
@@ -660,7 +664,7 @@ def compute_difficulty_scores(
             return np.clip(difficulty, 0, 1)
 
     if method == "entropy":
-        # Label entropy – only meaningful for soft/probabilistic labels.
+        # Label entropy – only meaningful for soft/probabilistic labels.  # noqa: RUF003
         if labels.ndim > 1:
             # Soft labels: proper entropy
             entropy = -np.sum(labels * np.log(labels + 1e-8), axis=1)
@@ -669,7 +673,7 @@ def compute_difficulty_scores(
             # Hard integer labels: all samples have zero label entropy by definition.
             # Fall back to uniform difficulty (0.5 for all).
             return np.full(len(labels), 0.5)
-        denom = np.log(max(n_classes, 2))   # guard log(1) == 0
+        denom = np.log(max(n_classes, 2))  # guard log(1) == 0
         difficulty = entropy / denom
         return np.clip(difficulty, 0, 1)
 
@@ -682,7 +686,7 @@ def compute_difficulty_scores(
             centroids = {}
             for c in np.unique(labels):
                 centroids[c] = embeddings[labels == c].mean(0)
-            distances = np.array([torch.norm(emb - centroids[l]).item() for emb, l in zip(embeddings, labels)])
+            distances = np.array([torch.norm(emb - centroids[l]).item() for emb, l in zip(embeddings, labels, strict=False)])  # noqa: E741
             difficulty = distances / (distances.max() + 1e-8)
             return np.clip(difficulty, 0, 1)
 
@@ -694,6 +698,7 @@ def compute_difficulty_scores(
 # 6. Training Integration Helpers
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def create_curriculum_manager(
     mode: str = "combined",
     n_samples: int = 10000,
@@ -702,13 +707,13 @@ def create_curriculum_manager(
 ) -> CurriculumManager:
     """
     Factory function to create a CurriculumManager with sensible defaults.
-    
+
     Args:
         mode: "difficulty", "self_paced", "loss_weighting", "adaptive", "combined"
         n_samples: Number of training samples
         difficulty_scores: Per-sample difficulty scores in [0, 1]
         **kwargs: Additional config parameters
-        
+
     Returns:
         Configured CurriculumManager
     """
@@ -740,6 +745,7 @@ def create_curriculum_manager(
 
     if mode in ("adaptive", "combined"):
         from training.curriculum_controller import AdaptiveCurriculumConfig
+
         adaptive_cfg = AdaptiveCurriculumConfig(
             stages=("easy", "medium", "hard"),
             seq_lens=(30, 60, 90, 120),

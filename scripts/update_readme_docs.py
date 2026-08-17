@@ -7,9 +7,10 @@ with open("README.md", encoding="utf-8") as f:
 # "**Version 6.7** fixes two critical training bottlenecks... **Version 6.6** improves..."
 # Let's find it. It's in the second paragraph of the file.
 
+
 def format_changelog_paragraph(text):
     # Find the big paragraph starting with "**Version"
-    lines = text.split('\n')
+    lines = text.split("\n")
     for i, line in enumerate(lines):
         if line.startswith("**Version 6.7**"):
             # This is the paragraph!
@@ -18,13 +19,13 @@ def format_changelog_paragraph(text):
             p = line
 
             # Split by "**Version "
-            parts = re.split(r'\*\*(Version \d+\.\d+)\*\*', p)
+            parts = re.split(r"\*\*(Version \d+\.\d+)\*\*", p)
             new_p = ""
             for j in range(1, len(parts), 2):
                 version = parts[j]
-                desc = parts[j+1].strip()
+                desc = parts[j + 1].strip()
                 # break desc into bullet points if it uses semicolons to list features
-                desc_bullets = desc.replace('; ', '.\n- ').replace('; and ', '.\n- ').replace('; plus ', '.\n- ')
+                desc_bullets = desc.replace("; ", ".\n- ").replace("; and ", ".\n- ").replace("; plus ", ".\n- ")
                 if desc_bullets.startswith("-"):
                     desc_bullets = desc_bullets[1:].strip()
                 new_p += f"\n### {version}\n- {desc_bullets}\n"
@@ -32,7 +33,8 @@ def format_changelog_paragraph(text):
             lines[i] = new_p.strip()
             break
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
+
 
 content = format_changelog_paragraph(content)
 

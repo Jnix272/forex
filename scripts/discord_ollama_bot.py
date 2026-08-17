@@ -95,9 +95,20 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return {"message": "No parseable JSONL metrics found."}
     last = rows[-1]
     metric_keys = (
-        "epoch", "train_loss", "val_loss", "val_sharpe", "sharpe",
-        "best_val_loss", "best_sharpe", "lr", "model", "model_name",
-        "train_acc", "val_acc", "profit_factor", "max_drawdown",
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "val_sharpe",
+        "sharpe",
+        "best_val_loss",
+        "best_sharpe",
+        "lr",
+        "model",
+        "model_name",
+        "train_acc",
+        "val_acc",
+        "profit_factor",
+        "max_drawdown",
     )
     latest = {k: last.get(k) for k in metric_keys if k in last}
     best_sharpe = None
@@ -258,19 +269,21 @@ async def run_bot() -> None:
 
         async with session.ws_connect(gateway_url, heartbeat=None, timeout=30) as ws:
             hello = await ws.receive_json()
-            asyncio.create_task(heartbeat(ws, int(hello["d"]["heartbeat_interval"])))
-            await ws.send_json({
-                "op": 2,
-                "d": {
-                    "token": token,
-                    "intents": 1 | 512 | 32768,
-                    "properties": {
-                        "os": "windows",
-                        "browser": "forex-ollama-bot",
-                        "device": "forex-ollama-bot",
+            asyncio.create_task(heartbeat(ws, int(hello["d"]["heartbeat_interval"])))  # noqa: RUF006
+            await ws.send_json(
+                {
+                    "op": 2,
+                    "d": {
+                        "token": token,
+                        "intents": 1 | 512 | 32768,
+                        "properties": {
+                            "os": "windows",
+                            "browser": "forex-ollama-bot",
+                            "device": "forex-ollama-bot",
+                        },
                     },
-                },
-            })
+                }
+            )
             print("[Discord] Ready. Use !train, !ollama, or mention the bot.", flush=True)
 
             async for msg in ws:

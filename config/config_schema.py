@@ -10,12 +10,14 @@ class SessionLimit:
     hours_local: tuple[time, time] | None = None
     tz: Any | None = None
 
+
 @dataclass
 class RegimeScale:
     crisis: float
     trending: float
     mean_rev: float
     normal: float
+
 
 @dataclass
 class LiveRiskSchema:

@@ -2,6 +2,7 @@
 Tests for monitoring.alerting (Improvement #7): channels, severity routing,
 dedup, rate limiting, escalation, runbooks, and drift/risk integration.
 """
+
 from __future__ import annotations
 
 import json
@@ -41,6 +42,7 @@ def manager(mem):
 # Channels
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_in_memory_channel_records(mem):
     ok = mem.send({"severity": "info", "title": "t", "message": "m"})
     assert ok is True
@@ -50,8 +52,7 @@ def test_in_memory_channel_records(mem):
 
 def test_console_channel_sends(capsys):
     ch = ConsoleChannel()
-    assert ch.send({"severity": "info", "title": "T", "message": "hello",
-                    "runbook": {"remediation": []}}) is True
+    assert ch.send({"severity": "info", "title": "T", "message": "hello", "runbook": {"remediation": []}}) is True
     captured = capsys.readouterr().out
     assert "hello" in captured
 
@@ -59,10 +60,10 @@ def test_console_channel_sends(capsys):
 def test_file_channel_appends(tmp_path):
     path = tmp_path / "alerts.log"
     ch = FileChannel(str(path))
-    assert ch.send({"severity": "warning", "title": "t", "message": "m",
-                    "runbook": {"remediation": []}, "x": 1}) is True
-    assert ch.send({"severity": "info", "title": "t2", "message": "m2",
-                    "runbook": {"remediation": []}}) is True
+    assert (
+        ch.send({"severity": "warning", "title": "t", "message": "m", "runbook": {"remediation": []}, "x": 1}) is True
+    )
+    assert ch.send({"severity": "info", "title": "t2", "message": "m2", "runbook": {"remediation": []}}) is True
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["message"] == "m"
@@ -70,18 +71,17 @@ def test_file_channel_appends(tmp_path):
 
 def test_slack_channel_no_webhook_fails():
     ch = SlackWebhookChannel("")
-    assert ch.send({"severity": "info", "title": "t", "message": "m",
-                    "runbook": {"remediation": []}}) is False
+    assert ch.send({"severity": "info", "title": "t", "message": "m", "runbook": {"remediation": []}}) is False
 
 
 def test_smtp_channel_no_host_fails():
     ch = SMTPChannel("", recipients=["a@b.com"])
-    assert ch.send({"severity": "info", "title": "t", "message": "m",
-                    "runbook": {"remediation": []}}) is False
+    assert ch.send({"severity": "info", "title": "t", "message": "m", "runbook": {"remediation": []}}) is False
 
 
 def test_channel_accepts_severity():
     from monitoring.alerting import CRITICAL, INFO, WARNING, Channel
+
     ch = Channel()
     ch.severity_min = WARNING
     assert ch.accepts(CRITICAL)
@@ -90,8 +90,9 @@ def test_channel_accepts_severity():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# AlertManager — routing & dedup
+# AlertManager - routing & dedup
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_alert_sent_to_in_memory(mem, manager):
     res = manager.alert("system", "disk full", severity=WARNING)
@@ -134,8 +135,9 @@ def test_unknown_alert_type_uses_system_runbook():
 
 
 def test_register_runbook():
-    register_runbook(Runbook(alert_type="test_alert", title="Test", severity=INFO,
-                             channels=["console"], remediation=["do x"]))
+    register_runbook(
+        Runbook(alert_type="test_alert", title="Test", severity=INFO, channels=["console"], remediation=["do x"])
+    )
     res = AlertManager(channels=[InMemoryChannel()]).alert("test_alert", "m")
     assert res["runbook"]["title"] == "Test"
     assert res["runbook"]["remediation"] == ["do x"]
@@ -149,6 +151,7 @@ def test_alert_id_present():
 # ═════════════════════════════════════════════════════════════════════════════
 # Escalation
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_critical_alert_tracks_pending(manager):
     res = manager.alert("circuit_breaker", "dd", severity=CRITICAL)
@@ -171,7 +174,7 @@ def test_escalate_after_timeout(manager):
     escalated = manager.escalate_pending()
     assert len(escalated) >= 1
     assert "ESCALATED" in escalated[0]["message"]
-    # sent to a second channel (the one the original alert also reached) — at least one delivery
+    # sent to a second channel (the one the original alert also reached) - at least one delivery
     assert any("ESCALATED" in a["message"] for a in mem2.alerts)
 
 
@@ -187,24 +190,22 @@ def test_escalate_only_once(manager):
 # Integration helpers
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_notify_drift_feature_event(manager):
-    res = notify_drift_event(manager, {"type": "feature_drift", "feature": "rsi_14",
-                                       "drift": True})
+    res = notify_drift_event(manager, {"type": "feature_drift", "feature": "rsi_14", "drift": True})
     assert res["alert_type"] == "drift_detected"
     assert "rsi_14" in res["message"]
     assert manager.channels[0].alerts  # type: ignore[attr-defined]
 
 
 def test_notify_drift_model_event(manager):
-    res = notify_drift_event(manager, {"type": "model_drift", "event": "challenger_losing",
-                                       "challenger": "mamba_v2"})
+    res = notify_drift_event(manager, {"type": "model_drift", "event": "challenger_losing", "challenger": "mamba_v2"})
     assert res["alert_type"] == "model_drift"
     assert "mamba_v2" in res["message"]
 
 
 def test_notify_risk_violation(manager):
-    res = notify_risk_violation(manager, {"rule": "max_position_pct", "value": 0.12,
-                                          "action": "reject"})
+    res = notify_risk_violation(manager, {"rule": "max_position_pct", "value": 0.12, "action": "reject"})
     assert res["alert_type"] == "risk_violation"
     assert res["severity"] == CRITICAL
     assert "max_position_pct" in res["message"]

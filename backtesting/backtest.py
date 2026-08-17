@@ -24,6 +24,7 @@ import numpy as np
 
 try:
     import polars as pl
+
     _POLARS_OK = True
 except ImportError:  # pragma: no cover
     _POLARS_OK = False
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover
 
 try:
     import pandas as pd
+
     _PANDAS_OK = True
 except ImportError:  # pragma: no cover
     _PANDAS_OK = False
@@ -38,6 +40,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from numba import njit
+
     _NUMBA_OK = True
 except ImportError:  # pragma: no cover - optional / version-skew fallback
     _NUMBA_OK = False
@@ -70,6 +73,7 @@ class ScalingAction(IntEnum):
 # HELPERS: accept both Polars and pandas DataFrames
 # -----------------------------------------------------------------------------
 
+
 def _df_columns(df) -> list:
     """Return list of column names."""
     return list(df.columns)
@@ -78,9 +82,9 @@ def _df_columns(df) -> list:
 def _get_column_numpy(df, col: str) -> np.ndarray:
     """Extract column as numpy array from Polars or pandas DataFrame."""
     if _POLARS_OK and pl is not None and isinstance(df, pl.DataFrame):
-        return df[col].to_numpy()
+        return np.asarray(df[col].to_numpy())
     if _PANDAS_OK and pd is not None and isinstance(df, pd.DataFrame):
-        return df[col].values
+        return np.asarray(df[col].to_numpy())
     raise TypeError(f"Unsupported DataFrame type: {type(df)}")
 
 
@@ -89,10 +93,10 @@ def _get_index_numpy(df) -> np.ndarray:
     if _POLARS_OK and pl is not None and isinstance(df, pl.DataFrame):
         for cand in ("timestamp_utc", "timestamp", "time", "date"):
             if cand in df.columns:
-                return df[cand].to_numpy()
+                return np.asarray(df[cand].to_numpy())
         return np.arange(len(df), dtype=np.int64)
     if _PANDAS_OK and pd is not None and isinstance(df, pd.DataFrame):
-        return df.index.values
+        return np.asarray(df.index.to_numpy())
     raise TypeError(f"Unsupported DataFrame type: {type(df)}")
 
 
@@ -100,14 +104,16 @@ def _get_index_numpy(df) -> np.ndarray:
 # TRADE RECORDS
 # -----------------------------------------------------------------------------
 
+
 @dataclass
 class Trade:
     """Record of a single trade execution."""
+
     trade_id: int
     entry_time: datetime
     entry_price: float
     entry_lots: float
-    direction: int           # +1 = long, -1 = short
+    direction: int  # +1 = long, -1 = short
     stop_loss: float
     take_profit: float
     exit_time: datetime | None = None
@@ -118,13 +124,14 @@ class Trade:
     pnl_usd: float = 0.0
     commission: float = 0.0
     slippage_pips: float = 0.0
-    exit_reason: str = ""    # 'stop_loss', 'take_profit', 'signal', 'scale_out', 'eod'
+    exit_reason: str = ""  # 'stop_loss', 'take_profit', 'signal', 'scale_out', 'eod'
     scale_additions: list[dict] = field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------
 # BACKTESTING ENGINE
 # -----------------------------------------------------------------------------
+
 
 class ForexScalingBacktest:
     """
@@ -157,8 +164,8 @@ class ForexScalingBacktest:
         pip_size: float = 0.0001,
         pip_value_per_lot: float = 1.0,
         max_lots: float = 3.0,
-        execution_delay_bars: int = 1,    # Simulate 1-bar execution delay
-        use_bid_ask: bool = True,          # Golden Rule: trade on bid/ask, not mid
+        execution_delay_bars: int = 1,  # Simulate 1-bar execution delay
+        use_bid_ask: bool = True,  # Golden Rule: trade on bid/ask, not mid
         daily_volume_lots: float = 500.0,
         apply_market_impact: bool = True,
         max_drawdown_limit: float = 0.20,
@@ -191,7 +198,10 @@ class ForexScalingBacktest:
         sig_cols = _df_columns(signals)
 
         if self._bars_pandas and pd is not None and isinstance(signals, pd.DataFrame):
-            self.signals = signals.reindex(bars.index)
+            bars_df = bars
+            if not isinstance(bars_df, pd.DataFrame):
+                raise TypeError("bars must be a pandas DataFrame in the pandas signal-alignment branch")
+            self.signals = signals.reindex(bars_df.index)
             # Actions are events, not state. Do not forward-fill them.
             if "action" in self.signals.columns:
                 self.signals["action"] = self.signals["action"].fillna(ScalingAction.HOLD.value)
@@ -202,17 +212,13 @@ class ForexScalingBacktest:
         elif _POLARS_OK and pl is not None and isinstance(signals, pl.DataFrame):
             sig = signals
             if "action" in sig.columns:
-                sig = sig.with_columns(
-                    pl.col("action").fill_null(ScalingAction.HOLD.value)
-                )
+                sig = sig.with_columns(pl.col("action").fill_null(ScalingAction.HOLD.value))
             for col in ("lots", "stop_loss", "take_profit"):
                 if col in sig.columns:
                     sig = sig.with_columns(pl.col(col).forward_fill())
             self.signals = sig
         else:
-            raise TypeError(
-                f"signals must be a polars or pandas DataFrame, got {type(signals)}"
-            )
+            raise TypeError(f"signals must be a polars or pandas DataFrame, got {type(signals)}")
 
         self.initial_equity = initial_equity
         self.equity = initial_equity
@@ -272,34 +278,50 @@ class ForexScalingBacktest:
         sig_len = len(self.signals)
         self._sig_action = (
             _get_column_numpy(self.signals, "action").astype(np.float64)
-            if "action" in sig_cols else np.zeros(sig_len, dtype=np.float64)
+            if "action" in sig_cols
+            else np.zeros(sig_len, dtype=np.float64)
         )
         self._sig_sl = (
             _get_column_numpy(self.signals, "stop_loss").astype(np.float64)
-            if "stop_loss" in sig_cols else np.zeros(sig_len, dtype=np.float64)
+            if "stop_loss" in sig_cols
+            else np.zeros(sig_len, dtype=np.float64)
         )
         self._sig_tp = (
             _get_column_numpy(self.signals, "take_profit").astype(np.float64)
-            if "take_profit" in sig_cols else np.zeros(sig_len, dtype=np.float64)
+            if "take_profit" in sig_cols
+            else np.zeros(sig_len, dtype=np.float64)
         )
         self._sig_lots = (
             _get_column_numpy(self.signals, "lots").astype(np.float64)
-            if "lots" in sig_cols else np.full(sig_len, 0.1, dtype=np.float64)
+            if "lots" in sig_cols
+            else np.full(sig_len, 0.1, dtype=np.float64)
         )
 
     # ── Timestamp helper ─────────────────────────────────────────────────────
 
-    def _bar_timestamp(self, idx: int):
+    def _bar_timestamp(self, idx: int) -> datetime:
         """Return a timestamp object for bar at position idx."""
         ts = self._arr_ts[idx]
-        if hasattr(ts, "astype"):
+        if isinstance(ts, np.datetime64):
             try:
                 import datetime as _dt
-                ts_ms = int(np.datetime64(ts, "ms").view(np.int64))
+
+                ts_ms = int(ts.astype("datetime64[ms]").view(np.int64))
                 return _dt.datetime.utcfromtimestamp(ts_ms / 1000.0)
             except Exception:
                 pass
-        return ts
+        if pd is not None and isinstance(ts, pd.Timestamp):
+            return ts.to_pydatetime()
+        if isinstance(ts, datetime):
+            return ts
+        if hasattr(ts, "tolist"):
+            try:
+                value = ts.tolist()
+                if isinstance(value, datetime):
+                    return value
+            except Exception:
+                pass
+        return datetime.utcfromtimestamp(0)
 
     # ── Price helpers ────────────────────────────────────────────────────────
 
@@ -326,17 +348,23 @@ class ForexScalingBacktest:
         if sess is None and not asia_london and not london_ny:
             try:
                 ts = self._arr_ts[idx]
-                if hasattr(ts, "to_pydatetime"):
+                if pd is not None and isinstance(ts, pd.Timestamp):
                     now = ts.to_pydatetime()
-                elif hasattr(ts, "astype"):
+                elif isinstance(ts, np.datetime64):
                     import datetime as _dt
-                    ts_ms = int(np.datetime64(ts, "ms").view(np.int64))
+
+                    ts_ms = int(ts.astype("datetime64[ms]").view(np.int64))
                     now = _dt.datetime.utcfromtimestamp(ts_ms / 1000.0)
             except Exception:
                 now = None
-        return float(session_spread_mult(
-            sess, asia_london=asia_london, london_ny=london_ny, now=now,
-        ))
+        return float(
+            session_spread_mult(
+                sess,
+                asia_london=asia_london,
+                london_ny=london_ny,
+                now=now,
+            )
+        )
 
     def _get_execution_price(self, idx: int, direction: int, lots: float, is_close: bool = False) -> float:
         """
@@ -347,7 +375,11 @@ class ForexScalingBacktest:
         """
         if self._arr_bid_close is not None and self._arr_ask_close is not None:
             base_price = self._arr_ask_close[idx] if direction > 0 else self._arr_bid_close[idx]
-            spread = self._arr_spread[idx] if self._arr_spread is not None else (self._arr_ask_close[idx] - self._arr_bid_close[idx])
+            spread = (
+                self._arr_spread[idx]
+                if self._arr_spread is not None
+                else (self._arr_ask_close[idx] - self._arr_bid_close[idx])
+            )
         else:
             if self._arr_spread is not None:
                 spread = self._arr_spread[idx]
@@ -373,8 +405,7 @@ class ForexScalingBacktest:
 
     # ── Trade execution ──────────────────────────────────────────────────────
 
-    def _open_position(self, idx: int, direction: int, lots: float,
-                       stop_loss: float, take_profit: float) -> Trade:
+    def _open_position(self, idx: int, direction: int, lots: float, stop_loss: float, take_profit: float) -> Trade:
         """Open a new position."""
         if lots > self.max_lots:
             lots = self.max_lots
@@ -419,23 +450,24 @@ class ForexScalingBacktest:
         self.equity -= cost
 
         total_lots = abs(self.position) + lots
-        self.avg_entry_price = (
-            abs(self.position) * self.avg_entry_price + lots * exec_price
-        ) / total_lots
+        self.avg_entry_price = (abs(self.position) * self.avg_entry_price + lots * exec_price) / total_lots
 
         self.position += direction * lots
 
         if self._open_trade:
-            self._open_trade.scale_additions.append({
-                "time": self._bar_timestamp(idx),
-                "price": exec_price,
-                "lots": lots,
-                "cost": cost,
-            })
+            self._open_trade.scale_additions.append(
+                {
+                    "time": self._bar_timestamp(idx),
+                    "price": exec_price,
+                    "lots": lots,
+                    "cost": cost,
+                }
+            )
             self._open_trade.commission += cost
 
-    def _close_position(self, idx: int, fraction: float = 1.0,
-                        exit_reason: str = "signal", override_price: float = None) -> float:
+    def _close_position(
+        self, idx: int, fraction: float = 1.0, exit_reason: str = "signal", override_price: float | None = None
+    ) -> float:
         """Close all or part of position. Returns realised P&L in USD."""
         if self.position == 0:
             return 0.0
@@ -486,12 +518,10 @@ class ForexScalingBacktest:
 
         direction = np.sign(self.position)
 
-        stop_ok = (self.current_stop is not None
-                   and np.isfinite(float(self.current_stop))
-                   and float(self.current_stop) > 0.0)
-        tp_ok = (self.current_tp is not None
-                 and np.isfinite(float(self.current_tp))
-                 and float(self.current_tp) > 0.0)
+        stop_ok = (
+            self.current_stop is not None and np.isfinite(float(self.current_stop)) and float(self.current_stop) > 0.0
+        )
+        tp_ok = self.current_tp is not None and np.isfinite(float(self.current_tp)) and float(self.current_tp) > 0.0
 
         if stop_ok and direction > 0 and self._arr_low[idx] <= self.current_stop:
             exec_px = self.current_stop - self.slippage_pips * self.pip_size
@@ -523,12 +553,32 @@ class ForexScalingBacktest:
     @staticmethod
     @njit(cache=True)
     def _run_core_numba(
-        arr_close, arr_high, arr_low, arr_bid, arr_ask, arr_spread, arr_ts,
-        sig_action, sig_sl, sig_tp, sig_lots,
-        n_bars, execution_delay, lot_size, commission_per_lot, slippage_pips,
-        pip_size, pip_value_per_lot, max_lots, max_drawdown_limit,
-        initial_equity, min_spread_clamp, max_spread_clamp, daily_volume_lots,
-        apply_market_impact, use_bid_ask,
+        arr_close,
+        arr_high,
+        arr_low,
+        arr_bid,
+        arr_ask,
+        arr_spread,
+        arr_ts,
+        sig_action,
+        sig_sl,
+        sig_tp,
+        sig_lots,
+        n_bars,
+        execution_delay,
+        lot_size,
+        commission_per_lot,
+        slippage_pips,
+        pip_size,
+        pip_value_per_lot,
+        max_lots,
+        max_drawdown_limit,
+        initial_equity,
+        min_spread_clamp,
+        max_spread_clamp,
+        daily_volume_lots,
+        apply_market_impact,
+        use_bid_ask,
     ):
         """Numba-accelerated backtest core. Returns pre-allocated result arrays + equity_curve."""
         res_eq = np.empty(n_bars, dtype=np.float64)
@@ -693,7 +743,13 @@ class ForexScalingBacktest:
                         slippage = direction * slippage_pips * pip_size
                         price = base_price + slippage
                         if apply_market_impact:
-                            price += direction * (min(max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp), max_spread_clamp) * np.sqrt(lots / max(daily_volume_lots, 1.0)))
+                            price += direction * (
+                                min(
+                                    max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp),
+                                    max_spread_clamp,
+                                )
+                                * np.sqrt(lots / max(daily_volume_lots, 1.0))
+                            )
                         cost = lots * commission_per_lot
                         equity -= cost
                         total_lots = abs(position) + lots
@@ -714,7 +770,13 @@ class ForexScalingBacktest:
                         slippage = direction * slippage_pips * pip_size
                         price = base_price + slippage
                         if apply_market_impact:
-                            price += direction * (min(max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp), max_spread_clamp) * np.sqrt(lots / max(daily_volume_lots, 1.0)))
+                            price += direction * (
+                                min(
+                                    max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp),
+                                    max_spread_clamp,
+                                )
+                                * np.sqrt(lots / max(daily_volume_lots, 1.0))
+                            )
                         cost = lots * commission_per_lot
                         equity -= cost
                         total_lots = abs(position) + lots
@@ -735,7 +797,13 @@ class ForexScalingBacktest:
                         slippage = direction * slippage_pips * pip_size
                         price = base_price + slippage
                         if apply_market_impact:
-                            price += direction * (min(max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp), max_spread_clamp) * np.sqrt(lots / max(daily_volume_lots, 1.0)))
+                            price += direction * (
+                                min(
+                                    max(arr_spread[i] if arr_spread[i] > 0 else 0.0001, min_spread_clamp),
+                                    max_spread_clamp,
+                                )
+                                * np.sqrt(lots / max(daily_volume_lots, 1.0))
+                            )
                         cost = lots * commission_per_lot
                         equity -= cost
                         total_lots = abs(position) + lots
@@ -925,8 +993,7 @@ class ForexScalingBacktest:
         pl.DataFrame (or pd.DataFrame if polars is unavailable):
             Bar-by-bar equity and P&L records.
         """
-        print(f"[Backtest] Running {len(self.bars):,} bars | "
-              f"Initial equity: ${self.initial_equity:,.2f}")
+        print(f"[Backtest] Running {len(self.bars):,} bars | Initial equity: ${self.initial_equity:,.2f}")
 
         # Reset simulation state so run() is idempotent
         self.position = 0.0
@@ -947,7 +1014,7 @@ class ForexScalingBacktest:
         if use_numba and _NUMBA_OK and n_bars >= self.numba_min_bars and not return_trades:
             return self._run_numba_path(n_bars)
         if use_numba and not _NUMBA_OK:
-            print("[Backtest] Numba unavailable — using Python path")
+            print("[Backtest] Numba unavailable - using Python path")
 
         return self._run_python_path(n_bars)
 
@@ -970,26 +1037,30 @@ class ForexScalingBacktest:
                 ts_list = ts_slice.tolist()
             except Exception:
                 ts_list = list(ts_slice)
-            return pl.DataFrame({
-                "timestamp": ts_list,
-                "equity": res_equity.tolist(),
-                "unrealised_pnl": res_unrealised.tolist(),
-                "total_value": res_total.tolist(),
-                "position": res_position.tolist(),
-                "drawdown": res_drawdown.tolist(),
-                "holding_bars": res_holding.tolist(),
-            })
+            return pl.DataFrame(
+                {
+                    "timestamp": ts_list,
+                    "equity": res_equity.tolist(),
+                    "unrealised_pnl": res_unrealised.tolist(),
+                    "total_value": res_total.tolist(),
+                    "position": res_position.tolist(),
+                    "drawdown": res_drawdown.tolist(),
+                    "holding_bars": res_holding.tolist(),
+                }
+            )
 
         if _PANDAS_OK and pd is not None:
-            return pd.DataFrame({
-                "timestamp": ts_slice,
-                "equity": res_equity,
-                "unrealised_pnl": res_unrealised,
-                "total_value": res_total,
-                "position": res_position,
-                "drawdown": res_drawdown,
-                "holding_bars": res_holding,
-            }).set_index("timestamp")
+            return pd.DataFrame(
+                {
+                    "timestamp": ts_slice,
+                    "equity": res_equity,
+                    "unrealised_pnl": res_unrealised,
+                    "total_value": res_total,
+                    "position": res_position,
+                    "drawdown": res_drawdown,
+                    "holding_bars": res_holding,
+                }
+            ).set_index("timestamp")
 
         raise RuntimeError("Neither polars nor pandas is available.")
 
@@ -1004,18 +1075,34 @@ class ForexScalingBacktest:
         sig_tp_f = self._sig_tp.astype(np.float64)
         sig_lots_f = self._sig_lots.astype(np.float64)
 
-        res_eq, res_unreal, res_total, res_pos, res_dd, res_hold, equity_curve, n_valid = \
-            self._run_core_numba(
-                self._arr_close, self._arr_high, self._arr_low,
-                arr_bid, arr_ask, arr_spread, self._arr_ts,
-                sig_action_f, sig_sl_f, sig_tp_f, sig_lots_f,
-                n_bars, self.execution_delay, self.lot_size,
-                self.commission_per_lot, self.slippage_pips, self.pip_size,
-                self.pip_value_per_lot, self.max_lots,
-                self.max_drawdown_limit, self.initial_equity,
-                self.min_spread_clamp, self.max_spread_clamp,
-                self.daily_volume_lots, self.apply_market_impact, self.use_bid_ask,
-            )
+        res_eq, res_unreal, res_total, res_pos, res_dd, res_hold, equity_curve, n_valid = self._run_core_numba(
+            self._arr_close,
+            self._arr_high,
+            self._arr_low,
+            arr_bid,
+            arr_ask,
+            arr_spread,
+            self._arr_ts,
+            sig_action_f,
+            sig_sl_f,
+            sig_tp_f,
+            sig_lots_f,
+            n_bars,
+            self.execution_delay,
+            self.lot_size,
+            self.commission_per_lot,
+            self.slippage_pips,
+            self.pip_size,
+            self.pip_value_per_lot,
+            self.max_lots,
+            self.max_drawdown_limit,
+            self.initial_equity,
+            self.min_spread_clamp,
+            self.max_spread_clamp,
+            self.daily_volume_lots,
+            self.apply_market_impact,
+            self.use_bid_ask,
+        )
 
         if n_valid > 0:
             self.equity = float(res_eq[-1])
@@ -1023,9 +1110,7 @@ class ForexScalingBacktest:
         self.equity_curve = equity_curve.tolist()
 
         res_ts = self._arr_ts[:n_valid]
-        self.results_df = self._build_results_df(
-            res_ts, res_eq, res_unreal, res_total, res_pos, res_dd, res_hold
-        )
+        self.results_df = self._build_results_df(res_ts, res_eq, res_unreal, res_total, res_pos, res_dd, res_hold)
         return self.results_df
 
     def _run_python_path(self, n_bars: int):
@@ -1098,7 +1183,12 @@ class ForexScalingBacktest:
                     mark_px = self._arr_bid_close[i] if direction > 0 else self._arr_ask_close[i]
                 else:
                     mark_px = self._arr_close[i]
-                unrealised = ((mark_px - self.avg_entry_price) / self.pip_size) * direction * abs(self.position) * self.pip_value_per_lot
+                unrealised = (
+                    ((mark_px - self.avg_entry_price) / self.pip_size)
+                    * direction
+                    * abs(self.position)
+                    * self.pip_value_per_lot
+                )
             else:
                 unrealised = 0.0
 
@@ -1145,8 +1235,13 @@ class ForexScalingBacktest:
             res_drawdown[-1] = 0.0
 
         self.results_df = self._build_results_df(
-            res_ts, res_equity, res_unrealised, res_total,
-            res_position, res_drawdown, res_holding,
+            res_ts,
+            res_equity,
+            res_unrealised,
+            res_total,
+            res_position,
+            res_drawdown,
+            res_holding,
         )
         return self.results_df
 
@@ -1155,12 +1250,12 @@ class ForexScalingBacktest:
     def _results_col_numpy(self, col: str) -> np.ndarray:
         """Extract a column from results_df as numpy regardless of backend."""
         if self.results_df is None:
-            return np.array([])
+            return np.array([], dtype=np.float64)
         if _POLARS_OK and pl is not None and isinstance(self.results_df, pl.DataFrame):
-            return self.results_df[col].to_numpy().astype(np.float64)
+            return np.asarray(self.results_df[col].to_numpy(), dtype=np.float64)
         if _PANDAS_OK and pd is not None and isinstance(self.results_df, pd.DataFrame):
-            return self.results_df[col].values.astype(np.float64)
-        return np.array([])
+            return np.asarray(self.results_df[col].to_numpy(dtype=np.float64), dtype=np.float64)
+        return np.array([], dtype=np.float64)
 
     def _has_results_col(self, col: str) -> bool:
         """Check if results_df has the given column."""
@@ -1173,9 +1268,11 @@ class ForexScalingBacktest:
         if not self.trades:
             if self.results_df is not None and len(self.results_df) > 0:
                 m = self._equity_curve_metrics()
-                m["warning"] = (m.get("warning", "") + " "
-                                "Trade-level metrics unavailable (empty trade log); "
-                                "using equity-curve fallback.").strip()
+                m["warning"] = (
+                    m.get("warning", "") + " "
+                    "Trade-level metrics unavailable (empty trade log); "
+                    "using equity-curve fallback."
+                ).strip()
                 return m
             return {"error": "No trades executed"}
 
@@ -1214,11 +1311,14 @@ class ForexScalingBacktest:
         drawdowns = (rolling_max - equity_arr) / (rolling_max + 1e-9)
         max_dd = float(drawdowns.max()) if len(drawdowns) else 0.0
 
-        avg_bars_held = float(np.mean([
-            (t.exit_time - t.entry_time).total_seconds() / 60
-            if t.exit_time and t.entry_time else 0
-            for t in self.trades
-        ]))
+        avg_bars_held = float(
+            np.mean(
+                [
+                    (t.exit_time - t.entry_time).total_seconds() / 60 if t.exit_time and t.entry_time else 0
+                    for t in self.trades
+                ]
+            )
+        )
 
         long_trades = [t for t in self.trades if t.direction > 0]
         short_trades = [t for t in self.trades if t.direction < 0]
@@ -1240,16 +1340,17 @@ class ForexScalingBacktest:
             "win_loss_ratio": (
                 abs(float(np.mean([t.pnl_usd for t in winning_trades])))
                 / max(abs(float(np.mean([t.pnl_usd for t in losing_trades]))), 0.01)
-                if winning_trades and losing_trades else 0
+                if winning_trades and losing_trades
+                else 0
             ),
             "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
             "max_drawdown_pct": max_dd * 100,
             "avg_holding_minutes": avg_bars_held,
             "profit_factor": (
-                sum(t.pnl_usd for t in winning_trades)
-                / max(abs(sum(t.pnl_usd for t in losing_trades)), 0.01)
-                if losing_trades else float("inf")
+                sum(t.pnl_usd for t in winning_trades) / max(abs(sum(t.pnl_usd for t in losing_trades)), 0.01)
+                if losing_trades
+                else float("inf")
             ),
         }
 
@@ -1334,21 +1435,24 @@ class ForexScalingBacktest:
                 return pd.DataFrame()
             return []
 
-        rows = [{
-            "trade_id": t.trade_id,
-            "entry_time": t.entry_time,
-            "exit_time": t.exit_time,
-            "direction": "Long" if t.direction > 0 else "Short",
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "lots": t.entry_lots,
-            "pnl_pips": t.pnl_pips,
-            "gross_pnl_usd": t.gross_pnl_usd,
-            "pnl_usd": t.pnl_usd,
-            "commission": t.commission,
-            "exit_reason": t.exit_reason,
-            "n_scale_adds": len(t.scale_additions),
-        } for t in self.trades]
+        rows = [
+            {
+                "trade_id": t.trade_id,
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "direction": "Long" if t.direction > 0 else "Short",
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "lots": t.entry_lots,
+                "pnl_pips": t.pnl_pips,
+                "gross_pnl_usd": t.gross_pnl_usd,
+                "pnl_usd": t.pnl_usd,
+                "commission": t.commission,
+                "exit_reason": t.exit_reason,
+                "n_scale_adds": len(t.scale_additions),
+            }
+            for t in self.trades
+        ]
 
         if _POLARS_OK and pl is not None:
             return pl.DataFrame(rows)
@@ -1360,7 +1464,8 @@ class ForexScalingBacktest:
         """Generate pyfolio tear sheet safely without crashing on bad runs."""
         try:
             import warnings
-            import pyfolio as pf
+
+            import pyfolio as pf  # type: ignore[import-not-found]
 
             if self.results_df is None or len(self.results_df) == 0:
                 print("WARNING: No results to generate tear sheet.")
@@ -1414,22 +1519,26 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
     if _POLARS_OK and pl is not None and isinstance(bars, pl.DataFrame):
         n = len(bars)
-        signals = pl.DataFrame({
-            "action": rng.choice(
-                [ScalingAction.HOLD, ScalingAction.OPEN_LONG,
-                 ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL],
-                size=n, p=[0.7, 0.1, 0.1, 0.1],
-            ).astype(np.int64).tolist(),
-            "lots": [0.1] * n,
-            "stop_loss": (bars["close"].to_numpy() - 0.0010).tolist(),
-            "take_profit": (bars["close"].to_numpy() + 0.0015).tolist(),
-        })
-    elif _PANDAS_OK and pd is not None:
+        signals = pl.DataFrame(
+            {
+                "action": rng.choice(
+                    [ScalingAction.HOLD, ScalingAction.OPEN_LONG, ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL],
+                    size=n,
+                    p=[0.7, 0.1, 0.1, 0.1],
+                )
+                .astype(np.int64)
+                .tolist(),
+                "lots": [0.1] * n,
+                "stop_loss": (bars["close"].to_numpy() - 0.0010).tolist(),
+                "take_profit": (bars["close"].to_numpy() + 0.0015).tolist(),
+            }
+        )
+    elif pd is not None and isinstance(bars, pd.DataFrame):
         signals = pd.DataFrame(index=bars.index)
         signals["action"] = rng.choice(
-            [ScalingAction.HOLD, ScalingAction.OPEN_LONG,
-             ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL],
-            size=len(bars), p=[0.7, 0.1, 0.1, 0.1]
+            [ScalingAction.HOLD, ScalingAction.OPEN_LONG, ScalingAction.OPEN_SHORT, ScalingAction.CLOSE_ALL],
+            size=len(bars),
+            p=[0.7, 0.1, 0.1, 0.1],
         )
         signals["lots"] = 0.1
         signals["stop_loss"] = bars["close"] - 0.0010
@@ -1442,5 +1551,8 @@ if __name__ == "__main__":
     bt.print_performance()
 
     trades = bt.get_trade_log()
-    if len(trades) > 0:
-        print(f"\nSample trades:\n{trades.head(5)}")
+    if hasattr(trades, "head") and not isinstance(trades, list):
+        sample_trades = trades.head(5)
+        print(f"\nSample trades:\n{sample_trades}")
+    elif isinstance(trades, list) and trades:
+        print(f"\nSample trades:\n{trades[:5]}")

@@ -17,17 +17,14 @@ from pathlib import Path
 # MANDATORY INTEGRITY WARNING: DO NOT CHEAT. All implementations must be genuine.
 # Do not hardcode test results.
 
+
 def main():
     print("=" * 70)
     print("Forex Scaling Model - E2E Test Runner")
     print("=" * 70)
 
     root_dir = Path(__file__).resolve().parent
-    tests_to_run = [
-        "tests/test_api.py",
-        "tests/test_dashboard.py",
-        "tests/test_visualizer.py"
-    ]
+    tests_to_run = ["tests/test_api.py", "tests/test_dashboard.py", "tests/test_visualizer.py"]
 
     # Check which test files exist
     existing_tests = []
@@ -51,23 +48,14 @@ def main():
 
     # Prepare command
     python_exe = sys.executable
-    cmd = [
-        python_exe, "-m", "pytest",
-        *existing_tests,
-        f"--junitxml={xml_report}",
-        "-v"
-    ]
+    cmd = [python_exe, "-m", "pytest", *existing_tests, f"--junitxml={xml_report}", "-v"]
 
     # Try adding coverage if pytest-cov/coverage is installed
     try:
         import pytest_cov  # noqa: F401
+
         # Try adding coverage for the targeted components
-        cmd.extend([
-            "--cov=api",
-            "--cov=dashboard",
-            "--cov=visualize_backtest",
-            "--cov-report=term-missing"
-        ])
+        cmd.extend(["--cov=api", "--cov=dashboard", "--cov=visualize_backtest", "--cov-report=term-missing"])
         print("pytest-cov detected. Running with coverage analysis...")
     except ImportError:
         print("pytest-cov not found. Running tests without coverage.")
@@ -146,7 +134,7 @@ def main():
                 print("\nSkipped Tests Detail:")
                 for cname, name, msg in skips_list:
                     # Clean up long messages
-                    msg_short = msg.strip().split('\n')[0]
+                    msg_short = msg.strip().split("\n")[0]
                     print(f"  [SKIP] {cname}::{name} -> {msg_short}")
 
         except Exception as e:
@@ -158,6 +146,7 @@ def main():
 
     # Return pytest exit code
     sys.exit(result.returncode)
+
 
 if __name__ == "__main__":
     main()

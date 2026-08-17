@@ -26,8 +26,12 @@ class KellySizingRequest(BaseModel):
     lot_size: float = Field(10000.0, description="Standard lot contract size (e.g. 10000 or 100000)", gt=0.0)
 
     # Optional PositionSizer configuration parameter overrides
-    kelly_fraction: float | None = Field(None, description="Fractional Kelly multiplier (default: 0.25)", gt=0.0, le=1.0)
-    max_position_pct: float | None = Field(None, description="Maximum position risk percentage of equity (default: 0.05)", gt=0.0, le=1.0)
+    kelly_fraction: float | None = Field(
+        None, description="Fractional Kelly multiplier (default: 0.25)", gt=0.0, le=1.0
+    )
+    max_position_pct: float | None = Field(
+        None, description="Maximum position risk percentage of equity (default: 0.05)", gt=0.0, le=1.0
+    )
     target_vol: float | None = Field(None, description="Target annual volatility (default: 0.10)", gt=0.0)
     pip_risk: float | None = Field(None, description="Minimum stop loss in pips (default: 20.0)", gt=0.0)
 
@@ -160,10 +164,7 @@ def volatility_bounds(payload: VolatilityBoundsRequest):
 
         # Guard against empty or single-element arrays
         if len(returns_np) < 2:
-            return VolatilityBoundsResponse(
-                vol_scalar=1.0,
-                realized_vol=0.0
-            )
+            return VolatilityBoundsResponse(vol_scalar=1.0, realized_vol=0.0)
 
         # Compute realized vol to align with vol_target_scalar logic:
         # realized_vol = std(recent) * sqrt(252)
@@ -188,4 +189,5 @@ def volatility_bounds(payload: VolatilityBoundsRequest):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8000)

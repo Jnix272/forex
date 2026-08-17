@@ -1,4 +1,5 @@
 """Tests for AMP dtype selection (Ampere+ → BF16)."""
+
 from __future__ import annotations
 
 import torch

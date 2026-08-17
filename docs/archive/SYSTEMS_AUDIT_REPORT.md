@@ -105,6 +105,7 @@ This means hyperparameters are fitted to the validation set — the same data le
 cal_loader = DataLoader(cal_dataset, ...)  # separate held-out fold
 scaler.fit(cal_loader)
 
+
 # Fix 2 — Fix forward() to preserve the full output tuple
 def forward(self, logits):
     direction_logits, ret_pred, conf_pred = logits  # unpack
@@ -138,12 +139,13 @@ Implement a Pydantic-based validation layer that runs on application startup:
 ```python
 from pydantic import BaseModel, validator, Field
 
+
 class LiveRiskConfig(BaseModel):
     kelly_fraction: float = Field(..., gt=0.0, lt=1.0)
     max_drawdown_pct: float = Field(..., gt=0.0, lt=100.0)
     max_position_pct: float = Field(..., gt=0.0, lt=100.0)
 
-    @validator('kelly_fraction')
+    @validator("kelly_fraction")
     def kelly_not_too_aggressive(cls, v):
         if v > 0.25:
             raise ValueError("kelly_fraction > 0.25 is dangerously aggressive")

@@ -2,6 +2,7 @@
 Tests for risk management: session limits, regime sizing, drawdown exit,
 Almgren-Chriss executor, portfolio VaR, and Kelly criterion.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,14 +27,15 @@ from sizing.kelly_criterion import (
 # 1. SessionLimitsEnforcer
 # ---------------------------------------------------------------------------
 
+
 class TestSessionLimitsEnforcer:
     @pytest.fixture
     def enforcer(self):
         limits = {
-            "asia":   {"max_lots": 1.0, "max_open_trades": 3, "hours_utc": (0, 9)},
+            "asia": {"max_lots": 1.0, "max_open_trades": 3, "hours_utc": (0, 9)},
             "london": {"max_lots": 3.0, "max_open_trades": 5, "hours_utc": (7, 16)},
-            "ny":     {"max_lots": 3.0, "max_open_trades": 5, "hours_utc": (12, 21)},
-            "off":    {"max_lots": 0.5, "max_open_trades": 1, "hours_utc": (21, 24)},
+            "ny": {"max_lots": 3.0, "max_open_trades": 5, "hours_utc": (12, 21)},
+            "off": {"max_lots": 0.5, "max_open_trades": 1, "hours_utc": (21, 24)},
         }
         return SessionLimitsEnforcer(session_limits=limits)
 
@@ -50,7 +52,7 @@ class TestSessionLimitsEnforcer:
             assert result["session"] == "london", f"Hour {hour} should be london"
 
     def test_asia_london_overlap(self, enforcer):
-        # Summer: Asia still open + London BST open around 07–09 UTC
+        # Summer: Asia still open + London BST open around 07–09 UTC  # noqa: RUF003
         result = enforcer.check(7, 0.0, 0)
         assert result["session"] == "asia_london"
 
@@ -67,7 +69,7 @@ class TestSessionLimitsEnforcer:
             assert result["session"] == "off", f"Hour {hour} should be off"
 
     def test_london_ny_overlap(self, enforcer):
-        # Mid-summer DST: London/NY overlap ~13:30–15:30 UTC → policy key london_ny
+        # Mid-summer DST: London/NY overlap ~13:30–15:30 UTC → policy key london_ny  # noqa: RUF003
         result = enforcer.check(14, 0.0, 0)
         assert result["session"] == "london_ny"
 
@@ -124,14 +126,20 @@ class TestSessionLimitsEnforcer:
 # 2. RegimePositionSizer
 # ---------------------------------------------------------------------------
 
+
 class TestRegimePositionSizer:
     @pytest.fixture
     def sizer(self):
         return RegimePositionSizer(
-            base_kelly=0.25, max_kelly=0.40, min_kelly=0.05,
-            corr_crisis_thresh=0.70, corr_crisis_scale=0.50,
-            hurst_trending=0.60, hurst_mean_rev=0.40,
-            trending_bonus=1.20, mean_rev_penalty=0.75,
+            base_kelly=0.25,
+            max_kelly=0.40,
+            min_kelly=0.05,
+            corr_crisis_thresh=0.70,
+            corr_crisis_scale=0.50,
+            hurst_trending=0.60,
+            hurst_mean_rev=0.40,
+            trending_bonus=1.20,
+            mean_rev_penalty=0.75,
         )
 
     def test_normal_regime(self, sizer):
@@ -184,10 +192,10 @@ class TestRegimePositionSizer:
         assert result["lots"] == 0.0
 
 
-
 # ---------------------------------------------------------------------------
 # 3. DrawdownAwareExitManager
 # ---------------------------------------------------------------------------
+
 
 class TestDrawdownAwareExitManager:
     def test_continue_under_soft_threshold(self):
@@ -214,7 +222,10 @@ class TestDrawdownAwareExitManager:
 
     def test_halt_after_hard_drawdown(self):
         dm = DrawdownAwareExitManager(
-            soft_dd=0.05, hard_dd=0.10, daily_limit=0.03, rec_bars=5,
+            soft_dd=0.05,
+            hard_dd=0.10,
+            daily_limit=0.03,
+            rec_bars=5,
         )
         dm.update(10000, 0)
         dm.update(10100, 100)
@@ -225,7 +236,10 @@ class TestDrawdownAwareExitManager:
 
     def test_consecutive_losses_reduce_size(self):
         dm = DrawdownAwareExitManager(
-            soft_dd=0.50, hard_dd=0.90, daily_limit=0.90, max_cons=3,
+            soft_dd=0.50,
+            hard_dd=0.90,
+            daily_limit=0.90,
+            max_cons=3,
         )
         eq = 10000
         for _ in range(4):
@@ -256,6 +270,7 @@ class TestDrawdownAwareExitManager:
 # ---------------------------------------------------------------------------
 # 4. AlmgrenChrissExecutor
 # ---------------------------------------------------------------------------
+
 
 class TestAlmgrenChrissExecutor:
     def test_schedule_sums_to_total(self):
@@ -292,6 +307,7 @@ class TestAlmgrenChrissExecutor:
 # 5. PortfolioVaR
 # ---------------------------------------------------------------------------
 
+
 class TestPortfolioVaR:
     @pytest.fixture
     def var_calc(self):
@@ -304,7 +320,8 @@ class TestPortfolioVaR:
 
     def test_var_positive_with_positions(self, var_calc):
         result = var_calc.parametric_var(
-            {"EURUSD": 1.0, "GBPUSD": 0.8}, 10000,
+            {"EURUSD": 1.0, "GBPUSD": 0.8},
+            10000,
         )
         assert result["var_pct"] > 0
         assert result["var_usd"] > 0
@@ -315,7 +332,8 @@ class TestPortfolioVaR:
 
     def test_cvar_exceeds_var(self, var_calc):
         result = var_calc.parametric_var(
-            {"EURUSD": 1.0, "GBPUSD": 0.8}, 10000,
+            {"EURUSD": 1.0, "GBPUSD": 0.8},
+            10000,
         )
         assert result["cvar_usd"] >= result["var_usd"]
 
@@ -325,7 +343,8 @@ class TestPortfolioVaR:
 
     def test_correlation_in_range(self, var_calc):
         result = var_calc.parametric_var(
-            {"EURUSD": 1.0, "GBPUSD": 0.8}, 10000,
+            {"EURUSD": 1.0, "GBPUSD": 0.8},
+            10000,
         )
         assert -1.0 <= result["correlation_avg"] <= 1.0
 
@@ -333,6 +352,7 @@ class TestPortfolioVaR:
 # ---------------------------------------------------------------------------
 # 6. Kelly Criterion functions
 # ---------------------------------------------------------------------------
+
 
 class TestKellyCriterion:
     def test_kelly_binary_positive_edge(self):
@@ -384,6 +404,7 @@ class TestKellyCriterion:
 # ---------------------------------------------------------------------------
 # 7. PositionSizer (legacy adapter)
 # ---------------------------------------------------------------------------
+
 
 class TestPositionSizer:
     def test_size_position_returns_expected_keys(self):

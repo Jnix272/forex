@@ -55,7 +55,7 @@ class LiveLogger:
                 ch.setFormatter(logging.Formatter("%(message)s"))
                 logger.addHandler(ch)
         self._log = logger
-        self._jsonl = open(jsonl_path, "a", encoding="utf-8")
+        self._jsonl = open(jsonl_path, "a", encoding="utf-8")  # noqa: SIM115
         atexit.register(self.close)
         self.event("INFO", "startup", "live logger initialized")
         return {"log": log_path, "jsonl": jsonl_path}

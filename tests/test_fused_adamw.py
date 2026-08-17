@@ -1,4 +1,5 @@
-"""Fused AdamW builder — CUDA fused kernel with eager / apex fallbacks."""
+"""Fused AdamW builder - CUDA fused kernel with eager / apex fallbacks."""
+
 from __future__ import annotations
 
 import torch

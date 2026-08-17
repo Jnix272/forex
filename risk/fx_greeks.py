@@ -1,5 +1,5 @@
 """
-risk/fx_greeks.py — FX Greeks for option-like exposures
+risk/fx_greeks.py - FX Greeks for option-like exposures
 
 Computes delta, gamma, theta, vega, rho for standard FX option models on an
 underlying spot and a strike, plus position-adjusted portfolio Greeks.
@@ -25,6 +25,7 @@ from dataclasses import dataclass
 def _norm_cdf(x: float) -> float:
     try:
         from scipy.stats import norm
+
         return float(norm.cdf(x))
     except ImportError:
         return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
@@ -33,6 +34,7 @@ def _norm_cdf(x: float) -> float:
 def _norm_pdf(x: float) -> float:
     try:
         from scipy.stats import norm
+
         return float(norm.pdf(x))
     except ImportError:
         return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
@@ -41,6 +43,7 @@ def _norm_pdf(x: float) -> float:
 @dataclass
 class FxGreeks:
     """Greeks for a single FX option-like position."""
+
     delta: float
     gamma: float
     theta: float
@@ -110,7 +113,7 @@ class FxOptionGreeks:
         return self.spot * math.exp((self.rd - self.rf) * self.t)
 
     def _d1d2(self) -> tuple:
-        t, v, s, k = self.t, self.vol, self.spot, self.strike
+        t, v, _s, k = self.t, self.vol, self.spot, self.strike
         if t <= 0 or v <= 1e-9:
             raise ValueError("tenor must be > 0 and vol > 0 to price greeks")
         f = self.forward()
@@ -188,8 +191,13 @@ def compute_greeks(
 ) -> FxGreeks:
     """One-call helper: greeks for a position of ``quantity`` base units."""
     g = FxOptionGreeks(
-        spot=spot, strike=strike, tenor_years=tenor_years, vol=vol,
-        rate_dom=rate_dom, rate_for=rate_for, is_jpy=_is_jpy_pair(pair),
+        spot=spot,
+        strike=strike,
+        tenor_years=tenor_years,
+        vol=vol,
+        rate_dom=rate_dom,
+        rate_for=rate_for,
+        is_jpy=_is_jpy_pair(pair),
     ).greeks(call=call)
     g.delta *= quantity
     g.gamma *= quantity
@@ -250,11 +258,15 @@ class PortfolioGreeks:
             if len(pair) != 6:
                 continue
             g = compute_greeks(
-                pair=pair, spot=float(leg["spot"]), strike=float(leg["strike"]),
+                pair=pair,
+                spot=float(leg["spot"]),
+                strike=float(leg["strike"]),
                 tenor_years=float(leg.get("tenor_years", 1.0)),
-                vol=float(leg.get("vol", 0.10)), rate_dom=float(leg.get("rate_dom", 0.02)),
+                vol=float(leg.get("vol", 0.10)),
+                rate_dom=float(leg.get("rate_dom", 0.02)),
                 rate_for=float(leg.get("rate_for", 0.01)),
-                call=bool(leg.get("call", True)), quantity=float(leg.get("quantity", 1.0)),
+                call=bool(leg.get("call", True)),
+                quantity=float(leg.get("quantity", 1.0)),
             )
             out[pair[:3]] = out.get(pair[:3], 0.0) + g.delta
         return {k: round(v, 6) for k, v in out.items()}

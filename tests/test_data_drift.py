@@ -3,6 +3,7 @@ Tests for drift.data_drift (Improvement #4): feature distribution drift, SHAP
 attribution drift, concept-drift detectors, adversarial validation, and the
 orchestrator.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -39,16 +40,17 @@ def live_features_same(ref_features):
 
 @pytest.fixture
 def live_features_drifted(ref_features):
-    rng = np.random.default_rng(2)
+    np.random.default_rng(2)
     return {
-        "f1": ref_features["f1"] + 3.0,   # big location shift
-        "f2": ref_features["f2"] * 5.0,   # big scale shift
+        "f1": ref_features["f1"] + 3.0,  # big location shift
+        "f2": ref_features["f2"] * 5.0,  # big scale shift
     }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Feature distribution drift
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_psi_identical():
     a = np.random.default_rng(0).normal(0.0, 1.0, 5000)
@@ -86,6 +88,7 @@ def test_feature_drift_to_event_shape(ref_features, live_features_drifted):
 # SHAP attribution drift
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_shap_drift_same_importance():
     ref = {"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1}
     live = {"a": 0.41, "b": 0.30, "c": 0.20, "d": 0.09}
@@ -112,6 +115,7 @@ def test_shap_drift_normalised_weights():
 # ═════════════════════════════════════════════════════════════════════════════
 # Concept-drift detectors
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_adwin_detects_shift():
     adwin = ADWIN(min_window=20)
@@ -175,6 +179,7 @@ def test_concept_tracker_score_and_events():
 # Adversarial validation
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_adversarial_validation_identical():
     rng = np.random.default_rng(3)
     X = rng.normal(0.0, 1.0, (300, 5))
@@ -202,6 +207,7 @@ def test_adversarial_validation_insufficient():
 # Orchestrator
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_run_data_drift_check_clean(ref_features, live_features_same):
     res = run_data_drift_check(ref_features, live_features_same)
     assert res["alert"] is False
@@ -211,7 +217,8 @@ def test_run_data_drift_check_clean(ref_features, live_features_same):
 
 def test_run_data_drift_check_alert(ref_features, live_features_drifted):
     res = run_data_drift_check(
-        ref_features, live_features_drifted,
+        ref_features,
+        live_features_drifted,
         ref_shap_importance={"f1": 0.5, "f2": 0.5},
         live_shap_importance={"f1": 0.1, "f2": 0.9},
     )

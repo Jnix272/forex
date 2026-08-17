@@ -2,10 +2,11 @@
 features/feature_engineering.py  (v2 - Polars Edition)
 All microstructure + momentum + cross-asset + sentiment features using Polars Expressions.
 """
+
+import os
 import time
 from datetime import UTC
 
-import os
 import numpy as np
 import polars as pl
 from sklearn.linear_model import LogisticRegression
@@ -13,12 +14,24 @@ from sklearn.linear_model import LogisticRegression
 from infrastructure.logging_utils import log_feature_build
 
 # === Polars Sanitize =======================================================================================-
-_SANITIZE_NO_CLIP = frozenset({
-    "open", "high", "low", "close", "volume",
-    "bid_close", "ask_close", "spread", "spread_pips",
-    "expected_latency_ms", "timestamp_utc",
-    "cot_net_hf", "cot_net_comm",
-})
+_SANITIZE_NO_CLIP = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "bid_close",
+        "ask_close",
+        "spread",
+        "spread_pips",
+        "expected_latency_ms",
+        "timestamp_utc",
+        "cot_net_hf",
+        "cot_net_comm",
+    }
+)
+
 
 def sanitize_frame(df: pl.DataFrame, fill_value: float = 0.0, context: str = "frame") -> pl.DataFrame:
     cols = df.select(pl.col(pl.Float32, pl.Float64)).columns
@@ -28,16 +41,18 @@ def sanitize_frame(df: pl.DataFrame, fill_value: float = 0.0, context: str = "fr
     noclip_cols = [c for c in cols if c in _SANITIZE_NO_CLIP]
     exprs = [
         pl.when(pl.col(c).is_infinite() | pl.col(c).is_nan())
-          .then(None).otherwise(pl.col(c))
-          .fill_null(fill_value)
-          .clip(-1e6, 1e6)
-          .alias(c)
+        .then(None)
+        .otherwise(pl.col(c))
+        .fill_null(fill_value)
+        .clip(-1e6, 1e6)
+        .alias(c)
         for c in clip_cols
     ] + [
         pl.when(pl.col(c).is_infinite() | pl.col(c).is_nan())
-          .then(None).otherwise(pl.col(c))
-          .fill_null(fill_value)
-          .alias(c)
+        .then(None)
+        .otherwise(pl.col(c))
+        .fill_null(fill_value)
+        .alias(c)
         for c in noclip_cols
     ]
     return df.with_columns(exprs)
@@ -62,8 +77,7 @@ def _with_available_time(
     if "timestamp_utc" not in df.columns:
         return df
     return df.with_columns(
-        (pl.col("timestamp_utc").cast(dtype)
-         + pl.duration(minutes=int(delay_minutes))).alias("available_time")
+        (pl.col("timestamp_utc").cast(dtype) + pl.duration(minutes=int(delay_minutes))).alias("available_time")
     )
 
 
@@ -80,12 +94,9 @@ def _join_asof_available(
     right = _with_available_time(right, delay_minutes=delay_minutes, time_dtype=left_dtype)
     if right is None or "available_time" not in right.columns:
         return left
-    drop_cols = [
-        c for c in right.columns
-        if c in left.columns and c not in ("timestamp_utc", "available_time")
-    ]
+    drop_cols = [c for c in right.columns if c in left.columns and c not in ("timestamp_utc", "available_time")]
     right_join = right.drop(drop_cols).sort("available_time")
-    # Don't bring event timestamp_utc across — left already has bar time.
+    # Don't bring event timestamp_utc across - left already has bar time.
     if "timestamp_utc" in right_join.columns:
         right_join = right_join.drop("timestamp_utc")
     # Match join-key dtypes exactly (ns vs us UTC mismatches fail hard).
@@ -109,9 +120,11 @@ def order_flow_imbalance(window: int = 20) -> pl.Expr:
     vol = pl.when(pl.col("volume") == 0).then(None).otherwise(pl.col("volume"))
     return ((bv - sv) / vol).rolling_mean(window).alias("ofi")
 
+
 def order_book_imbalance_proxy() -> pl.Expr:
     r = pl.col("high") - pl.col("low") + 1e-9
     return ((pl.col("close") - pl.col("low")) / r).clip(0, 1).alias("obi_proxy")
+
 
 def trade_arrival_rate(window: int = 30) -> list[pl.Expr]:
     # Since we can't do conditional columns easily without knowing schema, we assume volume is present.
@@ -126,6 +139,7 @@ def trade_arrival_rate(window: int = 30) -> list[pl.Expr]:
 # ====================================================================================================================================================================================================================================
 # ADVANCED MICROSTRUCTURE (Improvement: Kyle's Lambda, Multi-level OBI, VPIN)
 # ====================================================================================================================================================================================================================================
+
 
 def kyles_lambda(window: int = 20) -> pl.Expr:
     """Kyle's Lambda: price impact per unit *signed* volume, in basis points.
@@ -175,23 +189,18 @@ def multi_level_obi(n_levels: int = 5, use_real_l2: bool = False) -> list[pl.Exp
         for i in range(1, n_levels + 1):
             bid_col = f"bid_sz_{i:02d}"
             ask_col = f"ask_sz_{i:02d}"
-            real_obi = (
-                (pl.col(bid_col) - pl.col(ask_col)) /
-                (pl.col(bid_col) + pl.col(ask_col) + 1e-9)
-            ).alias(f"obi_l{i}")
+            real_obi = ((pl.col(bid_col) - pl.col(ask_col)) / (pl.col(bid_col) + pl.col(ask_col) + 1e-9)).alias(
+                f"obi_l{i}"
+            )
             exprs.append(real_obi)
 
-        # Weighted aggregate OBI across all levels
-        bid_total = sum(pl.col(f"bid_sz_{i:02d}") for i in range(1, n_levels + 1))
-        ask_total = sum(pl.col(f"ask_sz_{i:02d}") for i in range(1, n_levels + 1))
-        exprs.append(
-            ((bid_total - ask_total) / (bid_total + ask_total + 1e-9)).alias("obi_aggregate")
-        )
+        bid_total = pl.sum_horizontal([pl.col(f"bid_sz_{i:02d}") for i in range(1, n_levels + 1)])
+        ask_total = pl.sum_horizontal([pl.col(f"ask_sz_{i:02d}") for i in range(1, n_levels + 1)])
+        exprs.append(((bid_total - ask_total) / (bid_total + ask_total + 1e-9)).alias("obi_aggregate"))
         return exprs
 
     # Fallback: OHLC-simulated proxy (when L2 data unavailable)
     for i in range(1, n_levels + 1):
-        (pl.col("high") - pl.col("low")) / n_levels
         bid_vol = pl.when(pl.col("close") > pl.col("open")).then(pl.col("volume") / n_levels).otherwise(pl.lit(0))
         ask_vol = pl.when(pl.col("close") < pl.col("open")).then(pl.col("volume") / n_levels).otherwise(pl.lit(0))
         obi = (bid_vol - ask_vol) / (bid_vol + ask_vol + 1e-9)
@@ -201,7 +210,7 @@ def multi_level_obi(n_levels: int = 5, use_real_l2: bool = False) -> list[pl.Exp
 
 def vpin(bucket_size: int = 50, n_buckets: int = 50) -> pl.Expr:
     """Volume-Synchronized Probability of Informed Trading (VPIN).
-    
+
     Measures order flow toxicity using volume buckets.
     Requires buy/sell volume classification (approximated from close vs open).
     """
@@ -237,12 +246,13 @@ def realized_spread(window: int = 10) -> pl.Expr:
 # REGIME DETECTION UPGRADE: HMM + CPD (Improvement: Regime Detection)
 # ====================================================================================================================================================================================================================================
 
+
 def hmm_regime_probs(n_states: int = 3, window: int = 60, feature: str = "close") -> list[pl.Expr]:
     """DS-007: Volatility regime bucket (NOT a true HMM).
 
     Bins rolling volatility into terciles and computes rolling state membership
     probabilities. Despite the legacy name, this is a simple volatility bucket
-    classifier — not a Hidden Markov Model.
+    classifier - not a Hidden Markov Model.
 
     Output columns are named 'vol_regime_state_N_prob' (renamed from 'hmm_state_N_prob').
     """
@@ -257,16 +267,12 @@ def hmm_regime_probs(n_states: int = 3, window: int = 60, feature: str = "close"
     elif n_states == 3:
         vol_q33 = vol.rolling_quantile(0.33, window_size=window)
         vol_q66 = vol.rolling_quantile(0.66, window_size=window)
-        state = pl.when(vol <= vol_q33).then(0) \
-                .when(vol <= vol_q66).then(1) \
-                .otherwise(2)
+        state = pl.when(vol <= vol_q33).then(0).when(vol <= vol_q66).then(1).otherwise(2)
     else:
         # Generic N-way split using equal quantiles
         vol_q33 = vol.rolling_quantile(0.33, window_size=window)
         vol_q66 = vol.rolling_quantile(0.66, window_size=window)
-        state = pl.when(vol <= vol_q33).then(0) \
-                .when(vol <= vol_q66).then(1) \
-                .otherwise(2)
+        state = pl.when(vol <= vol_q33).then(0).when(vol <= vol_q66).then(1).otherwise(2)
         n_states = 3
 
     for s in range(n_states):
@@ -276,8 +282,10 @@ def hmm_regime_probs(n_states: int = 3, window: int = 60, feature: str = "close"
     # volatility-bucket fallback path too when HMM/Numba is unavailable.
     exprs.append(state.cast(pl.Int32).alias("regime_class"))
     exprs.append(
-        pl.when(state == 0).then(pl.lit(-1.0))
-        .when(state == 2).then(pl.lit(1.0))
+        pl.when(state == 0)
+        .then(pl.lit(-1.0))
+        .when(state == 2)
+        .then(pl.lit(1.0))
         .otherwise(pl.lit(0.0))
         .alias("regime_label")
     )
@@ -286,7 +294,7 @@ def hmm_regime_probs(n_states: int = 3, window: int = 60, feature: str = "close"
 
 def cpd_ret(data: str = "close", window: int = 60) -> pl.Expr:
     """Change Point Detection (CPD) using rolling CUSUM on returns.
-    
+
     Returns CUSUM statistic for regime change detection.
     """
     ret = (pl.col(data) / pl.col(data).shift(1)).log()
@@ -298,7 +306,7 @@ def cpd_ret(data: str = "close", window: int = 60) -> pl.Expr:
 
 def regime_persistence(window: int = 20) -> pl.Expr:
     """Regime persistence: how long current regime has persisted.
-    
+
     Based on sign of returns or volatility regime.
     """
     ret = (pl.col("close") / pl.col("close").shift(1)).log()
@@ -313,17 +321,18 @@ def regime_persistence(window: int = 20) -> pl.Expr:
 # CIRCUIT BREAKERS / KILL SWITCHES (Improvement: Risk Controls)
 # ====================================================================================================================================================================================================================================
 
+
 def circuit_breaker_features(
     max_position_pct: float = 0.05,
     max_daily_loss_pct: float = 0.03,
     max_drawdown_pct: float = 0.10,
-    var_window: int = 252
+    var_window: int = 252,
 ) -> list[pl.Expr]:
     """Generate circuit breaker / kill switch features.
-    
+
     Returns flags for:
     - Position size limits
-    - Daily loss limits  
+    - Daily loss limits
     - Drawdown limits
     - VaR breach
     """
@@ -359,10 +368,10 @@ def position_limit_flags(
     """Position sizing limits based on ATR and account risk.
 
     PIPE-002: pip_value now computed dynamically per currency pair.
-    - USD-quoted pairs (EURUSD, GBPUSD): pip_value = $10/lot (0.0001 × 100,000)
-    - JPY-quoted pairs (USDJPY, EURJPY): pip_value ≈ $6.5–9.3/lot (0.01 × 100,000 / rate)
+    - USD-quoted pairs (EURUSD, GBPUSD): pip_value = $10/lot (0.0001 x 100,000)
+    - JPY-quoted pairs (USDJPY, EURJPY): pip_value ≈ $6.5–9.3/lot (0.01 x 100,000 / rate)
       Approximated as $7.0 (conservative) since exact rate isn't available at feature time.
-    """
+    """  # noqa: RUF002
     pair_upper = str(pair).upper()
 
     # Calculate exact pip value in account currency (assuming USD account)
@@ -393,6 +402,7 @@ def position_limit_flags(
 # ====================================================================================================================================================================================================================================
 # EMBEDDING FEATURES (Improvement: FinBERT + Vector Storage)
 # ====================================================================================================================================================================================================================================
+
 
 def embedding_placeholders(dim: int = 8) -> list[pl.Expr]:
     """Schema-compatible FinBERT placeholders when no embeddings are available.
@@ -433,6 +443,7 @@ def compute_finbert_embeddings(
 
     try:
         from transformers import AutoModel, AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)
         model.eval()
@@ -443,19 +454,20 @@ def compute_finbert_embeddings(
     all_embeddings = []
     with torch.no_grad():
         for i in range(0, len(headlines), batch_size):
-            batch = headlines[i:i + batch_size]
-            inputs = tokenizer(batch, padding=True, truncation=True,
-                             max_length=max_length, return_tensors="pt")
+            batch = headlines[i : i + batch_size]
+            inputs = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
             outputs = model(**inputs)
             cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
             all_embeddings.append(cls_embeddings)
 
     import numpy as np
+
     embeddings = np.vstack(all_embeddings)
 
     # PCA reduction to output_dim
     if embeddings.shape[1] > output_dim:
         from sklearn.decomposition import PCA
+
         pca = PCA(n_components=output_dim)
         embeddings = pca.fit_transform(embeddings)
 
@@ -472,13 +484,10 @@ def compute_finbert_embeddings(
 # FEATURE DISCOVERY / AUTO-GENERATION
 # ====================================================================================================================================================================================================================================
 
-def feature_discovery_mutual_info(
-    target: str = "ret_5",
-    candidates: list[str] = None,
-    window: int = 20
-) -> pl.Expr:
+
+def feature_discovery_mutual_info(target: str = "ret_5", candidates: list[str] | None = None, window: int = 20) -> pl.Expr:
     """Mutual Information between candidates and target (approximation).
-    
+
     Uses correlation ratio as proxy for MI.
     """
     if candidates is None:
@@ -499,6 +508,7 @@ def feature_discovery_mutual_info(
 # TENSORRT / ONNX EXPORT HELPERS
 # ====================================================================================================================================================================================================================================
 
+
 def onnx_compatible_features() -> list[str]:
     """Return list of feature names compatible with ONNX export.
 
@@ -507,34 +517,58 @@ def onnx_compatible_features() -> list[str]:
     """
     # These are the core features that export cleanly to ONNX
     return [
-        "close", "open", "high", "low", "volume",
-        # lag_returns() produces ret_{w} — NOT log_ret_{w}
-        "ret_5", "ret_20", "ret_60",
-        "atr_6", "atr_20",
-        # rolling_volatility(20) produces vol_20 — NOT rolling_vol_20
+        "close",
+        "open",
+        "high",
+        "low",
+        "volume",
+        # lag_returns() produces ret_{w} - NOT log_ret_{w}
+        "ret_5",
+        "ret_20",
+        "ret_60",
+        "atr_6",
+        "atr_20",
+        # rolling_volatility(20) produces vol_20 - NOT rolling_vol_20
         "vol_20",
-        "rsi_14", "macd", "macd_sig", "macd_hist",
-        "bb_pct", "bb_width",
-        "stoch_k", "stoch_d", "williams_r", "cci",
-        "ofi", "obi_proxy", "vpin",
-        "trend_regime", "range_regime", "volatility_regime",
+        "rsi_14",
+        "macd",
+        "macd_sig",
+        "macd_hist",
+        "bb_pct",
+        "bb_width",
+        "stoch_k",
+        "stoch_d",
+        "williams_r",
+        "cci",
+        "ofi",
+        "obi_proxy",
+        "vpin",
+        "trend_regime",
+        "range_regime",
+        "volatility_regime",
         # HAELTFeatureBuilder.build() produces time_sin/time_cos/day_sin/day_cos
         # NOT hour_sin/hour_cos/dow_sin/dow_cos
-        "time_sin", "time_cos", "day_sin", "day_cos",
+        "time_sin",
+        "time_cos",
+        "day_sin",
+        "day_cos",
     ]
 
 
 def quantize_aware_features() -> list[str]:
     """Features suitable for INT8 quantization (bounded range)."""
     return [
-        "stoch_k", "stoch_d",  # 0-100
+        "stoch_k",
+        "stoch_d",  # 0-100
         "rsi_14",  # 0-100
         "williams_r",  # -100 to 0
         "cci",  # typically -300 to 300
         "bb_pct",  # 0-1
-        # HAELTFeatureBuilder produces time_sin/time_cos/day_sin/day_cos — NOT hour_*/dow_*
-        "time_sin", "time_cos",  # -1 to 1
-        "day_sin", "day_cos",   # -1 to 1
+        # HAELTFeatureBuilder produces time_sin/time_cos/day_sin/day_cos - NOT hour_*/dow_*
+        "time_sin",
+        "time_cos",  # -1 to 1
+        "day_sin",
+        "day_cos",  # -1 to 1
     ]
 
 
@@ -542,19 +576,21 @@ def quantize_aware_features() -> list[str]:
 # AUTOMATED MODEL CARDS (Improvement: Governance)
 # ====================================================================================================================================================================================================================================
 
+
 def model_card_template(
     model_name: str,
     version: str,
     features: list[str],
     metrics: dict,
     data_window: str,
-    known_limitations: list[str] = None
+    known_limitations: list[str] | None = None,
 ) -> dict:
     """Generate standardized model card for auditability.
-    
+
     Returns dict that can be saved as JSON alongside model.
     """
     from datetime import datetime, timedelta
+
     _now = datetime.now(UTC)
     return {
         "model_name": model_name,
@@ -572,7 +608,8 @@ def model_card_template(
             "frequency": "1min",
         },
         "metrics": metrics,
-        "known_limitations": known_limitations or [
+        "known_limitations": known_limitations
+        or [
             "Trained on 1-min data; may not generalize to other timeframes",
             "Regime-dependent performance; monitor regime features",
             "No on-chain/satellite data in current version",
@@ -588,9 +625,10 @@ def model_card_template(
 # POPULATION-BASED HPO (Improvement: Better Optuna)
 # ====================================================================================================================================================================================================================================
 
+
 def population_based_hpo_config() -> dict:
     """Configuration for Population-Based Training (PBT) style HPO.
-    
+
     Returns config dict for Optuna/ray tune integration.
     """
     return {
@@ -616,16 +654,16 @@ def population_based_hpo_config() -> dict:
 # === ATR-6 + Volatility ====================================================================================
 def average_true_range(window: int = 6) -> pl.Expr:
     prev_close = pl.col("close").shift(1)
-    tr = pl.max_horizontal([
-        pl.col("high") - pl.col("low"),
-        (pl.col("high") - prev_close).abs(),
-        (pl.col("low") - prev_close).abs()
-    ])
+    tr = pl.max_horizontal(
+        [pl.col("high") - pl.col("low"), (pl.col("high") - prev_close).abs(), (pl.col("low") - prev_close).abs()]
+    )
     return tr.rolling_mean(window).alias(f"atr_{window}")
+
 
 def rolling_volatility(window: int = 20) -> pl.Expr:
     ret = (pl.col("close") / pl.col("close").shift(1)).log()
     return ret.rolling_std(window).alias(f"vol_{window}")
+
 
 def bollinger_bands(window: int = 20, n_std: float = 2.0) -> list[pl.Expr]:
     mid = pl.col("close").rolling_mean(window)
@@ -639,28 +677,29 @@ def bollinger_bands(window: int = 20, n_std: float = 2.0) -> list[pl.Expr]:
         up.alias("bb_upper"),
         lo.alias("bb_lower"),
         width.alias("bb_width"),
-        pct.alias("bb_pct")
+        pct.alias("bb_pct"),
     ]
+
 
 # === Momentum ================================================================================================-
 def rsi(period: int = 14) -> pl.Expr:
     d = pl.col("close").diff()
     g = d.clip(0, float("inf")).rolling_mean(period)
-    l = (-d.clip(float("-inf"), 0)).rolling_mean(period) + 1e-9
+    l = (-d.clip(float("-inf"), 0)).rolling_mean(period) + 1e-9  # noqa: E741
     return (100 - 100 / (1 + g / l)).alias(f"rsi_{period}")
+
 
 def macd(fast: int = 12, slow: int = 26, signal: int = 9) -> list[pl.Expr]:
     ef = pl.col("close").ewm_mean(span=fast, adjust=False)
     es = pl.col("close").ewm_mean(span=slow, adjust=False)
     line = ef - es
     sig = line.ewm_mean(span=signal, adjust=False)
-    return [
-        line.alias("macd"),
-        sig.alias("macd_sig"),
-        (line - sig).alias("macd_hist")
-    ]
+    return [line.alias("macd"), sig.alias("macd_sig"), (line - sig).alias("macd_hist")]
 
-def lag_returns(windows: list[int] = [5, 20, 60]) -> list[pl.Expr]:
+
+def lag_returns(windows: list[int] | None = None) -> list[pl.Expr]:
+    if windows is None:
+        windows = [5, 20, 60]
     lp = pl.col("close").log()
     return [(lp - lp.shift(w)).alias(f"ret_{w}") for w in windows]
 
@@ -668,6 +707,7 @@ def lag_returns(windows: list[int] = [5, 20, 60]) -> list[pl.Expr]:
 # ====================================================================================================================================================================================================================================
 # CLASSICAL INDICATORS (Improvement #2)
 # ====================================================================================================================================================================================================================================
+
 
 def stochastic_oscillator(k_period: int = 14, d_period: int = 3) -> list[pl.Expr]:
     """Stochastic Oscillator %K and %D."""
@@ -697,27 +737,33 @@ def cci(period: int = 20) -> pl.Expr:
 # CANDLESTICK PATTERNS (Improvement: Pattern Recognition)
 # ====================================================================================================================================================================================================================================
 
+
 def candle_body() -> pl.Expr:
     """Candle body size (absolute close - open)."""
     return (pl.col("close") - pl.col("open")).abs().alias("candle_body")
+
 
 def candle_range() -> pl.Expr:
     """Full candle range (high - low)."""
     return (pl.col("high") - pl.col("low")).alias("candle_range")
 
+
 def upper_shadow() -> pl.Expr:
     """Upper shadow length."""
     return (pl.col("high") - pl.max_horizontal("open", "close")).alias("upper_shadow")
 
+
 def lower_shadow() -> pl.Expr:
     """Lower shadow length."""
     return (pl.min_horizontal("open", "close") - pl.col("low")).alias("lower_shadow")
+
 
 def is_doji(threshold: float = 0.1) -> pl.Expr:
     """Doji: body <= threshold * range. Threshold is Optuna-tunable."""
     body = (pl.col("close") - pl.col("open")).abs()
     rng = pl.col("high") - pl.col("low") + 1e-9
     return (body / rng <= threshold).cast(pl.Int32).alias("is_doji")
+
 
 def is_hammer(body_ratio: float = 0.3, lower_ratio: float = 0.6, upper_ratio: float = 0.1) -> pl.Expr:
     """Hammer: small body, long lower shadow, little upper shadow.
@@ -731,6 +777,7 @@ def is_hammer(body_ratio: float = 0.3, lower_ratio: float = 0.6, upper_ratio: fl
     cond = (body / rng <= body_ratio) & (lower / rng >= lower_ratio) & (upper / rng <= upper_ratio)
     return cond.cast(pl.Int32).alias("is_hammer")
 
+
 def is_shooting_star() -> pl.Expr:
     """Shooting star: small body, long upper shadow, little lower shadow."""
     body = (pl.col("close") - pl.col("open")).abs()
@@ -740,27 +787,46 @@ def is_shooting_star() -> pl.Expr:
     cond = (body / rng <= 0.3) & (upper / rng >= 0.6) & (lower / rng <= 0.1)
     return cond.cast(pl.Int32).alias("is_shooting_star")
 
+
 def is_engulfing() -> pl.Expr:
     """Bullish/Bearish Engulfing: current body engulfs previous body."""
     prev_open = pl.col("open").shift(1)
     prev_close = pl.col("close").shift(1)
     (prev_close - prev_open).abs()
     (pl.col("close") - pl.col("open")).abs()
-    bullish = (prev_close < prev_open) & (pl.col("close") > pl.col("open")) & \
-              (pl.col("open") <= prev_close) & (pl.col("close") >= prev_open)
-    bearish = (prev_close > prev_open) & (pl.col("close") < pl.col("open")) & \
-              (pl.col("open") >= prev_close) & (pl.col("close") <= prev_open)
+    bullish = (
+        (prev_close < prev_open)
+        & (pl.col("close") > pl.col("open"))
+        & (pl.col("open") <= prev_close)
+        & (pl.col("close") >= prev_open)
+    )
+    bearish = (
+        (prev_close > prev_open)
+        & (pl.col("close") < pl.col("open"))
+        & (pl.col("open") >= prev_close)
+        & (pl.col("close") <= prev_open)
+    )
     return (bullish.cast(pl.Int32) - bearish.cast(pl.Int32)).alias("engulfing")
+
 
 def is_harami() -> pl.Expr:
     """Harami: current body inside previous body."""
     prev_open = pl.col("open").shift(1)
     prev_close = pl.col("close").shift(1)
-    bullish = (prev_close < prev_open) & (pl.col("close") > pl.col("open")) & \
-              (pl.col("open") > prev_close) & (pl.col("close") < prev_open)
-    bearish = (prev_close > prev_open) & (pl.col("close") < pl.col("open")) & \
-              (pl.col("open") < prev_close) & (pl.col("close") > prev_open)
+    bullish = (
+        (prev_close < prev_open)
+        & (pl.col("close") > pl.col("open"))
+        & (pl.col("open") > prev_close)
+        & (pl.col("close") < prev_open)
+    )
+    bearish = (
+        (prev_close > prev_open)
+        & (pl.col("close") < pl.col("open"))
+        & (pl.col("open") < prev_close)
+        & (pl.col("close") > prev_open)
+    )
     return (bullish.cast(pl.Int32) - bearish.cast(pl.Int32)).alias("harami")
+
 
 def is_morning_star() -> pl.Expr:
     """Morning Star: 3-candle bullish reversal."""
@@ -781,6 +847,7 @@ def is_morning_star() -> pl.Expr:
     cond = c1_bearish & c2_small & c2_gap_down & c3_bullish & c3_gap_up & c3_closes_above
     return cond.cast(pl.Int32).alias("morning_star")
 
+
 def is_evening_star() -> pl.Expr:
     """Evening Star: 3-candle bearish reversal."""
     c1_open = pl.col("open").shift(2)
@@ -800,25 +867,26 @@ def is_evening_star() -> pl.Expr:
     cond = c1_bullish & c2_small & c2_gap_up & c3_bearish & c3_gap_down & c3_closes_below
     return cond.cast(pl.Int32).alias("evening_star")
 
+
 def is_three_white_soldiers() -> pl.Expr:
     """Three White Soldiers: 3 consecutive bullish candles with higher closes."""
     c1_bullish = pl.col("close").shift(2) > pl.col("open").shift(2)
     c2_bullish = pl.col("close").shift(1) > pl.col("open").shift(1)
     c3_bullish = pl.col("close") > pl.col("open")
-    higher_closes = (pl.col("close") > pl.col("close").shift(1)) & \
-                    (pl.col("close").shift(1) > pl.col("close").shift(2))
+    higher_closes = (pl.col("close") > pl.col("close").shift(1)) & (pl.col("close").shift(1) > pl.col("close").shift(2))
     cond = c1_bullish & c2_bullish & c3_bullish & higher_closes
     return cond.cast(pl.Int32).alias("three_white_soldiers")
+
 
 def is_three_black_crows() -> pl.Expr:
     """Three Black Crows: 3 consecutive bearish candles with lower closes."""
     c1_bearish = pl.col("close").shift(2) < pl.col("open").shift(2)
     c2_bearish = pl.col("close").shift(1) < pl.col("open").shift(1)
     c3_bearish = pl.col("close") < pl.col("open")
-    lower_closes = (pl.col("close") < pl.col("close").shift(1)) & \
-                   (pl.col("close").shift(1) < pl.col("close").shift(2))
+    lower_closes = (pl.col("close") < pl.col("close").shift(1)) & (pl.col("close").shift(1) < pl.col("close").shift(2))
     cond = c1_bearish & c2_bearish & c3_bearish & lower_closes
     return cond.cast(pl.Int32).alias("three_black_crows")
+
 
 def all_candlestick_patterns() -> list[pl.Expr]:
     """Return all candlestick pattern expressions."""
@@ -843,13 +911,14 @@ def all_candlestick_patterns() -> list[pl.Expr]:
 # VOLUME-WEIGHTED FEATURES (Improvement #4)
 # ====================================================================================================================================================================================================================================
 
+
 def vwap_bands(window: int = 60, n_std: float = 2.0) -> list[pl.Expr]:
     """VWAP with standard deviation bands."""
     tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3
     vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume"))
     vwap = (tp * vol).rolling_sum(window) / vol.rolling_sum(window)
     # VWAP standard deviation (volume-weighted)
-    vwap_var = ((tp - vwap)**2 * vol).rolling_sum(window) / (vol.rolling_sum(window) + 1e-9)
+    vwap_var = ((tp - vwap) ** 2 * vol).rolling_sum(window) / (vol.rolling_sum(window) + 1e-9)
     vwap_std = vwap_var.sqrt()
     return [
         vwap.alias("vwap"),
@@ -869,6 +938,7 @@ def volume_weighted_momentum(window: int = 20) -> pl.Expr:
 # ====================================================================================================================================================================================================================================
 # VOLUME PROFILE / POINT OF CONTROL (POC)
 # ====================================================================================================================================================================================================================================
+
 
 def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int = 10) -> pl.DataFrame:
     """Volume Profile / Point-of-Control (POC) features.
@@ -891,10 +961,7 @@ def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int
     b = pl.col("__vp_bin")
     vol = pl.col("volume").cast(pl.Float64)
 
-    rolls = [
-        (pl.when(b == k).then(vol).otherwise(0.0).rolling_sum(window), k)
-        for k in range(n_bins)
-    ]
+    rolls = [(pl.when(b == k).then(vol).otherwise(0.0).rolling_sum(window), k) for k in range(n_bins)]
     tot = vol.rolling_sum(window)
 
     poc_bin = pl.concat_list([r for r, _ in rolls]).list.arg_max().cast(pl.Float64)
@@ -903,18 +970,19 @@ def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int
     va_wstd = (pl.sum_horizontal([r * (k - vw_mean) ** 2 for r, k in rolls]) / (tot + 1e-9)).sqrt()
     norm = max(1, n_bins - 1)
 
-    out = F.with_columns([
-        (poc_bin / norm).alias("vp_poc_pos"),
-        ((b.cast(pl.Float64) - poc_bin) / n_bins).alias("vp_poc_dist"),
-        (poc_vol / (tot + 1e-9)).alias("vp_poc_share"),
-        (vw_mean / norm).alias("vp_vw_pos"),
-        ((vw_mean / norm) - (poc_bin / norm)).alias("vp_skew"),
-        ((va_wstd / n_bins) * 10.0).alias("vp_va_width"),
-        pl.when((b.cast(pl.Float64) - poc_bin).abs() <= va_wstd).then(1.0).otherwise(0.0).alias("vp_in_va"),
-    ]).drop("__vp_bin")
+    out = F.with_columns(
+        [
+            (poc_bin / norm).alias("vp_poc_pos"),
+            ((b.cast(pl.Float64) - poc_bin) / n_bins).alias("vp_poc_dist"),
+            (poc_vol / (tot + 1e-9)).alias("vp_poc_share"),
+            (vw_mean / norm).alias("vp_vw_pos"),
+            ((vw_mean / norm) - (poc_bin / norm)).alias("vp_skew"),
+            ((va_wstd / n_bins) * 10.0).alias("vp_va_width"),
+            pl.when((b.cast(pl.Float64) - poc_bin).abs() <= va_wstd).then(1.0).otherwise(0.0).alias("vp_in_va"),
+        ]
+    ).drop("__vp_bin")
 
-    for c in ("vp_poc_pos", "vp_poc_dist", "vp_poc_share", "vp_vw_pos",
-              "vp_skew", "vp_va_width", "vp_in_va"):
+    for c in ("vp_poc_pos", "vp_poc_dist", "vp_poc_share", "vp_vw_pos", "vp_skew", "vp_va_width", "vp_in_va"):
         out = out.with_columns(pl.col(c).fill_null(0.0))
     return out
 
@@ -922,6 +990,7 @@ def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int
 # ====================================================================================================================================================================================================================================
 # INTRADAY VOLATILITY CLOCK (time-of-day volatility seasonality)
 # ====================================================================================================================================================================================================================================
+
 
 def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_days: int = 7) -> pl.DataFrame:
     """Intraday 'volatility clock' features.
@@ -936,26 +1005,28 @@ def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_da
     Requires columns: ``timestamp_utc`` (UTC), ``close``.
     """
     ret = (pl.col("close") / pl.col("close").shift(1)).log().abs()
-    mins_day = (pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60
-                + pl.col("timestamp_utc").dt.minute().cast(pl.Int32))
+    mins_day = pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp_utc").dt.minute().cast(
+        pl.Int32
+    )
     pos = mins_day / float(day_period)
 
     refs = [ret.shift(day_period * k) for k in range(1, k_days + 1)]
     ref_mean = pl.sum_horizontal(refs) / k_days
-    ref_std = (pl.sum_horizontal([r ** 2 for r in refs]) / k_days - ref_mean ** 2).clip(0.0, None).sqrt()
+    ref_std = (pl.sum_horizontal([r**2 for r in refs]) / k_days - ref_mean**2).clip(0.0, None).sqrt()
     typical_daily = ret.rolling_mean(day_period * k_days) * float(day_period)
     session_cum = ret.cum_sum().over(pl.col("timestamp_utc").dt.date())
     pace = session_cum / (typical_daily + 1e-9)
 
-    out = df.with_columns([
-        pos.alias("vol_clock_pos"),
-        (ret / (ref_mean + 1e-9)).clip(0.0, 10.0).alias("vol_clock_ratio"),
-        ((ret - ref_mean) / (ref_std + 1e-9)).clip(-10.0, 10.0).alias("vol_clock_z"),
-        pace.clip(0.0, 10.0).alias("vol_clock_pace"),
-        (pace - pos).clip(-5.0, 10.0).alias("vol_clock_hot"),
-    ])
-    for c in ("vol_clock_pos", "vol_clock_ratio", "vol_clock_z",
-              "vol_clock_pace", "vol_clock_hot"):
+    out = df.with_columns(
+        [
+            pos.alias("vol_clock_pos"),
+            (ret / (ref_mean + 1e-9)).clip(0.0, 10.0).alias("vol_clock_ratio"),
+            ((ret - ref_mean) / (ref_std + 1e-9)).clip(-10.0, 10.0).alias("vol_clock_z"),
+            pace.clip(0.0, 10.0).alias("vol_clock_pace"),
+            (pace - pos).clip(-5.0, 10.0).alias("vol_clock_hot"),
+        ]
+    )
+    for c in ("vol_clock_pos", "vol_clock_ratio", "vol_clock_z", "vol_clock_pace", "vol_clock_hot"):
         out = out.with_columns(pl.col(c).fill_null(0.0))
     return out
 
@@ -964,9 +1035,10 @@ def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_da
 # REGIME-GATED / INTERACTION FEATURES (Improvements #3, #5)
 # ====================================================================================================================================================================================================================================
 
-def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
+
+def regime_gated_features(existing_cols: set | None = None) -> list[pl.Expr]:
     """Create regime-specific variants of key features.
-    
+
     Args:
         existing_cols: Set of column names that exist in the DataFrame.
                        If provided, only creates expressions for available columns.
@@ -1006,9 +1078,9 @@ def regime_gated_features(existing_cols: set = None) -> list[pl.Expr]:
     return exprs
 
 
-def interaction_features(existing_cols: set = None) -> list[pl.Expr]:
+def interaction_features(existing_cols: set | None = None) -> list[pl.Expr]:
     """Explicit non-linear feature interactions for linear/weak non-linear models.
-    
+
     Args:
         existing_cols: Set of column names that exist in the DataFrame.
     """
@@ -1054,12 +1126,14 @@ def interaction_features(existing_cols: set = None) -> list[pl.Expr]:
 # FEATURE QUALITY REPORT (Improvement #1)
 # ====================================================================================================================================================================================================================================
 
+
 def compute_quality_report(df: pl.DataFrame) -> dict:
     """Compute per-feature quality metrics for monitoring.
-    
+
     Returns dict mapping feature_name -> quality_metrics
     """
     from datetime import datetime
+
     report = {
         "timestamp": datetime.now(UTC).isoformat(),
         "n_rows": len(df),
@@ -1067,41 +1141,73 @@ def compute_quality_report(df: pl.DataFrame) -> dict:
         "features": {},
     }
 
-    numeric_cols = df.select(pl.col(pl.NUMERIC_DTYPES)).columns
+    numeric_dtypes = (
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+        pl.Float32,
+        pl.Float64,
+    )
+    numeric_cols = df.select(pl.col(numeric_dtypes)).columns
     for col in numeric_cols:
         s = df[col]
         n_null = s.null_count()
         n_total = len(s)
-        vals = s.drop_nulls()
+        vals = s.cast(pl.Float64, strict=False).drop_nulls()
 
         if len(vals) == 0:
             report["features"][col] = {
-                "null_pct": 100.0, "constant": True, "dtype": str(s.dtype),
+                "null_pct": 100.0,
+                "constant": True,
+                "dtype": str(s.dtype),
+            }
+            continue
+
+        values = vals.to_numpy()
+        if values.size == 0:
+            report["features"][col] = {
+                "null_pct": 100.0,
+                "constant": True,
+                "dtype": str(s.dtype),
             }
             continue
 
         # Check for constant
-        is_const = vals.n_unique() == 1
+        is_const = values.size == 1 or np.unique(values).size == 1
 
         # Basic stats
-        mean_v = float(vals.mean())
-        std_v = float(vals.std())
-        skew_v = float(vals.skew()) if len(vals) > 2 else 0.0
-        kurt_v = float(vals.kurtosis()) if len(vals) > 3 else 0.0
+        mean_v = float(np.mean(values))
+        std_v = float(np.std(values)) if values.size > 1 else 0.0
+        if values.size > 2:
+            centered = values - mean_v
+            skew_v = float(np.mean(centered**3) / (std_v**3 + 1e-9))
+        else:
+            skew_v = 0.0
+        if values.size > 3:
+            centered = values - mean_v
+            kurt_v = float(np.mean(centered**4) / (std_v**4 + 1e-9) - 3.0)
+        else:
+            kurt_v = 0.0
 
-        # Extreme values
-        inf_count = int(s.is_infinite().sum())
+        inf_count = int(np.isinf(values).sum())
+        min_val = float(np.min(values))
+        max_val = float(np.max(values))
 
         report["features"][col] = {
             "dtype": str(s.dtype),
             "null_count": int(n_null),
             "null_pct": float(n_null / n_total * 100),
             "constant": bool(is_const),
-            "n_unique": int(vals.n_unique()),
+            "n_unique": int(np.unique(values).size),
             "mean": mean_v,
             "std": std_v,
-            "min": float(vals.min()),
-            "max": float(vals.max()),
+            "min": min_val,
+            "max": max_val,
             "skew": skew_v,
             "kurtosis": kurt_v,
             "inf_count": inf_count,
@@ -1112,13 +1218,12 @@ def compute_quality_report(df: pl.DataFrame) -> dict:
 
 # === Cross-Asset =============================================================================================-
 class CrossAssetFeatures:
-
     def __init__(self, corr_window=60, regime_window=240, lags=(1, 5, 15)):
         self.cw = corr_window
         self.rw = regime_window
         self.lags = tuple(lags)
 
-    def build(self, bars: pl.DataFrame, data: dict = None) -> pl.DataFrame:
+    def build(self, bars: pl.DataFrame, data: dict | None = None) -> pl.DataFrame:
         len(bars)
         synthetic = self._synthetic(bars)
 
@@ -1133,9 +1238,7 @@ class CrossAssetFeatures:
         F = bars
 
         # Calculate forex return
-        F = F.with_columns([
-            (pl.col("close").log() - pl.col("close").shift(1).log()).alias("forex_ret")
-        ])
+        F = F.with_columns([(pl.col("close").log() - pl.col("close").shift(1).log()).alias("forex_ret")])
 
         # Join assets
         for asset, s_df in merged.items():
@@ -1153,24 +1256,22 @@ class CrossAssetFeatures:
                 print(f"[CrossAsset] WARNING: Cannot find time column for {asset}. Columns: {s_df.columns}. Skipping.")
                 continue
 
-            s_df = s_df.with_columns(
-                pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
-            )
+            s_df = s_df.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             s_df = s_df.select(["timestamp_utc", asset]).sort("timestamp_utc")
             F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
             # forward fill
             F = F.with_columns([pl.col(asset).fill_null(strategy="forward")])
 
             # Returns
-            lr = (pl.col(asset).log() - pl.col(asset).shift(1).log())
+            lr = pl.col(asset).log() - pl.col(asset).shift(1).log()
             exprs = [lr.alias(f"{asset}_ret")]
             for lag in self.lags:
                 exprs.append(lr.shift(lag).alias(f"{asset}_ret_l{lag}"))
 
             # rolling corr and beta
-            cov = pl.rolling_cov(lr, pl.col("forex_ret"), window_size=self.cw, min_periods=max(5, self.cw//4))
-            var_x = pl.col("forex_ret").rolling_var(window_size=self.cw, min_periods=max(5, self.cw//4))
-            var_y = lr.rolling_var(window_size=self.cw, min_periods=max(5, self.cw//4))
+            cov = pl.rolling_cov(lr, pl.col("forex_ret"), window_size=self.cw)
+            var_x = pl.col("forex_ret").rolling_var(window_size=self.cw)
+            var_y = lr.rolling_var(window_size=self.cw)
 
             corr = cov / (var_x.sqrt() * var_y.sqrt() + 1e-9)
             beta = cov / (var_x + 1e-9)
@@ -1182,15 +1283,19 @@ class CrossAssetFeatures:
         cols = F.columns
         exprs = []
         if "US10Y" in cols and "DE10Y" in cols:
-            exprs.extend([
-                (pl.col("US10Y") - pl.col("DE10Y")).alias("yield_spread_us_de_10y"),
-                (pl.col("US10Y") - pl.col("DE10Y")).diff().alias("yield_spread_us_de_10y_chg")
-            ])
+            exprs.extend(
+                [
+                    (pl.col("US10Y") - pl.col("DE10Y")).alias("yield_spread_us_de_10y"),
+                    (pl.col("US10Y") - pl.col("DE10Y")).diff().alias("yield_spread_us_de_10y_chg"),
+                ]
+            )
         if "US10Y" in cols and "US2Y" in cols:
-            exprs.extend([
-                (pl.col("US10Y") - pl.col("US2Y")).alias("us_2s10s_spread"),
-                (pl.col("US10Y") - pl.col("US2Y")).diff().alias("us_2s10s_spread_chg")
-            ])
+            exprs.extend(
+                [
+                    (pl.col("US10Y") - pl.col("US2Y")).alias("us_2s10s_spread"),
+                    (pl.col("US10Y") - pl.col("US2Y")).diff().alias("us_2s10s_spread_chg"),
+                ]
+            )
         if "SPX" in cols and "VIX" in cols:
             spx_ret = pl.col("SPX").log().diff()
             vix_ret = pl.col("VIX").log().diff()
@@ -1203,10 +1308,7 @@ class CrossAssetFeatures:
             gd_vy = pl.col("DXY_ret").rolling_var(window_size=self.cw)
             gd_corr = gd_cov / (gd_vx.sqrt() * gd_vy.sqrt() + 1e-9)
             gd_corr_base = gd_corr.rolling_mean(self.rw)
-            exprs.extend([
-                gd_corr.alias("gold_dxy_corr"),
-                (gd_corr - gd_corr_base).abs().alias("gold_dxy_corr_break")
-            ])
+            exprs.extend([gd_corr.alias("gold_dxy_corr"), (gd_corr - gd_corr_base).abs().alias("gold_dxy_corr_break")])
         if "WTI_ret" in cols and "COPPER_ret" in cols:
             exprs.append(
                 (0.6 * pl.col("COPPER_ret").shift(1) + 0.4 * pl.col("WTI_ret").shift(1)).alias("commodity_fx_lead")
@@ -1236,7 +1338,7 @@ class CrossAssetFeatures:
 
         ret_cols = [c for c in F.columns if c.endswith("_ret") and c not in ("forex_ret",)]
         if "forex_ret" in F.columns:
-            ret_cols = ret_cols + ["forex_ret"]
+            ret_cols = [*ret_cols, "forex_ret"]
         if len(ret_cols) < 2:
             return F
 
@@ -1246,10 +1348,16 @@ class CrossAssetFeatures:
         )
         fact = build_cross_asset_factors(
             panel,
-            n_factors=3, method="pca",
-            factor_window=120, factor_step=20,
-            maxlag=1, granger_window=120, granger_step=20,
-            max_lag=5, leadlag_window=120, leadlag_step=20,
+            n_factors=3,
+            method="pca",
+            factor_window=120,
+            factor_step=20,
+            maxlag=1,
+            granger_window=120,
+            granger_step=20,
+            max_lag=5,
+            leadlag_window=120,
+            leadlag_step=20,
             min_abs_corr=0.05,
         )
         new_cols = [c for c in fact.columns if c not in F.columns]
@@ -1262,12 +1370,14 @@ class CrossAssetFeatures:
         # Return an empty dict so that only provided real data is merged.
         return {}
 
+
 # === Sentiment ================================================================================================-
-def sentiment_decay(s_df: pl.DataFrame, lam: float = 0.1) -> pl.Series:
+def sentiment_decay(s_df: pl.DataFrame, lam: float = 0.1) -> np.ndarray:
     if s_df is None or len(s_df) == 0:
         return np.zeros(0, dtype=float)
     import pandas as pd
-    ts_ns = pd.to_datetime(s_df["timestamp_utc"].to_numpy(), utc=True).asi8.astype(np.int64)
+
+    ts_ns = pd.to_datetime(s_df["timestamp_utc"].to_numpy(), utc=True).view("int64").astype(np.int64)
     # Fill null sentiment with 0 (neutral) before processing
     vals = np.nan_to_num(s_df["sentiment_raw"].to_numpy().astype(float), nan=0.0)
     event_mask = vals != 0.0
@@ -1279,8 +1389,10 @@ def sentiment_decay(s_df: pl.DataFrame, lam: float = 0.1) -> pl.Series:
         dec[valid] = vals[last_idx[valid]] * np.exp(-float(lam) * elapsed)
     return dec
 
+
 def buzz_score(window: int = 5) -> pl.Expr:
     return pl.col("article_counts").rolling_sum(window).fill_null(0.0).alias("buzz")
+
 
 def proj_finbert(emb, dim=8):
     rng = np.random.default_rng(0)
@@ -1289,18 +1401,28 @@ def proj_finbert(emb, dim=8):
     e = emb.reshape(1, -1) if emb.ndim == 1 else emb
     return (e @ P).squeeze()
 
+
 # === Filters ===================================================================================================-
 def vol_filter(atr_col: str = "atr_6", mult: float = 3.0, lb: int = 60) -> pl.Expr:
     return (pl.col(atr_col) <= mult * pl.col(atr_col).rolling_mean(lb)).cast(pl.Float64).alias("vol_ok")
 
+
 # === L2 Order   Book Imbalance =================================================================================
-def order_book_imbalance_l2(bid1: str = "bid_price_1", ask1: str = "ask_price_1", bid2: str = "bid_price_2", ask2: str = "ask_price_2", vol1: str = "bid_size_1", vol2: str = "ask_size_1") -> pl.Expr:
+def order_book_imbalance_l2(
+    bid1: str = "bid_price_1",
+    ask1: str = "ask_price_1",
+    bid2: str = "bid_price_2",
+    ask2: str = "ask_price_2",
+    vol1: str = "bid_size_1",
+    vol2: str = "ask_size_1",
+) -> pl.Expr:
     """Compute a depth   2 order   book imbalance proxy.
     Uses volume   weighted price differences across the top two levels.
     """
     imbalance1 = (pl.col(bid1) * pl.col(vol1) - pl.col(ask1) * pl.col(vol2)) / (pl.col(vol1) + pl.col(vol2) + 1e-9)
     imbalance2 = (pl.col(bid2) * pl.col(vol1) - pl.col(ask2) * pl.col(vol2)) / (pl.col(vol1) + pl.col(vol2) + 1e-9)
     return (imbalance1 + imbalance2).rolling_mean(20).alias("ofi_l2")
+
 
 # === Carry Features =============================================================================================-
 def carry_features(spot: str = "close", forward: str = "forward_price", window: int = 30) -> pl.Expr:
@@ -1310,10 +1432,12 @@ def carry_features(spot: str = "close", forward: str = "forward_price", window: 
     carry = (pl.col(forward) / pl.col(spot)).log()
     return carry.rolling_mean(window).alias("carry_spot_forward")
 
+
 # === Yield Curve Slope ==========================================================================================-
 def yield_curve_slope(short_yield: str = "US2Y", long_yield: str = "US10Y") -> pl.Expr:
     """Simple slope = long   term yield minus short   term yield."""
     return (pl.col(long_yield) - pl.col(short_yield)).alias("yield_curve_slope")
+
 
 # === Correlation Breakdown Detector =====================================================================-
 def correlation_breakdown(a: str, b: str, window: int = 60) -> pl.Expr:
@@ -1324,21 +1448,20 @@ def correlation_breakdown(a: str, b: str, window: int = 60) -> pl.Expr:
     delta = (corr - corr.rolling_mean(window)).abs()
     return delta.alias(f"corr_break_{a}_{b}")
 
+
 # === Sentiment Tiers =============================================================================================-
 def sentiment_tiers(df: pl.DataFrame, decay_lam: float = 0.1, fb_dim: int = 8) -> pl.DataFrame:
     """Add three sentiment columns:
     1. raw sentiment (if present)
     2. decayed sentiment (exponential decay)
     3. FinBERT projection to low dim space.
-    
+
     Null sentiment values are treated as 0/neutral.
     """
     # raw sentiment assumed in column "sentiment"
     if "sentiment" in df.columns:
         # Fill null sentiment with 0 (neutral) before processing
-        df = df.with_columns([
-            pl.col("sentiment").fill_null(0.0).alias("sentiment_raw")
-        ])
+        df = df.with_columns([pl.col("sentiment").fill_null(0.0).alias("sentiment_raw")])
         df = df.with_columns(pl.Series("sentiment_decayed", sentiment_decay(df, decay_lam)))
     else:
         df = df.with_columns([pl.lit(0.0).alias("sentiment_raw"), pl.lit(0.0).alias("sentiment_decayed")])
@@ -1347,11 +1470,14 @@ def sentiment_tiers(df: pl.DataFrame, decay_lam: float = 0.1, fb_dim: int = 8) -
         df = df.with_columns([pl.lit(0.0).alias(f"fb_{i}")])
     return df
 
+
 def news_filter_expr(news_events: list, buf_min: int = 15) -> list[pl.Expr]:
     # Polars implementation using list matching or just looping if list is small.
-    # Actually, simpler to do via joining an events dataframe.
-    # This will be implemented directly in the FeatureEngineer class.
-    pass
+    # This is intentionally left as a no-op placeholder for callers that
+    # integrate an event dataset upstream; it does not create additional columns.
+    del news_events, buf_min
+    return []
+
 
 # === Regime Gating ==========================================================================================-
 class RegimeGateClassifier:
@@ -1361,8 +1487,8 @@ class RegimeGateClassifier:
         self.model = LogisticRegression(max_iter=500, random_state=self.random_state)
 
     def _zscore(self, col: str, lb: int = 60) -> pl.Expr:
-        mu = pl.col(col).rolling_mean(lb, min_periods=max(10, lb // 4))
-        sd = pl.col(col).rolling_std(lb, min_periods=max(10, lb // 4)) + 1e-9
+        mu = pl.col(col).rolling_mean(window_size=lb)
+        sd = pl.col(col).rolling_std(window_size=lb) + 1e-9
         return ((pl.col(col) - mu) / sd).clip(-6, 6).alias(f"{col}_z")
 
     def fit_predict(self, F: pl.DataFrame) -> pl.Series:
@@ -1370,16 +1496,17 @@ class RegimeGateClassifier:
         if not all(c in F.columns for c in req):
             return pl.Series("regime_break_prob", np.zeros(len(F)))
 
-        X_df = F.select([
-            self._zscore("gold_dxy_corr_break").alias("gold_break_z"),
-            self._zscore("us_2s10s_spread_chg").alias("curve_chg_z"),
-            self._zscore("yield_spread_us_de_10y_chg").alias("yield_chg_z"),
-            self._zscore("risk_off_signal", lb=30).alias("risk_off_z")
-        ])
+        X_df = F.select(
+            [
+                self._zscore("gold_dxy_corr_break").alias("gold_break_z"),
+                self._zscore("us_2s10s_spread_chg").alias("curve_chg_z"),
+                self._zscore("yield_spread_us_de_10y_chg").alias("yield_chg_z"),
+                self._zscore("risk_off_signal", lb=30).alias("risk_off_z"),
+            ]
+        )
 
         y_expr = (
-            (pl.col("gold_break_z") > 1.0) &
-            ((pl.col("risk_off_z") > 0.5) | (pl.col("curve_chg_z").abs() > 1.0))
+            (pl.col("gold_break_z") > 1.0) & ((pl.col("risk_off_z") > 0.5) | (pl.col("curve_chg_z").abs() > 1.0))
         ).cast(pl.Int32)
 
         y = X_df.select(y_expr.alias("y"))["y"].to_numpy()
@@ -1387,29 +1514,34 @@ class RegimeGateClassifier:
         ok = X_pd.notna().all(axis=1)
 
         if ok.sum() < self.min_samples or len(np.unique(y[ok])) < 2:
-            score = (0.8 * X_pd["gold_break_z"].fillna(0) +
-                     0.5 * X_pd["risk_off_z"].fillna(0) +
-                     0.3 * X_pd["curve_chg_z"].abs().fillna(0))
+            score = (
+                0.8 * X_pd["gold_break_z"].fillna(0)
+                + 0.5 * X_pd["risk_off_z"].fillna(0)
+                + 0.3 * X_pd["curve_chg_z"].abs().fillna(0)
+            )
             prob = 1.0 / (1.0 + np.exp(-score.clip(-8, 8)))
             return pl.Series("regime_break_prob", prob)
 
         ok_idx = np.where(ok)[0]
         prob = np.zeros(len(F), dtype=np.float64)
-        
+
         # Baseline heuristic score for the entire series (fully causal)
-        score = (0.8 * X_pd["gold_break_z"].fillna(0) +
-                 0.5 * X_pd["risk_off_z"].fillna(0) +
-                 0.3 * X_pd["curve_chg_z"].abs().fillna(0))
-        prob[ok] = 1.0 / (1.0 + np.exp(-score.clip(-8, 8).values[ok]))
+        score = (
+            0.8 * X_pd["gold_break_z"].fillna(0)
+            + 0.5 * X_pd["risk_off_z"].fillna(0)
+            + 0.3 * X_pd["curve_chg_z"].abs().fillna(0)
+        )
+        ok_mask = ok.to_numpy(dtype=bool, copy=False)
+        prob[ok_mask] = 1.0 / (1.0 + np.exp(-score.clip(-8, 8).to_numpy()[ok_mask]))
 
         # Expanding window fit: fit up to i, predict [i, i+step)
         step = max(self.min_samples, len(ok_idx) // 10)
-        
+
         if step < len(ok_idx):
             for i in range(step, len(ok_idx), step):
                 train_idx = ok_idx[:i]
-                test_idx = ok_idx[i:i+step] if i + step < len(ok_idx) else ok_idx[i:]
-                
+                test_idx = ok_idx[i : i + step] if i + step < len(ok_idx) else ok_idx[i:]
+
                 if len(np.unique(y[train_idx])) >= 2:
                     try:
                         self.model.fit(X_pd.iloc[train_idx].values, y[train_idx])
@@ -1418,6 +1550,7 @@ class RegimeGateClassifier:
                         pass
 
         return pl.Series("regime_break_prob", prob)
+
 
 # ==================================================================================================================-
 # MULTI-SCALE FEATURES  (short / medium / long triples)
@@ -1428,9 +1561,12 @@ def multi_scale_atr(windows=(6, 20, 60)) -> list[pl.Expr]:
     for w in windows:
         exprs.append(average_true_range(w))
         if prev_w is not None:
-            exprs.append((pl.col(f"atr_{prev_w}") / (pl.col(f"atr_{w}") + 1e-9)).clip(0.1, 10.0).alias(f"atr_ratio_{prev_w}_{w}"))
+            exprs.append(
+                (pl.col(f"atr_{prev_w}") / (pl.col(f"atr_{w}") + 1e-9)).clip(0.1, 10.0).alias(f"atr_ratio_{prev_w}_{w}")
+            )
         prev_w = w
     return exprs
+
 
 def multi_scale_vol(windows=(6, 20, 60)) -> list[pl.Expr]:
     exprs = []
@@ -1438,9 +1574,12 @@ def multi_scale_vol(windows=(6, 20, 60)) -> list[pl.Expr]:
     for w in windows:
         exprs.append(rolling_volatility(w))
         if prev_w is not None:
-            exprs.append((pl.col(f"vol_{prev_w}") / (pl.col(f"vol_{w}") + 1e-9)).clip(0.1, 10.0).alias(f"vol_ratio_{prev_w}_{w}"))
+            exprs.append(
+                (pl.col(f"vol_{prev_w}") / (pl.col(f"vol_{w}") + 1e-9)).clip(0.1, 10.0).alias(f"vol_ratio_{prev_w}_{w}")
+            )
         prev_w = w
     return exprs
+
 
 # ==================================================================================================================-
 # B4. OFI SURPRISE       abnormal pressure vs. background
@@ -1448,8 +1587,9 @@ def multi_scale_vol(windows=(6, 20, 60)) -> list[pl.Expr]:
 def ofi_surprise(fast=20, slow=120) -> list[pl.Expr]:
     return [
         order_flow_imbalance(fast),
-        ((pl.col("ofi") - pl.col("ofi").rolling_mean(slow)) / (pl.col("ofi").rolling_std(slow) + 1e-9)).alias("ofi_z")
+        ((pl.col("ofi") - pl.col("ofi").rolling_mean(slow)) / (pl.col("ofi").rolling_std(slow) + 1e-9)).alias("ofi_z"),
     ]
+
 
 # ==================================================================================================================-
 # B5. BREAKOUT PRESSURE       how extended price is vs. VWAP
@@ -1460,8 +1600,9 @@ def breakout_pressure(vwap_window=60, atr_window=20) -> list[pl.Expr]:
     vwap = (tp * vol).rolling_sum(vwap_window) / vol.rolling_sum(vwap_window)
     return [
         average_true_range(atr_window),
-        ((pl.col("close") - vwap) / (pl.col(f"atr_{atr_window}") + 1e-9)).alias("breakout_pressure")
+        ((pl.col("close") - vwap) / (pl.col(f"atr_{atr_window}") + 1e-9)).alias("breakout_pressure"),
     ]
+
 
 # ==================================================================================================================-
 # B6. LIQUIDITY VACUUM       spread spike vs. median
@@ -1471,20 +1612,24 @@ def liquidity_vacuum(window=120) -> pl.Expr:
     median_spread = spread.rolling_median(window) + 1e-9
     return (spread / median_spread).alias("liquidity_vacuum")
 
+
 # ==================================================================================================================-
 # FRAGILITY INDICATORS
 # ==================================================================================================================-
 def vol_of_vol(vol_window=20, vov_window=20) -> pl.Expr:
     return pl.col(f"vol_{vol_window}").rolling_std(vov_window).alias("vol_of_vol")
 
+
 def price_ofi_divergence(ofi_window=20, price_window=10) -> pl.Expr:
     price_dir = pl.col("close").diff(price_window).sign()
-    ofi_dir = pl.col("ofi").sign() # Assuming ofi is already calculated
+    ofi_dir = pl.col("ofi").sign()  # Assuming ofi is already calculated
     return (price_dir - ofi_dir).abs().rolling_mean(price_window).alias("price_ofi_div")
+
 
 def _pip_size_for_pair(pair: str = "EURUSD") -> float:
     pair = str(pair or "").upper()
     return 0.01 if "JPY" in pair else 0.0001
+
 
 def add_spread_cost_features(df: pl.DataFrame, pair: str = "EURUSD", atr_col: str = "atr_6") -> pl.DataFrame:
     """Add execution-cost context from trailing spread behavior."""
@@ -1495,8 +1640,8 @@ def add_spread_cost_features(df: pl.DataFrame, pair: str = "EURUSD", atr_col: st
     spread = pd.Series(df["spread_pips"].to_numpy(), dtype="float64")
     mu = spread.rolling(240, min_periods=20).mean()
     sd = spread.rolling(240, min_periods=20).std().replace(0.0, np.nan)
-    z = ((spread - mu) / (sd + 1e-9)).clip(-8.0, 8.0)
-    percentile = 1.0 / (1.0 + np.exp(-1.702 * z.fillna(0.0)))
+    z = pd.Series(((spread - mu) / (sd + 1e-9)).clip(-8.0, 8.0), index=spread.index, dtype="float64")
+    percentile = pd.Series(1.0 / (1.0 + np.exp(-1.702 * z.fillna(0.0))), index=spread.index, dtype="float64")
     widening_5 = spread / (spread.rolling(5, min_periods=2).mean() + 1e-9)
     widening_20 = spread / (spread.rolling(20, min_periods=5).mean() + 1e-9)
 
@@ -1507,13 +1652,16 @@ def add_spread_cost_features(df: pl.DataFrame, pair: str = "EURUSD", atr_col: st
     else:
         cost_to_atr = pd.Series(0.0, index=spread.index)
 
-    return df.with_columns([
-        pl.Series("spread_zscore", z.fillna(0.0).to_numpy()),
-        pl.Series("spread_percentile", percentile.fillna(0.5).clip(0.0, 1.0).to_numpy()),
-        pl.Series("spread_widening_5m", widening_5.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
-        pl.Series("spread_widening_20m", widening_20.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
-        pl.Series("cost_to_atr", cost_to_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()),
-    ])
+    return df.with_columns(
+        [
+            pl.Series("spread_zscore", z.fillna(0.0).to_numpy()),
+            pl.Series("spread_percentile", percentile.fillna(0.5).clip(0.0, 1.0).to_numpy()),
+            pl.Series("spread_widening_5m", widening_5.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
+            pl.Series("spread_widening_20m", widening_20.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
+            pl.Series("cost_to_atr", cost_to_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()),
+        ]
+    )
+
 
 def add_market_regime_features(
     df: pl.DataFrame,
@@ -1533,11 +1681,14 @@ def add_market_regime_features(
     low = pd.Series(df["low"].to_numpy(), dtype="float64")
     close = pd.Series(df["close"].to_numpy(), dtype="float64")
     prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
 
     up_move = high.diff()
     down_move = -low.diff()
@@ -1561,27 +1712,30 @@ def add_market_regime_features(
     range_regime = ((chop > 60.0) & (adx < 20.0)).astype(float)
 
     vw = int(max(10, volatility_window))
-    ret = np.log(close / close.shift(1))
+    ret = pd.Series(np.log(close / close.shift(1)), index=close.index, dtype="float64")
     acorr = ret.rolling(vw, min_periods=30).corr(ret.shift(1)).clip(-1.0, 1.0)
     hurst = (0.5 + 0.25 * acorr).clip(0.0, 1.0)
     noise_to_signal = ret.rolling(60, min_periods=10).std() / (ret.rolling(60, min_periods=10).mean().abs() + 1e-9)
     trailing_vol = ret.rolling(60, min_periods=10).std()
 
-    return df.with_columns([
-        pl.Series("adx_14", adx.fillna(0.0).to_numpy()),
-        pl.Series("chop_index", chop.replace([np.inf, -np.inf], np.nan).fillna(50.0).to_numpy()),
-        pl.Series("trend_regime", trend_regime.fillna(0.0).to_numpy()),
-        pl.Series("range_regime", range_regime.fillna(0.0).to_numpy()),
-        pl.Series("volatility_regime", vol_regime.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
-        pl.Series("hurst_exponent", hurst.fillna(0.5).to_numpy()),
-        pl.Series("noise_to_signal_60", noise_to_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()),
-        pl.Series("trailing_volatility_60", trailing_vol.fillna(0.0).to_numpy()),
-    ])
+    return df.with_columns(
+        [
+            pl.Series("adx_14", adx.fillna(0.0).to_numpy()),
+            pl.Series("chop_index", chop.replace([np.inf, -np.inf], np.nan).fillna(50.0).to_numpy()),
+            pl.Series("trend_regime", trend_regime.fillna(0.0).to_numpy()),
+            pl.Series("range_regime", range_regime.fillna(0.0).to_numpy()),
+            pl.Series("volatility_regime", vol_regime.replace([np.inf, -np.inf], np.nan).fillna(1.0).to_numpy()),
+            pl.Series("hurst_exponent", hurst.fillna(0.5).to_numpy()),
+            pl.Series("noise_to_signal_60", noise_to_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()),
+            pl.Series("trailing_volatility_60", trailing_vol.fillna(0.0).to_numpy()),
+        ]
+    )
+
 
 def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
     """Join completed 5m/15m/1h context back to each 1m row without lookahead.
 
-    Stays in Polars (group_by_dynamic + join_asof) — no Polars→Pandas→Polars
+    Stays in Polars (group_by_dynamic + join_asof) - no Polars→Pandas→Polars
     round-trip of the full bar frame.
     """
     req = {"timestamp_utc", "open", "high", "low", "close", "volume"}
@@ -1592,7 +1746,10 @@ def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
     for every, suffix, median_window in (("5m", "5m", 48), ("15m", "15m", 32), ("1h", "1h", 24)):
         ohlcv = (
             out.group_by_dynamic(
-                "timestamp_utc", every=every, closed="right", label="right",
+                "timestamp_utc",
+                every=every,
+                closed="right",
+                label="right",
             )
             .agg(
                 pl.col("open").first().alias("open"),
@@ -1615,9 +1772,7 @@ def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
         atr = tr.rolling_mean(14, min_samples=3)
         tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
         vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume")).fill_null(1.0)
-        vwap = (tp * vol).rolling_sum(20, min_samples=3) / (
-            vol.rolling_sum(20, min_samples=3) + 1e-9
-        )
+        vwap = (tp * vol).rolling_sum(20, min_samples=3) / (vol.rolling_sum(20, min_samples=3) + 1e-9)
         # RSI(14) on HTF close
         d = pl.col("close").diff()
         gain = d.clip(lower_bound=0.0).rolling_mean(14, min_samples=5)
@@ -1629,13 +1784,9 @@ def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
                 (pl.col("close").log() - pl.col("close").shift(1).log()).alias(f"ret_{suffix}"),
                 rsi.alias(f"rsi_{suffix}"),
                 atr.alias(f"atr_{suffix}"),
-                ((pl.col("close") - pl.col("close").shift(3)) / (atr + 1e-9)).alias(
-                    f"trend_slope_{suffix}"
-                ),
+                ((pl.col("close") - pl.col("close").shift(3)) / (atr + 1e-9)).alias(f"trend_slope_{suffix}"),
                 ((pl.col("close") - vwap) / (atr + 1e-9)).alias(f"distance_to_vwap_{suffix}"),
-                (
-                    atr / (atr.rolling_median(median_window, min_samples=5) + 1e-9)
-                ).alias(f"volatility_regime_{suffix}"),
+                (atr / (atr.rolling_median(median_window, min_samples=5) + 1e-9)).alias(f"volatility_regime_{suffix}"),
             ]
         ).select(
             [
@@ -1655,22 +1806,20 @@ def add_higher_timeframe_context(df: pl.DataFrame) -> pl.DataFrame:
 
     # Finite cleanup on newly added numeric HTF cols
     htf_cols = [
-        c for c in out.columns
-        if c.endswith(("_5m", "_15m", "_1h")) and c.startswith(
-            ("ret_", "rsi_", "atr_", "trend_slope_", "distance_to_vwap_", "volatility_regime_")
-        )
+        c
+        for c in out.columns
+        if c.endswith(("_5m", "_15m", "_1h"))
+        and c.startswith(("ret_", "rsi_", "atr_", "trend_slope_", "distance_to_vwap_", "volatility_regime_"))
     ]
     if htf_cols:
         out = out.with_columns(
             [
-                pl.when(pl.col(c).is_infinite())
-                .then(0.0)
-                .otherwise(pl.col(c).fill_nan(0.0).fill_null(0.0))
-                .alias(c)
+                pl.when(pl.col(c).is_infinite()).then(0.0).otherwise(pl.col(c).fill_nan(0.0).fill_null(0.0)).alias(c)
                 for c in htf_cols
             ]
         )
     return out
+
 
 # ==================================================================================================================-
 # MISSINGNESS FLAGS
@@ -1682,39 +1831,82 @@ def missingness_flags(df: pl.DataFrame, cols: list, decay: float = 0.9) -> pl.Da
             continue
 
         is_null = df[c].is_null()
-        df = df.with_columns([
-            is_null.cast(pl.Float64).alias(f"{c}_missing"),
-            is_null.cum_min().cast(pl.Float64).alias(f"{c}_staleness"),
-        ])
+        df = df.with_columns(
+            [
+                is_null.cast(pl.Float64).alias(f"{c}_missing"),
+                is_null.cum_min().cast(pl.Float64).alias(f"{c}_staleness"),
+            ]
+        )
     return df
 
+
 # === F: Latency feature =================================================================================-
-def compute_latency_feature(df: pl.DataFrame, latency_baseline_ms: float = 50.0, atr_col: str = "atr_6", atr_window_ref: int = 120) -> pl.Series:
+def compute_latency_feature(
+    df: pl.DataFrame, latency_baseline_ms: float = 50.0, atr_col: str = "atr_6", atr_window_ref: int = 120
+) -> pl.Series:
     n = len(df)
     latency = np.full(n, latency_baseline_ms, dtype=np.float32)
     if atr_col in df.columns:
         atr_vals = df[atr_col].fill_null(strategy="forward").to_numpy()
-        med_atr = df[atr_col].fill_null(strategy="forward").rolling_median(atr_window_ref, min_samples=10).fill_null(0.0).to_numpy()
+        med_atr = (
+            df[atr_col]
+            .fill_null(strategy="forward")
+            .rolling_median(atr_window_ref, min_samples=10)
+            .fill_null(0.0)
+            .to_numpy()
+        )
         atr_excess = np.maximum(0.0, atr_vals / np.maximum(med_atr, 1e-12) - 1.0)
         latency += latency_baseline_ms * 0.5 * atr_excess
 
     latency = np.clip(latency, latency_baseline_ms, latency_baseline_ms * 10.0)
     return pl.Series("expected_latency_ms", latency)
 
+
 # === Master Builder ==========================================================================================
 class FeatureEngineer:
-    def __init__(self,atr_window=6,ofi_window=20,tar_window=30,rsi_period=14,
-                 macd_fast=12,macd_slow=26,macd_signal=9,bb_window=20,bb_std=2.0,
-                 lag_windows=[5,20,60],vol_mult=3.0,news_buf=2,decay_lam=0.1,fb_dim=8,
-                 ca_corr_window=60,ca_regime_window=240,ca_lags=(1,5,15),
-                 enable_regime_gate=True, enable_quality_gate=False, enable_no_trade_zones=False):
-        self.atr_w=atr_window; self.ofi_w=ofi_window; self.tar_w=tar_window
-        self.rsi_p=rsi_period; self.mf=macd_fast; self.ms=macd_slow; self.msig=macd_signal
-        self.bb_w=bb_window; self.bb_s=bb_std; self.lags=lag_windows
-        self.vm=vol_mult; self.nb=news_buf; self.dl=decay_lam; self.fb=fb_dim
+    def __init__(
+        self,
+        atr_window=6,
+        ofi_window=20,
+        tar_window=30,
+        rsi_period=14,
+        macd_fast=12,
+        macd_slow=26,
+        macd_signal=9,
+        bb_window=20,
+        bb_std=2.0,
+        lag_windows=None,
+        vol_mult=3.0,
+        news_buf=2,
+        decay_lam=0.1,
+        fb_dim=8,
+        ca_corr_window=60,
+        ca_regime_window=240,
+        ca_lags=(1, 5, 15),
+        enable_regime_gate=True,
+        enable_quality_gate=False,
+        enable_no_trade_zones=False,
+    ):
+        if lag_windows is None:
+            lag_windows = [5, 20, 60]
+        self.atr_w = atr_window
+        self.ofi_w = ofi_window
+        self.tar_w = tar_window
+        self.rsi_p = rsi_period
+        self.mf = macd_fast
+        self.ms = macd_slow
+        self.msig = macd_signal
+        self.bb_w = bb_window
+        self.bb_s = bb_std
+        self.lags = lag_windows
+        self.vm = vol_mult
+        self.nb = news_buf
+        self.dl = decay_lam
+        self.fb = fb_dim
 
         try:
-            from config.settings import FEATURE_SCALES as FS, FEATURE_CACHE as FC
+            from config.settings import FEATURE_CACHE as FC
+            from config.settings import FEATURE_SCALES as FS
         except ImportError:
             FS = {}
             FC = {}
@@ -1727,6 +1919,7 @@ class FeatureEngineer:
         if _cfg_path:
             try:
                 import yaml
+
                 with open(_cfg_path, encoding="utf-8") as f:
                     _yaml_root = yaml.safe_load(f) or {}
                 yaml_fs = _yaml_root.get("features", {}) or {}
@@ -1745,7 +1938,7 @@ class FeatureEngineer:
         self.volatility_w = int(yaml_fs.get("volatility_window", FS.get("volatility_window", 120)))
         _ca_cw = int(yaml_fs.get("corr_window", FS.get("corr_window", ca_corr_window)))
         _ca_rw = int(yaml_fs.get("regime_window", FS.get("regime_window", ca_regime_window)))
-        self.ca=CrossAssetFeatures(
+        self.ca = CrossAssetFeatures(
             corr_window=_ca_cw,
             regime_window=_ca_rw,
             lags=ca_lags,
@@ -1762,13 +1955,16 @@ class FeatureEngineer:
         self.regime_gate = RegimeGateClassifier()
         try:
             from features.macro_features import MacroYieldFeatureBuilder
+
             self._macro_builder = MacroYieldFeatureBuilder()
         except Exception as e:
             print(f"[FeatureEngineering] WARNING: MacroYieldFeatureBuilder init failed: {e}")
             self._macro_builder = None
         self._warned_finbert_placeholder = False
-    def build_chunked(self, bars: pl.DataFrame, chunk_size: int = 50_000,
-                      output_dir: str = None, **kwargs) -> pl.DataFrame:
+
+    def build_chunked(
+        self, bars: pl.DataFrame, chunk_size: int = 50_000, output_dir: str | None = None, **kwargs
+    ) -> pl.DataFrame:
         """DS-005: Process features in overlapping chronological chunks to bound RAM.
 
         For datasets too large to fit in memory, processes chunk_size bars at a time
@@ -1797,6 +1993,7 @@ class FeatureEngineer:
 
             if output_dir:
                 from pathlib import Path
+
                 out_path = Path(output_dir)
                 out_path.mkdir(parents=True, exist_ok=True)
                 features.write_parquet(out_path / f"features_{start:08d}.parquet")
@@ -1807,8 +2004,7 @@ class FeatureEngineer:
             return pl.DataFrame()
         return pl.concat(chunks, how="vertical_relaxed") if chunks else pl.DataFrame()
 
-    def build_with_warmup(self, bars: pl.DataFrame, warmup_bars: pl.DataFrame,
-                          **kwargs) -> pl.DataFrame:
+    def build_with_warmup(self, bars: pl.DataFrame, warmup_bars: pl.DataFrame, **kwargs) -> pl.DataFrame:
         """DS-002: Build features with warmup context to prevent EMA look-ahead bias.
 
         Prepends warmup_bars before the target bars, builds features on the
@@ -1831,13 +2027,26 @@ class FeatureEngineer:
     @property
     def warmup_bars_needed(self) -> int:
         """Minimum historical bars needed before a split to avoid EMA cold-start."""
-        return 3 * self.ms  # 3 × slow MACD window
+        return 3 * self.ms  # 3 x slow MACD window
 
-    def build(self,bars: pl.DataFrame,cross_asset=None,sentiment=None,eco_act=None,eco_fc=None,
-              art_counts=None,finbert_embs=None,news_events=None, cot_data=None, pair="EURUSD",
-              eco_prior=None, news_cats=None) -> pl.DataFrame:
+    def build(
+        self,
+        bars: pl.DataFrame,
+        cross_asset=None,
+        sentiment=None,
+        eco_act=None,
+        eco_fc=None,
+        art_counts=None,
+        finbert_embs=None,
+        news_events=None,
+        cot_data=None,
+        pair="EURUSD",
+        eco_prior=None,
+        news_cats=None,
+    ) -> pl.DataFrame:
 
         import pandas as pd
+
         if isinstance(bars, pd.DataFrame):
             if bars.index.name is None:
                 bars.index.name = "timestamp_utc"
@@ -1861,30 +2070,29 @@ class FeatureEngineer:
 
         # 1. Base Features (Independent)
         F = bars.with_columns(
-            [order_book_imbalance_proxy()] +
-            trade_arrival_rate(self.tar_w) +
-            [order_flow_imbalance(self.ofi_w)] +
-            [average_true_range(w) for w in self.atr_ws] +
-            [rolling_volatility(w) for w in self.vol_ws] +
-            bollinger_bands(self.bb_w, self.bb_s) +
-            [rsi(self.rsi_p)] +
-            macd(self.mf, self.ms, self.msig) +
-            lag_returns(self.lags) +
-            stochastic_oscillator() +
-            [williams_r()] +
-            [cci()] +
-            all_candlestick_patterns() +
-            [kyles_lambda(20)] +
-            [amihud_illiquidity(20)] +
-            [realized_spread(10)] +
-            [vpin(50, 50)] +
-            multi_level_obi(5)
+            [order_book_imbalance_proxy()]
+            + trade_arrival_rate(self.tar_w)
+            + [order_flow_imbalance(self.ofi_w)]
+            + [average_true_range(w) for w in self.atr_ws]
+            + [rolling_volatility(w) for w in self.vol_ws]
+            + bollinger_bands(self.bb_w, self.bb_s)
+            + [rsi(self.rsi_p)]
+            + macd(self.mf, self.ms, self.msig)
+            + lag_returns(self.lags)
+            + stochastic_oscillator()
+            + [williams_r()]
+            + [cci()]
+            + all_candlestick_patterns()
+            + [kyles_lambda(20)]
+            + [amihud_illiquidity(20)]
+            + [realized_spread(10)]
+            + [vpin(50, 50)]
+            + multi_level_obi(5)
         )
 
         # Curriculum / FEATURE_MASK expect ``ofi_l2``. Real L2 books use
         # order_book_imbalance_l2(); otherwise alias the OHLC proxy ``obi_l2``.
-        _l2_cols = ("bid_price_1", "ask_price_1", "bid_price_2", "ask_price_2",
-                    "bid_size_1", "ask_size_1")
+        _l2_cols = ("bid_price_1", "ask_price_1", "bid_price_2", "ask_price_2", "bid_size_1", "ask_size_1")
         if all(c in F.columns for c in _l2_cols):
             F = F.with_columns([order_book_imbalance_l2()])
         elif "obi_l2" in F.columns:
@@ -1901,27 +2109,42 @@ class FeatureEngineer:
         vwap_bands_expr = vwap_bands(self.vwap_w, 2.0)
 
         F = F.with_columns(
-            vwap_bands_expr +
-            [volume_weighted_momentum(20)] +
+            vwap_bands_expr
+            + [volume_weighted_momentum(20)]
+            +
             # OFI Surprise
-            [((pl.col("ofi") - pl.col("ofi").rolling_mean(min(120, self.ofi_w*6))) / (pl.col("ofi").rolling_std(min(120, self.ofi_w*6)) + 1e-9)).alias("ofi_z")] +
+            [
+                (
+                    (pl.col("ofi") - pl.col("ofi").rolling_mean(min(120, self.ofi_w * 6)))
+                    / (pl.col("ofi").rolling_std(min(120, self.ofi_w * 6)) + 1e-9)
+                ).alias("ofi_z")
+            ]
+            +
             # Multi-scale ATR
-            [((pl.col(f"atr_{self.atr_w}") / (pl.col("atr_20") + 1e-9)).clip(0.1, 10.0)).alias(f"atr_ratio_{self.atr_w}_20")] +
-            [((pl.col("atr_20") / (pl.col("atr_60") + 1e-9)).clip(0.1, 10.0)).alias("atr_ratio_20_60")] +
+            [
+                ((pl.col(f"atr_{self.atr_w}") / (pl.col("atr_20") + 1e-9)).clip(0.1, 10.0)).alias(
+                    f"atr_ratio_{self.atr_w}_20"
+                )
+            ]
+            + [((pl.col("atr_20") / (pl.col("atr_60") + 1e-9)).clip(0.1, 10.0)).alias("atr_ratio_20_60")]
+            +
             # Multi-scale Volatility
-            [((pl.col("vol_6") / (pl.col("vol_20") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_6_20")] +
-            [((pl.col("vol_20") / (pl.col("vol_60") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_20_60")] +
+            [((pl.col("vol_6") / (pl.col("vol_20") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_6_20")]
+            + [((pl.col("vol_20") / (pl.col("vol_60") + 1e-9)).clip(0.1, 10.0)).alias("vol_ratio_20_60")]
+            +
             # Breakout Pressure
-            [((pl.col("close") - vwap) / (pl.col("atr_20") + 1e-9)).alias("breakout_pressure")] +
+            [((pl.col("close") - vwap) / (pl.col("atr_20") + 1e-9)).alias("breakout_pressure")]
+            +
             # Liquidity Vacuum (requires bid/ask columns)
-            ([liquidity_vacuum(120)] if "ask_close" in F.columns and "bid_close" in F.columns else [pl.lit(0.0).alias("liquidity_vacuum")])
+            (
+                [liquidity_vacuum(120)]
+                if "ask_close" in F.columns and "bid_close" in F.columns
+                else [pl.lit(0.0).alias("liquidity_vacuum")]
+            )
         )
 
         # 3. Fragility
-        F = F.with_columns([
-            vol_of_vol(20, 20),
-            price_ofi_divergence(self.ofi_w, 10)
-        ])
+        F = F.with_columns([vol_of_vol(20, 20), price_ofi_divergence(self.ofi_w, 10)])
 
         pip_size = _pip_size_for_pair(pair)
         if "spread_avg" in F.columns:
@@ -1945,17 +2168,19 @@ class FeatureEngineer:
         F = F.with_columns(regime_gated_features(existing))
 
         # Add regime quality features
-        F = F.with_columns([
-            # realized_vol_regime: 0=low, 1=normal, 2=high (percentile-based)
-            pl.when(pl.col("vol_60") <= pl.col("vol_60").rolling_quantile(0.33, window_size=60))
-            .then(0)
-            .when(pl.col("vol_60") <= pl.col("vol_60").rolling_quantile(0.66, window_size=60))
-            .then(1)
-            .otherwise(2)
-            .alias("realized_vol_regime"),
-            # trend_quality: ADX (trend strength) x 5-bar RSI momentum (direction & pace)
-            (pl.col("adx_14") * (pl.col("rsi_14") - pl.col("rsi_14").shift(5))).alias("trend_quality"),
-        ])
+        F = F.with_columns(
+            [
+                # realized_vol_regime: 0=low, 1=normal, 2=high (percentile-based)
+                pl.when(pl.col("vol_60") <= pl.col("vol_60").rolling_quantile(0.33, window_size=60))
+                .then(0)
+                .when(pl.col("vol_60") <= pl.col("vol_60").rolling_quantile(0.66, window_size=60))
+                .then(1)
+                .otherwise(2)
+                .alias("realized_vol_regime"),
+                # trend_quality: ADX (trend strength) x 5-bar RSI momentum (direction & pace)
+                (pl.col("adx_14") * (pl.col("rsi_14") - pl.col("rsi_14").shift(5))).alias("trend_quality"),
+            ]
+        )
 
         # Interaction features (Improvement #5) - explicit non-linear combinations
         existing = set(F.columns)
@@ -1971,29 +2196,42 @@ class FeatureEngineer:
         existing = set(F.columns)
         try:
             from features.regime_detection import detect_regimes_polars
+
             _t0_reg = time.perf_counter()
             _reg = detect_regimes_polars(
-                F, close_col="close", n_states=3, window=60,
-                hurst_window=120, fractal_window=60, step=5,
+                F,
+                close_col="close",
+                n_states=3,
+                window=60,
+                hurst_window=120,
+                fractal_window=60,
+                step=5,
             )
             F = F.with_columns(_reg)
             log_feature_build(
-                "regime_detection", n_rows=F.height, n_cols=len(_reg.columns),
-                status="success", t0=_t0_reg,
+                "regime_detection",
+                n_rows=F.height,
+                n_cols=len(_reg.columns),
+                status="success",
+                t0=_t0_reg,
                 note="detect_regimes_polars (HMM + Hurst + fractal)",
             )
         except Exception as _reg_exc:
             # Fall back to the legacy volatility-tercile bucket expressions if
-            # hmmlearn/Numba is unavailable — still emit regime_class.
+            # hmmlearn/Numba is unavailable - still emit regime_class.
             print(
                 f"[FeatureEngineering] WARNING: detect_regimes_polars failed "
                 f"({type(_reg_exc).__name__}: {_reg_exc}); using vol-bucket regime_class"
             )
             F = F.with_columns(hmm_regime_probs(3, 60))
             log_feature_build(
-                "regime_detection", n_rows=F.height, n_cols=3,
-                status="fallback_vol_bucket", t0=time.perf_counter(),
-                exc=_reg_exc, note="hmmlearn/numba unavailable",
+                "regime_detection",
+                n_rows=F.height,
+                n_cols=3,
+                status="fallback_vol_bucket",
+                t0=time.perf_counter(),
+                exc=_reg_exc,
+                note="hmmlearn/numba unavailable",
             )
         F = F.with_columns(cpd_ret("close", 60))
         F = F.with_columns(regime_persistence(20))
@@ -2011,13 +2249,9 @@ class FeatureEngineer:
                 else:
                     emb_df = pl.DataFrame(finbert_embs)
                 if "timestamp_utc" in emb_df.columns and "timestamp_utc" in F.columns:
-                    emb_df = emb_df.with_columns(
-                        pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
-                    )
+                    emb_df = emb_df.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
                     emb_cols = [c for c in emb_df.columns if c.startswith("embed_") or c.startswith("fb_")]
-                    F = _join_asof_available(
-                        F, emb_df.select(["timestamp_utc"] + emb_cols)
-                    )
+                    F = _join_asof_available(F, emb_df.select(["timestamp_utc", *emb_cols]))
                     # Normalize to fb_* (FEATURE_MASK / curriculum.macro contract).
                     rename_map = {}
                     for i, c in enumerate(emb_cols):
@@ -2034,7 +2268,9 @@ class FeatureEngineer:
                             F = F.with_columns(pl.lit(0.0).alias(col))
                 else:
                     if not self._warned_finbert_placeholder:
-                        print("[FeatureEngineering] WARNING: FinBERT embs missing timestamp_utc; using zero placeholders")
+                        print(
+                            "[FeatureEngineering] WARNING: FinBERT embs missing timestamp_utc; using zero placeholders"
+                        )
                         self._warned_finbert_placeholder = True
                     F = F.with_columns(embedding_placeholders(8))
             except Exception as e:
@@ -2064,6 +2300,7 @@ class FeatureEngineer:
         if cot_data is not None:
             try:
                 from features.cot_features import add_cot_features
+
                 F = add_cot_features(F, cot_data, pair)
             except Exception as e:
                 print(f"[FeatureEngineering] WARNING: COT features build failed: {e}")
@@ -2096,6 +2333,7 @@ class FeatureEngineer:
         # the calendar-style lead-in for scheduled events known in advance.
         if news_events is not None and len(news_events) > 0:
             import pandas as pd
+
             buf = pd.Timedelta(minutes=self.nb)
             ts = F["timestamp_utc"].to_pandas()
             flags = pd.DataFrame({"news_ok": 1.0, "pre_news": 0.0, "post_news": 0.0}, index=ts)
@@ -2106,48 +2344,51 @@ class FeatureEngineer:
                 flags.loc[mask_ok, "news_ok"] = 0.0
                 flags.loc[mask_pre, "pre_news"] = 1.0
                 flags.loc[mask_post, "post_news"] = 1.0
-            F = F.with_columns([
-                pl.Series("news_ok", flags["news_ok"].values),
-                pl.Series("pre_news", flags["pre_news"].values),
-                pl.Series("post_news", flags["post_news"].values)
-            ])
+            F = F.with_columns(
+                [
+                    pl.Series("news_ok", flags["news_ok"].values),
+                    pl.Series("pre_news", flags["pre_news"].values),
+                    pl.Series("post_news", flags["post_news"].values),
+                ]
+            )
         else:
-            F = F.with_columns([
-                pl.lit(1.0).alias("news_ok"),
-                pl.lit(0.0).alias("pre_news"),
-                pl.lit(0.0).alias("post_news")
-            ])
+            F = F.with_columns(
+                [pl.lit(1.0).alias("news_ok"), pl.lit(0.0).alias("pre_news"), pl.lit(0.0).alias("post_news")]
+            )
 
         if self.enable_regime_gate:
             rbp = self.regime_gate.fit_predict(F)
             F = F.with_columns([rbp])
-            F = F.with_columns([
-                (0.2 + 0.8 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_gold_weight"),
-                (1.0 - 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_yield_weight"),
-                (0.3 + 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_risk_weight")
-            ])
+            F = F.with_columns(
+                [
+                    (0.2 + 0.8 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_gold_weight"),
+                    (1.0 - 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_yield_weight"),
+                    (0.3 + 0.7 * pl.col("regime_break_prob")).clip(0.0, 1.0).alias("gate_risk_weight"),
+                ]
+            )
 
-        # Sentiment & News features — join on available_time (PIT), not event time.
+        # Sentiment & News features - join on available_time (PIT), not event time.
         if sentiment is not None:
             if "timestamp_utc" in sentiment.columns:
-                sentiment = sentiment.with_columns(
-                    pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
-                )
+                sentiment = sentiment.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             F = _join_asof_available(F, sentiment)
             F = sentiment_tiers(F, decay_lam=self.dl, fb_dim=self.fb)
         else:
             # No sentiment data     create zeroed columns for the three tiers
-            F = F.with_columns([
-                pl.lit(0.0).alias("sentiment_raw"),
-                pl.lit(0.0).alias("sentiment_decayed"),
-                *[pl.lit(0.0).alias(f"fb_{i}") for i in range(self.fb)]
-            ])
+            F = F.with_columns(
+                [
+                    pl.lit(0.0).alias("sentiment_raw"),
+                    pl.lit(0.0).alias("sentiment_decayed"),
+                    *[pl.lit(0.0).alias(f"fb_{i}") for i in range(self.fb)],
+                ]
+            )
 
         # Multi-modal sentiment fusion (Improvement #3): news + social + COT,
         # topic modeling and financial NER. Requires raw events with a text column.
         if sentiment is not None and any(c in sentiment.columns for c in ("text", "headline")):
             try:
                 from features.sentiment_fusion import add_sentiment_features
+
                 _tcol = "text" if "text" in sentiment.columns else "headline"
                 _ev = sentiment.rename({_tcol: "text"}) if _tcol != "text" else sentiment
                 _keep = [c for c in ("timestamp_utc", "source", "text", "sentiment") if c in _ev.columns]
@@ -2156,11 +2397,14 @@ class FeatureEngineer:
                 _ev_pit = _ev.select(_keep)
                 if "timestamp_utc" in _ev_pit.columns:
                     _ev_pit = _ev_pit.with_columns(
-                        (pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
-                         + pl.duration(minutes=_DEFAULT_PIT_DELAY_MINUTES)).alias("timestamp_utc")
+                        (
+                            pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
+                            + pl.duration(minutes=_DEFAULT_PIT_DELAY_MINUTES)
+                        ).alias("timestamp_utc")
                     )
                 F = add_sentiment_features(
-                    F, _ev_pit,
+                    F,
+                    _ev_pit,
                     time_col="timestamp_utc",
                     lam=float(self.dl) if self.dl else 0.05,
                     dt_sec=3600.0,
@@ -2186,15 +2430,12 @@ class FeatureEngineer:
             left_dtype = F.schema["timestamp_utc"]
             if "available_time" not in eco.columns:
                 eco = eco.with_columns(
-                    (pl.col("timestamp_utc").cast(left_dtype) + pl.duration(minutes=1))
-                    .alias("available_time")
+                    (pl.col("timestamp_utc").cast(left_dtype) + pl.duration(minutes=1)).alias("available_time")
                 )
             else:
                 eco = eco.with_columns(pl.col("available_time").cast(left_dtype))
             eco_join = (
-                eco.drop(drop_cols)
-                .with_columns(pl.col("available_time").cast(left_dtype))
-                .sort("available_time")
+                eco.drop(drop_cols).with_columns(pl.col("available_time").cast(left_dtype)).sort("available_time")
             )
             join_drop = [c for c in ("timestamp_utc",) if c in eco_join.columns]
             F = F.join_asof(
@@ -2206,15 +2447,39 @@ class FeatureEngineer:
             if "available_time" in F.columns:
                 F = F.drop("available_time")
             if "actual" in F.columns and "forecast" in F.columns:
-                F = F.with_columns([
-                    (pl.col("actual").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False) -
-                     pl.col("forecast").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False)).fill_null(0.0).alias("eco_surprise")
-                ])
+                F = F.with_columns(
+                    [
+                        (
+                            pl.col("actual")
+                            .cast(pl.String)
+                            .str.replace_all(r"[^\d\.\-]", "")
+                            .cast(pl.Float64, strict=False)
+                            - pl.col("forecast")
+                            .cast(pl.String)
+                            .str.replace_all(r"[^\d\.\-]", "")
+                            .cast(pl.Float64, strict=False)
+                        )
+                        .fill_null(0.0)
+                        .alias("eco_surprise")
+                    ]
+                )
                 if "prior" in F.columns:
-                    F = F.with_columns([
-                        (pl.col("actual").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False) -
-                         pl.col("prior").cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False)).fill_null(0.0).alias("eco_revision")
-                    ])
+                    F = F.with_columns(
+                        [
+                            (
+                                pl.col("actual")
+                                .cast(pl.String)
+                                .str.replace_all(r"[^\d\.\-]", "")
+                                .cast(pl.Float64, strict=False)
+                                - pl.col("prior")
+                                .cast(pl.String)
+                                .str.replace_all(r"[^\d\.\-]", "")
+                                .cast(pl.Float64, strict=False)
+                            )
+                            .fill_null(0.0)
+                            .alias("eco_revision")
+                        ]
+                    )
                 else:
                     F = F.with_columns([pl.lit(0.0).alias("eco_revision")])
             else:
@@ -2224,9 +2489,7 @@ class FeatureEngineer:
 
         if art_counts is not None:
             if "timestamp_utc" in art_counts.columns:
-                art_counts = art_counts.with_columns(
-                    pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC"))
-                )
+                art_counts = art_counts.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             F = _join_asof_available(F, art_counts)
             if "article_counts" in F.columns:
                 F = F.with_columns([pl.col("article_counts").fill_null(0.0)])
@@ -2237,7 +2500,14 @@ class FeatureEngineer:
             F = F.with_columns([pl.lit(0.0).alias("buzz")])
 
         # News category one-hot flags (central_bank, inflation, labor, growth, geopolitical, commentary)
-        _NEWS_CAT_COLS = ["cat_central_bank", "cat_inflation", "cat_labor", "cat_growth", "cat_geopolitical", "cat_commentary"]
+        _NEWS_CAT_COLS = [
+            "cat_central_bank",
+            "cat_inflation",
+            "cat_labor",
+            "cat_growth",
+            "cat_geopolitical",
+            "cat_commentary",
+        ]
         if news_cats is not None and "timestamp_utc" in news_cats.columns:
             news_cats = news_cats.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             F = _join_asof_available(F, news_cats)
@@ -2255,19 +2525,21 @@ class FeatureEngineer:
         if missing_fb:
             F = F.with_columns([pl.lit(0.0).alias(c) for c in missing_fb])
 
-
         # Temporal / session clock features.
         # Prefer DST-aware ``london_ny`` from bars when present; otherwise
         # fixed-UTC fallback. ``asia_london`` stays labeling-only aux on bars
         # (joined in dataset_builder) to avoid curriculum / FEATURE_MASK churn.
         import pandas as pd
+
         ts_pd = F["timestamp_utc"].to_pandas()
-        h = ts_pd.dt.hour; m = ts_pd.dt.minute; tm = h * 60 + m
+        h = ts_pd.dt.hour
+        m = ts_pd.dt.minute
+        tm = h * 60 + m
         temporal = [
-            pl.Series("time_sin", np.sin(2*np.pi*tm/1440)),
-            pl.Series("time_cos", np.cos(2*np.pi*tm/1440)),
-            pl.Series("day_sin", np.sin(2*np.pi*ts_pd.dt.dayofweek/5)),
-            pl.Series("day_cos", np.cos(2*np.pi*ts_pd.dt.dayofweek/5)),
+            pl.Series("time_sin", np.sin(2 * np.pi * tm / 1440)),
+            pl.Series("time_cos", np.cos(2 * np.pi * tm / 1440)),
+            pl.Series("day_sin", np.sin(2 * np.pi * ts_pd.dt.dayofweek / 5)),
+            pl.Series("day_cos", np.cos(2 * np.pi * ts_pd.dt.dayofweek / 5)),
         ]
         if "london_ny" not in F.columns:
             # Fixed-UTC fallback (approximate under DST); bars DST path is preferred.
@@ -2282,17 +2554,18 @@ class FeatureEngineer:
         # Latency
         try:
             from config.settings import EXECUTION as _EX
+
             _lat_base = float(_EX.get("latency_baseline_ms", 50.0))
         except Exception:
             _lat_base = 50.0
 
-        F = F.with_columns([
-            compute_latency_feature(F, _lat_base, ac)
-        ])
+        F = F.with_columns([compute_latency_feature(F, _lat_base, ac)])
 
         # Final cleanup
         n0 = len(F)
-        F = F.drop(["actual", "forecast", "prior", "_eco_raw", "_eco_scale", "sentiment", "article_counts"], strict=False)
+        F = F.drop(
+            ["actual", "forecast", "prior", "_eco_raw", "_eco_scale", "sentiment", "article_counts"], strict=False
+        )
         F = F.drop_nulls(subset=[ac])
         F = F.fill_null(strategy="forward").fill_null(0.0)
         if n0 > len(F):
@@ -2307,6 +2580,7 @@ class FeatureEngineer:
         if self.enable_no_trade_zones:
             try:
                 from features.no_trade_zones import compute_heuristic_no_trade_score
+
                 _nt_cols = [c for c in ("atr_6", "spread_pips", "adx_14", "rsi_14") if c in F.columns]
                 _nt_pd = F.select(_nt_cols).to_pandas()
                 F = F.with_columns(pl.Series("no_trade_score", compute_heuristic_no_trade_score(_nt_pd)))
@@ -2318,11 +2592,14 @@ class FeatureEngineer:
         if self.enable_quality_gate:
             try:
                 from features.feature_quality_monitor import feature_quality_monitor, filter_features
+
                 self.quality_report = feature_quality_monitor(F)
                 _n_severe = int((self.quality_report["psi_level"] == "severe").sum())
                 _n_leaky = int(self.quality_report["leak_flag"].sum())
-                print(f"[Features] Quality monitor: {len(self.quality_report)} features | "
-                      f"{_n_severe} severe-drift | {_n_leaky} leaky")
+                print(
+                    f"[Features] Quality monitor: {len(self.quality_report)} features | "
+                    f"{_n_severe} severe-drift | {_n_leaky} leaky"
+                )
                 F, _rep, _dropped = filter_features(F, drop_leaky=True, drop_severe_drift=True)
                 if _dropped:
                     print(f"[Features] Quality gate dropped {len(_dropped)} features: {sorted(_dropped)[:10]}...")

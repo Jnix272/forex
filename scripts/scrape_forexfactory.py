@@ -77,8 +77,7 @@ FAILURE_FIELDS = ["week", "url", "reason"]
 DEFAULT_FF_TZ = "America/New_York"
 
 _USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 _MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_abbr) if m}
@@ -88,6 +87,7 @@ _SESSION.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
 
 
 # ── CSV helpers ---------------------------------------------------------------
+
 
 def _read_existing(path: Path) -> list[dict]:
     if not path.exists() or path.stat().st_size == 0:
@@ -169,6 +169,7 @@ def _append_failures(path: Path, rows: list[dict]) -> None:
 
 # ── Week-string helpers -------------------------------------------------------
 
+
 def _week_url(week_str: str) -> str:
     return f"https://www.forexfactory.com/calendar?week={week_str}"
 
@@ -221,9 +222,7 @@ def _is_specific_time(time_str: str) -> bool:
     return ("am" in t or "pm" in t) and ":" in t
 
 
-def _parse_ff_time(
-    date_str: str, time_str: str, week_year: int, week_str: str, tz_name: str
-) -> datetime | None:
+def _parse_ff_time(date_str: str, time_str: str, week_year: int, week_str: str, tz_name: str) -> datetime | None:
     """Convert a ForexFactory date/time row into a UTC datetime.
 
     ``date_str`` looks like "Mon Jan 1"; ``time_str`` like "8:30am",
@@ -306,15 +305,12 @@ def _clean_numeric(raw: str) -> str:
 
 # ── HTTP fetch with retries ---------------------------------------------------
 
+
 def _retry_sleep_seconds(exc: Exception, sleep_s: float, attempt: int) -> float:
     base = max(float(sleep_s), 1.0)
     retry_after = None
     resp = getattr(exc, "response", None)
-    if (
-        isinstance(exc, requests.exceptions.HTTPError)
-        and resp is not None
-        and resp.status_code == 429
-    ):
+    if isinstance(exc, requests.exceptions.HTTPError) and resp is not None and resp.status_code == 429:
         try:
             retry_after = float(resp.headers.get("Retry-After", ""))
         except (TypeError, ValueError):
@@ -352,6 +348,7 @@ def _fetch_week_html(url: str, *, sleep_s: float, retries: int, timeout: int = 2
 
 
 # ── Parsing -------------------------------------------------------------------
+
 
 def _impact_from_cell(impact_td) -> str:
     """Map ForexFactory impact color to high/medium/low."""
@@ -411,18 +408,20 @@ def parse_week_html(html: str, week_str: str, *, tz_name: str) -> list[dict]:
             headline = _cell_text(tr, "calendar__event")
 
             ts = _parse_ff_time(current_date, current_time, year, week_str, tz_name)
-            rows.append({
-                "timestamp_utc": ts.isoformat().replace("+00:00", "Z") if ts else "",
-                "event_type": "calendar",
-                "currency": currency,
-                "impact": impact,
-                "headline": headline,
-                "actual": _clean_numeric(_cell_text(tr, "calendar__actual")),
-                "forecast": _clean_numeric(_cell_text(tr, "calendar__forecast")),
-                "prior": _clean_numeric(_cell_text(tr, "calendar__previous")),
-                "source": "forexfactory",
-                "url": url,
-            })
+            rows.append(
+                {
+                    "timestamp_utc": ts.isoformat().replace("+00:00", "Z") if ts else "",
+                    "event_type": "calendar",
+                    "currency": currency,
+                    "impact": impact,
+                    "headline": headline,
+                    "actual": _clean_numeric(_cell_text(tr, "calendar__actual")),
+                    "forecast": _clean_numeric(_cell_text(tr, "calendar__forecast")),
+                    "prior": _clean_numeric(_cell_text(tr, "calendar__previous")),
+                    "source": "forexfactory",
+                    "url": url,
+                }
+            )
         except Exception as exc:
             print(f"    [FF] WARN skipping malformed row in {week_str}: {exc}", flush=True)
             continue
@@ -430,14 +429,13 @@ def parse_week_html(html: str, week_str: str, *, tz_name: str) -> list[dict]:
     return rows
 
 
-def fetch_forexfactory_week(
-    week_str: str, *, tz_name: str, sleep_s: float, retries: int
-) -> list[dict]:
+def fetch_forexfactory_week(week_str: str, *, tz_name: str, sleep_s: float, retries: int) -> list[dict]:
     html = _fetch_week_html(_week_url(week_str), sleep_s=sleep_s, retries=retries)
     return parse_week_html(html, week_str, tz_name=tz_name)
 
 
 # ── CLI -----------------------------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -448,21 +446,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default="2025-12-31", help="End date YYYY-MM-DD")
     p.add_argument("--out", default=str(DEFAULT_OUT), help="Output events CSV path")
     p.add_argument(
-        "--failures-out", default=str(DEFAULT_FAILURES_OUT),
+        "--failures-out",
+        default=str(DEFAULT_FAILURES_OUT),
         help="CSV recording weeks that failed to scrape (for re-run)",
     )
     p.add_argument(
-        "--tz", default=DEFAULT_FF_TZ,
+        "--tz",
+        default=DEFAULT_FF_TZ,
         help="IANA timezone ForexFactory renders times in (logged-out default is US Eastern)",
     )
     p.add_argument("--sleep", type=float, default=1.5, help="Base seconds between weekly requests")
     p.add_argument("--retries", type=int, default=5, help="HTTP retries per week (429/5xx/network)")
     p.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="Skip weeks already present in the output CSV",
     )
     p.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="List the weeks that would be scraped without making any HTTP calls",
     )
     return p.parse_args()
@@ -510,9 +512,7 @@ def main() -> int:
             print(f"  [{i}/{len(weeks)}] {week_str} -> skip (already present)", flush=True)
             continue
         try:
-            rows = fetch_forexfactory_week(
-                week_str, tz_name=args.tz, sleep_s=args.sleep, retries=args.retries
-            )
+            rows = fetch_forexfactory_week(week_str, tz_name=args.tz, sleep_s=args.sleep, retries=args.retries)
             added = writer.append(rows)
             total_new += added
             print(f"  [{i}/{len(weeks)}] {week_str} -> {len(rows)} events (+{added} new)", flush=True)

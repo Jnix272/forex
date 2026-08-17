@@ -21,6 +21,7 @@ from data.feature_store import FeatureStore
 
 try:
     from scipy import stats as _sp_stats
+
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
@@ -31,16 +32,16 @@ except Exception:
 # ════════════════════════════════════════════════════════════════════════════
 
 # PSI thresholds (common convention)
-PSI_LOW    = 0.1   # No significant shift
-PSI_MEDIUM = 0.2   # Moderate shift — monitor
+PSI_LOW = 0.1  # No significant shift
+PSI_MEDIUM = 0.2  # Moderate shift - monitor
 # Above 0.2 = significant shift → alert / retrain
 
 # KS default thresholds
 KS_PVALUE_THRESHOLD = 0.05
-KS_STAT_THRESHOLD   = 0.05  # Minimum effect size (D-stat) to flag
+KS_STAT_THRESHOLD = 0.05  # Minimum effect size (D-stat) to flag
 
 DEFAULT_WINDOW_BASELINE = 20_000  # Rows for reference distribution
-DEFAULT_WINDOW_LIVE     = 5_000   # Rows for recent distribution
+DEFAULT_WINDOW_LIVE = 5_000  # Rows for recent distribution
 
 
 class DriftSeverity(Enum):
@@ -74,6 +75,7 @@ class DriftSeverity(Enum):
 @dataclass
 class DriftResult:
     """Result of drift check for a single feature."""
+
     feature_name: str
     psi: float
     ks_pvalue: float
@@ -92,6 +94,7 @@ class DriftResult:
 @dataclass
 class DriftReport:
     """Aggregate drift report across features."""
+
     feature_results: list[DriftResult]
     psi_max: float
     ks_min_pvalue: float
@@ -109,11 +112,12 @@ class DriftReport:
 # Core: Per-feature drift metrics
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def _safe_psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
     """Population Stability Index with degenerate-distribution hardening."""
     eps = 1e-9
     expected = expected[np.isfinite(expected)]
-    actual   = actual[np.isfinite(actual)]
+    actual = actual[np.isfinite(actual)]
     if len(expected) < 2 or len(actual) < 2:
         return 0.0
     lo = min(float(expected.min()), float(actual.min()))
@@ -144,7 +148,7 @@ def _ks_2samp(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     if _HAS_SCIPY:
         stat, p = _sp_stats.ks_2samp(a, b)
         return float(stat), float(p)
-    return 1.0, 1.0  # Can't compute — no drift detected
+    return 1.0, 1.0  # Can't compute - no drift detected
 
 
 def _psi_to_severity(psi: float) -> DriftSeverity:
@@ -175,6 +179,7 @@ def _ks_to_severity(ks_pvalue: float, ks_stat: float) -> DriftSeverity:
 # Drift Checker (single-shot)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def check_feature_drift(
     feature_name: str,
     baseline: np.ndarray,
@@ -184,15 +189,22 @@ def check_feature_drift(
     ks_stat_threshold: float = KS_STAT_THRESHOLD,
 ) -> DriftResult:
     """Run PSI + KS on a single feature."""
-    psi  = _safe_psi(baseline, live, bins=psi_bins)
+    psi = _safe_psi(baseline, live, bins=psi_bins)
     ks_stat, ks_p = _ks_2samp(baseline, live)
 
     psi_sev = _psi_to_severity(psi)
-    ks_sev  = _ks_to_severity(ks_p, ks_stat) if _HAS_SCIPY else DriftSeverity.NONE
-    severity = max(psi_sev, ks_sev, key=lambda s: [
-        DriftSeverity.NONE, DriftSeverity.LOW, DriftSeverity.MODERATE,
-        DriftSeverity.HIGH, DriftSeverity.CRITICAL,
-    ].index(s))
+    ks_sev = _ks_to_severity(ks_p, ks_stat) if _HAS_SCIPY else DriftSeverity.NONE
+    severity = max(
+        psi_sev,
+        ks_sev,
+        key=lambda s: [
+            DriftSeverity.NONE,
+            DriftSeverity.LOW,
+            DriftSeverity.MODERATE,
+            DriftSeverity.HIGH,
+            DriftSeverity.CRITICAL,
+        ].index(s),
+    )
 
     # Drift if PSI > 0.2 OR (KS p < threshold AND stat >= threshold)
     ks_drift = ks_p < ks_pvalue_threshold and ks_stat >= ks_stat_threshold
@@ -227,9 +239,16 @@ def run_drift_check(
     common = set(baseline_data) & set(live_data)
     if not common:
         return DriftReport(
-            feature_results=[], psi_max=0.0, ks_min_pvalue=1.0, ks_max_stat=0.0,
-            n_drifted=0, n_features=0, overall_severity=DriftSeverity.NONE,
-            drift_detected=False, baseline_time=baseline_time, live_time=live_time,
+            feature_results=[],
+            psi_max=0.0,
+            ks_min_pvalue=1.0,
+            ks_max_stat=0.0,
+            n_drifted=0,
+            n_features=0,
+            overall_severity=DriftSeverity.NONE,
+            drift_detected=False,
+            baseline_time=baseline_time,
+            live_time=live_time,
             reasons=["No common features between baseline and live"],
         )
 
@@ -238,7 +257,12 @@ def run_drift_check(
         bl = baseline_data[name]
         lv = live_data[name]
         result = check_feature_drift(
-            name, bl, lv, psi_bins, ks_pvalue_threshold, ks_stat_threshold,
+            name,
+            bl,
+            lv,
+            psi_bins,
+            ks_pvalue_threshold,
+            ks_stat_threshold,
         )
         results.append(result)
 
@@ -276,6 +300,7 @@ def run_drift_check(
 # FeatureStore-Integrated Drift Checker
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class DriftTracker:
     """
     Persistent drift monitoring integrated with the Feature Store.
@@ -289,6 +314,7 @@ class DriftTracker:
     def _init_db(self) -> None:
         """Create drift tracking tables in FeatureStore's registry DB."""
         import sqlite3
+
         with sqlite3.connect(self.store.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS drift_checks (
@@ -351,12 +377,13 @@ class DriftTracker:
             if lv is None or len(lv) == 0:
                 missing.append(name)
                 continue
-            feat_col = [c for c in bl.columns if c != "timestamp_utc"][0]
+            feat_col = next(c for c in bl.columns if c != "timestamp_utc")
             baseline_data[name] = bl[feat_col].to_numpy()
             live_data[name] = lv[feat_col].to_numpy()
 
         report = run_drift_check(
-            baseline_data, live_data,
+            baseline_data,
+            live_data,
             baseline_time=baseline_start.isoformat(),
             live_time=live_start.isoformat(),
             psi_bins=psi_bins,
@@ -373,56 +400,82 @@ class DriftTracker:
     def _persist_report(self, report: DriftReport) -> None:
         """Write drift results to SQLite."""
         import sqlite3
+
         with sqlite3.connect(self.store.db_path) as conn:
             now = datetime.now(UTC).isoformat()
             for r in report.feature_results:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO drift_checks
                     (feature_name, check_time, baseline_time, live_time,
                      n_baseline, n_live, psi, ks_pvalue, ks_stat,
                      severity, drifted, baseline_mean, live_mean, meta)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    r.feature_name, now, report.baseline_time, report.live_time,
-                    r.n_baseline, r.n_live, r.psi, r.ks_pvalue, r.ks_stat,
-                    r.severity.value, int(r.drifted),
-                    r.baseline_mean, r.live_mean, "{}",
-                ))
+                """,
+                    (
+                        r.feature_name,
+                        now,
+                        report.baseline_time,
+                        report.live_time,
+                        r.n_baseline,
+                        r.n_live,
+                        r.psi,
+                        r.ks_pvalue,
+                        r.ks_stat,
+                        r.severity.value,
+                        int(r.drifted),
+                        r.baseline_mean,
+                        r.live_mean,
+                        "{}",
+                    ),
+                )
 
                 if r.drifted:
                     check_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    conn.execute("""
+                    conn.execute(
+                        """
                         INSERT INTO drift_alerts
                         (check_id, feature_name, alert_time, severity, message)
                         VALUES (?, ?, ?, ?, ?)
-                    """, (
-                        check_id, r.feature_name, now, r.severity.value,
-                        f"PSI={r.psi:.4f} KS_p={r.ks_pvalue:.6f} "
-                        f"baseline_mean={r.baseline_mean:.6f} live_mean={r.live_mean:.6f}"
-                    ))
+                    """,
+                        (
+                            check_id,
+                            r.feature_name,
+                            now,
+                            r.severity.value,
+                            f"PSI={r.psi:.4f} KS_p={r.ks_pvalue:.6f} "
+                            f"baseline_mean={r.baseline_mean:.6f} live_mean={r.live_mean:.6f}",
+                        ),
+                    )
 
-    def get_recent_checks(
-        self, feature_name: str = None, limit: int = 20
-    ) -> list[dict]:
+    def get_recent_checks(self, feature_name: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent drift check history for a feature."""
         import sqlite3
+
         with sqlite3.connect(self.store.db_path) as conn:
             conn.row_factory = sqlite3.Row
             if feature_name:
-                rows = conn.execute("""
+                rows = conn.execute(
+                    """
                     SELECT * FROM drift_checks
                     WHERE feature_name = ? ORDER BY check_time DESC LIMIT ?
-                """, (feature_name, limit)).fetchall()
+                """,
+                    (feature_name, limit),
+                ).fetchall()
             else:
-                rows = conn.execute("""
+                rows = conn.execute(
+                    """
                     SELECT * FROM drift_checks
                     ORDER BY check_time DESC LIMIT ?
-                """, (limit,)).fetchall()
+                """,
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
 
     def get_active_alerts(self, unacknowledged_only: bool = True) -> list[dict]:
         """Get active drift alerts."""
         import sqlite3
+
         with sqlite3.connect(self.store.db_path) as conn:
             conn.row_factory = sqlite3.Row
             if unacknowledged_only:
@@ -444,30 +497,38 @@ class DriftTracker:
 
     def acknowledge_alert(self, alert_id: int) -> None:
         import sqlite3
-        with sqlite3.connect(self.store.db_path) as conn:
-            conn.execute(
-                "UPDATE drift_alerts SET acknowledged = 1 WHERE id = ?",
-                (alert_id,)
-            )
 
-    def get_drift_summary(self, since: datetime = None) -> dict:
+        with sqlite3.connect(self.store.db_path) as conn:
+            conn.execute("UPDATE drift_alerts SET acknowledged = 1 WHERE id = ?", (alert_id,))
+
+    def get_drift_summary(self, since: datetime | None = None) -> dict:
         """Get summary statistics of recent drift activity."""
         import sqlite3
+
         with sqlite3.connect(self.store.db_path) as conn:
             if since:
-                rows = conn.execute("""
+                rows = conn.execute(
+                    """
                     SELECT severity, COUNT(*) as cnt, MAX(psi) as max_psi
                     FROM drift_checks
                     WHERE check_time >= ? AND drifted = 1
                     GROUP BY severity
-                """, (since.isoformat(),)).fetchall()
-                total = conn.execute("""
+                """,
+                    (since.isoformat(),),
+                ).fetchall()
+                total = conn.execute(
+                    """
                     SELECT COUNT(*) as cnt FROM drift_checks WHERE check_time >= ?
-                """, (since.isoformat(),)).fetchone()[0]
-                n_drifted = conn.execute("""
+                """,
+                    (since.isoformat(),),
+                ).fetchone()[0]
+                n_drifted = conn.execute(
+                    """
                     SELECT COUNT(*) as cnt FROM drift_checks
                     WHERE check_time >= ? AND drifted = 1
-                """, (since.isoformat(),)).fetchone()[0]
+                """,
+                    (since.isoformat(),),
+                ).fetchone()[0]
             else:
                 rows = conn.execute("""
                     SELECT severity, COUNT(*) as cnt, MAX(psi) as max_psi
@@ -475,17 +536,13 @@ class DriftTracker:
                     GROUP BY severity
                 """).fetchall()
                 total = conn.execute("SELECT COUNT(*) as cnt FROM drift_checks").fetchone()[0]
-                n_drifted = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM drift_checks WHERE drifted = 1"
-                ).fetchone()[0]
+                n_drifted = conn.execute("SELECT COUNT(*) as cnt FROM drift_checks WHERE drifted = 1").fetchone()[0]
 
             return {
                 "total_checks": total,
                 "n_drifted": n_drifted,
                 "drift_rate": n_drifted / max(total, 1),
-                "by_severity": [
-                    {"severity": r[0], "count": r[1], "max_psi": r[2]} for r in rows
-                ],
+                "by_severity": [{"severity": r[0], "count": r[1], "max_psi": r[2]} for r in rows],
                 "active_alerts": len(self.get_active_alerts()),
             }
 
@@ -493,6 +550,7 @@ class DriftTracker:
 # ════════════════════════════════════════════════════════════════════════════
 # Scheduled drift checks
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def schedule_drift_check(
     store: FeatureStore,
@@ -515,7 +573,11 @@ def schedule_drift_check(
 
     tracker = DriftTracker(store)
     return tracker.check_from_store(
-        feature_names, baseline_start, baseline_end, live_start, live_end,
+        feature_names,
+        baseline_start,
+        baseline_end,
+        live_start,
+        live_end,
     )
 
 
@@ -523,6 +585,7 @@ def schedule_drift_check(
 # Convenience: run drift check on raw arrays from NPY/Zarr cache
 # (wraps the existing monitoring/drift_gate.py logic with named features)
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def drift_check_from_cache(
     cache_path: str,
@@ -545,7 +608,7 @@ def drift_check_from_cache(
         raise ValueError(f"Dataset too small for drift check: n_total={n_total}")
 
     b = max(50, min(baseline_samples, n_total // 2))
-    l = max(50, min(live_samples, n_total - b))
+    l = max(50, min(live_samples, n_total - b))  # noqa: E741
     live_start = max(b, n_total - l)
 
     x_base = _read_feature_slice(cache_path, 0, b)
@@ -556,7 +619,8 @@ def drift_check_from_cache(
     live_data = {feature_names[i]: x_live[:, i] for i in range(n_feats)}
 
     return run_drift_check(
-        baseline_data, live_data,
+        baseline_data,
+        live_data,
         baseline_time=f"rows 0..{b}",
         live_time=f"rows {live_start}..{n_total}",
         psi_bins=psi_bins,

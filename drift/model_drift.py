@@ -1,14 +1,14 @@
 """
-drift/model_drift.py — Model drift & deployment safety (Improvement #5)
+drift/model_drift.py - Model drift & deployment safety (Improvement #5)
 
 Champion-challenger model management for live inference:
 
-  * ChampionChallengerHarness  — shadow-mode evaluation: challenger predicts in
+  * ChampionChallengerHarness  - shadow-mode evaluation: challenger predicts in
     parallel with the champion and we compare their performance on the same live
     trade/error stream (equity, Sharpe, drawdown, PSR).
-  * CanaryRollout              — gradually route `x%` of live signals to a
+  * CanaryRollout              - gradually route `x%` of live signals to a
     challenger, escalating the fraction on success and de-escalating on failure.
-  * AutomatedRollbackMonitor   — watch live challenger/champion performance
+  * AutomatedRollbackMonitor   - watch live challenger/champion performance
     against a deployment-time baseline; breach thresholds (drawdown, PSR drop,
     error spike) → rollback alert (optional callback for checkpoint swap).
 
@@ -30,6 +30,7 @@ from validation.promotion_gate import PromotionGate
 try:
     from evaluation.metrics import probabilistic_sharpe_ratio as _psr_fn
 except Exception:  # pragma: no cover - evaluation.metrics ships with repo
+
     def _psr_fn(sr_hat, sr_benchmark, n_obs, skewness=0.0, kurtosis=3.0):  # type: ignore
         return 0.5
 
@@ -68,9 +69,11 @@ def _max_drawdown_pct(equity: np.ndarray) -> float:
 # Rolling model stats
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class ModelStats:
     """Rolling window of trade results + prediction errors for one model."""
+
     model_id: str
     maxlen: int = 500
     pnls: list[float] = field(default_factory=list)
@@ -121,14 +124,23 @@ class ModelStats:
         if pnls.size < 5:
             return 0.5
         sr = _safe_sharpe(pnls, annual_factor)
-        sk = float(((pnls - pnls.mean()) / max(pnls.std(ddof=1), 1e-12) ** 3).mean()) if pnls.std(ddof=1) > 1e-12 else 0.0
-        ku = float((((pnls - pnls.mean()) / max(pnls.std(ddof=1), 1e-12)) ** 4).mean()) if pnls.std(ddof=1) > 1e-12 else 3.0
+        sk = (
+            float(((pnls - pnls.mean()) / max(pnls.std(ddof=1), 1e-12) ** 3).mean())
+            if pnls.std(ddof=1) > 1e-12
+            else 0.0
+        )
+        ku = (
+            float((((pnls - pnls.mean()) / max(pnls.std(ddof=1), 1e-12)) ** 4).mean())
+            if pnls.std(ddof=1) > 1e-12
+            else 3.0
+        )
         return _psr_fn(sr, 0.0, pnls.size, sk, ku)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Champion-challenger harness
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class ChampionChallengerHarness:
     """Shadow-mode comparison of challenger vs champion on a live stream.
@@ -188,11 +200,13 @@ class ChampionChallengerHarness:
             }
 
         challenger_gate = self._gate.evaluate_from_history(
-            trade_pnls=ca.pnls, equity_curve=ca.equity_array.tolist() if ca.equity else [],
+            trade_pnls=ca.pnls,
+            equity_curve=ca.equity_array.tolist() if ca.equity else [],
             n_bars=max(len(ca.pnls), 1),
         )
         champion_gate = self._gate.evaluate_from_history(
-            trade_pnls=ch.pnls, equity_curve=ch.equity_array.tolist() if ch.equity else [],
+            trade_pnls=ch.pnls,
+            equity_curve=ch.equity_array.tolist() if ch.equity else [],
             n_bars=max(len(ch.pnls), 1),
         )
 
@@ -222,6 +236,7 @@ class ChampionChallengerHarness:
 # ═════════════════════════════════════════════════════════════════════════════
 # Canary rollout
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class CanaryRollout:
     """Route a growing fraction of live signals to a challenger.
@@ -291,15 +306,17 @@ class CanaryRollout:
 # Automated rollback
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class RollbackConfig:
     """Thresholds that fire an automated rollback."""
-    max_drawdown_pct: float = 0.10        # equity drawdown breach
-    min_psr: float = 0.90                 # PSR floor vs benchmark 0
-    min_sharpe: float = 0.30              # rolling sharpe floor
-    error_spike_ratio: float = 2.0        # live error rate > baseline × ratio
-    min_baseline_errors: int = 20         # baseline needs this many errors
-    min_trades: int = 30                  # rolling window needs this many trades
+
+    max_drawdown_pct: float = 0.10  # equity drawdown breach
+    min_psr: float = 0.90  # PSR floor vs benchmark 0
+    min_sharpe: float = 0.30  # rolling sharpe floor
+    error_spike_ratio: float = 2.0  # live error rate > baseline x ratio
+    min_baseline_errors: int = 20  # baseline needs this many errors
+    min_trades: int = 30  # rolling window needs this many trades
     annual_factor: float = 252.0
 
 
@@ -341,9 +358,15 @@ class AutomatedRollbackMonitor:
         if trade_pnls is not None:
             arr = np.asarray(trade_pnls, dtype=np.float64)
             self._baseline_psr = _psr_fn(
-                _safe_sharpe(arr, self.cfg.annual_factor), 0.0, arr.size,
-                float(((arr - arr.mean()) / max(arr.std(ddof=1), 1e-12) ** 3).mean()) if arr.std(ddof=1) > 1e-12 else 0.0,
-                float((((arr - arr.mean()) / max(arr.std(ddof=1), 1e-12)) ** 4).mean()) if arr.std(ddof=1) > 1e-12 else 3.0,
+                _safe_sharpe(arr, self.cfg.annual_factor),
+                0.0,
+                arr.size,
+                float(((arr - arr.mean()) / max(arr.std(ddof=1), 1e-12) ** 3).mean())
+                if arr.std(ddof=1) > 1e-12
+                else 0.0,
+                float((((arr - arr.mean()) / max(arr.std(ddof=1), 1e-12)) ** 4).mean())
+                if arr.std(ddof=1) > 1e-12
+                else 3.0,
             )
         if equity_curve is not None:
             self._baseline_equity = list(equity_curve)
@@ -396,7 +419,7 @@ class AutomatedRollbackMonitor:
             live_err = self._live.error_rate
             if live_err > self._baseline_error_rate * self.cfg.error_spike_ratio:
                 triggers.append(
-                    f"Error spike {live_err:.3f} > baseline {self._baseline_error_rate:.3f} × {self.cfg.error_spike_ratio:.1f}"
+                    f"Error spike {live_err:.3f} > baseline {self._baseline_error_rate:.3f} x {self.cfg.error_spike_ratio:.1f}"
                 )
 
         if not triggers:
@@ -421,6 +444,7 @@ class AutomatedRollbackMonitor:
 # Orchestrator
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def run_model_drift_check(
     champion_id: str,
     challenger_ids: Sequence[str],
@@ -433,8 +457,10 @@ def run_model_drift_check(
     """One-call model drift audit: populate the harness from existing trade lists
     and emit a comparison report with structured events for alerting."""
     harness = ChampionChallengerHarness(
-        champion=champion_id, challengers=challenger_ids,
-        window=window, annual_factor=annual_factor,
+        champion=champion_id,
+        challengers=challenger_ids,
+        window=window,
+        annual_factor=annual_factor,
     )
     for pnl in champion_pnls:
         harness.record_trade(champion_id, pnl)
@@ -446,14 +472,16 @@ def run_model_drift_check(
         cmp = harness.compare(cid)
         comparisons.append(cmp)
         if cmp.get("ready") and not cmp["beats_champion"]:
-            alerts.append({
-                "type": "model_drift",
-                "event": "challenger_losing",
-                "challenger": cid,
-                "champion": champion_id,
-                "challenger_sharpe": cmp["challenger_sharpe"],
-                "champion_sharpe": cmp["champion_sharpe"],
-            })
+            alerts.append(
+                {
+                    "type": "model_drift",
+                    "event": "challenger_losing",
+                    "challenger": cid,
+                    "champion": champion_id,
+                    "challenger_sharpe": cmp["challenger_sharpe"],
+                    "champion_sharpe": cmp["champion_sharpe"],
+                }
+            )
     return {
         "ts": _now_iso(),
         "champion": champion_id,

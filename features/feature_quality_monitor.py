@@ -28,6 +28,7 @@ import polars as pl
 # 1. Population Stability Index (PSI)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def population_stability_index(
     reference: np.ndarray,
     current: np.ndarray,
@@ -67,6 +68,7 @@ def population_stability_index(
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Information Value (WOE + IV) vs a binary target
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def woe_iv(
     feature: np.ndarray,
@@ -118,6 +120,7 @@ def information_value(feature: np.ndarray, target: np.ndarray, n_bins: int = 10)
 def _roc_auc(feature: np.ndarray, target: np.ndarray) -> float | None:
     """AUC of a single feature as a classifier of a binary target."""
     from sklearn.metrics import roc_auc_score
+
     f = np.asarray(feature, dtype=float)
     t = np.asarray(target, dtype=float).ravel()
     ok = np.isfinite(f) & np.isfinite(t)
@@ -133,6 +136,7 @@ def _roc_auc(feature: np.ndarray, target: np.ndarray) -> float | None:
 # ════════════════════════════════════════════════════════════════════════════
 # 3. Stability: rolling PSI + Kolmogorov-Smirnov vs a baseline window
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def _ffill_steps(n: int, positions: list[int], values: list[float]) -> np.ndarray:
     """Forward-fill refit values: row ``i`` uses the last refit at or before ``i``."""
@@ -167,30 +171,34 @@ def stability_index_series(
     positions = list(range(window, n, step))
     if n - 1 > positions[-1]:
         positions.append(n - 1)
-    values = [population_stability_index(baseline, s[max(0, t - window + 1): t + 1], n_bins)
-              for t in positions]
+    values = [population_stability_index(baseline, s[max(0, t - window + 1) : t + 1], n_bins) for t in positions]
     return _ffill_steps(n, positions, values)
 
 
 def ks_statistic(reference: np.ndarray, current: np.ndarray) -> float:
     """Two-sample Kolmogorov-Smirnov statistic (0..1) between two samples."""
     from scipy import stats
+
     ref = np.asarray(reference, dtype=float)
     cur = np.asarray(current, dtype=float)
     ref = ref[np.isfinite(ref)]
     cur = cur[np.isfinite(cur)]
     if ref.size == 0 or cur.size == 0:
         return 0.0
-    return float(stats.ks_2samp(ref, cur).statistic)
+    result = stats.ks_2samp(ref, cur)
+    statistic = getattr(result, "statistic", 0.0)
+    return float(statistic)
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 4. Leakage detection
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class LeakageResult:
     """Per-feature leakage assessment."""
+
     feature: str
     iv: float
     auc: float | None
@@ -236,24 +244,34 @@ def leakage_scan(
         auc = _roc_auc(feat, target)
         shift = _is_target_shift(feat, target)
         near_perfect = (auc is not None and auc > auc_threshold) or iv > iv_threshold
-        rows.append({
-            "feature": col,
-            "iv": iv,
-            "auc": auc,
-            "is_target_shift": shift,
-            "near_perfect": near_perfect,
-            "leak_flag": shift or near_perfect,
-        })
-    out = pl.DataFrame(rows, schema={
-        "feature": pl.Utf8, "iv": pl.Float64, "auc": pl.Float64,
-        "is_target_shift": pl.Boolean, "near_perfect": pl.Boolean, "leak_flag": pl.Boolean,
-    })
+        rows.append(
+            {
+                "feature": col,
+                "iv": iv,
+                "auc": auc,
+                "is_target_shift": shift,
+                "near_perfect": near_perfect,
+                "leak_flag": shift or near_perfect,
+            }
+        )
+    out = pl.DataFrame(
+        rows,
+        schema={
+            "feature": pl.Utf8,
+            "iv": pl.Float64,
+            "auc": pl.Float64,
+            "is_target_shift": pl.Boolean,
+            "near_perfect": pl.Boolean,
+            "leak_flag": pl.Boolean,
+        },
+    )
     return out.sort("leak_flag", descending=True)
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. Master per-feature quality monitor
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def feature_quality_monitor(
     df: pl.DataFrame,
@@ -285,7 +303,7 @@ def feature_quality_monitor(
     exclude = set(exclude_cols or [])
     exclude.add("timestamp_utc")
     qr = compute_quality_report(df, exclude_cols=list(exclude))
-    qmap = {f.name: f for f in qr.features}
+    {f.name: f for f in qr.features}
 
     target = None
     if target_col:
@@ -329,23 +347,25 @@ def feature_quality_monitor(
         clean = not (fq.has_nulls or fq.has_inf or fq.is_constant or fq.near_constant)
         clean = clean and psi_level != "severe" and not leak
 
-        rows.append({
-            "feature": col,
-            "dtype": fq.dtype,
-            "null_pct": fq.null_pct,
-            "std": fq.std,
-            "unique_count": fq.unique_count,
-            "constant": fq.is_constant,
-            "near_constant": fq.near_constant,
-            "psi": psi,
-            "psi_level": psi_level,
-            "stability": stab,
-            "ks": ks,
-            "iv": iv,
-            "auc": auc,
-            "leak_flag": leak,
-            "quality_flag": clean,
-        })
+        rows.append(
+            {
+                "feature": col,
+                "dtype": fq.dtype,
+                "null_pct": fq.null_pct,
+                "std": fq.std,
+                "unique_count": fq.unique_count,
+                "constant": fq.is_constant,
+                "near_constant": fq.near_constant,
+                "psi": psi,
+                "psi_level": psi_level,
+                "stability": stab,
+                "ks": ks,
+                "iv": iv,
+                "auc": auc,
+                "leak_flag": leak,
+                "quality_flag": clean,
+            }
+        )
 
     out = pl.DataFrame(rows).sort("leak_flag", descending=True)
     return out
@@ -354,6 +374,7 @@ def feature_quality_monitor(
 # ════════════════════════════════════════════════════════════════════════════
 # Convenience: drift alarm helper
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def drift_level(psi: float, threshold_moderate: float = 0.10, threshold_severe: float = 0.25) -> str:
     """Human-readable drift level for a PSI value."""
@@ -367,6 +388,7 @@ def drift_level(psi: float, threshold_moderate: float = 0.10, threshold_severe: 
 # ════════════════════════════════════════════════════════════════════════════
 # 6. Convenience: quality gate for feature selection
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def filter_features(
     df: pl.DataFrame,
@@ -383,8 +405,11 @@ def filter_features(
     quality issues), keeping the target and timestamp columns intact.
     """
     report = feature_quality_monitor(
-        df, target_col=target_col, reference_df=reference_df,
-        exclude_cols=exclude_cols, **kwargs,
+        df,
+        target_col=target_col,
+        reference_df=reference_df,
+        exclude_cols=exclude_cols,
+        **kwargs,
     )
     drop = set()
     for r in report.to_dicts():

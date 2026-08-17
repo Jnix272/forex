@@ -1,7 +1,7 @@
 """
 data/feature_definitions.py
 ===========================
-Feature Specification Registry — Single source of truth for all features.
+Feature Specification Registry - Single source of truth for all features.
 Each feature is defined once with its type, source, transformation, and dependencies.
 """
 
@@ -15,44 +15,48 @@ from typing import Any
 
 class FeatureType(Enum):
     """Feature type determines storage, materialization, and serving strategy."""
-    NUMERIC = "numeric"          # Scalar float/int per timestamp
+
+    NUMERIC = "numeric"  # Scalar float/int per timestamp
     CATEGORICAL = "categorical"  # String or integer category
-    EMBEDDING = "embedding"      # Vector per timestamp (e.g., FinBERT)
-    TIMESTAMP = "timestamp"      # datetime index
+    EMBEDDING = "embedding"  # Vector per timestamp (e.g., FinBERT)
+    TIMESTAMP = "timestamp"  # datetime index
 
 
 class MaterializationStrategy(Enum):
     """How and when the feature is materialized."""
-    EAGER_BATCH = "eager_batch"      # Full backfill nightly (macro, COT)
-    INCREMENTAL = "incremental"      # Append-only rolling (returns, volatility)
-    ON_DEMAND = "on_demand"          # Computed at inference, cached (microstructure)
-    SNAPSHOT = "snapshot"            # Tagged version at promotion time
+
+    EAGER_BATCH = "eager_batch"  # Full backfill nightly (macro, COT)
+    INCREMENTAL = "incremental"  # Append-only rolling (returns, volatility)
+    ON_DEMAND = "on_demand"  # Computed at inference, cached (microstructure)
+    SNAPSHOT = "snapshot"  # Tagged version at promotion time
 
 
 class FeatureSource(Enum):
     """Origin system for the feature."""
-    PRICE = "price"              # OHLCV from tick resampling
-    ORDERBOOK = "orderbook"      # L2/L3 reconstructed or real
-    MACRO = "macro"              # Yields, spreads, economic calendar
-    SENTIMENT = "sentiment"      # News, social, FinBERT
-    COT = "cot"                  # Commitment of Traders
-    EXTERNAL = "external"        # Cross-asset, alternatives
-    DERIVED = "derived"          # Computed from other features
+
+    PRICE = "price"  # OHLCV from tick resampling
+    ORDERBOOK = "orderbook"  # L2/L3 reconstructed or real
+    MACRO = "macro"  # Yields, spreads, economic calendar
+    SENTIMENT = "sentiment"  # News, social, FinBERT
+    COT = "cot"  # Commitment of Traders
+    EXTERNAL = "external"  # Cross-asset, alternatives
+    DERIVED = "derived"  # Computed from other features
 
 
 @dataclass
 class FeatureSpec:
     """
     Complete specification for a single feature.
-    
+
     The content hash (SHA256 of transformation + dependencies + params)
     enables deduplication and version detection.
     """
+
     name: str
     feature_type: FeatureType
     description: str
     source: FeatureSource
-    transformation: str           # Human-readable: "log_ret(close, lag=1)"
+    transformation: str  # Human-readable: "log_ret(close, lag=1)"
     params: dict[str, Any] = field(default_factory=dict)  # e.g., {"window": 20, "lag": 1}
     dependencies: list[str] = field(default_factory=list)  # Upstream feature names
     version: int = 1
@@ -150,7 +154,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["price", "core"],
         materialization=MaterializationStrategy.EAGER_BATCH,
     ),
-
     # ── Volatility ──
     FeatureSpec(
         name="atr_6",
@@ -188,7 +191,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="bollinger_upper_20",
         feature_type=FeatureType.NUMERIC,
-        description="Bollinger Band upper (20, 2σ)",
+        description="Bollinger Band upper (20, 2σ)",  # noqa: RUF001
         source=FeatureSource.PRICE,
         transformation="rolling_mean(close, 20) + 2 * rolling_std(close, 20)",
         params={"window": 20, "n_std": 2.0},
@@ -199,7 +202,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="bollinger_lower_20",
         feature_type=FeatureType.NUMERIC,
-        description="Bollinger Band lower (20, 2σ)",
+        description="Bollinger Band lower (20, 2σ)",  # noqa: RUF001
         source=FeatureSource.PRICE,
         transformation="rolling_mean(close, 20) - 2 * rolling_std(close, 20)",
         params={"window": 20, "n_std": 2.0},
@@ -207,7 +210,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["volatility", "mean_reversion"],
         materialization=MaterializationStrategy.INCREMENTAL,
     ),
-
     # ── Microstructure ──
     FeatureSpec(
         name="ofi_20",
@@ -242,7 +244,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["microstructure", "flow"],
         materialization=MaterializationStrategy.INCREMENTAL,
     ),
-
     # ── Session / Time ──
     FeatureSpec(
         name="session_asian",
@@ -288,7 +289,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["session", "time", "overlap"],
         materialization=MaterializationStrategy.INCREMENTAL,
     ),
-
     # ── Advanced Features (from advanced_features.py) ──
     FeatureSpec(
         name="hurst_120",
@@ -334,7 +334,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["options_proxy", "distribution"],
         materialization=MaterializationStrategy.INCREMENTAL,
     ),
-
     # ── Macro / Yield Spreads ──
     FeatureSpec(
         name="spread_us_de_10y",
@@ -369,7 +368,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["macro", "yield_curve", "fred"],
         materialization=MaterializationStrategy.EAGER_BATCH,
     ),
-
     # ── Sentiment ──
     FeatureSpec(
         name="sentiment_raw",
@@ -393,7 +391,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["sentiment", "decayed"],
         materialization=MaterializationStrategy.ON_DEMAND,
     ),
-
     # ── COT (Commitment of Traders) ──
     FeatureSpec(
         name="cot_net_noncom",
@@ -417,7 +414,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["cot", "extreme"],
         materialization=MaterializationStrategy.EAGER_BATCH,
     ),
-
     # ── Cross-Asset / Intermarket ──
     FeatureSpec(
         name="dxy",
@@ -659,7 +655,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="vwap_upper",
         feature_type=FeatureType.NUMERIC,
-        description="VWAP upper band (2σ)",
+        description="VWAP upper band (2σ)",  # noqa: RUF001
         source=FeatureSource.PRICE,
         transformation="vwap_upper(window=60, n_std=2.0)",
         params={"window": 60, "n_std": 2.0},
@@ -670,7 +666,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="vwap_lower",
         feature_type=FeatureType.NUMERIC,
-        description="VWAP lower band (2σ)",
+        description="VWAP lower band (2σ)",  # noqa: RUF001
         source=FeatureSource.PRICE,
         transformation="vwap_lower(window=60, n_std=2.0)",
         params={"window": 60, "n_std": 2.0},
@@ -830,7 +826,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="atr_x_ofi",
         feature_type=FeatureType.NUMERIC,
-        description="ATR × OFI interaction (volatility × flow)",
+        description="ATR x OFI interaction (volatility x flow)",
         source=FeatureSource.DERIVED,
         transformation="atr_6 * ofi_z",
         params={},
@@ -841,7 +837,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="atr_ratio_x_ofi",
         feature_type=FeatureType.NUMERIC,
-        description="ATR ratio × OFI interaction",
+        description="ATR ratio x OFI interaction",
         source=FeatureSource.DERIVED,
         transformation="atr_ratio_6_20 * ofi_z",
         params={},
@@ -852,7 +848,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="rsi_x_trend",
         feature_type=FeatureType.NUMERIC,
-        description="RSI × trend regime interaction",
+        description="RSI x trend regime interaction",
         source=FeatureSource.DERIVED,
         transformation="rsi_14 * trend_regime",
         params={},
@@ -863,7 +859,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="macd_x_trend",
         feature_type=FeatureType.NUMERIC,
-        description="MACD × trend regime interaction",
+        description="MACD x trend regime interaction",
         source=FeatureSource.DERIVED,
         transformation="macd * trend_regime",
         params={},
@@ -874,7 +870,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="stoch_x_range",
         feature_type=FeatureType.NUMERIC,
-        description="Stochastic × range regime interaction",
+        description="Stochastic x range regime interaction",
         source=FeatureSource.DERIVED,
         transformation="stoch_k * range_regime",
         params={},
@@ -885,7 +881,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="bb_x_range",
         feature_type=FeatureType.NUMERIC,
-        description="Bollinger %B × range regime interaction",
+        description="Bollinger %B x range regime interaction",
         source=FeatureSource.DERIVED,
         transformation="bb_pct * range_regime",
         params={},
@@ -896,7 +892,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="cost_x_volatile",
         feature_type=FeatureType.NUMERIC,
-        description="Cost-to-ATR × volatile regime interaction",
+        description="Cost-to-ATR x volatile regime interaction",
         source=FeatureSource.DERIVED,
         transformation="cost_to_atr * volatility_regime",
         params={},
@@ -907,7 +903,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="curve_x_risk",
         feature_type=FeatureType.NUMERIC,
-        description="Yield curve slope × risk-off signal interaction",
+        description="Yield curve slope x risk-off signal interaction",
         source=FeatureSource.DERIVED,
         transformation="yield_curve_slope * risk_off_signal",
         params={},
@@ -918,7 +914,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="carry_x_trend",
         feature_type=FeatureType.NUMERIC,
-        description="Carry × trend regime interaction",
+        description="Carry x trend regime interaction",
         source=FeatureSource.DERIVED,
         transformation="carry_eur * trend_regime",
         params={},
@@ -929,7 +925,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="gold_dxy_x_risk",
         feature_type=FeatureType.NUMERIC,
-        description="Gold-DXY correlation × risk-off signal interaction",
+        description="Gold-DXY correlation x risk-off signal interaction",
         source=FeatureSource.DERIVED,
         transformation="gold_dxy_corr * risk_off_signal",
         params={},
@@ -1031,7 +1027,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="time_to_barrier_est",
         feature_type=FeatureType.NUMERIC,
-        description="ATR_20 / |ΔP_5| — time to barrier estimate",
+        description="ATR_20 / |ΔP_5| - time to barrier estimate",
         source=FeatureSource.DERIVED,
         transformation="time_to_barrier(atr_20, ret_5)",
         params={},
@@ -1056,7 +1052,7 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
     FeatureSpec(
         name="kyles_lambda",
         feature_type=FeatureType.NUMERIC,
-        description="Kyle\'s Lambda - price impact per unit volume (20-bar)",
+        description="Kyle's Lambda - price impact per unit volume (20-bar)",
         source=FeatureSource.ORDERBOOK,
         transformation="kyles_lambda(window=20)",
         params={"window": 20},
@@ -1086,7 +1082,6 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
         tags=["microstructure", "cost"],
         materialization=MaterializationStrategy.INCREMENTAL,
     ),
-
     # ════════════════════════════════════════════════════════════════════════════
     # REGIME QUALITY
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1119,14 +1114,15 @@ BUILTIN_FEATURES: list[FeatureSpec] = [
 # REGISTRY HELPERS
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class FeatureRegistry:
     """In-memory registry with lookup helpers."""
 
-    def __init__(self, features: list[FeatureSpec] = None):
+    def __init__(self, features: list[FeatureSpec] | None = None):
         self._by_name: dict[str, FeatureSpec] = {}
         self._by_source: dict[FeatureSource, list[FeatureSpec]] = {}
         self._by_tag: dict[str, list[FeatureSpec]] = {}
-        for f in (features or BUILTIN_FEATURES):
+        for f in features or BUILTIN_FEATURES:
             self.register(f)
 
     def register(self, spec: FeatureSpec) -> None:
@@ -1177,7 +1173,7 @@ def get_feature_spec(name: str) -> FeatureSpec | None:
     return REGISTRY.get(name)
 
 
-def list_features(source: FeatureSource = None, tag: str = None) -> list[FeatureSpec]:
+def list_features(source: FeatureSource = None, tag: str | None = None) -> list[FeatureSpec]:
     """List features filtered by source and/or tag."""
     if source and tag:
         return [f for f in REGISTRY.get_by_source(source) if tag in f.tags]

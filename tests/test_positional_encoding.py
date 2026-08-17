@@ -1,11 +1,11 @@
 """Tests for the positional encoding fix (audit A4, 2026-08-07).
 
 Before the fix: three Transformer-branched classes in `models/architectures.py`
-(see file for line numbers — these change after edits) had NO positional
+(see file for line numbers - these change after edits) had NO positional
 encoding, even though attention is permutation-equivariant over time:
 - `HAELTHybrid`
 - `TFTScalper`
-- `EXPERTEncoder` — explicitly "no positional encoding by design" (a
+- `EXPERTEncoder` - explicitly "no positional encoding by design" (a
   misconception: order is NOT inherent in time series when no position
   signal is fed to the attention).
 
@@ -17,7 +17,7 @@ Tests:
 - Source-level: the EXPERTEncoder docstring no longer says "order is inherent".
 - Behavioural (requires torch): permuting the time axis changes the output
   when positions are added (model becomes position-sensitive).
-- Behavioural (requires torch): backward-compat — calling the classes with
+- Behavioural (requires torch): backward-compat - calling the classes with
   their original constructor signature (no `max_seq_len`) still works.
 """
 
@@ -37,6 +37,7 @@ if str(_ROOT) not in sys.path:
 # Source-level checks
 # ---------------------------------------------------------------------------
 
+
 def _strip_comments(src: str) -> str:
     out = []
     for line in src.splitlines():
@@ -55,17 +56,15 @@ def test_haelthybrid_has_positional_embedding():
     # The class should exist
     assert "class HAELTHybrid" in src
     # …and should have a `self.pos_emb = nn.Embedding(...)` declaration
-    code = _strip_comments(src)
+    _strip_comments(src)
     # Find the HAELTHybrid block (between 'class HAELTHybrid' and the next 'class ')
     start = src.find("class HAELTHybrid")
     end = src.find("\nclass ", start + 1)
     block = src[start:end]
-    assert "self.pos_emb = nn.Embedding(" in block, (
-        "HAELTHybrid should define a positional embedding"
-    )
+    assert "self.pos_emb = nn.Embedding(" in block, "HAELTHybrid should define a positional embedding"
     # The forward should reference pos_emb (either via the inline addition
     # pattern `h + pos_emb.weight` or a helper call)
-    assert "pos_emb" in src[start + len("class HAELTHybrid"):end]
+    assert "pos_emb" in src[start + len("class HAELTHybrid") : end]
 
 
 def test_tftscalper_has_positional_embedding():
@@ -90,9 +89,7 @@ def test_expertencoder_has_positional_embedding_and_removes_old_docstring():
     if end == -1:
         end = len(src)
     block = src[start:end]
-    assert "self.pos_emb = nn.Embedding(" in block, (
-        "EXPERTEncoder should define a positional embedding (A4 fix)"
-    )
+    assert "self.pos_emb = nn.Embedding(" in block, "EXPERTEncoder should define a positional embedding (A4 fix)"
     # The misleading docstring line should NOT be present in the class docstring
     assert "NO positional encoding (order is inherent in time series)" not in block, (
         "EXPERTEncoder docstring should not retain the misleading 'order inherent' claim"
@@ -106,8 +103,9 @@ def test_expertencoder_has_positional_embedding_and_removes_old_docstring():
 # Constructor backward-compatibility check (requires torch)
 # ---------------------------------------------------------------------------
 
+
 def test_tftscalper_constructor_backward_compatible():
-    """The new `max_seq_len` kwarg is optional — old callers using just
+    """The new `max_seq_len` kwarg is optional - old callers using just
     ``(input_size=..., hidden=..., ...)`` should work unchanged.
     """
     try:
@@ -116,9 +114,9 @@ def test_tftscalper_constructor_backward_compatible():
         pytest.skip("torch not available")
     try:
         from models.architectures import ModelZoo
+
         # Old call without max_seq_len kwarg should succeed with default
-        model = ModelZoo.TFTScalper(input_size=64, hidden=32, heads=2,
-                                     lstm_layers=1, num_classes=1)
+        model = ModelZoo.TFTScalper(input_size=64, hidden=32, heads=2, lstm_layers=1, num_classes=1)
         assert hasattr(model, "pos_emb")
     except Exception as e:
         pytest.skip(f"could not construct TFTScalper (env-specific): {e}")
@@ -135,9 +133,10 @@ def test_haelthybrid_constructor_backward_compatible():
         pytest.skip("torch not available")
     try:
         from models.architectures import ModelZoo
-        model = ModelZoo.HAELTHybrid(input_size=64, seq_len=60, lstm_hidden=32,
-                                       d_model=32, nhead=2, n_layers=1,
-                                       num_classes=1)
+
+        model = ModelZoo.HAELTHybrid(
+            input_size=64, seq_len=60, lstm_hidden=32, d_model=32, nhead=2, n_layers=1, num_classes=1
+        )
         assert hasattr(model, "pos_emb")
         # The positional embedding table shape should match (seq_len, d_model)
         assert model.pos_emb.weight.shape == (60, 32)
@@ -152,8 +151,8 @@ def test_expertencoder_constructor_backward_compatible():
         pytest.skip("torch not available")
     try:
         from models.architectures import ModelZoo
-        model = ModelZoo.EXPERTEncoder(input_size=64, d_model=32, nhead=2,
-                                        num_layers=1, num_classes=1)
+
+        model = ModelZoo.EXPERTEncoder(input_size=64, d_model=32, nhead=2, num_layers=1, num_classes=1)
         assert hasattr(model, "pos_emb")
     except Exception as e:
         pytest.skip(f"could not construct EXPERTEncoder (env-specific): {e}")
@@ -162,6 +161,7 @@ def test_expertencoder_constructor_backward_compatible():
 # ---------------------------------------------------------------------------
 # Behavioural: the model is now order-sensitive (permuting time changes output)
 # ---------------------------------------------------------------------------
+
 
 def test_haelthybrid_is_order_sensitive():
     """Before the fix, HAELTHybrid's Transformer branch was permutation-
@@ -180,9 +180,9 @@ def test_haelthybrid_is_order_sensitive():
         pytest.skip(f"could not import: {e}")
     try:
         torch.manual_seed(0)
-        model = ModelZoo.HAELTHybrid(input_size=8, seq_len=20, lstm_hidden=8,
-                                       d_model=8, nhead=2, n_layers=1,
-                                       num_classes=1)
+        model = ModelZoo.HAELTHybrid(
+            input_size=8, seq_len=20, lstm_hidden=8, d_model=8, nhead=2, n_layers=1, num_classes=1
+        )
         model.eval()
     except Exception as e:
         pytest.skip(f"could not construct: {e}")
@@ -192,7 +192,7 @@ def test_haelthybrid_is_order_sensitive():
         # Permute the time axis
         perm = torch.randperm(20)
         y2 = model(x[:, perm, :])
-    # Outputs should differ — the model is now position-aware.
+    # Outputs should differ - the model is now position-aware.
     # If outputs were identical, the positional embedding would be a no-op.
     diff = (y1 - y2).abs().sum().item()
     # LSTM branch is also sequence-sensitive, so diff is almost certainly

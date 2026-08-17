@@ -8,22 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
-from monitoring.events import TrainingEvent, EventType, Severity
-from monitoring.event_bus import get_event_bus, init_event_bus, shutdown_event_bus, HandlerPriority
-from monitoring.unified_logger import UnifiedLogger, UnifiedLoggerConfig
-
+from monitoring.event_bus import HandlerPriority, get_event_bus
+from monitoring.events import EventType, Severity, TrainingEvent
+from monitoring.unified_logger import UnifiedLogger
 
 # Global state
 logger: UnifiedLogger | None = None
@@ -34,18 +30,18 @@ max_history = 1000
 
 class ConnectionManager:
     """Manages WebSocket connections."""
-    
+
     def __init__(self):
         self.active_connections: list[WebSocket] = []
-    
+
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-    
+
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-    
+
     async def broadcast(self, message: str):
         for connection in self.active_connections[:]:
             try:
@@ -61,7 +57,7 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
     """Create FastAPI app with dashboard routes."""
     global logger
     logger = logger_instance
-    
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup
@@ -71,14 +67,14 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
         # Shutdown
         if logger:
             await logger.stop()
-    
+
     app = FastAPI(
         title="Forex Training Dashboard",
         description="Real-time training monitoring dashboard",
         version="1.0.0",
         lifespan=lifespan,
     )
-    
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -86,31 +82,31 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # Serve static files if directory exists
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-    
+
     # ===== REST API =====
-    
+
     @app.get("/api/health")
     async def health():
-        return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
-    
+        return {"status": "healthy", "timestamp": datetime.now(UTC).isoformat()}
+
     @app.get("/api/logger/stats")
     async def logger_stats():
         if logger:
             return logger.get_stats()
         return {"error": "Logger not initialized"}
-    
+
     @app.get("/api/metrics")
     async def get_metrics(metric: str = Query(None)):
         global metrics_history
         if metric:
             return {metric: metrics_history.get(metric, [])}
         return metrics_history
-    
+
     @app.get("/api/events")
     async def query_events(
         run_id: str = Query(None),
@@ -133,14 +129,16 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
             return {"events": [e.to_dict() for e in events]}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
-    
+
     @app.get("/api/checks/results")
     async def get_check_results(phase: str = Query(None)):
         from monitoring.checks import get_engine
+
         engine = get_engine()
         if phase:
             try:
                 from monitoring.events import CheckPhase
+
                 ph = CheckPhase(phase)
                 results = engine.get_results(ph)
                 return {k: [r.to_dict() for r in v] for k, v in results.items()}
@@ -148,13 +146,14 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
                 raise HTTPException(status_code=400, detail=f"Invalid phase: {phase}")
         results = engine.get_results()
         return {k: [r.to_dict() for r in v] for k, v in results.items()}
-    
+
     @app.get("/api/checks/summary")
     async def get_check_summary():
         from monitoring.checks import get_engine
+
         engine = get_engine()
         return engine.get_summary()
-    
+
     @app.get("/api/runs")
     async def list_runs():
         """List recent training runs."""
@@ -173,13 +172,14 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
             elif e.run_id in runs:
                 runs[e.run_id]["event_count"] += 1
         return {"runs": list(runs.values())}
-    
+
     # ===== WebSocket =====
-    
+
     # Background task to broadcast metric events to WebSocket clients
     async def broadcast_metrics():
         """Background task to push metrics to WebSocket clients."""
         bus = get_event_bus()
+
         # Register a handler that broadcasts metric events
         async def metric_handler(event: TrainingEvent):
             if event.event_type == EventType.METRIC:
@@ -197,41 +197,47 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
                     metrics_history[name].append(entry)
                     if len(metrics_history[name]) > max_history:
                         metrics_history[name] = metrics_history[name][-max_history:]
-                    
+
                     # Broadcast to all connected WebSocket clients
-                    await manager.broadcast(json.dumps({
-                        "type": "metric",
-                        "name": name,
-                        **entry,
-                    }))
-        
+                    await manager.broadcast(
+                        json.dumps(
+                            {
+                                "type": "metric",
+                                "name": name,
+                                **entry,
+                            }
+                        )
+                    )
+
         bus.register_handler(
             metric_handler,
             event_types={EventType.METRIC},
             priority=HandlerPriority.NORMAL,
         )
-        
+
         # Keep running
         while True:
             await asyncio.sleep(3600)  # Run indefinitely
-    
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         await manager.connect(websocket)
         try:
             # Send initial state
-            await websocket.send_json({
-                "type": "init",
-                "metrics": metrics_history,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-            
+            await websocket.send_json(
+                {
+                    "type": "init",
+                    "metrics": metrics_history,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
+
             while True:
                 data = await websocket.receive_text()
                 try:
                     msg = json.loads(data)
                     if msg.get("type") == "ping":
-                        await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+                        await websocket.send_json({"type": "pong", "timestamp": datetime.now(UTC).isoformat()})
                     elif msg.get("type") == "subscribe":
                         # Handle subscription to specific metrics/events
                         pass
@@ -241,18 +247,18 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
             manager.disconnect(websocket)
         except Exception:
             manager.disconnect(websocket)
-    
+
     # Start background metrics broadcaster
     @app.on_event("startup")
     async def start_metrics_broadcaster():
-        asyncio.create_task(broadcast_metrics())
-    
+        asyncio.create_task(broadcast_metrics())  # noqa: RUF006
+
     # ===== Dashboard HTML =====
-    
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():
         return DASHBOARD_HTML
-    
+
     return app
 
 
@@ -313,7 +319,7 @@ DASHBOARD_HTML = """
             <span id="run-info"></span>
         </div>
     </header>
-    
+
     <div class="container">
         <div class="tabs">
             <button class="tab active" data-tab="metrics">📈 Metrics</button>
@@ -321,7 +327,7 @@ DASHBOARD_HTML = """
             <button class="tab" data-tab="events">📋 Events</button>
             <button class="tab" data-tab="system">🖥️ System</button>
         </div>
-        
+
         <div id="tab-metrics" class="tab-content">
             <div class="grid">
                 <div class="card">
@@ -342,7 +348,7 @@ DASHBOARD_HTML = """
                 </div>
             </div>
         </div>
-        
+
         <div id="tab-checks" class="tab-content hidden">
             <div class="grid">
                 <div class="card">
@@ -352,14 +358,14 @@ DASHBOARD_HTML = """
                 </div>
             </div>
         </div>
-        
+
         <div id="tab-events" class="tab-content hidden">
             <div class="card">
                 <h2>Event Log</h2>
                 <div class="event-log" id="event-log"></div>
             </div>
         </div>
-        
+
         <div id="tab-system" class="tab-content hidden">
             <div class="grid">
                 <div class="card">
@@ -374,18 +380,18 @@ DASHBOARD_HTML = """
             </div>
         </div>
     </div>
-    
+
     <script>
         // Chart.js defaults
         Chart.defaults.color = '#94a3b8';
         Chart.defaults.borderColor = 'rgba(255,255,255,0.1)';
         Chart.defaults.font.family = 'monospace';
-        
+
         // State
         let ws = null;
         let charts = {};
         const maxPoints = 100;
-        
+
         // Initialize charts
         function initCharts() {
             const common = {
@@ -398,7 +404,7 @@ DASHBOARD_HTML = """
                 },
                 plugins: { legend: { display: false } },
             };
-            
+
             charts.loss = new Chart('loss-chart', { type: 'line', data: { labels: [], datasets: [{ label: 'Train Loss', data: [], borderColor: '#3b82f6', fill: false, tension: 0.2 }] }, options: common });
             charts.val = new Chart('val-chart', { type: 'line', data: { labels: [], datasets: [{ label: 'Val Loss', data: [], borderColor: '#f59e0b', fill: false, tension: 0.2 }, { label: 'Val Sharpe', data: [], borderColor: '#10b981', fill: false, tension: 0.2, yAxisID: 'y1' }] }, options: { ...common, scales: { ...common.scales, y1: { type: 'linear', display: true, position: 'right', grid: { drawOnChartArea: false } } } });
             charts.lr = new Chart('lr-chart', { type: 'line', data: { labels: [], datasets: [{ label: 'LR', data: [], borderColor: '#8b5cf6', fill: false }] }, options: common });
@@ -406,42 +412,42 @@ DASHBOARD_HTML = """
             charts.gpuMem = new Chart('gpu-mem-chart', { type: 'line', data: { labels: [], datasets: [{ label: 'GPU Mem %', data: [], borderColor: '#3b82f6', fill: false }] }, options: common });
             charts.cpuMem = new Chart('cpu-mem-chart', { type: 'line', data: { labels: [], datasets: [{ label: 'CPU Mem %', data: [], borderColor: '#10b981', fill: false }] }, options: common });
         }
-        
+
         // Add point to chart
         function addPoint(chart, x, y, maxPts = 100) {
             if (!chart.data.labels) chart.data.labels = [];
             if (!chart.data.datasets[0].data) chart.data.datasets[0].data = [];
-            
+
             chart.data.labels.push(x);
             chart.data.datasets[0].data.push(y);
-            
+
             if (chart.data.datasets[1]) {
                 chart.data.datasets[1].data.push(y);
             }
-            
+
             if (chart.data.labels.length > maxPts) {
                 chart.data.labels.shift();
                 chart.data.datasets.forEach(ds => ds.data.shift());
             }
             chart.update('none');
         }
-        
+
         // WebSocket
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-            
+
             ws.onopen = () => {
                 document.getElementById('ws-status').textContent = 'Connected';
                 document.getElementById('ws-status').className = 'badge badge-connected';
             };
-            
+
             ws.onclose = () => {
                 document.getElementById('ws-status').textContent = 'Disconnected';
                 document.getElementById('ws-status').className = 'badge badge-disconnected';
                 setTimeout(connect, 3000);
             };
-            
+
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
@@ -451,7 +457,7 @@ DASHBOARD_HTML = """
                 }
             };
         }
-        
+
         function handleMessage(msg) {
             switch (msg.type) {
                 case 'init':
@@ -477,11 +483,11 @@ DASHBOARD_HTML = """
                     break;
             }
         }
-        
+
         function addMetricPoint(name, point) {
             const epoch = point.epoch || 0;
             const value = point.value;
-            
+
             // Route to appropriate chart
             if (name.includes('loss') && !name.includes('val')) addPoint(charts.loss, epoch, value);
             else if (name.includes('val_loss')) addPoint(charts.val, epoch, value);
@@ -491,25 +497,25 @@ DASHBOARD_HTML = """
             else if (name.includes('gpu_mem')) addPoint(charts.gpuMem, epoch, value);
             else if (name.includes('cpu_mem')) addPoint(charts.cpuMem, epoch, value);
         }
-        
+
         function updateCheck(msg) {
             const container = document.getElementById('check-details');
             if (!container) return;
-            
+
             const status = msg.payload.passed ? '✅' : '❌';
             const el = document.getElementById(`check-${msg.payload.name}`);
             const html = `<div class="metric-row">
                 <span class="metric-label">${msg.payload.name}</span>
                 <span class="metric-value ${msg.payload.passed ? 'ok' : 'error'}">${status} ${msg.payload.message}</span>
             </div>`;
-            
+
             if (el) el.outerHTML = `<div id="check-${msg.payload.name}">${html}</div>`;
             else container.insertAdjacentHTML('afterbegin', `<div id="check-${msg.payload.name}">${html}</div>`);
-            
+
             // Update summary
             updateCheckSummary();
         }
-        
+
         function updateCheckSummary() {
             const container = document.getElementById('check-summary');
             const checks = container.querySelectorAll('[id^="check-"]');
@@ -518,39 +524,39 @@ DASHBOARD_HTML = """
                 if (c.querySelector('.ok')) passed++;
                 else if (c.querySelector('.error')) failed++;
             });
-            document.getElementById('check-summary').innerHTML = 
+            document.getElementById('check-summary').innerHTML =
                 `<div class="metric-row"><span class="metric-label">Total</span><span class="metric-value">${checks.length}</span></div>
                  <div class="metric-row"><span class="metric-label">Passed</span><span class="metric-value ok">${passed}</span></div>
                  <div class="metric-row"><span class="metric-label">Failed</span><span class="metric-value error">${failed}</span></div>`;
         }
-        
+
         function addEvent(msg) {
             const log = document.getElementById('event-log');
             if (!log) return;
-            
+
             const time = new Date(msg.timestamp).toLocaleTimeString();
             const type = msg.event_type || 'LOG';
             const severity = msg.severity || 'info';
             const source = msg.source || '';
             const message = msg.payload.message || JSON.stringify(msg.payload);
-            
+
             const colors = { LOG: '#64748b', METRIC: '#3b82f6', CHECK: '#10b981', ALERT: '#ef4444', CHECKPOINT: '#f59e0b', PROGRESS: '#f59e0b', HEARTBEAT: '#64748b' };
             const color = colors[type] || '#64748b';
-            
+
             const div = document.createElement('div');
             div.className = 'event-entry';
             div.innerHTML = `<span class="event-time">${time}</span><span class="event-type" style="color:${color}">${type}</span><span class="event-source">${source}</span><span class="event-message">${message}</span>`;
-            
+
             log.insertBefore(div, log.firstChild);
-            
+
             // Limit entries
             while (log.children.length > 200) log.removeChild(log.lastChild);
         }
-        
+
         function updateStats(msg) {
             document.getElementById('run-info').textContent = `Run: ${msg.run_id} | Model: ${msg.model || 'N/A'}`;
         }
-        
+
         // Tabs
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -560,11 +566,11 @@ DASHBOARD_HTML = """
                 document.getElementById(`tab-${tab.dataset.tab}`).classList.remove('hidden');
             });
         });
-        
+
         // Init
         initCharts();
         connect();
-        
+
         // Poll REST for initial data
         async function poll() {
             try {
@@ -577,7 +583,7 @@ DASHBOARD_HTML = """
             setTimeout(poll, 5000);
         }
         poll();
-        
+
         // Reconnect on visibility change
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && (!ws || ws.readyState !== WebSocket.OPEN)) connect();
@@ -595,6 +601,7 @@ def run_dashboard(
 ):
     """Run the dashboard server."""
     import uvicorn
+
     app = create_dashboard_app(logger_instance)
     uvicorn.run(app, host=host, port=port, log_level="info")
 

@@ -52,19 +52,19 @@ def atomic_swap(src, dst) -> None:
     Copies `src` to a temp file in the SAME directory as `dst` (so os.replace
     stays on one filesystem) then os.replace()s it into place. os.replace is
     atomic on POSIX and Windows, so a concurrent reader of `dst` (e.g. the live
-    inference loop) always sees either the old or the new file — never a
+    inference loop) always sees either the old or the new file - never a
     half-written one. (B-M2 / B-C3)
     """
     import tempfile
+
     src = Path(src)
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".tmp",
-                                    dir=str(dst.parent))
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".tmp", dir=str(dst.parent))
     os.close(fd)
     try:
         shutil.copy2(src, tmp_name)
-        os.replace(tmp_name, dst)   # atomic
+        os.replace(tmp_name, dst)  # atomic
     finally:
         if os.path.exists(tmp_name):
             try:
@@ -75,6 +75,7 @@ def atomic_swap(src, dst) -> None:
 
 # ── Page-Hinkley change detector ─────────────────────────────────────────────
 
+
 class PageHinkleyDetector:
     """
     Page-Hinkley test for detecting a persistent change in the mean of a series.
@@ -84,30 +85,29 @@ class PageHinkleyDetector:
 
     Parameters
     ----------
-    delta  : Magnitude tolerance — small allowed mean shift.
-    lambda_: Detection threshold — higher = fewer false positives.
+    delta  : Magnitude tolerance - small allowed mean shift.
+    lambda_: Detection threshold - higher = fewer false positives.
     min_obs: Min observations before detector can fire.
     """
 
-    def __init__(self, delta: float = 0.005, lambda_: float = 50.0,
-                 min_obs: int = 30):
-        self.delta    = delta
-        self.lambda_  = lambda_
-        self.min_obs  = min_obs
-        self._sum     = 0.0
-        self._n       = 0
+    def __init__(self, delta: float = 0.005, lambda_: float = 50.0, min_obs: int = 30):
+        self.delta = delta
+        self.lambda_ = lambda_
+        self.min_obs = min_obs
+        self._sum = 0.0
+        self._n = 0
         self._min_sum = 0.0
 
     def reset(self):
-        self._sum     = 0.0
-        self._n       = 0
+        self._sum = 0.0
+        self._n = 0
         self._min_sum = 0.0
 
     def add(self, value: float) -> bool:
         """
         Add one observation. Returns True if a change is detected.
         """
-        self._n   += 1
+        self._n += 1
         self._sum += value - self.delta
         self._min_sum = min(self._min_sum, self._sum)
         if self._n < self.min_obs:
@@ -121,12 +121,13 @@ class PageHinkleyDetector:
 
 # ── rolling stats ─────────────────────────────────────────────────────────────
 
+
 class _RollingWindow:
     """Efficient rolling window for Sharpe and win rate computation."""
 
     def __init__(self, maxlen: int = 300, trades_per_year: float = 252 * 50):
-        self._pnls:    deque[float] = deque(maxlen=maxlen)
-        self._wins:    deque[bool]  = deque(maxlen=maxlen)
+        self._pnls: deque[float] = deque(maxlen=maxlen)
+        self._wins: deque[bool] = deque(maxlen=maxlen)
         self._equitys: deque[float] = deque(maxlen=maxlen)
         self._win_count = 0
         self._ann_factor = math.sqrt(trades_per_year)
@@ -153,7 +154,7 @@ class _RollingWindow:
         if len(self._pnls) < 10:
             return 0.0
         if len(self._equitys) >= len(self._pnls):
-            eq = np.array(self._equitys)[-len(self._pnls):]
+            eq = np.array(self._equitys)[-len(self._pnls) :]
             prev_eq = np.maximum(eq - np.array(self._pnls), 1e-9)
             arr = np.array(self._pnls) / prev_eq
         else:
@@ -171,13 +172,14 @@ class _RollingWindow:
     def max_drawdown(self) -> float:
         if len(self._equitys) < 2:
             return 0.0
-        eq   = np.array(self._equitys)
+        eq = np.array(self._equitys)
         peak = np.maximum.accumulate(eq)
-        dd   = (eq - peak) / np.maximum(peak, 1e-9)
+        dd = (eq - peak) / np.maximum(peak, 1e-9)
         return float(abs(dd.min()))
 
 
 # ── main monitor ─────────────────────────────────────────────────────────────
+
 
 class DemotionMonitor:
     """
@@ -196,26 +198,26 @@ class DemotionMonitor:
 
     def __init__(
         self,
-        sharpe_floor:     float = 0.5,
-        winrate_floor:    float = 0.45,
+        sharpe_floor: float = 0.5,
+        winrate_floor: float = 0.45,
         max_drawdown_pct: float = 0.10,
-        window_trades:    int   = 300,
-        ph_delta:         float = 0.005,
-        ph_lambda:        float = 50.0,
-        auto_rollback:    bool  = True,
-        verbose:          bool  = True,
-        trades_per_year:  float = 252 * 50,
+        window_trades: int = 300,
+        ph_delta: float = 0.005,
+        ph_lambda: float = 50.0,
+        auto_rollback: bool = True,
+        verbose: bool = True,
+        trades_per_year: float = 252 * 50,
     ):
-        self.sharpe_floor   = sharpe_floor
-        self.winrate_floor  = winrate_floor
-        self.max_dd_pct     = max_drawdown_pct
-        self.auto_rollback  = auto_rollback
-        self.verbose        = verbose
+        self.sharpe_floor = sharpe_floor
+        self.winrate_floor = winrate_floor
+        self.max_dd_pct = max_drawdown_pct
+        self.auto_rollback = auto_rollback
+        self.verbose = verbose
 
         self.window_trades = window_trades
-        self._window  = _RollingWindow(maxlen=window_trades, trades_per_year=trades_per_year)
-        self._ph      = PageHinkleyDetector(delta=ph_delta, lambda_=ph_lambda)
-        self._ph_fired = False   # B-M3: latched until consumed by _check_triggers
+        self._window = _RollingWindow(maxlen=window_trades, trades_per_year=trades_per_year)
+        self._ph = PageHinkleyDetector(delta=ph_delta, lambda_=ph_lambda)
+        self._ph_fired = False  # B-M3: latched until consumed by _check_triggers
         self._demoted = False
         self._n_bars = 0
 
@@ -223,17 +225,17 @@ class DemotionMonitor:
 
     def on_trade_closed(
         self,
-        pnl:       float,
-        equity:    float,
-        regime:    str   = "unknown",
-        direction: str   = "long",
+        pnl: float,
+        equity: float,
+        regime: str = "unknown",
+        direction: str = "long",
     ):
         """Call every time a trade is closed."""
         self._window.add_trade(pnl, equity)
         # Page-Hinkley on equity changes (detects regime shift in performance).
-        # B-M3: capture the detector's return value — previously it was discarded
+        # B-M3: capture the detector's return value - previously it was discarded
         # so the change-detector trigger could never actually fire a demotion.
-        if self._ph.add(-pnl):   # negative PnL = increasing loss trend
+        if self._ph.add(-pnl):  # negative PnL = increasing loss trend
             self._ph_fired = True
 
     def on_bar(self, equity: float) -> dict | None:
@@ -245,10 +247,10 @@ class DemotionMonitor:
         self._window.add_equity(equity)
 
         if self._demoted:
-            return None   # already demoted, don't fire again
+            return None  # already demoted, don't fire again
 
         if self._window.n_trades < min(30, self.window_trades):
-            return None   # not enough data yet
+            return None  # not enough data yet
 
         triggers = self._check_triggers()
         if triggers:
@@ -258,21 +260,21 @@ class DemotionMonitor:
     def status(self) -> dict:
         """Current rolling performance status."""
         return {
-            "n_trades":     self._window.n_trades,
-            "sharpe":       round(self._window.sharpe, 4),
-            "win_rate":     round(self._window.win_rate, 4),
+            "n_trades": self._window.n_trades,
+            "sharpe": round(self._window.sharpe, 4),
+            "win_rate": round(self._window.win_rate, 4),
             "max_drawdown": round(self._window.max_drawdown, 4),
-            "demoted":      self._demoted,
+            "demoted": self._demoted,
         }
 
     def reset(self):
         """Call after a new model is deployed to start fresh monitoring."""
-        self._window  = _RollingWindow(maxlen=self._window._pnls.maxlen)
-        self._ph      = PageHinkleyDetector()
+        self._window = _RollingWindow(maxlen=self._window._pnls.maxlen)
+        self._ph = PageHinkleyDetector()
         self._ph_fired = False
         self._demoted = False
         self._n_bars = 0
-        prod, prev, needs_retrain = _get_checkpoint_paths()
+        _prod, _prev, needs_retrain = _get_checkpoint_paths()
         if needs_retrain.exists():
             needs_retrain.unlink()
 
@@ -286,14 +288,11 @@ class DemotionMonitor:
         dd = self._window.max_drawdown
 
         if sr < self.sharpe_floor:
-            triggers.append(
-                f"Sharpe {sr:.3f} < floor {self.sharpe_floor}")
+            triggers.append(f"Sharpe {sr:.3f} < floor {self.sharpe_floor}")
         if wr < self.winrate_floor:
-            triggers.append(
-                f"WinRate {wr:.1%} < floor {self.winrate_floor:.0%}")
+            triggers.append(f"WinRate {wr:.1%} < floor {self.winrate_floor:.0%}")
         if dd > self.max_dd_pct:
-            triggers.append(
-                f"MaxDD {dd:.1%} > limit {self.max_dd_pct:.0%}")
+            triggers.append(f"MaxDD {dd:.1%} > limit {self.max_dd_pct:.0%}")
         if self._ph_fired:
             triggers.append("Page-Hinkley change detector fired on equity curve")
             self._ph_fired = False
@@ -308,14 +307,14 @@ class DemotionMonitor:
         run_dir = active_checkpoint_dir()
         run_dir.mkdir(parents=True, exist_ok=True)
         prod, prev, needs_retrain = _get_checkpoint_paths()
-        needs_retrain.write_text(f"Demotion at {timestamp}\n" +
-                                 "\n".join(triggers))
+        needs_retrain.write_text(f"Demotion at {timestamp}\n" + "\n".join(triggers))
 
         # Rollback checkpoint
         rollback_ok = False
         if self.auto_rollback and prev.exists():
             try:
                 import logging
+
                 logging.warning("Auto-rollback: restoring previous checkpoint.")
                 atomic_swap(prev, prod)
                 rollback_ok = True
@@ -323,18 +322,19 @@ class DemotionMonitor:
                 print(f"[DemotionMonitor] Rollback failed: {e}")
 
         alert = {
-            "demoted":      True,
-            "timestamp":    timestamp,
-            "triggers":     triggers,
-            "status":       self.status(),
-            "rollback_ok":  rollback_ok,
-            "equity":       equity,
+            "demoted": True,
+            "timestamp": timestamp,
+            "triggers": triggers,
+            "status": self.status(),
+            "rollback_ok": rollback_ok,
+            "equity": equity,
             "needs_retrain": True,
         }
 
         if self.verbose:
             print(f"\n[DemotionMonitor] ⬇️  DEMOTION TRIGGERED @ {timestamp}")
-            for t in triggers: print(f"   • {t}")
+            for t in triggers:
+                print(f"   • {t}")
             print(f"   Rollback: {'✓' if rollback_ok else '✗ (no prev checkpoint)'}")
             prod, prev, needs_retrain = _get_checkpoint_paths()
             print(f"   Retrain flag: {needs_retrain}")
@@ -346,15 +346,16 @@ class DemotionMonitor:
     def _log_demotion(self, alert: dict):
         try:
             from validation.mlflow_logger import MLflowModelLogger
+
             logger = MLflowModelLogger(verbose=False)
             logger.log_promotion(
                 model_name="rollback_event",
-                gate_result={"promoted": False, "details": self.status(),
-                             "reasons": alert["triggers"]},
+                gate_result={"promoted": False, "details": self.status(), "reasons": alert["triggers"]},
                 extra_tags={"event_type": "demotion"},
             )
         except Exception:
             import json as _json
+
             log_dir = active_checkpoint_dir().parent / "logs" / "demotions"
             log_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -366,12 +367,17 @@ class DemotionMonitor:
 
 if __name__ == "__main__":
     import numpy as np
+
     rng = np.random.default_rng(42)
 
     print("=== DemotionMonitor smoke test ===\n")
     mon = DemotionMonitor(
-        sharpe_floor=0.5, winrate_floor=0.45, max_drawdown_pct=0.10,
-        window_trades=50, auto_rollback=False, verbose=True,
+        sharpe_floor=0.5,
+        winrate_floor=0.45,
+        max_drawdown_pct=0.10,
+        window_trades=50,
+        auto_rollback=False,
+        verbose=True,
     )
 
     # Simulate 80 good trades
@@ -391,12 +397,13 @@ if __name__ == "__main__":
     print("\n  Simulating 50 losing trades...")
     for i in range(50):
         pnl = float(rng.normal(-100, 80))
-        eq  = max(eq + pnl, 1.0)
+        eq = max(eq + pnl, 1.0)
         mon.on_trade_closed(pnl=pnl, equity=eq)
         alert = mon.on_bar(eq)
         if alert and alert["demoted"]:
             print(f"\n  Demotion triggered at bad-trade {i}:")
-            for t in alert["triggers"]: print(f"    • {t}")
+            for t in alert["triggers"]:
+                print(f"    • {t}")
             break
 
     print(f"\n  Final status: {mon.status()}")

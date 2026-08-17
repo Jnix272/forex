@@ -37,10 +37,10 @@ class ElasticWeightConsolidation(nn.Module):
         self.loss_fn = loss_fn
 
         self.params = {n: p for n, p in self.model.named_parameters() if p.requires_grad}
-        
+
         for n, p in self.params.items():
             self.register_buffer(f"saved_{n.replace('.', '_')}", p.clone().detach().requires_grad_(False))
-            
+
         fisher = self._compute_fisher_diagonal()
         for n, f in fisher.items():
             self.register_buffer(f"fisher_{n.replace('.', '_')}", f.clone().detach().requires_grad_(False))
@@ -82,9 +82,9 @@ class ElasticWeightConsolidation(nn.Module):
         2. **Underweighting when dataset < max_samples**: when the actual
            dataset is smaller than `max_samples`, the loop iterates fewer
            times (samples_processed << max_samples) but the divisor is the
-           flat `max_samples` constant — the Fisher diagonal gets diluted
+           flat `max_samples` constant - the Fisher diagonal gets diluted
            by the unfilled `(max_samples - samples_processed)` budget.
-           Audit example: a 65-sample dataset gave a Fisher diagonal ~15×
+           Audit example: a 65-sample dataset gave a Fisher diagonal ~15x
            too small relative to the same diagonal on max_samples=1000.
 
         The fix accumulates raw per-sample-mean `grad²` over each batch
@@ -98,6 +98,7 @@ class ElasticWeightConsolidation(nn.Module):
         self.model.eval()
 
         from torch.utils.data import DataLoader
+
         dataloader = DataLoader(self.dataset, batch_size=32, shuffle=True)
 
         samples_processed = 0
@@ -126,7 +127,7 @@ class ElasticWeightConsolidation(nn.Module):
             for n, p in self.params.items():
                 if p.grad is not None:
                     # A4/EWC fix: raw accumulation; normalise once after the loop.
-                    fisher[n] += p.grad.data ** 2
+                    fisher[n] += p.grad.data**2
 
             samples_processed += features.size(0)
 
@@ -145,7 +146,7 @@ class ElasticWeightConsolidation(nn.Module):
         """Calculate the EWC penalty term."""
         loss = torch.tensor(0.0, device=self.device)
         for n, p in self.params.items():
-            name = n.replace('.', '_')
+            name = n.replace(".", "_")
             saved_p = getattr(self, f"saved_{name}")
             fisher = getattr(self, f"fisher_{name}")
             _loss = fisher * (p - saved_p) ** 2

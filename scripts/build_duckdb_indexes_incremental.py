@@ -9,7 +9,7 @@ Instead we:
   1. create an empty ``ticks_rebuild`` with the same schema,
   2. create all three indexes on the empty table (instant, no memory pressure),
   3. copy the data over batch-by-batch per (pair, month) so each INSERT is a
-     small transaction — DuckDB maintains the ART index incrementally, bounded
+     small transaction - DuckDB maintains the ART index incrementally, bounded
      by the batch size,
   4. swap ``ticks_rebuild`` back to ``ticks``.
 
@@ -43,6 +43,7 @@ INDEXES = [
 def build_incremental(db_path: str, memory_limit: str, threads: int) -> dict:
     output = db_path
     import pathlib
+
     spill = pathlib.Path(output).parent / _SPILL_DIR
     spill.mkdir(parents=True, exist_ok=True)
 
@@ -54,7 +55,7 @@ def build_incremental(db_path: str, memory_limit: str, threads: int) -> dict:
     # 1. Empty schema copy.
     conn.execute("CREATE TABLE IF NOT EXISTS ticks_rebuild AS SELECT * FROM ticks WHERE FALSE")
 
-    # 2. Indexes on the empty table — instant.
+    # 2. Indexes on the empty table - instant.
     for name, sql in INDEXES:
         t0 = time.time()
         conn.execute(sql)
@@ -102,15 +103,18 @@ def build_incremental(db_path: str, memory_limit: str, threads: int) -> dict:
         conn.execute("CHECKPOINT")
         print("swapped ticks_rebuild -> ticks", flush=True)
     else:
-        print("row counts differ — NOT swapping", flush=True)
+        print("row counts differ - NOT swapping", flush=True)
 
     conn.close()
 
     # 5. Report final index state.
     check = duckdb.connect(str(output), read_only=True)
-    idx = [r[0] for r in check.execute(
-        "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'ticks' ORDER BY index_name"
-    ).fetchall()]
+    idx = [
+        r[0]
+        for r in check.execute(
+            "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'ticks' ORDER BY index_name"
+        ).fetchall()
+    ]
     print("indexes:", idx, flush=True)
     check.close()
     return {"indexes": idx}

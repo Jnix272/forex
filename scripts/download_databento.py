@@ -5,13 +5,8 @@ import databento as db
 import pandas as pd
 from dotenv import load_dotenv
 
-CME_MAP = {
-    "EURUSD": "6E",
-    "GBPUSD": "6B",
-    "USDJPY": "6J",
-    "AUDUSD": "6A",
-    "USDCAD": "6C"
-}
+CME_MAP = {"EURUSD": "6E", "GBPUSD": "6B", "USDJPY": "6J", "AUDUSD": "6A", "USDCAD": "6C"}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Download Databento CME L2 Order Book data")
@@ -21,9 +16,13 @@ def main():
     parser.add_argument("--schema", type=str, default="mbp-10", help="Data schema (mbp-10 or trades)")
     parser.add_argument("--dry-run", action="store_true", help="Only estimate cost, do not download")
     parser.add_argument("--budget", type=float, default=None, help="Maximum total cost in USD (stop if exceeded)")
-    parser.add_argument("--max-size-gb", type=float, default=None, help="Maximum total download size in GB (stop if exceeded)")
+    parser.add_argument(
+        "--max-size-gb", type=float, default=None, help="Maximum total download size in GB (stop if exceeded)"
+    )
     parser.add_argument("--skip-cost-check", action="store_true", help="Skip cost estimate API call (avoids hangs)")
-    parser.add_argument("--api-key", type=str, required=True, help="Databento API key (pass on CLI; not stored in .env)")
+    parser.add_argument(
+        "--api-key", type=str, required=True, help="Databento API key (pass on CLI; not stored in .env)"
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -49,11 +48,13 @@ def main():
 
     # Calculate Total Cost
     total_estimated_cost = 0.0
-    if not getattr(args, 'skip_cost_check', False):
+    if not getattr(args, "skip_cost_check", False):
         try:
             import signal
+
             def _timeout_handler(signum, frame):
                 raise TimeoutError("Cost estimate timed out")
+
             try:
                 signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(10)
@@ -65,7 +66,7 @@ def main():
                 schema=args.schema,
                 start=args.start,
                 end=args.end,
-                stype_in="continuous"
+                stype_in="continuous",
             )
             try:
                 signal.alarm(0)
@@ -81,7 +82,6 @@ def main():
     total_cost_accum = 0.0
     total_size_bytes = 0
 
-
     if args.dry_run:
         print("[DRY RUN] Exiting.")
         return
@@ -94,7 +94,7 @@ def main():
     end_dt = pd.to_datetime(args.end)
 
     # Create weekly periods
-    periods = pd.date_range(start=start_dt, end=end_dt, freq='7D')
+    periods = pd.date_range(start=start_dt, end=end_dt, freq="7D")
     if len(periods) == 0 or periods[-1] < end_dt:
         periods = periods.append(pd.DatetimeIndex([end_dt]))
 
@@ -107,7 +107,7 @@ def main():
     print("\n[DOWNLOAD] Starting Week-by-Week Chunked Download...")
     for idx in range(len(periods) - 1):
         chunk_start = periods[idx]
-        chunk_end = periods[idx+1]
+        chunk_end = periods[idx + 1]
 
         str_start = chunk_start.strftime("%Y-%m-%d")
         str_end = chunk_end.strftime("%Y-%m-%d")
@@ -122,24 +122,25 @@ def main():
                 total_size_bytes += out_file.stat().st_size
             continue
 
-        print(f"  -> Downloading {str_start} to {str_end} (Chunk {idx+1}/{len(periods)-1})...")
+        print(f"  -> Downloading {str_start} to {str_end} (Chunk {idx + 1}/{len(periods) - 1})...")
         try:
             import threading
+
             result = [None]
             error = [None]
 
             def _fetch():
                 try:
-                    result[0] = client.timeseries.get_range(
+                    result[0] = client.timeseries.get_range(  # noqa: B023
                         dataset=dataset,
                         symbols=symbols,
                         schema=args.schema,
-                        start=str_start,
-                        end=str_end,
-                        stype_in="continuous"
+                        start=str_start,  # noqa: B023
+                        end=str_end,  # noqa: B023
+                        stype_in="continuous",
                     )
                 except Exception as e:
-                    error[0] = e
+                    error[0] = e  # noqa: B023
 
             t = threading.Thread(target=_fetch, daemon=True)
             t.start()
@@ -162,17 +163,22 @@ def main():
 
         # Enforce budget limits if provided
         if args.budget is not None and total_cost_accum >= args.budget:
-            print(f"[LIMIT] Budget of ${args.budget:.2f} reached (estimated cost ${total_cost_accum:.2f}). Stopping further downloads.")
+            print(
+                f"[LIMIT] Budget of ${args.budget:.2f} reached (estimated cost ${total_cost_accum:.2f}). Stopping further downloads."
+            )
             break
         if args.max_size_gb is not None and (total_size_bytes / (1024**3)) >= args.max_size_gb:
-            print(f"[LIMIT] Size limit of {args.max_size_gb:.2f} GB reached (downloaded {(total_size_bytes/1024**3):.2f} GB). Stopping further downloads.")
+            print(
+                f"[LIMIT] Size limit of {args.max_size_gb:.2f} GB reached (downloaded {(total_size_bytes / 1024**3):.2f} GB). Stopping further downloads."
+            )
             break
 
     print("\n[COMPLETE] Download session finished.")
     if args.budget is not None:
         print(f"Total estimated cost this session: ${total_cost_accum:.4f}")
     if args.max_size_gb is not None:
-        print(f"Total downloaded size this session: {(total_size_bytes/1024**3):.2f} GB")
+        print(f"Total downloaded size this session: {(total_size_bytes / 1024**3):.2f} GB")
+
 
 if __name__ == "__main__":
     main()

@@ -15,6 +15,7 @@ from sizing.kelly_criterion import PositionSizer
 # Initialize TestClient
 client = TestClient(app)
 
+
 def run_performance_test():
     """Scenario 1: Large Input Performance Stress Test (10,000 returns elements)."""
     print("\n--- Running Performance Test (10k elements) ---")
@@ -26,7 +27,7 @@ def run_performance_test():
         "price": 1.1000,
         "current_atr": 0.0005,
         "equity": 10000.0,
-        "lot_size": 10000.0
+        "lot_size": 10000.0,
     }
 
     start_time = time.perf_counter()
@@ -40,11 +41,7 @@ def run_performance_test():
     assert elapsed < 0.5, f"Performance warning: request took {elapsed:.4f} seconds"
 
     # Also test /volatility_bounds
-    payload_vol = {
-        "returns": large_returns,
-        "target_vol": 0.10,
-        "lookback": 20
-    }
+    payload_vol = {"returns": large_returns, "target_vol": 0.10, "lookback": 20}
     start_time = time.perf_counter()
     response_vol = client.post("/volatility_bounds", json=payload_vol)
     elapsed_vol = time.perf_counter() - start_time
@@ -53,6 +50,7 @@ def run_performance_test():
     print(f"Time taken for /volatility_bounds with 10k returns: {elapsed_vol:.4f} seconds")
     print(f"Result: vol_scalar={data_vol['vol_scalar']:.4f}, realized_vol={data_vol['realized_vol']:.4f}")
     assert elapsed_vol < 0.5
+
 
 def test_stress_large_input():
     run_performance_test()
@@ -70,7 +68,7 @@ def run_zero_atr_test():
         "price": 1.1000,
         "current_atr": 0.0,
         "equity": 10000.0,
-        "lot_size": 10000.0
+        "lot_size": 10000.0,
     }
     response = client.post("/kelly_sizing", json=payload_zero)
     print(f"Zero ATR status code (expect 422): {response.status_code}")
@@ -89,16 +87,13 @@ def run_zero_atr_test():
     try:
         sizer = PositionSizer()
         res = sizer.size_position(
-            win_prob=0.55,
-            win_loss_ratio=1.5,
-            returns=[0.001, -0.002, 0.003],
-            price=1.1000,
-            current_atr=0.0
+            win_prob=0.55, win_loss_ratio=1.5, returns=[0.001, -0.002, 0.003], price=1.1000, current_atr=0.0
         )
         print(f"Direct PositionSizer sizing with 0 ATR succeeded: lots={res['lots']}")
         assert isinstance(res["lots"], float)
     except Exception as e:
         pytest.fail(f"PositionSizer direct call crashed with 0 ATR: {e}")
+
 
 def test_stress_zero_atr():
     run_zero_atr_test()
@@ -115,7 +110,7 @@ def run_low_target_vol_test():
         "current_atr": 0.0005,
         "equity": 10000.0,
         "lot_size": 10000.0,
-        "target_vol": 1e-9  # extremely small target vol
+        "target_vol": 1e-9,  # extremely small target vol
     }
     response = client.post("/kelly_sizing", json=payload)
     assert response.status_code == 200
@@ -129,6 +124,7 @@ def run_low_target_vol_test():
     response_bad = client.post("/kelly_sizing", json=payload_bad)
     print(f"Target Vol (0.0) status code (expect 422): {response_bad.status_code}")
     assert response_bad.status_code == 422
+
 
 def test_stress_low_target_vol():
     run_low_target_vol_test()
@@ -145,7 +141,7 @@ def run_edge_case_win_prob_test():
         "price": 1.1000,
         "current_atr": 0.0005,
         "equity": 10000.0,
-        "lot_size": 10000.0
+        "lot_size": 10000.0,
     }
     response_1 = client.post("/kelly_sizing", json=payload_1)
     assert response_1.status_code == 200
@@ -186,6 +182,7 @@ def run_edge_case_win_prob_test():
     print(f"Win/Loss Ratio (1e9) Result: lots={data_hr['lots']}, full_kelly={data_hr['full_kelly']:.4f}")
     assert data_hr["full_kelly"] >= 0.54
 
+
 def test_stress_edge_case_win_prob():
     run_edge_case_win_prob_test()
 
@@ -202,7 +199,7 @@ def run_nan_inf_test():
         "price": 1.1000,
         "current_atr": 0.0005,
         "equity": 10000.0,
-        "lot_size": 10000.0
+        "lot_size": 10000.0,
     }
 
     response_nan = client.post("/kelly_sizing", json=payload_nan)
@@ -226,7 +223,7 @@ def run_nan_inf_test():
     payload_vol_nan = {
         "returns": [0.001, -0.002, 0.003, -0.001, 0.002] * 4 + ["NaN"],
         "target_vol": 0.10,
-        "lookback": 20
+        "lookback": 20,
     }
     response_vol_nan = client.post("/volatility_bounds", json=payload_vol_nan)
     print(f"Volatility bounds with NaN status code: {response_vol_nan.status_code}")
@@ -236,6 +233,7 @@ def run_nan_inf_test():
         print("Volatility bounds with NaN caused 500 Internal Server Error!")
     else:
         print(f"Volatility bounds with NaN returned {response_vol_nan.status_code}: {response_vol_nan.text}")
+
 
 def test_stress_nan_inf():
     run_nan_inf_test()

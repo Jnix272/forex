@@ -38,15 +38,18 @@ import torch.nn.functional as F
 
 try:
     import torch.optim as optim
+
     TORCH = True
 except ImportError:
     TORCH = False
 
 try:
     from tqdm import tqdm as _tqdm
+
     def _pbar(it, **kw):
         return _tqdm(it, **kw)
 except ImportError:
+
     def _pbar(it, **kw):
         return it
 
@@ -55,9 +58,11 @@ except ImportError:
 # 1. Configuration
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class MultiTaskPretrainConfig:
     """Configuration for multi-task pretraining."""
+
     # Shared encoder
     d_model: int = 128
     seq_len: int = 60
@@ -137,6 +142,7 @@ class MultiTaskPretrainConfig:
 @dataclass
 class PretrainResult:
     """Result of pretraining."""
+
     history: dict[str, list[float]]
     encoder_state: dict[str, torch.Tensor]
     config: MultiTaskPretrainConfig
@@ -146,6 +152,7 @@ class PretrainResult:
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Augmentations
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TimeSeriesAugmenter:
     """Time-series augmentations for contrastive/SSL."""
@@ -167,7 +174,7 @@ class TimeSeriesAugmenter:
     def augment_batch(self, x: np.ndarray) -> np.ndarray:
         """Apply augmentations to batch of windows."""
         x = x.copy()
-        B, T, F = x.shape
+        B, _T, F = x.shape
 
         # Jitter
         if self.jitter_std > 0:
@@ -195,8 +202,10 @@ class TimeSeriesAugmenter:
 # 3. Shared Encoder & Task Heads
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class _MeanPool(nn.Module):
     """Mean pooling over sequence dimension."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.mean(dim=1)
 
@@ -337,6 +346,7 @@ class CORALLoss(nn.Module):
 # 4. Task Losses
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.5) -> torch.Tensor:
     """NT-Xent contrastive loss (SimCLR)."""
     B = z1.shape[0]
@@ -346,7 +356,7 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.5) -
 
     # Mask self-similarity
     mask = torch.eye(2 * z1.shape[0], device=z1.device, dtype=torch.bool)
-    sim = sim.masked_fill(mask, float('-inf'))
+    sim = sim.masked_fill(mask, float("-inf"))
 
     # Positive pairs: (i, i+B) and (i+B, i)
     labels = torch.arange(B, device=z1.device)
@@ -390,7 +400,7 @@ def vae_loss(
     This prevents the KL term from dominating when the reconstruction MSE uses
     the global element-wise mean (which is ~latent_dim smaller than the KL sum).
     """
-    recon_loss = F.mse_loss(recon, target, reduction='none').sum(dim=list(range(1, recon.ndim))).mean()
+    recon_loss = F.mse_loss(recon, target, reduction="none").sum(dim=list(range(1, recon.ndim))).mean()
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
     loss = recon_loss + beta * kl
     return loss, recon_loss, kl
@@ -433,10 +443,11 @@ def domain_adversarial_loss(
 # 5. Multi-Task Pretrainer
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class MultiTaskPretrainer(nn.Module):
     """
     Unified multi-task pretraining with optional domain adaptation.
-    
+
     Combines multiple self-supervised objectives:
       - Contrastive (NT-Xent/BYOL)
       - Masked reconstruction
@@ -444,7 +455,7 @@ class MultiTaskPretrainer(nn.Module):
       - VAE (optional)
       - Drift detection (optional)
       - Domain adaptation (DANN/MMD/CORAL)
-    
+
     Features:
       - Shared encoder with task-specific heads
       - GradNorm for automatic loss balancing
@@ -549,7 +560,7 @@ class MultiTaskPretrainer(nn.Module):
             weight_decay=config.weight_decay,
         )
 
-# GradNorm parameters (learnable task weights)
+        # GradNorm parameters (learnable task weights)
         self.gradnorm_params = None
         self._gradnorm_task_names = []
         if config.use_gradnorm:
@@ -567,10 +578,8 @@ class MultiTaskPretrainer(nn.Module):
                 self._gradnorm_task_names.append("drift")
             # Domain is conditional on domain_labels, so exclude from GradNorm
             if self._gradnorm_task_names:
-                self.gradnorm_params = nn.Parameter(
-                    torch.ones(len(self._gradnorm_task_names), device=self.device)
-                )
-                self.register_parameter('gradnorm_weights', self.gradnorm_params)
+                self.gradnorm_params = nn.Parameter(torch.ones(len(self._gradnorm_task_names), device=self.device))
+                self.register_parameter("gradnorm_weights", self.gradnorm_params)
 
         self._total_epochs = 0
         self._rng = np.random.default_rng(config.seed)
@@ -579,7 +588,7 @@ class MultiTaskPretrainer(nn.Module):
         self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
 
         # History
-        self.history = {k: [] for k in ["loss", "total"] + list(self.task_weights.keys())}
+        self.history = {k: [] for k in ["loss", "total", *list(self.task_weights.keys())]}
         self.history["gradnorm_weights"] = []
 
     def _mask_input(self, x: torch.Tensor, mask_prob: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -622,9 +631,9 @@ class MultiTaskPretrainer(nn.Module):
 
     def _compute_forecast_loss(self, x: torch.Tensor) -> torch.Tensor:
         """Compute forecast pretext loss."""
-        prefix_len = self.config.seq_len - self.config.forecast_horizon
-        prefix = x[:, :self.config.prefix_len, :]
-        target = x[:, self.config.prefix_len:, :]
+        self.config.seq_len - self.config.forecast_horizon
+        prefix = x[:, : self.config.prefix_len, :]
+        target = x[:, self.config.prefix_len :, :]
 
         h = self._forward_encoder(prefix)
         pred = self.heads["forecast"](h).view(-1, self.config.forecast_horizon, self.config.n_features)
@@ -703,19 +712,20 @@ class MultiTaskPretrainer(nn.Module):
 
         # GradNorm: L_grad = sum_i |G_i - mean(G) * (L_i / mean(L))^alpha|
         grad_norms = torch.stack([grads[k] for k in task_losses_filtered])
-        loss_vals = torch.stack([l.detach() for l in task_losses_filtered.values()])
+        loss_vals = torch.stack([l.detach() for l in task_losses_filtered.values()])  # noqa: E741
         mean_grad = grad_norms.mean()
         mean_loss = loss_vals.mean()
         relative = (loss_vals / mean_loss) ** self.config.gradnorm_alpha
         target_grad = mean_grad * relative
-        gradnorm_loss = (grad_norms - target_grad).abs().sum()
+        (grad_norms - target_grad).abs().sum()
 
         # Update task weights
         self.gradnorm_params.data = (self.gradnorm_params * (target_grad / grad_norms).detach()).clamp(0.1, 10.0)
 
         # Return weighted sum
-        weighted_loss = sum(self.gradnorm_params[i] * list(task_losses_filtered.values())[i]
-                           for i in range(len(task_losses_filtered)))
+        weighted_loss = sum(
+            self.gradnorm_params[i] * list(task_losses_filtered.values())[i] for i in range(len(task_losses_filtered))
+        )
         return weighted_loss
 
     def step(
@@ -737,7 +747,7 @@ class MultiTaskPretrainer(nn.Module):
             task_losses["forecast"] = self._compute_forecast_loss(x)
 
         if self.config.use_vae:
-            loss, recon, kl = self._compute_vae_loss(x)
+            loss, _recon, _kl = self._compute_vae_loss(x)
             task_losses["vae"] = loss
 
         if self.config.use_drift:
@@ -750,10 +760,7 @@ class MultiTaskPretrainer(nn.Module):
         if self.config.use_gradnorm and len(task_losses) > 1:
             total_loss = self._gradnorm_step(task_losses)
         else:
-            total_loss = sum(
-                self.task_weights.get(k, 1.0) * v
-                for k, v in task_losses.items()
-            )
+            total_loss = sum(self.task_weights.get(k, 1.0) * v for k, v in task_losses.items())
 
         task_losses["total"] = total_loss
 
@@ -763,9 +770,9 @@ class MultiTaskPretrainer(nn.Module):
             self._scaler.scale(total_loss).backward()
             self._scaler.unscale_(self.opt)
             nn.utils.clip_grad_norm_(
-                list(self.encoder.parameters()) +
-                [p for h in self.heads.values() for p in h.parameters()] +
-                ([p for p in self.discriminator.parameters()] if self.discriminator else []),
+                list(self.encoder.parameters())
+                + [p for h in self.heads.values() for p in h.parameters()]
+                + (list(self.discriminator.parameters()) if self.discriminator else []),
                 1.0,
             )
             self._scaler.step(self.opt)
@@ -773,14 +780,14 @@ class MultiTaskPretrainer(nn.Module):
         else:
             total_loss.backward()
             nn.utils.clip_grad_norm_(
-                list(self.encoder.parameters()) +
-                [p for h in self.heads.values() for p in h.parameters()] +
-                ([p for p in self.discriminator.parameters()] if self.discriminator else []),
+                list(self.encoder.parameters())
+                + [p for h in self.heads.values() for p in h.parameters()]
+                + (list(self.discriminator.parameters()) if self.discriminator else []),
                 1.0,
             )
             self.opt.step()
 
-# Record losses
+        # Record losses
         losses_dict = {k: v.detach().item() for k, v in task_losses.items()}
         return losses_dict
 
@@ -795,7 +802,7 @@ class MultiTaskPretrainer(nn.Module):
     ) -> dict[str, list[float]]:
         """
         Run multi-task pretraining.
-        
+
         Args:
             X: Input data (N, seq_len, n_features)
             domain_labels: Domain labels for each sample (for DANN)
@@ -803,7 +810,7 @@ class MultiTaskPretrainer(nn.Module):
             batch_size: Batch size
             checkpoint_path: Path to save encoder checkpoint
             silent: Suppress progress output
-        
+
         Returns:
             History dictionary with loss curves.
         """
@@ -811,15 +818,15 @@ class MultiTaskPretrainer(nn.Module):
         batch_size = batch_size or self.config.batch_size
         if checkpoint_path is None:
             from config.settings import PATHS
+
             checkpoint_path = PATHS.get("file_contrastive_encoder", "encoder.pt")
 
         N = len(X)
         if not silent:
-            tasks = [k for k in self.task_weights.keys() if self.task_weights[k] > 0]
+            tasks = [k for k in self.task_weights if self.task_weights[k] > 0]
             print(f"[MultiTask] {epochs} ep | {N:,} windows | batch={batch_size} | tasks={tasks}")
 
         # Prepare domain labels tensor
-        domain_labels_tensor = None
         if domain_labels is not None:
             domain_labels = torch.as_tensor(domain_labels, dtype=torch.long).to(self.device)
 
@@ -831,7 +838,6 @@ class MultiTaskPretrainer(nn.Module):
             n_batches = 0
 
             # LR schedule with warmup + cosine decay
-            base_lr = self.config.lr
             warmup = min(self.config.warmup_epochs, epochs)
             if epoch < warmup:
                 lr_scale = (epoch + 1) / warmup
@@ -919,6 +925,7 @@ class MultiTaskPretrainer(nn.Module):
 # 6. Factory & Convenience
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def create_multi_task_pretrainer(
     X: np.ndarray,
     config: MultiTaskPretrainConfig | None = None,
@@ -927,12 +934,12 @@ def create_multi_task_pretrainer(
     """Factory function to create MultiTaskPretrainer with sensible defaults."""
     if config is None:
         # Pop training-specific kwargs that are not config parameters
-        epochs = kwargs.pop("epochs", 50)
-        batch_size = kwargs.pop("batch_size", 256)
-        device = kwargs.pop("device", "cuda")
-        silent = kwargs.pop("silent", False)
-        checkpoint_path = kwargs.pop("checkpoint_path", None)
-        domain_labels = kwargs.pop("domain_labels", None)
+        kwargs.pop("epochs", 50)
+        kwargs.pop("batch_size", 256)
+        kwargs.pop("device", "cuda")
+        kwargs.pop("silent", False)
+        kwargs.pop("checkpoint_path", None)
+        kwargs.pop("domain_labels", None)
 
         seq_len = kwargs.pop("seq_len", 60)
         n_features = kwargs.pop("n_features", X.shape[2] if X.ndim == 3 else 20)
@@ -952,20 +959,21 @@ def pretrain_multi_task(
 ) -> tuple[MultiTaskPretrainer, dict]:
     """
     One-shot multi-task pretraining.
-    
+
     Args:
         X: Input data (N, seq_len, n_features)
         config: Pretraining config
         domain_labels: Domain labels for DANN
         **kwargs: Additional config overrides
-    
+
     Returns:
         (trainer, history)
     """
     trainer = create_multi_task_pretrainer(X, config, **kwargs)
     # Filter kwargs for pretrain method
-    pretrain_kwargs = {k: v for k, v in kwargs.items()
-                       if k in ["epochs", "batch_size", "checkpoint_path", "silent", "domain_labels"]}
+    pretrain_kwargs = {
+        k: v for k, v in kwargs.items() if k in ["epochs", "batch_size", "checkpoint_path", "silent", "domain_labels"]
+    }
     history = trainer.pretrain(X, domain_labels=domain_labels, **pretrain_kwargs)
     return trainer, history
 
@@ -973,6 +981,7 @@ def pretrain_multi_task(
 # ════════════════════════════════════════════════════════════════════════════
 # 7. Domain Adaptation Utilities
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def adapt_encoder_to_target(
     encoder: nn.Module,
@@ -985,7 +994,7 @@ def adapt_encoder_to_target(
 ) -> nn.Module:
     """
     Fine-tune encoder for domain adaptation (unsupervised).
-    
+
     Args:
         encoder: Pre-trained encoder
         source_data: Source domain data
@@ -994,7 +1003,7 @@ def adapt_encoder_to_target(
         epochs: Fine-tuning epochs
         lr: Learning rate
         device: Device
-    
+
     Returns:
         Adapted encoder
     """
@@ -1024,7 +1033,7 @@ def adapt_encoder_to_target(
                 tgt = target_t[:, -1, :]
             else:
                 ctx = emb
-                tgt = target_t.reshape(target_t.shape[0], -1)[:, : encoder_dim]
+                tgt = target_t.reshape(target_t.shape[0], -1)[:, :encoder_dim]
                 if tgt.shape[-1] != head.out_features:
                     head = nn.Linear(ctx.shape[-1], tgt.shape[-1]).to(device)
                     opt_h = optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=lr)
@@ -1043,10 +1052,10 @@ def adapt_encoder_to_target(
         source_t = torch.as_tensor(source_data, dtype=torch.float32, device=device)
         target_t = torch.as_tensor(target_data, dtype=torch.float32, device=device)
 
-        source_labels = torch.zeros(len(source_data), dtype=torch.long, device=device)
+        torch.zeros(len(source_data), dtype=torch.long, device=device)
         target_labels = torch.ones(len(target_data), dtype=torch.long, device=device)
 
-        for epoch in range(epochs):
+        for _epoch in range(epochs):
             # Source forward - get pooled embeddings
             with torch.no_grad():
                 source_emb_full = encoder(source_t)
@@ -1063,7 +1072,9 @@ def adapt_encoder_to_target(
 
             # Discriminator
             disc_in = torch.cat([source_emb, target_emb], dim=0)
-            disc_labels = torch.cat([torch.zeros(len(source_data)), torch.ones(len(target_data))], dim=0).long().to(device)
+            disc_labels = (
+                torch.cat([torch.zeros(len(source_data)), torch.ones(len(target_data))], dim=0).long().to(device)
+            )
 
             pred = discriminator(grad_reverse(disc_in, 1.0))
             loss_d = F.cross_entropy(pred, disc_labels)
@@ -1092,9 +1103,7 @@ def adapt_encoder_to_target(
             loss.backward()
             opt.step()
     else:
-        raise ValueError(
-            f"Unknown domain-adapt method {method!r}; expected dann|mmd|coral|fine_tune"
-        )
+        raise ValueError(f"Unknown domain-adapt method {method!r}; expected dann|mmd|coral|fine_tune")
 
     return encoder
 

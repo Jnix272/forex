@@ -4,14 +4,19 @@ Comprehensive data quality audit for data/raw/
 Checks: coverage gaps, spread sanity, price sanity, volume, tick density,
         duplicate timestamps, monotonicity, NaN, outliers, COT, news, eco-calendar.
 """
-import os, sys, glob, math
-import polars as pl
-import numpy as np
-from datetime import datetime, timedelta, timezone
+
+import glob
+import math
+import os
+import sys
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta, timezone
+
+import numpy as np
+import polars as pl
 
 RAW = "data/raw"
-PAIRS = ["EURUSD","GBPUSD","USDJPY","GBPJPY","AUDUSD","USDCAD","NZDUSD","USDCHF","EURJPY","EURGBP"]
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF", "EURJPY", "EURGBP"]
 
 # Expected spread bounds per pair (pips)
 SPREAD_BOUNDS = {
@@ -26,18 +31,21 @@ SPREAD_BOUNDS = {
     "EURJPY": (0.0, 10.0),
     "EURGBP": (0.0, 8.0),
 }
-JPY_PAIRS = {"USDJPY","GBPJPY","EURJPY"}
+JPY_PAIRS = {"USDJPY", "GBPJPY", "EURJPY"}
 
 RESULTS = []
 
+
 def pip_size(pair):
     return 0.01 if pair in JPY_PAIRS else 0.0001
+
 
 def log(level, check, detail):
     icon = {"PASS": "OK", "FAIL": "FAIL", "WARN": "WARN", "INFO": "INFO"}.get(level, "?")
     line = f"  [{icon}] {check}: {detail}"
     print(line)
     RESULTS.append((level, check, detail))
+
 
 def check_pair(pair):
     files = sorted(glob.glob(f"{RAW}/dukascopy/{pair}/**/*.parquet", recursive=True))
@@ -64,7 +72,7 @@ def check_pair(pair):
     # Sample ~1% of files for detailed checks, always include first+last
     n = len(files)
     step = max(1, n // 200)
-    sample_files = sorted(set([files[0], files[-1]] + files[::step]))
+    sample_files = sorted({files[0], files[-1], *files[::step]})
 
     for fpath in sample_files:
         try:
@@ -118,7 +126,7 @@ def check_pair(pair):
             month = int(parts[-2])
             fname = parts[-1].replace(".parquet", "")
             day, hour = map(int, fname.split("_"))
-            hours_present.add(datetime(year, month, day, hour, tzinfo=timezone.utc))
+            hours_present.add(datetime(year, month, day, hour, tzinfo=UTC))
         except Exception:
             pass
 
@@ -129,12 +137,15 @@ def check_pair(pair):
         first_h = sorted_hours[0]
         last_h = sorted_hours[-1]
         for i in range(1, len(sorted_hours)):
-            gap = (sorted_hours[i] - sorted_hours[i-1]).total_seconds() / 3600
+            gap = (sorted_hours[i] - sorted_hours[i - 1]).total_seconds() / 3600
             if gap > max_gap:
                 max_gap = gap
 
-    log("INFO", f"{pair}/coverage",
-        f"{n:,} files | {first_h.date() if first_h else '?'} to {last_h.date() if last_h else '?'} | max_gap={max_gap:.0f}h")
+    log(
+        "INFO",
+        f"{pair}/coverage",
+        f"{n:,} files | {first_h.date() if first_h else '?'} to {last_h.date() if last_h else '?'} | max_gap={max_gap:.0f}h",
+    )
 
     if error_files:
         log("FAIL", f"{pair}/corrupt_files", f"{len(error_files)} corrupt parquet files")
@@ -200,7 +211,7 @@ def check_cot():
             log("WARN", "cot/nulls", f"{null_pct:.1f}% null cells")
         else:
             log("PASS", "cot/nulls", f"{null_pct:.2f}% null cells")
-        date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date","time","report"])]
+        date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "report"])]
         if date_cols:
             log("INFO", "cot/date_range", f"Date cols: {date_cols} | sample: {df[date_cols[0]].head(1).to_list()}")
     except Exception as e:
@@ -221,8 +232,12 @@ def check_news():
             null_pct = df.null_count().row(0)
             total_nulls = sum(null_pct)
             null_frac = total_nulls / max(1, df.shape[0] * df.shape[1]) * 100
-            date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date","time","publish","created"])]
-            log("INFO", f"news/{fname}", f"{df.shape[0]:,} rows x {df.shape[1]} cols | nulls={null_frac:.1f}% | date_cols={date_cols}")
+            date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "publish", "created"])]
+            log(
+                "INFO",
+                f"news/{fname}",
+                f"{df.shape[0]:,} rows x {df.shape[1]} cols | nulls={null_frac:.1f}% | date_cols={date_cols}",
+            )
             if null_frac > 30:
                 log("WARN", f"news/{fname}/nulls", f"High null rate: {null_frac:.1f}%")
             else:
@@ -261,13 +276,13 @@ def print_summary():
     counts = defaultdict(int)
     for level, _, _ in RESULTS:
         counts[level] += 1
-    for level in ["PASS","WARN","FAIL","INFO"]:
+    for level in ["PASS", "WARN", "FAIL", "INFO"]:
         if counts[level]:
             icon = {"PASS": "OK", "FAIL": "FAIL", "WARN": "WARN", "INFO": "INFO"}[level]
             print(f"  [{icon}] {level}: {counts[level]}")
 
     print()
-    fails = [(c, d) for l, c, d in RESULTS if l == "FAIL"]
+    fails = [(c, d) for l, c, d in RESULTS if l == "FAIL"]  # noqa: E741
     if fails:
         print("FAILURES:")
         for c, d in fails:
@@ -275,7 +290,7 @@ def print_summary():
     else:
         print("No FAIL-level issues found!")
 
-    warns = [(c, d) for l, c, d in RESULTS if l == "WARN"]
+    warns = [(c, d) for l, c, d in RESULTS if l == "WARN"]  # noqa: E741
     if warns:
         print()
         print("WARNINGS:")
@@ -285,10 +300,10 @@ def print_summary():
 
 
 if __name__ == "__main__":
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  FOREX RAW DATA QUALITY AUDIT")
     print(f"  Run at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     print("=== DUKASCOPY TICK DATA ===\n")
     for pair in PAIRS:

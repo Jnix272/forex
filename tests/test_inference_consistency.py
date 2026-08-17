@@ -33,23 +33,24 @@ def test_inference_consistency():
 
         # Create dummy config
         import json
+
         cfg_path = ckpt_dir / f"{model_name}_config.json"
-        cfg_path.write_text(json.dumps({
-            "model": "mamba",
-            "n_features": n_features,
-            "seq_len": seq_len,
-            "d_model": 128,
-            "num_layers": 2,
-            "num_classes": 3
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "model": "mamba",
+                    "n_features": n_features,
+                    "seq_len": seq_len,
+                    "d_model": 128,
+                    "num_layers": 2,
+                    "num_classes": 3,
+                }
+            )
+        )
 
         # 2. PyTorch Engine
         pt_engine = PyTorchInferenceEngine(
-            checkpoint_path=str(ckpt_path),
-            model_name=model_name,
-            seq_len=seq_len,
-            n_features=n_features,
-            device="cpu"
+            checkpoint_path=str(ckpt_path), model_name=model_name, seq_len=seq_len, n_features=n_features, device="cpu"
         )
         assert pt_engine.seq_len == seq_len
         assert pt_engine.n_features == n_features
@@ -58,11 +59,7 @@ def test_inference_consistency():
         onnx_path = ckpt_dir / f"{model_name}_best.onnx"
         core_onnx_export(model, n_features, seq_len, str(onnx_path))
 
-        onnx_engine = DirectMLInferenceEngine(
-            onnx_path=str(onnx_path),
-            seq_len=seq_len,
-            prefer_cpu=True
-        )
+        onnx_engine = DirectMLInferenceEngine(onnx_path=str(onnx_path), seq_len=seq_len, prefer_cpu=True)
         assert onnx_engine.seq_len == seq_len
 
         # Check action interfaces
@@ -91,7 +88,7 @@ def test_inference_consistency():
             model_name=model_name,
             seq_len=seq_len,
             n_features=n_features,
-            device="cpu"
+            device="cpu",
         )
         assert rl_engine.seq_len == seq_len
         assert rl_engine.n_features == n_features
@@ -101,6 +98,7 @@ def test_inference_consistency():
 
         print("Consistency check passed for PyTorch, ONNX, and RL engines.")
         print(f"Validated seq_len={seq_len}, n_features={n_features}")
+
 
 if __name__ == "__main__":
     test_inference_consistency()

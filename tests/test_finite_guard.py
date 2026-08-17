@@ -31,10 +31,12 @@ def test_sanitize_array_coerces_empty_strings():
 
 
 def test_sanitize_frame_skips_price_columns():
-    df = pd.DataFrame({
-        "close": [150.0, 151.0],
-        "feat": [100.0, np.nan],
-    })
+    df = pd.DataFrame(
+        {
+            "close": [150.0, 151.0],
+            "feat": [100.0, np.nan],
+        }
+    )
     out = sanitize_frame(df, fill_value=0.0, context="test")
     assert out["close"].tolist() == [150.0, 151.0]
     assert out["feat"].iloc[0] == 20.0  # clipped

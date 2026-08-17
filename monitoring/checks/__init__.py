@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Callable, Optional
+from datetime import UTC, datetime, timezone  # noqa: F401
+from enum import Enum, StrEnum  # noqa: F401
+from typing import Any, Optional  # noqa: F401
 
-from monitoring.events import TrainingEvent, EventType, Severity, CheckPhase
+from monitoring.events import CheckPhase, EventType, Severity, TrainingEvent  # noqa: F401
 
 
-class CheckStatus(str, Enum):
+class CheckStatus(StrEnum):
     """Check execution status."""
+
     PENDING = "pending"
     RUNNING = "running"
     PASSED = "passed"
@@ -29,15 +31,16 @@ class CheckStatus(str, Enum):
 @dataclass
 class CheckResult:
     """Result of a single check execution."""
+
     name: str
     status: CheckStatus
     passed: bool
     message: str = ""
     details: dict = field(default_factory=dict)
-    threshold: Optional[float] = None
-    value: Optional[float] = None
+    threshold: float | None = None
+    value: float | None = None
     duration_ms: float = 0.0
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict:
         """Serialize to dictionary for JSON output."""
@@ -57,13 +60,14 @@ class CheckResult:
 @dataclass
 class CheckMetadata:
     """Metadata for a registered check."""
+
     name: str
     phase: CheckPhase
     func: Callable
     description: str = ""
     severity: str = "warning"
     tags: set[str] = field(default_factory=set)
-    threshold: Optional[dict] = None  # Configurable thresholds
+    threshold: dict | None = None  # Configurable thresholds
     enabled: bool = True
     async_fn: bool = False
     dependencies: list[str] = field(default_factory=list)  # Other checks that must run first
@@ -71,13 +75,13 @@ class CheckMetadata:
 
 class CheckContext:
     """Context passed to check functions."""
-    
+
     def __init__(
         self,
         run_id: str = "",
         session_id: str = "",
-        epoch: Optional[int] = None,
-        batch: Optional[int] = None,
+        epoch: int | None = None,
+        batch: int | None = None,
         model_name: str = "",
         model: Any = None,
         optimizer: Any = None,
@@ -86,9 +90,9 @@ class CheckContext:
         batch_targets: Any = None,
         outputs: Any = None,
         gradients: Any = None,
-        metrics: dict = None,
-        history: dict = None,
-        config: dict = None,
+        metrics: dict | None = None,
+        history: dict | None = None,
+        config: dict | None = None,
         **kwargs,
     ):
         self.run_id = run_id
@@ -107,14 +111,14 @@ class CheckContext:
         self.history = history or {}
         self.config = config or {}
         self.extra = kwargs
-        
+
         # Results from previous checks in this phase
         self.check_results: dict[str, CheckResult] = {}
 
 
 class CheckRegistry:
     """Central registry for all validation checks."""
-    
+
     def __init__(self):
         self._checks: dict[str, CheckMetadata] = {}
         self._phase_order = [
@@ -127,7 +131,7 @@ class CheckRegistry:
             CheckPhase.RL_EPISODE,
             CheckPhase.POST_TRAIN,
         ]
-    
+
     def register(
         self,
         name: str,
@@ -135,10 +139,10 @@ class CheckRegistry:
         func: Callable,
         description: str = "",
         severity: str = "warning",
-        tags: set[str] = None,
-        threshold: dict = None,
+        tags: set[str] | None = None,
+        threshold: dict | None = None,
         enabled: bool = True,
-        dependencies: list[str] = None,
+        dependencies: list[str] | None = None,
     ) -> CheckMetadata:
         """Register a check function."""
         # Convert string phase to enum
@@ -149,7 +153,7 @@ class CheckRegistry:
                 raise ValueError(f"Invalid phase: {phase}. Valid: {[p.value for p in CheckPhase]}")
         if name in self._checks:
             raise ValueError(f"Check '{name}' already registered")
-        
+
         metadata = CheckMetadata(
             name=name,
             phase=phase,
@@ -162,35 +166,35 @@ class CheckRegistry:
             async_fn=asyncio.iscoroutinefunction(func),
             dependencies=dependencies or [],
         )
-        
+
         self._checks[name] = metadata
         return metadata
-    
+
     def unregister(self, name: str):
         """Unregister a check."""
         if name in self._checks:
             del self._checks[name]
-    
-    def get(self, name: str) -> Optional[CheckMetadata]:
+
+    def get(self, name: str) -> CheckMetadata | None:
         """Get check metadata by name."""
         return self._checks.get(name)
-    
+
     def get_phase_checks(self, phase: CheckPhase) -> list[CheckMetadata]:
         """Get all checks for a phase, sorted by dependencies."""
         checks = [c for c in self._checks.values() if c.phase == phase and c.enabled]
         # Simple topological sort by dependencies
         return self._topological_sort(checks)
-    
+
     def _topological_sort(self, checks: list[CheckMetadata]) -> list[CheckMetadata]:
         """Sort checks by dependencies (simple Kahn's algorithm)."""
         # Build adjacency
         graph = {c.name: set(c.dependencies) for c in checks}
         name_to_check = {c.name: c for c in checks}
-        
+
         # Find nodes with no dependencies
         in_degree = {name: len(deps) for name, deps in graph.items()}
         queue = [name for name, deg in in_degree.items() if deg == 0]
-        
+
         sorted_checks = []
         while queue:
             name = queue.pop(0)
@@ -201,27 +205,27 @@ class CheckRegistry:
                     in_degree[other_name] -= 1
                     if in_degree[other_name] == 0:
                         queue.append(other_name)
-        
+
         # If cycle detected, fall back to original order
         if len(sorted_checks) != len(checks):
             return checks
-        
+
         return sorted_checks
-    
+
     def list_all(self) -> list[CheckMetadata]:
         """List all registered checks."""
         return list(self._checks.values())
-    
+
     def enable(self, name: str):
         """Enable a check."""
         if name in self._checks:
             self._checks[name].enabled = True
-    
+
     def disable(self, name: str):
         """Disable a check."""
         if name in self._checks:
             self._checks[name].enabled = False
-    
+
     def set_threshold(self, name: str, threshold: dict):
         """Update check threshold."""
         if name in self._checks:
@@ -230,7 +234,7 @@ class CheckRegistry:
 
 class CheckEngine:
     """Orchestrates check execution for each phase."""
-    
+
     def __init__(self, registry: CheckRegistry, logger=None):
         self.registry = registry
         self.logger = logger
@@ -238,7 +242,7 @@ class CheckEngine:
         # Store all results across phases for cross-phase dependency resolution
         self._all_results: dict[str, CheckResult] = {}
         self._running = False
-    
+
     async def run_phase(
         self,
         phase: CheckPhase | str,
@@ -251,17 +255,17 @@ class CheckEngine:
                 phase = CheckPhase(phase)
             except ValueError:
                 raise ValueError(f"Invalid phase: {phase}. Valid: {[p.value for p in CheckPhase]}")
-        
+
         # Initialize context.check_results with all previous phase results for cross-phase deps
         context.check_results = dict(self._all_results)
-        
+
         checks = self.registry.get_phase_checks(phase)
         results = {}
-        
+
         for check_meta in checks:
             if not check_meta.enabled:
                 continue
-            
+
             # Check dependencies (can now reference checks from previous phases)
             deps_ok = all(
                 context.check_results.get(dep, CheckResult("", CheckStatus.PENDING, False)).passed
@@ -277,20 +281,20 @@ class CheckEngine:
                 results[check_meta.name] = result
                 context.check_results[check_meta.name] = result
                 continue
-            
+
             # Propagate threshold config from CheckMetadata to context.config
             # This allows checks to read thresholds via context.config.get("key")
             if check_meta.threshold:
                 # Merge check-specific thresholds into context.config
                 context.config.update(check_meta.threshold)
-            
+
             # Run check
             try:
                 if check_meta.async_fn:
                     result = await check_meta.func(context)
                 else:
                     result = check_meta.func(context)
-                
+
                 if not isinstance(result, CheckResult):
                     # Convert bool/None to CheckResult
                     passed = bool(result) if result is not None else False
@@ -299,12 +303,12 @@ class CheckEngine:
                         status=CheckStatus.PASSED if passed else CheckStatus.FAILED,
                         passed=passed,
                     )
-                
+
                 # Ensure required fields
                 result.name = check_meta.name
                 if result.status == CheckStatus.PENDING:
                     result.status = CheckStatus.PASSED if result.passed else CheckStatus.FAILED
-                
+
             except Exception as e:
                 result = CheckResult(
                     name=check_meta.name,
@@ -312,12 +316,12 @@ class CheckEngine:
                     passed=False,
                     message=f"Check error: {e}",
                 )
-            
+
             results[check_meta.name] = result
             context.check_results[check_meta.name] = result
             # Also store in global all_results for cross-phase access
             self._all_results[check_meta.name] = result
-            
+
             # Log result
             if self.logger:
                 self.logger.check(
@@ -331,16 +335,16 @@ class CheckEngine:
                     batch=context.batch,
                     model_name=context.model_name,
                 )
-        
+
         self._results[phase.value].extend(results.values())
         return results
-    
-    def get_results(self, phase: Optional[CheckPhase] = None) -> dict[str, list[CheckResult]]:
+
+    def get_results(self, phase: CheckPhase | None = None) -> dict[str, list[CheckResult]]:
         """Get check results."""
         if phase:
             return {phase.value: self._results.get(phase.value, [])}
         return dict(self._results)
-    
+
     def get_summary(self) -> dict:
         """Get summary of all check results."""
         summary = {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}
@@ -359,8 +363,8 @@ class CheckEngine:
 
 
 # Global registry
-_global_registry: Optional[CheckRegistry] = None
-_global_engine: Optional[CheckEngine] = None
+_global_registry: CheckRegistry | None = None
+_global_engine: CheckEngine | None = None
 
 
 def get_registry() -> CheckRegistry:

@@ -103,18 +103,20 @@ _d_cfg = _yaml_config.get("download", {})
 _data_cfg = _yaml_config.get("data", {})
 _training_cfg = _yaml_config.get("training", {})
 
-DEF_PAIRS = _data_cfg.get("pairs", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"])
+DEF_PAIRS = _data_cfg.get(
+    "pairs", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
+)
 DEF_START = str(_data_cfg.get("start", "2018-01-01"))
-DEF_END   = str(_data_cfg.get("end", "2025-12-31"))
+DEF_END = str(_data_cfg.get("end", "2025-12-31"))
 DEF_FULL_DAY = bool(_data_cfg.get("full_day_data", False))
 
-DEFAULT_PAIRS       = DEF_PAIRS
-DEFAULT_START       = DEF_START
-DEFAULT_END         = DEF_END
-SESSION_HOURS       = list(range(7, 18))   # 07-17 UTC  (London + NY open)
-FULL_DAY_HOURS      = list(range(0, 24))   # 00-23 UTC
-CROSS_ASSET_CACHE   = str(_ROOT / "data" / "processed" / "cross_asset")
-CROSS_ASSET_SOURCE  = (
+DEFAULT_PAIRS = DEF_PAIRS
+DEFAULT_START = DEF_START
+DEFAULT_END = DEF_END
+SESSION_HOURS = list(range(7, 18))  # 07-17 UTC  (London + NY open)
+FULL_DAY_HOURS = list(range(0, 24))  # 00-23 UTC
+CROSS_ASSET_CACHE = str(_ROOT / "data" / "processed" / "cross_asset")
+CROSS_ASSET_SOURCE = (
     os.getenv("CROSS_ASSET_SOURCE", "").strip()
     or str(_training_cfg.get("cross_asset_provider") or _yaml_config.get("cross_asset_source") or "auto").strip()
 ).lower()
@@ -136,11 +138,12 @@ DEF_CHECK_MISSING_SCOPE = _d_cfg.get("check_missing_scope", "both")
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _fmt_rows(n: int) -> str:
     if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}M"
+        return f"{n / 1_000_000:.2f}M"
     if n >= 1_000:
-        return f"{n/1_000:.1f}K"
+        return f"{n / 1_000:.1f}K"
     return str(n)
 
 
@@ -163,15 +166,16 @@ def _cross_asset_cache_mb(cache_dir: str) -> float:
 # Tick downloader
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def download_ticks(
-    pairs:                list[str],
-    start:                str,
-    end:                  str,
-    hours:                list[int],
-    concurrency:        int,
-    cache_dir:            str,
+    pairs: list[str],
+    start: str,
+    end: str,
+    hours: list[int],
+    concurrency: int,
+    cache_dir: str,
     max_parallel_pairs: int = 1,
-    request_delay:      float = 0.05,
+    request_delay: float = 0.05,
 ) -> None:
     print("\n" + "=" * 66)
     print("  TICK DATA  --  Dukascopy")
@@ -185,11 +189,11 @@ def download_ticks(
     print("=" * 66)
 
     loader = DukascopyLoader(
-        cache_dir            = cache_dir,
-        concurrency          = concurrency,
-        max_parallel_pairs   = max_parallel_pairs,
-        request_delay        = request_delay,
-        verbose              = True,
+        cache_dir=cache_dir,
+        concurrency=concurrency,
+        max_parallel_pairs=max_parallel_pairs,
+        request_delay=request_delay,
+        verbose=True,
     )
 
     t0 = time.perf_counter()
@@ -201,15 +205,15 @@ def download_ticks(
     print("  " + "-" * 36)
     total_rows = 0
     for pair in pairs:
-        df    = results.get(pair)
-        rows  = len(df) if df is not None else 0
-        mb    = _bar_size_mb(cache_dir, pair)
+        df = results.get(pair)
+        rows = len(df) if df is not None else 0
+        mb = _bar_size_mb(cache_dir, pair)
         total_rows += rows
         print(f"  {pair:<10} {_fmt_rows(rows):>10}  {mb:>10.1f} MB")
     print("  " + "-" * 36)
     total_mb = sum(_bar_size_mb(cache_dir, p) for p in pairs)
     print(f"  {'TOTAL':<10} {_fmt_rows(total_rows):>10}  {total_mb:>10.1f} MB")
-    print(f"\n  Done in {elapsed:.1f}s  ({total_rows/max(elapsed,1):.0f} ticks/s)")
+    print(f"\n  Done in {elapsed:.1f}s  ({total_rows / max(elapsed, 1):.0f} ticks/s)")
     print("-" * 66)
 
 
@@ -293,11 +297,12 @@ def download_ticks_yearly(
 # Cross-asset downloader
 # ---------------------------------------------------------------------------
 
+
 def download_cross_asset(
-    start:     str,
-    end:       str,
+    start: str,
+    end: str,
     cache_dir: str,
-    source:    str,
+    source: str,
 ) -> None:
     print("\n" + "=" * 66)
     print("  CROSS-ASSET PANEL")
@@ -306,12 +311,12 @@ def download_cross_asset(
     print(f"  Cache  : {cache_dir}")
     print("=" * 66)
 
-    t0    = time.perf_counter()
+    t0 = time.perf_counter()
     panel = load_cross_asset_panel(
-        start     = start,
-        end       = end,
-        cache_dir = cache_dir,
-        source    = source,
+        start=start,
+        end=end,
+        cache_dir=cache_dir,
+        source=source,
     )
     elapsed = time.perf_counter() - t0
 
@@ -339,12 +344,13 @@ def download_cross_asset(
 # EODHD downloaders
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def download_eodhd_forex(
-    pairs:     list[str],
-    start:     str,
-    end:       str,
+    pairs: list[str],
+    start: str,
+    end: str,
     cache_dir: str,
-    api_key:   str = "",
+    api_key: str = "",
 ) -> None:
     print("\n" + "=" * 66)
     print("  EODHD FOREX  --  Daily OHLCV")
@@ -366,10 +372,10 @@ def download_eodhd_forex(
     print("  " + "-" * 52)
     total_rows = 0
     for pair in pairs:
-        df  = loader.load(pair, start=start, end=end, use_cache=False)
+        df = loader.load(pair, start=start, end=end, use_cache=False)
         rows = len(df)
         total_rows += rows
-        mb   = _bar_size_mb(cache_dir, pair)
+        mb = _bar_size_mb(cache_dir, pair)
         if rows:
             d0, d1 = str(df.index.min().date()), str(df.index.max().date())
         else:
@@ -384,10 +390,10 @@ def download_eodhd_forex(
 
 
 def download_eodhd_cross_asset(
-    start:     str,
-    end:       str,
+    start: str,
+    end: str,
     cache_dir: str,
-    api_key:   str = "",
+    api_key: str = "",
 ) -> None:
     print("\n" + "=" * 66)
     print("  EODHD CROSS-ASSET PANEL")
@@ -400,7 +406,7 @@ def download_eodhd_cross_asset(
         print("\n  [ERROR] EODHD_API_KEY not set.")
         return
 
-    t0    = time.perf_counter()
+    t0 = time.perf_counter()
     panel = loader.load_cross_asset(start=start, end=end, use_cache=False)
     elapsed = time.perf_counter() - t0
 
@@ -426,10 +432,11 @@ def download_eodhd_cross_asset(
 # Myfxbook ingester
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def ingest_myfxbook(
     filepath: str,
-    pair:     str,
-    verify:   bool,
+    pair: str,
+    verify: bool,
     data_dir: str,
 ) -> None:
     print("\n" + "=" * 66)
@@ -440,7 +447,7 @@ def ingest_myfxbook(
     print("=" * 66)
 
     loader = MyfxbookLoader(data_dir=data_dir, verbose=True)
-    dest   = loader.ingest_file(filepath, pair)
+    dest = loader.ingest_file(filepath, pair)
 
     if verify:
         print("\n  Verifying ingested file ...")
@@ -459,6 +466,7 @@ def ingest_myfxbook(
 # ─────────────────────────────────────────────────────────────────────────────
 # Auto Check and Repair Missing Data Grouped by Month
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _group_missing_datetimes(
     suspicious: list,
@@ -559,16 +567,20 @@ def auto_redownload_missing_data(
     print("\n  Auto-redownloading missing data for affected pairs...")
     for pair, suspicious in all_suspicious_to_fix.items():
         rd_stats = redownload_hours(
-            cache, pair, suspicious,
+            cache,
+            pair,
+            suspicious,
             concurrency=concurrency,
             request_delay=request_delay,
         )
         print(f"  [{pair}] Repaired | Re-fetched: {rd_stats['refetched']} | Still missing: {rd_stats['still_missing']}")
         if wandb and wandb.run:
-            wandb.log({
-                f"dukascopy/{pair}/missing_hours_repaired": rd_stats['refetched'],
-                f"dukascopy/{pair}/missing_hours_unfixable": rd_stats['still_missing'],
-            })
+            wandb.log(
+                {
+                    f"dukascopy/{pair}/missing_hours_repaired": rd_stats["refetched"],
+                    f"dukascopy/{pair}/missing_hours_unfixable": rd_stats["still_missing"],
+                }
+            )
 
     print("-" * 66)
 
@@ -577,89 +589,152 @@ def auto_redownload_missing_data(
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Download Dukascopy tick data and cross-asset panel.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--pairs",     nargs="+", default=DEFAULT_PAIRS,
-                   metavar="PAIR", help="FX pairs to download")
-    p.add_argument("--start",     default=DEFAULT_START,  help="Start date YYYY-MM-DD")
-    p.add_argument("--end",       default=DEFAULT_END,    help="End date   YYYY-MM-DD")
-    p.add_argument("--full-day",  action="store_true", default=DEF_FULL_DAY,
-                   help="Download all 24 hours/day (default: session only 07-17 UTC)")
-    p.add_argument("--yearly", action="store_true", default=DEF_YEARLY,
-                   help="Download Dukascopy ticks pair-by-pair and year-by-year with verification gates")
-    p.add_argument("--concurrency", type=int, default=12,
-                   help="Max concurrent hour-downloads per pair (lower = kinder to the feed)")
-    p.add_argument("--max-pair-parallelism", type=int, default=1,
-                   help="How many FX pairs to download at once (1 = safest; raise if stable)")
-    p.add_argument("--request-delay", type=float, default=0.05,
-                   help="Extra pause (seconds) before/after each HTTP get (0 = fastest)")
-    p.add_argument("--redownload-passes", type=int, default=2,
-                   help="Automatic missing-hour redownload passes for yearly mode")
-    p.add_argument("--keep-going", action="store_true", default=DEF_KEEP_GOING,
-                   help="In yearly mode, continue to later years and pairs after a failed year")
-    p.add_argument("--tick-cache",  default=DEFAULT_DUKASCOPY_CACHE_DIR,
-                   help="Root directory for raw Parquet tick cache")
-    p.add_argument("--compact-cache", default=DEFAULT_DUKASCOPY_COMPACT_DIR,
-                   help="Root directory for compacted Dukascopy Parquet partitions")
-    p.add_argument("--compact-granularity", choices=["daily", "monthly"], default="daily",
-                   help="Partition size for automatic compaction in yearly mode")
-    p.add_argument("--no-auto-compact", action="store_true",
-                   help="In yearly mode, skip automatic compaction after download")
-    p.add_argument("--no-auto-duckdb", action="store_true",
-                   help="In yearly mode, skip automatic DuckDB view build after compaction")
-    p.add_argument("--cross-asset-cache", default=CROSS_ASSET_CACHE,
-                   help="Directory for cross-asset CSV cache")
-    p.add_argument("--cross-asset-source", default=CROSS_ASSET_SOURCE,
-                   choices=["auto", "stooq", "yahoo", "fred", "eodhd"],
-                   help="Cross-asset data provider")
-    p.add_argument("--no-ticks",        action="store_true", default=not DEF_TICKS, help="Skip tick download")
-    p.add_argument("--no-cross-asset",  action="store_true", default=not DEF_CA, help="Skip cross-asset download")
+    p.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS, metavar="PAIR", help="FX pairs to download")
+    p.add_argument("--start", default=DEFAULT_START, help="Start date YYYY-MM-DD")
+    p.add_argument("--end", default=DEFAULT_END, help="End date   YYYY-MM-DD")
+    p.add_argument(
+        "--full-day",
+        action="store_true",
+        default=DEF_FULL_DAY,
+        help="Download all 24 hours/day (default: session only 07-17 UTC)",
+    )
+    p.add_argument(
+        "--yearly",
+        action="store_true",
+        default=DEF_YEARLY,
+        help="Download Dukascopy ticks pair-by-pair and year-by-year with verification gates",
+    )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=12,
+        help="Max concurrent hour-downloads per pair (lower = kinder to the feed)",
+    )
+    p.add_argument(
+        "--max-pair-parallelism",
+        type=int,
+        default=1,
+        help="How many FX pairs to download at once (1 = safest; raise if stable)",
+    )
+    p.add_argument(
+        "--request-delay",
+        type=float,
+        default=0.05,
+        help="Extra pause (seconds) before/after each HTTP get (0 = fastest)",
+    )
+    p.add_argument(
+        "--redownload-passes", type=int, default=2, help="Automatic missing-hour redownload passes for yearly mode"
+    )
+    p.add_argument(
+        "--keep-going",
+        action="store_true",
+        default=DEF_KEEP_GOING,
+        help="In yearly mode, continue to later years and pairs after a failed year",
+    )
+    p.add_argument(
+        "--tick-cache", default=DEFAULT_DUKASCOPY_CACHE_DIR, help="Root directory for raw Parquet tick cache"
+    )
+    p.add_argument(
+        "--compact-cache",
+        default=DEFAULT_DUKASCOPY_COMPACT_DIR,
+        help="Root directory for compacted Dukascopy Parquet partitions",
+    )
+    p.add_argument(
+        "--compact-granularity",
+        choices=["daily", "monthly"],
+        default="daily",
+        help="Partition size for automatic compaction in yearly mode",
+    )
+    p.add_argument(
+        "--no-auto-compact", action="store_true", help="In yearly mode, skip automatic compaction after download"
+    )
+    p.add_argument(
+        "--no-auto-duckdb",
+        action="store_true",
+        help="In yearly mode, skip automatic DuckDB view build after compaction",
+    )
+    p.add_argument("--cross-asset-cache", default=CROSS_ASSET_CACHE, help="Directory for cross-asset CSV cache")
+    p.add_argument(
+        "--cross-asset-source",
+        default=CROSS_ASSET_SOURCE,
+        choices=["auto", "stooq", "yahoo", "fred", "eodhd"],
+        help="Cross-asset data provider",
+    )
+    p.add_argument("--no-ticks", action="store_true", default=not DEF_TICKS, help="Skip tick download")
+    p.add_argument("--no-cross-asset", action="store_true", default=not DEF_CA, help="Skip cross-asset download")
     # Myfxbook ingestion
-    p.add_argument("--ingest-myfxbook", metavar="FILE",
-                   help="Path to a Myfxbook CSV export to ingest")
-    p.add_argument("--myfxbook-pair",   metavar="PAIR",
-                   help="FX pair symbol for the Myfxbook file (e.g. EURGBP)")
-    p.add_argument("--myfxbook-dir",    default=DEFAULT_MYFXBOOK_DATA_DIR,
-                   help="Root directory for Myfxbook data")
-    p.add_argument("--verify-myfxbook", action="store_true",
-                   help="After ingesting, parse and print row count / date range")
+    p.add_argument("--ingest-myfxbook", metavar="FILE", help="Path to a Myfxbook CSV export to ingest")
+    p.add_argument("--myfxbook-pair", metavar="PAIR", help="FX pair symbol for the Myfxbook file (e.g. EURGBP)")
+    p.add_argument("--myfxbook-dir", default=DEFAULT_MYFXBOOK_DATA_DIR, help="Root directory for Myfxbook data")
+    p.add_argument(
+        "--verify-myfxbook", action="store_true", help="After ingesting, parse and print row count / date range"
+    )
     # EODHD
     _all_eodhd_pairs = sorted(EODHD_FOREX_PAIRS.keys())
-    p.add_argument("--eodhd", action="store_true", default=DEF_EODHD,
-                   help="Download EODHD daily forex for --eodhd-pairs (requires EODHD_API_KEY)")
-    p.add_argument("--eodhd-pairs", nargs="+", default=_all_eodhd_pairs,
-                   metavar="PAIR",
-                   help=f"Pairs to download via EODHD (default: all {len(_all_eodhd_pairs)} supported pairs)")
-    p.add_argument("--eodhd-cross-asset", action="store_true", default=DEF_EODHD_CA,
-                   help="Download EODHD cross-asset panel (requires EODHD_API_KEY)")
-    p.add_argument("--eodhd-cache", default=DEFAULT_EODHD_CACHE_DIR,
-                   help="Root directory for EODHD cache")
-    p.add_argument("--eodhd-api-key", default="",
-                   help="EODHD API key (overrides EODHD_API_KEY env var)")
-    p.add_argument("--no-eodhd", action="store_true",
-                   help="Skip EODHD forex download (overrides config default)")
-    p.add_argument("--no-eodhd-cross-asset", action="store_true",
-                   help="Skip EODHD cross-asset download (overrides config default)")
+    p.add_argument(
+        "--eodhd",
+        action="store_true",
+        default=DEF_EODHD,
+        help="Download EODHD daily forex for --eodhd-pairs (requires EODHD_API_KEY)",
+    )
+    p.add_argument(
+        "--eodhd-pairs",
+        nargs="+",
+        default=_all_eodhd_pairs,
+        metavar="PAIR",
+        help=f"Pairs to download via EODHD (default: all {len(_all_eodhd_pairs)} supported pairs)",
+    )
+    p.add_argument(
+        "--eodhd-cross-asset",
+        action="store_true",
+        default=DEF_EODHD_CA,
+        help="Download EODHD cross-asset panel (requires EODHD_API_KEY)",
+    )
+    p.add_argument("--eodhd-cache", default=DEFAULT_EODHD_CACHE_DIR, help="Root directory for EODHD cache")
+    p.add_argument("--eodhd-api-key", default="", help="EODHD API key (overrides EODHD_API_KEY env var)")
+    p.add_argument("--no-eodhd", action="store_true", help="Skip EODHD forex download (overrides config default)")
+    p.add_argument(
+        "--no-eodhd-cross-asset", action="store_true", help="Skip EODHD cross-asset download (overrides config default)"
+    )
     # Data verification
-    p.add_argument("--verify", action="store_true", default=DEF_VERIFY,
-                   help="After download, run data quality verification (duplicates, gaps, missing)")
-    p.add_argument("--verify-fix", action="store_true", default=DEF_VERIFY_FIX,
-                   help="Like --verify but also auto-repair (remove dupes, redownload missing)")
-    p.add_argument("--check-missing-months", action="store_true", default=DEF_CHECK_MISSING_MONTHS,
-                   help="After download, automatically check and redownload missing data grouped by month")
-    p.add_argument("--check-missing-scope", choices=["months", "years", "pairs", "both"],
-                   default=DEF_CHECK_MISSING_SCOPE,
-                   help="How to summarize missing-data checks before automatic redownload")
-    p.add_argument("--verify-min-ticks", type=int, default=0,
-                   help="Flag files with fewer than N ticks as suspicious (0=off)")
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        default=DEF_VERIFY,
+        help="After download, run data quality verification (duplicates, gaps, missing)",
+    )
+    p.add_argument(
+        "--verify-fix",
+        action="store_true",
+        default=DEF_VERIFY_FIX,
+        help="Like --verify but also auto-repair (remove dupes, redownload missing)",
+    )
+    p.add_argument(
+        "--check-missing-months",
+        action="store_true",
+        default=DEF_CHECK_MISSING_MONTHS,
+        help="After download, automatically check and redownload missing data grouped by month",
+    )
+    p.add_argument(
+        "--check-missing-scope",
+        choices=["months", "years", "pairs", "both"],
+        default=DEF_CHECK_MISSING_SCOPE,
+        help="How to summarize missing-data checks before automatic redownload",
+    )
+    p.add_argument(
+        "--verify-min-ticks", type=int, default=0, help="Flag files with fewer than N ticks as suspicious (0=off)"
+    )
     return p.parse_args()
 
 
 def main() -> None:
-    args  = _parse_args()
+    args = _parse_args()
     if args.no_eodhd:
         args.eodhd = False
     if args.no_eodhd_cross_asset:
@@ -685,20 +760,20 @@ def main() -> None:
     # EODHD forex
     if args.eodhd:
         download_eodhd_forex(
-            pairs     = [p.upper().replace("/", "") for p in args.eodhd_pairs],
-            start     = args.start,
-            end       = args.end,
-            cache_dir = args.eodhd_cache,
-            api_key   = args.eodhd_api_key,
+            pairs=[p.upper().replace("/", "") for p in args.eodhd_pairs],
+            start=args.start,
+            end=args.end,
+            cache_dir=args.eodhd_cache,
+            api_key=args.eodhd_api_key,
         )
 
     # EODHD cross-asset
     if args.eodhd_cross_asset:
         download_eodhd_cross_asset(
-            start     = args.start,
-            end       = args.end,
-            cache_dir = args.eodhd_cache,
-            api_key   = args.eodhd_api_key,
+            start=args.start,
+            end=args.end,
+            cache_dir=args.eodhd_cache,
+            api_key=args.eodhd_api_key,
         )
 
     # Myfxbook ingest (standalone - can run without tick/cross-asset)
@@ -707,10 +782,10 @@ def main() -> None:
             print("\n  [ERROR] --myfxbook-pair is required with --ingest-myfxbook")
             sys.exit(1)
         ingest_myfxbook(
-            filepath = args.ingest_myfxbook,
-            pair     = args.myfxbook_pair,
-            verify   = args.verify_myfxbook,
-            data_dir = args.myfxbook_dir,
+            filepath=args.ingest_myfxbook,
+            pair=args.myfxbook_pair,
+            verify=args.verify_myfxbook,
+            data_dir=args.myfxbook_dir,
         )
         # If ONLY ingesting (no ticks/cross-asset flags flipped), exit early
         if args.no_ticks and args.no_cross_asset:
@@ -721,64 +796,65 @@ def main() -> None:
         tick_pairs = [p.upper().replace("/", "") for p in args.pairs]
         if args.yearly:
             download_ticks_yearly(
-                pairs              = tick_pairs,
-                start              = args.start,
-                end                = args.end,
-                full_day           = args.full_day,
-                concurrency        = args.concurrency,
-                cache_dir          = args.tick_cache,
-                compact_dir        = args.compact_cache,
-                request_delay      = args.request_delay,
-                redownload_passes  = args.redownload_passes,
-                keep_going         = args.keep_going,
-                auto_compact       = not args.no_auto_compact,
-                compact_granularity= args.compact_granularity,
-                auto_duckdb        = not args.no_auto_duckdb,
+                pairs=tick_pairs,
+                start=args.start,
+                end=args.end,
+                full_day=args.full_day,
+                concurrency=args.concurrency,
+                cache_dir=args.tick_cache,
+                compact_dir=args.compact_cache,
+                request_delay=args.request_delay,
+                redownload_passes=args.redownload_passes,
+                keep_going=args.keep_going,
+                auto_compact=not args.no_auto_compact,
+                compact_granularity=args.compact_granularity,
+                auto_duckdb=not args.no_auto_duckdb,
             )
         else:
             download_ticks(
-                pairs                = tick_pairs,
-                start                = args.start,
-                end                  = args.end,
-                hours                = hours,
-                concurrency          = args.concurrency,
-                cache_dir            = args.tick_cache,
-                max_parallel_pairs   = args.max_pair_parallelism,
-                request_delay        = args.request_delay,
+                pairs=tick_pairs,
+                start=args.start,
+                end=args.end,
+                hours=hours,
+                concurrency=args.concurrency,
+                cache_dir=args.tick_cache,
+                max_parallel_pairs=args.max_pair_parallelism,
+                request_delay=args.request_delay,
             )
 
     if not args.no_cross_asset:
         download_cross_asset(
-            start     = args.start,
-            end       = args.end,
-            cache_dir = args.cross_asset_cache,
-            source    = args.cross_asset_source,
+            start=args.start,
+            end=args.end,
+            cache_dir=args.cross_asset_cache,
+            source=args.cross_asset_source,
         )
 
     # Post-download verification
     if args.verify or args.verify_fix:
         from scripts.verify_data import run_verification
+
         run_verification(
-            pairs         = [p.upper().replace("/", "") for p in args.pairs],
-            start         = args.start,
-            end           = args.end,
-            hours         = hours,
-            cache_dir     = args.tick_cache,
-            fix           = args.verify_fix,
-            min_ticks     = args.verify_min_ticks,
-            concurrency   = args.concurrency,
-            request_delay = args.request_delay,
+            pairs=[p.upper().replace("/", "") for p in args.pairs],
+            start=args.start,
+            end=args.end,
+            hours=hours,
+            cache_dir=args.tick_cache,
+            fix=args.verify_fix,
+            min_ticks=args.verify_min_ticks,
+            concurrency=args.concurrency,
+            request_delay=args.request_delay,
         )
     elif args.check_missing_months:
         auto_redownload_missing_data(
-            pairs         = [p.upper().replace("/", "") for p in args.pairs],
-            start         = args.start,
-            end           = args.end,
-            hours         = hours,
-            cache_dir     = args.tick_cache,
-            concurrency   = args.concurrency,
-            request_delay = args.request_delay,
-            scope         = args.check_missing_scope,
+            pairs=[p.upper().replace("/", "") for p in args.pairs],
+            start=args.start,
+            end=args.end,
+            hours=hours,
+            cache_dir=args.tick_cache,
+            concurrency=args.concurrency,
+            request_delay=args.request_delay,
+            scope=args.check_missing_scope,
         )
 
     print("\n  All done.\n")

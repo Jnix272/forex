@@ -81,11 +81,13 @@ def test_pretrain_span_plan_covers_multiple_timeline_regions():
 
 
 def test_pretrain_span_plan_uses_difficulty_buckets():
-    diff = np.concatenate([
-        np.zeros(300, dtype=np.uint8),
-        np.ones(300, dtype=np.uint8),
-        np.full(300, 2, dtype=np.uint8),
-    ])
+    diff = np.concatenate(
+        [
+            np.zeros(300, dtype=np.uint8),
+            np.ones(300, dtype=np.uint8),
+            np.full(300, 2, dtype=np.uint8),
+        ]
+    )
     spans = _make_pretrain_span_plan(
         len(diff),
         180,
@@ -181,13 +183,13 @@ def test_extended_pretrain_smoke(tmp_path, trainer_cls, extra):
     rng = np.random.default_rng(21)
     X = rng.standard_normal((24, 8, 4)).astype(np.float32)
     ckpt = tmp_path / f"{trainer_cls.__name__}.pt"
-    kwargs = dict(
-        encoder=TinyEncoder(),
-        d_model=8,
-        lr=1e-3,
-        device="cpu",
-        seed=3,
-    )
+    kwargs = {
+        "encoder": TinyEncoder(),
+        "d_model": 8,
+        "lr": 1e-3,
+        "device": "cpu",
+        "seed": 3,
+    }
     kwargs.update(extra)
     trainer = trainer_cls(**kwargs)
     history = trainer.pretrain(X, epochs=1, batch_size=8, checkpoint_path=str(ckpt))

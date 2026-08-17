@@ -11,7 +11,7 @@ Everything is deterministic and self-contained (numpy/scipy only):
                               optional weight clipping and bootstrap CI
   counterfactual_reward_by_action : per-action IPS counterfactual rewards
   doubly_robust_reward_by_action  : per-action doubly-robust estimates
-  quantile_reward_labels    : QR-DQN distributional labels — per-bar quantiles
+  quantile_reward_labels    : QR-DQN distributional labels - per-bar quantiles
                               of the forward exit-reward distribution (long/short)
 """
 
@@ -26,10 +26,11 @@ import polars as pl
 # 1. Propensity helpers
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def softmax_probs(logits: np.ndarray) -> np.ndarray:
     """Softmax over logits (last axis) -> action probability distribution."""
-    l = np.asarray(logits, dtype=float)
-    l = l - np.max(l, axis=-1, keepdims=True)
+    l = np.asarray(logits, dtype=float)  # noqa: E741
+    l = l - np.max(l, axis=-1, keepdims=True)  # noqa: E741
     e = np.exp(l)
     return e / np.sum(e, axis=-1, keepdims=True)
 
@@ -37,6 +38,7 @@ def softmax_probs(logits: np.ndarray) -> np.ndarray:
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Inverse Propensity Score (IPS) estimators
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def _valid_index(actions, rewards, behavior_probs, target_probs):
     n = len(actions)
@@ -106,8 +108,7 @@ def ipw_value_estimate(
         qs = np.quantile(boots, [0.025, 0.975])
         lo, hi = float(qs[0]), float(qs[1])
 
-    return {"ips": ips, "se": se, "ci95_lo": lo, "ci95_hi": hi,
-            "weights": w}
+    return {"ips": ips, "se": se, "ci95_lo": lo, "ci95_hi": hi, "weights": w}
 
 
 def counterfactual_reward_by_action(
@@ -146,6 +147,7 @@ def counterfactual_reward_by_action(
 # ════════════════════════════════════════════════════════════════════════════
 # 3. Doubly-robust estimator
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def doubly_robust_reward_by_action(
     actions: np.ndarray,
@@ -203,6 +205,7 @@ def doubly_robust_reward_by_action(
 # 4. QR-DQN distributional reward labels
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def quantile_reward_labels(
     close: np.ndarray,
     atr: np.ndarray,
@@ -221,7 +224,7 @@ def quantile_reward_labels(
     For each bar, the distribution of outcomes is built from the forward
     path over ``lookahead`` bars: for every possible time-exit k in
     1..lookahead, the net reward of a long exit and a short exit is computed
-    (against entry ± ATR×mult barriers), and the better side is taken. The
+    (against entry ± ATRxmult barriers), and the better side is taken. The
     quantiles of that {reward}_k distribution become the distributional labels.
 
     Returns a Polars DataFrame with one row per bar:
@@ -287,22 +290,25 @@ def quantile_reward_labels(
         out_q[i] = np.quantile(best, lev)
         out_conv[i] = float(np.mean(best > 0.0))
 
-    cols = {f"reward_q{int(round(q * 100)):02d}": out_q[:, k] for k, q in enumerate(lev)}
+    cols = {f"reward_q{round(q * 100):02d}": out_q[:, k] for k, q in enumerate(lev)}
     med_idx = lev.index(0.5) if 0.5 in lev else min(range(len(lev)), key=lambda k: abs(lev[k] - 0.5))
     med = out_q[:, med_idx]
     cost = float(tx_cost_pips)
     label = np.where(med > cost, 1, np.where(med < -cost, -1, 0)).astype(int)
-    return pl.DataFrame({
-        **cols,
-        "reward_q_med": med,
-        "label_quantile": label,
-        "conviction_q": out_conv,
-    })
+    return pl.DataFrame(
+        {
+            **cols,
+            "reward_q_med": med,
+            "label_quantile": label,
+            "conviction_q": out_conv,
+        }
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. Orchestrator
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def compute_off_policy_rewards(
     actions: np.ndarray,
@@ -337,10 +343,8 @@ def compute_off_policy_rewards(
     n = min(len(actions), len(rewards), len(behavior_probs), len(target_probs))
     actions, rewards = actions[:n], rewards[:n]
 
-    ips_by_action = counterfactual_reward_by_action(
-        actions, rewards, behavior_probs, target_probs, n_actions, clip)
-    dr_by_action = doubly_robust_reward_by_action(
-        actions, rewards, behavior_probs, target_probs, n_actions, clip=clip)
+    ips_by_action = counterfactual_reward_by_action(actions, rewards, behavior_probs, target_probs, n_actions, clip)
+    dr_by_action = doubly_robust_reward_by_action(actions, rewards, behavior_probs, target_probs, n_actions, clip=clip)
 
     est = ipw_value_estimate(actions, rewards, behavior_probs, target_probs, clip, n_bootstrap, seed)
     w = est["weights"]
@@ -348,19 +352,23 @@ def compute_off_policy_rewards(
     rows = []
     for a in range(n_actions):
         m = actions == a
-        rows.append({
-            "action": int(a),
-            "ips_reward": float(ips_by_action[a]),
-            "dr_reward": float(dr_by_action[a]),
-            "behavior_n": int(m.sum()),
-            "weight_mean": float(np.mean(w[m])) if m.sum() else 0.0,
-            "weight_max": float(np.max(w[m])) if m.sum() else 0.0,
-        })
+        rows.append(
+            {
+                "action": int(a),
+                "ips_reward": float(ips_by_action[a]),
+                "dr_reward": float(dr_by_action[a]),
+                "behavior_n": int(m.sum()),
+                "weight_mean": float(np.mean(w[m])) if m.sum() else 0.0,
+                "weight_max": float(np.max(w[m])) if m.sum() else 0.0,
+            }
+        )
     out = pl.DataFrame(rows)
-    out = out.with_columns([
-        pl.lit(float(est["ips"])).alias("ipw_value"),
-        pl.lit(float(np.mean(dr_by_action))).alias("dr_value"),
-        pl.lit(float(est["ci95_lo"])).alias("ci95_lo"),
-        pl.lit(float(est["ci95_hi"])).alias("ci95_hi"),
-    ])
+    out = out.with_columns(
+        [
+            pl.lit(float(est["ips"])).alias("ipw_value"),
+            pl.lit(float(np.mean(dr_by_action))).alias("dr_value"),
+            pl.lit(float(est["ci95_lo"])).alias("ci95_lo"),
+            pl.lit(float(est["ci95_hi"])).alias("ci95_hi"),
+        ]
+    )
     return out

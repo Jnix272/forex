@@ -30,11 +30,12 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.settings import PATHS
-from models.catboost_model import CatBoostForecaster
+from config.settings import PATHS  # noqa: E402
+from models.catboost_model import CatBoostForecaster  # noqa: E402
 
 try:
     import wandb
+
     WANDB = True
 except ImportError:
     WANDB = False
@@ -42,6 +43,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_yaml_config(path: str | None) -> dict:
     if not path:
@@ -64,9 +66,11 @@ def _config_get(cfg: dict, dotted: str, default=None):
         cur = cur[part]
     return cur
 
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def load_data_from_store(
     data_dir: Path,
@@ -78,9 +82,9 @@ def load_data_from_store(
     """
     Reads processed features and labels from the latest Zarr store.
     Returns (X, y_dir, y_ret) where
-      X       : (N, T, F) float32  — full sequence
-      y_dir   : (N,)      int8     — direction class 0/1/2
-      y_ret   : (N,)      float32  — continuous return
+      X       : (N, T, F) float32  - full sequence
+      y_dir   : (N,)      int8     - direction class 0/1/2
+      y_ret   : (N,)      float32  - continuous return
     """
     import zarr
 
@@ -109,23 +113,25 @@ def load_data_from_store(
     total_samples = int(z["X"].shape[0])
     n_samples = min(total_samples, max_samples)
 
-    X = np.array(z["X"][-n_samples:], dtype=np.float32)          # (N, T, F)
-    y_all = np.array(z["y"][-n_samples:], dtype=np.float32)       # (N,) or (N, K)
+    X = np.array(z["X"][-n_samples:], dtype=np.float32)  # (N, T, F)
+    y_all = np.array(z["y"][-n_samples:], dtype=np.float32)  # (N,) or (N, K)
 
     if y_all.ndim == 2 and y_all.shape[1] >= 2:
-        y_dir = y_all[:, 0].astype(np.int8)    # direction class  (col 0)
-        y_ret = y_all[:, 1].astype(np.float32) # continuous return (col 1)
+        y_dir = y_all[:, 0].astype(np.int8)  # direction class  (col 0)
+        y_ret = y_all[:, 1].astype(np.float32)  # continuous return (col 1)
     else:
         y_dir = np.zeros(n_samples, dtype=np.int8)
         y_ret = y_all.ravel().astype(np.float32)
 
     return X, y_dir, y_ret
 
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 
-BARS_PER_DAY = 24 * 12   # 5-minute bars; adjust if needed
+BARS_PER_DAY = 24 * 12  # 5-minute bars; adjust if needed
+
 
 def compute_sharpe(pred_dir: np.ndarray, y_ret: np.ndarray, bars_per_day: int = BARS_PER_DAY) -> float:
     """
@@ -151,9 +157,11 @@ def compute_dir_accuracy(pred_dir: np.ndarray, y_dir: np.ndarray) -> float:
         pred_dir = pred_dir.argmax(axis=1)
     return float((pred_dir == y_dir).mean())
 
+
 # ---------------------------------------------------------------------------
 # Walk-forward folds (purged/embargoed via training.cv_splits)
 # ---------------------------------------------------------------------------
+
 
 def walk_forward_splits(n: int, folds: int = 5, cfg: dict | None = None):
     """Expanding-window walk-forward with purge+embargo (same math as GPU path)."""
@@ -172,15 +180,16 @@ def _tune_train_val_split(n: int, cfg: dict | None = None, val_split: float = 0.
     emb, pur, meth = embargo_purge_from_config(cfg)
     return _embargo_split(n, val_split, emb, pur, meth)
 
+
 # ---------------------------------------------------------------------------
 # Hyperparameter tuning
 # ---------------------------------------------------------------------------
 
 TUNE_GRID = {
-    "iterations":         [200, 500],
-    "depth":              [4, 6, 8],
-    "subsample":          [0.7, 0.9],
-    "colsample_bylevel":  [0.6, 0.8],
+    "iterations": [200, 500],
+    "depth": [4, 6, 8],
+    "subsample": [0.7, 0.9],
+    "colsample_bylevel": [0.6, 0.8],
 }
 
 
@@ -193,7 +202,11 @@ def _native_cb_params(params: dict) -> dict:
         "reg_lambda": "l2_leaf_reg",
     }
     drop = {
-        "min_child_weight", "gamma", "reg_alpha", "objective", "eval_metric",
+        "min_child_weight",
+        "gamma",
+        "reg_alpha",
+        "objective",
+        "eval_metric",
         "early_stopping_rounds",
     }
     out: dict = {}
@@ -203,11 +216,18 @@ def _native_cb_params(params: dict) -> dict:
         out[alias.get(key, key)] = value
     return out
 
-def tune_hyperparams(X_train: np.ndarray, y_train: np.ndarray,
-                     X_val: np.ndarray,   y_val: np.ndarray,
-                     task: str, lr: float, n_trials: int = 20) -> dict:
+
+def tune_hyperparams(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    task: str,
+    lr: float,
+    n_trials: int = 20,
+) -> dict:
     """Cheap grid search; returns best CatBoost param dict."""
-    keys   = list(TUNE_GRID.keys())
+    keys = list(TUNE_GRID.keys())
     values = list(TUNE_GRID.values())
     combos = list(itertools.product(*values))
     # Randomly sample up to n_trials
@@ -220,22 +240,23 @@ def tune_hyperparams(X_train: np.ndarray, y_train: np.ndarray,
 
     print(f"[Tune] Searching {len(combos)} hyperparameter combinations...")
     for combo in combos:
-        params = dict(zip(keys, combo))
+        params = dict(zip(keys, combo, strict=False))
         if task == "classification":
             m = cb.CatBoostClassifier(
-                classes_count=3, loss_function="MultiClass",
+                classes_count=3,
+                loss_function="MultiClass",
                 learning_rate=lr,
-                eval_metric="MultiClass", verbose=0, task_type="GPU",
-                **params
+                eval_metric="MultiClass",
+                verbose=0,
+                task_type="GPU",
+                **params,
             )
             m.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
             preds = m.predict(X_val)
             score = compute_dir_accuracy(preds, y_val)
         else:
             m = cb.CatBoostRegressor(
-                loss_function="RMSE",
-                learning_rate=lr, eval_metric="RMSE", verbose=0, task_type="GPU",
-                **params
+                loss_function="RMSE", learning_rate=lr, eval_metric="RMSE", verbose=0, task_type="GPU", **params
             )
             m.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
             preds = m.predict(X_val)
@@ -250,11 +271,13 @@ def tune_hyperparams(X_train: np.ndarray, y_train: np.ndarray,
     print(f"[Tune] Best params: {best_params}  score={best_score:.4f}")
     return best_params
 
+
 # ---------------------------------------------------------------------------
 # Feature label generation
 # ---------------------------------------------------------------------------
 
 _TEMPORAL_STAT_NAMES = ["mean", "std", "min", "max", "last", "range"]
+
 
 def _build_feature_labels(n_raw_features: int, sequence_mode: str, n_tab_features: int) -> list[str]:
     """
@@ -280,6 +303,7 @@ def _build_feature_labels(n_raw_features: int, sequence_mode: str, n_tab_feature
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
@@ -292,43 +316,42 @@ def main():
     parser.add_argument("--subsample", type=float, default=0.8)
     parser.add_argument("--colsample", type=float, default=0.8)
     parser.add_argument(
-        "--task", default="classification",
+        "--task",
+        default="classification",
         choices=["regression", "classification"],
         help="classification: predict direction (3-class); regression: predict return",
     )
     parser.add_argument(
-        "--sequence-mode", default="temporal",
+        "--sequence-mode",
+        default="temporal",
         choices=["temporal", "last_bar", "flatten"],
         help="How to convert (B, T, F) sequence to tabular CatBoost input.",
     )
-    parser.add_argument("--folds", type=int, default=5,
-                        help="Walk-forward CV folds (0 = single 80/20 split)")
-    parser.add_argument("--tune", action="store_true",
-                        help="Grid-search hyperparameters before final training")
+    parser.add_argument("--folds", type=int, default=5, help="Walk-forward CV folds (0 = single 80/20 split)")
+    parser.add_argument("--tune", action="store_true", help="Grid-search hyperparameters before final training")
     parser.add_argument("--tune-trials", type=int, default=20)
-    parser.add_argument("--demo", action="store_true",
-                        help="Run with synthetic data for testing")
+    parser.add_argument("--demo", action="store_true", help="Run with synthetic data for testing")
     args = parser.parse_args()
 
     cfg = _load_yaml_config(args.config)
     cb_cfg = cfg.get("catboost", {}) or {}
     data_dir = Path(args.data_dir or _config_get(cfg, "paths.data_cache", PATHS["data_processed"]))
-    pairs      = _config_get(cfg, "data.pairs", None) or [_config_get(cfg, "data.pair", "EURUSD")]
+    pairs = _config_get(cfg, "data.pairs", None) or [_config_get(cfg, "data.pair", "EURUSD")]
     data_start = _config_get(cfg, "data.start", None)
-    data_end   = _config_get(cfg, "data.end",   None)
-    news_file  = _config_get(cfg, "news.historical_news_file", None)
+    data_end = _config_get(cfg, "data.end", None)
+    news_file = _config_get(cfg, "news.historical_news_file", None)
 
     # Merge YAML catboost: defaults into CLI args (CLI takes precedence)
     _cb_defaults = {
         "estimators": int(cb_cfg.get("iterations", cb_cfg.get("n_estimators", args.estimators))),
-        "depth":      int(cb_cfg.get("depth", cb_cfg.get("max_depth", args.depth))),
-        "lr":         float(cb_cfg.get("learning_rate", args.lr)),
-        "subsample":  float(cb_cfg.get("subsample", args.subsample)),
-        "colsample":  float(cb_cfg.get("colsample_bylevel", cb_cfg.get("colsample_bytree", args.colsample))),
-        "task":       str(cb_cfg.get("task", args.task)),
+        "depth": int(cb_cfg.get("depth", cb_cfg.get("max_depth", args.depth))),
+        "lr": float(cb_cfg.get("learning_rate", args.lr)),
+        "subsample": float(cb_cfg.get("subsample", args.subsample)),
+        "colsample": float(cb_cfg.get("colsample_bylevel", cb_cfg.get("colsample_bytree", args.colsample))),
+        "task": str(cb_cfg.get("task", args.task)),
         "sequence_mode": str(cb_cfg.get("sequence_mode", args.sequence_mode)),
-        "folds":      int(cb_cfg.get("folds", args.folds)),
-        "samples":    int(cb_cfg.get("max_samples", args.samples)),
+        "folds": int(cb_cfg.get("folds", args.folds)),
+        "samples": int(cb_cfg.get("max_samples", args.samples)),
     }
     for _k, _v in _cb_defaults.items():
         if not any(f"--{_k}" in a or f"--{_k.replace('_', '-')}" in a for a in sys.argv[1:]):
@@ -340,21 +363,25 @@ def main():
 
     _env_l2 = float(os.environ.get("CB_L2_LEAF_REG", cb_cfg.get("l2_leaf_reg", cb_cfg.get("reg_lambda", 1.0))))
     _early_stop = int(cb_cfg.get("early_stopping_rounds", 15))
-    _do_feature_importance = os.environ.get("CB_FEATURE_IMPORTANCE", "1" if cb_cfg.get("feature_importance", True) else "0") == "1"
+    _do_feature_importance = (
+        os.environ.get("CB_FEATURE_IMPORTANCE", "1" if cb_cfg.get("feature_importance", True) else "0") == "1"
+    )
     _fi_top_n = int(os.environ.get("CB_FEATURE_IMPORTANCE_TOP_N", cb_cfg.get("feature_importance_top_n", 50)))
 
     # ── load data ─────────────────────────────────────────────────────────────
     if args.demo:
         print("Running in DEMO mode with synthetic data.")
         N, T, F = 2000, 60, 50
-        X    = np.random.randn(N, T, F).astype(np.float32)
+        X = np.random.randn(N, T, F).astype(np.float32)
         y_dir = np.random.randint(0, 3, N).astype(np.int8)
         y_ret = np.random.randn(N).astype(np.float32) * 0.001
     else:
         X, y_dir, y_ret = load_data_from_store(
-            data_dir, args.samples, args.cache_path,
+            data_dir,
+            args.samples,
+            args.cache_path,
             expected_start=data_start if args.config else None,
-            expected_end=data_end   if args.config else None,
+            expected_end=data_end if args.config else None,
         )
         if X is None:
             sys.exit(1)
@@ -379,54 +406,63 @@ def main():
     best_params: dict = {}
     if args.tune:
         best_params = tune_hyperparams(
-            X_train_tab, y_train_target,
-            X_val_tab,   y_val_target,
-            task=args.task, lr=args.lr,
+            X_train_tab,
+            y_train_target,
+            X_val_tab,
+            y_val_target,
+            task=args.task,
+            lr=args.lr,
             n_trials=args.tune_trials,
         )
 
-    cb_params = _native_cb_params({
-        "iterations":        best_params.get("iterations", args.estimators),
-        "depth":             best_params.get("depth", args.depth),
-        "learning_rate":     args.lr,
-        "subsample":         best_params.get("subsample", args.subsample),
-        "colsample_bylevel": best_params.get("colsample_bylevel", args.colsample),
-        "l2_leaf_reg":       _env_l2,
-    })
+    cb_params = _native_cb_params(
+        {
+            "iterations": best_params.get("iterations", args.estimators),
+            "depth": best_params.get("depth", args.depth),
+            "learning_rate": args.lr,
+            "subsample": best_params.get("subsample", args.subsample),
+            "colsample_bylevel": best_params.get("colsample_bylevel", args.colsample),
+            "l2_leaf_reg": _env_l2,
+        }
+    )
 
     # ── walk-forward CV ───────────────────────────────────────────────────────
-    fold_sharpes:  list[float] = []
-    fold_diraccs:  list[float] = []
+    fold_sharpes: list[float] = []
+    fold_diraccs: list[float] = []
 
     if args.folds > 0:
         print(f"\n[WalkForward] {args.folds} folds...")
         for fold_i, (tr_idx, va_idx) in enumerate(walk_forward_splits(N, args.folds, cfg)):
-            Xtr = X_tab[tr_idx];  ytr = y_target[tr_idx]
-            Xva = X_tab[va_idx];  yva = y_target[va_idx]
-            yva_dir = y_dir[va_idx];  yva_ret = y_ret[va_idx]
+            Xtr = X_tab[tr_idx]
+            ytr = y_target[tr_idx]
+            Xva = X_tab[va_idx]
+            yva = y_target[va_idx]
+            yva_dir = y_dir[va_idx]
+            yva_ret = y_ret[va_idx]
 
             if args.task == "classification":
                 m = cb.CatBoostClassifier(
-                    classes_count=3, loss_function="MultiClass",
-                    eval_metric="MultiClass", verbose=0, task_type="GPU", **cb_params
+                    classes_count=3,
+                    loss_function="MultiClass",
+                    eval_metric="MultiClass",
+                    verbose=0,
+                    task_type="GPU",
+                    **cb_params,
                 )
-                m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False,
-                      early_stopping_rounds=_early_stop)
+                m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False, early_stopping_rounds=_early_stop)
                 preds = m.predict(Xva)
             else:
                 m = cb.CatBoostRegressor(
-                    loss_function="RMSE",
-                    eval_metric="RMSE", verbose=0, task_type="GPU", **cb_params
+                    loss_function="RMSE", eval_metric="RMSE", verbose=0, task_type="GPU", **cb_params
                 )
-                m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False,
-                      early_stopping_rounds=_early_stop)
+                m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False, early_stopping_rounds=_early_stop)
                 preds = m.predict(Xva)
 
-            sh  = compute_sharpe(preds, yva_ret)
+            sh = compute_sharpe(preds, yva_ret)
             acc = compute_dir_accuracy(preds, yva_dir)
             fold_sharpes.append(sh)
             fold_diraccs.append(acc)
-            print(f"  Fold {fold_i+1}: Sharpe={sh:+.3f}  DirAcc={acc:.3f}  n_val={len(va_idx):,}")
+            print(f"  Fold {fold_i + 1}: Sharpe={sh:+.3f}  DirAcc={acc:.3f}  n_val={len(va_idx):,}")
 
         cv_sharpe = float(np.mean(fold_sharpes))
         cv_sharpe_std = float(np.std(fold_sharpes))
@@ -453,7 +489,8 @@ def main():
     print("\nTraining final CatBoost model...")
     train_t0 = time.perf_counter()
     model.fit(
-        X_train_tab, y_train_target,
+        X_train_tab,
+        y_train_target,
         eval_set=[(X_val_tab, y_val_target)],
         verbose=True,
         early_stopping_rounds=_early_stop,
@@ -462,11 +499,10 @@ def main():
 
     # ── validation metrics ────────────────────────────────────────────────────
     val_preds_raw = model.model.predict(X_val_tab)
-    val_sharpe  = compute_sharpe(val_preds_raw, y_val_ret)
-    val_diраcc  = compute_dir_accuracy(val_preds_raw, y_val_dir)
-    val_mse     = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
-    val_corr    = float(np.corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) \
-                  if len(y_val_target) > 1 else 0.0
+    val_sharpe = compute_sharpe(val_preds_raw, y_val_ret)
+    val_diраcc = compute_dir_accuracy(val_preds_raw, y_val_dir)
+    val_mse = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
+    val_corr = float(np.corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) if len(y_val_target) > 1 else 0.0
     if not np.isfinite(val_corr):
         val_corr = 0.0
 
@@ -480,33 +516,38 @@ def main():
     print(f"Model saved to {out_path}")
 
     sidecar_path = out_dir / "catboost_best.json.json"
-    sidecar_path.write_text(json.dumps({
-        "model":              "catboost",
-        "task":               args.task,
-        "sequence_mode":      args.sequence_mode,
-        "n_features_raw":     int(X.shape[2]),
-        "n_features_tabular": int(X_tab.shape[1]),
-        "seq_len":            int(X.shape[1]),
-        "is_classifier":      args.task == "classification",
-        "data_dir":           str(data_dir),
-        "cache_path":         str(args.cache_path or ""),
-        "pairs":              pairs,
-        "data_start":         data_start,
-        "data_end":           data_end,
-        "historical_news_file": news_file,
-        "train_time_s":       train_time_s,
-        "validation_sharpe":  val_sharpe,
-        "validation_dir_acc": val_diраcc,
-        "validation_loss":    val_mse,
-        "validation_corr":    val_corr,
-        "cv_folds":           args.folds,
-        "cv_sharpe_mean":     cv_sharpe,
-        "cv_sharpe_std":      cv_sharpe_std,
-        "cv_dir_acc_mean":    cv_diраcc,
-        "fold_sharpes":       fold_sharpes,
-        "params":             cb_params,
-        "tuned":              args.tune,
-    }, indent=2))
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "model": "catboost",
+                "task": args.task,
+                "sequence_mode": args.sequence_mode,
+                "n_features_raw": int(X.shape[2]),
+                "n_features_tabular": int(X_tab.shape[1]),
+                "seq_len": int(X.shape[1]),
+                "is_classifier": args.task == "classification",
+                "data_dir": str(data_dir),
+                "cache_path": str(args.cache_path or ""),
+                "pairs": pairs,
+                "data_start": data_start,
+                "data_end": data_end,
+                "historical_news_file": news_file,
+                "train_time_s": train_time_s,
+                "validation_sharpe": val_sharpe,
+                "validation_dir_acc": val_diраcc,
+                "validation_loss": val_mse,
+                "validation_corr": val_corr,
+                "cv_folds": args.folds,
+                "cv_sharpe_mean": cv_sharpe,
+                "cv_sharpe_std": cv_sharpe_std,
+                "cv_dir_acc_mean": cv_diраcc,
+                "fold_sharpes": fold_sharpes,
+                "params": cb_params,
+                "tuned": args.tune,
+            },
+            indent=2,
+        )
+    )
 
     # ── feature importance extraction ─────────────────────────────────────────
     if _do_feature_importance:
@@ -522,10 +563,12 @@ def main():
                         # ShapValues requires passing data; skip unless X_val is small
                         continue
                     raw_scores = cb_model.get_feature_importance(type=imp_type)
-                    feature_names = cb_model.feature_names_ if hasattr(cb_model, "feature_names_") else [
-                        f"f{i}" for i in range(len(raw_scores))
-                    ]
-                    pairs = sorted(zip(feature_names, raw_scores.tolist()), key=lambda x: x[1], reverse=True)
+                    feature_names = (
+                        cb_model.feature_names_
+                        if hasattr(cb_model, "feature_names_")
+                        else [f"f{i}" for i in range(len(raw_scores))]
+                    )
+                    pairs = sorted(zip(feature_names, raw_scores.tolist(), strict=False), key=lambda x: x[1], reverse=True)
                     fi_report[imp_type] = {
                         "all": {k: float(v) for k, v in pairs},
                         "top_n": {k: float(v) for k, v in pairs[:_fi_top_n]},
@@ -541,12 +584,13 @@ def main():
                 n_raw_feats = X.shape[2]
                 feature_labels = _build_feature_labels(n_raw_feats, args.sequence_mode, n_tab_feats)
                 labeled = sorted(
-                    zip(feature_labels, importances.tolist()),
-                    key=lambda x: x[1], reverse=True,
+                    zip(feature_labels, importances.tolist(), strict=False),
+                    key=lambda x: x[1],
+                    reverse=True,
                 )
                 fi_report["sklearn_importance"] = {
-                    "top_n": {k: v for k, v in labeled[:_fi_top_n]},
-                    "all": {k: v for k, v in labeled},
+                    "top_n": dict(labeled[:_fi_top_n]),
+                    "all": dict(labeled),
                 }
                 print(f"  [sklearn] Top-5: {', '.join(f'{k}={v:.4f}' for k, v in labeled[:5])}")
 
@@ -557,12 +601,14 @@ def main():
             print(f"  [FeatureImportance] Extraction failed (non-fatal): {fi_err}")
 
     if WANDB:
-        wandb.log({
-            "val_sharpe": val_sharpe,
-            "val_dir_acc": val_diраcc,
-            "val_mse": val_mse,
-            "cv_sharpe": cv_sharpe,
-        })
+        wandb.log(
+            {
+                "val_sharpe": val_sharpe,
+                "val_dir_acc": val_diраcc,
+                "val_mse": val_mse,
+                "cv_sharpe": cv_sharpe,
+            }
+        )
         wandb.finish()
 
     print("\nDone.")

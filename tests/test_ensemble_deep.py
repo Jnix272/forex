@@ -10,6 +10,7 @@ class MockModelSingle(nn.Module):
         # return (B, 1)
         return x.mean(dim=(1, 2), keepdim=True)
 
+
 class MockModelTuple(nn.Module):
     def forward(self, x):
         # return (direction, return_hat, confidence)
@@ -19,6 +20,7 @@ class MockModelTuple(nn.Module):
         confidence = torch.ones(B, 1)
         return (direction, return_hat, confidence)
 
+
 class MockModelMultitask(nn.Module):
     def forward(self, x):
         # mock multitask where first is (B, 3)
@@ -27,6 +29,7 @@ class MockModelMultitask(nn.Module):
         second = x.mean(dim=(1, 2), keepdim=True)
         third = torch.zeros(B, 1)
         return (first, second, third)
+
 
 def test_base_pred_to_batch_vector():
     B = 4
@@ -55,17 +58,19 @@ def test_base_pred_to_batch_vector():
     assert out4.shape == (B,)
     assert torch.allclose(out4, t1.squeeze(-1))
 
-    # CE-only (B, 3) logits → buy − sell signed score (not B*3 flatten)
+    # CE-only (B, 3) logits → buy − sell signed score (not B*3 flatten)  # noqa: RUF003
     logits = torch.tensor([[1.0, 0.0, 3.0], [2.0, 0.0, 0.5]])
     out5 = _base_pred_to_batch_vector(logits)
     assert out5.shape == (2,)
     assert torch.allclose(out5, torch.tensor([2.0, -1.5]))
+
 
 def test_ensemble_meta_learner_initialization():
     models = [MockModelSingle(), MockModelSingle()]
     ensemble = EnsembleMetaLearner(base_models=models, context_dim=16, hidden=32)
     assert len(ensemble.bases) == 2
     assert ensemble.n_models == 2
+
 
 def test_ensemble_meta_learner_forward():
     B, T, F = 8, 10, 5
@@ -79,6 +84,7 @@ def test_ensemble_meta_learner_forward():
     # Weights should sum to 1 over the models
     assert torch.allclose(weights.sum(dim=1), torch.ones(B))
 
+
 def test_ensemble_model_weights_summary():
     B, T, F = 4, 5, 2
     x = torch.randn(B, T, F)
@@ -90,6 +96,7 @@ def test_ensemble_model_weights_summary():
     assert "m1" in summary and "m2" in summary
     assert len(summary) == 2
     assert abs(sum(summary.values()) - 1.0) < 1e-5
+
 
 def test_ensemble_diversity_loss():
     models = [MockModelSingle(), MockModelSingle()]
@@ -113,6 +120,7 @@ def test_ensemble_diversity_loss():
     div_rand = ensemble.diversity_loss(preds_rand)
     assert abs(div_rand.item()) < 0.1
 
+
 def test_ensemble_predict_with_disagreement():
     B, T, F = 4, 5, 2
     x = torch.randn(B, T, F)
@@ -124,6 +132,7 @@ def test_ensemble_predict_with_disagreement():
     assert disagreement.shape == (B,)
     assert (disagreement >= 0).all()
 
+
 def test_train_meta_learner(tmp_path):
     B, T, F = 16, 5, 4
     n_batches = 3
@@ -131,6 +140,7 @@ def test_train_meta_learner(tmp_path):
     class DummyDataset(torch.utils.data.Dataset):
         def __len__(self):
             return B * n_batches
+
         def __getitem__(self, idx):
             return torch.randn(T, F), torch.randn(1).squeeze()
 
@@ -149,13 +159,14 @@ def test_train_meta_learner(tmp_path):
         diversity_weight=0.1,
         device="cpu",
         verbose=False,
-        checkpoint_path=str(ckpt_path)
+        checkpoint_path=str(ckpt_path),
     )
 
     assert len(history) == 2
     assert ckpt_path.exists()
     assert ckpt_path.with_name("meta_ckpt_latest.pt").exists()
     assert ckpt_path.with_name(ckpt_path.name + ".json").exists()
+
 
 def test_ensemble_risk_filter():
     filter = EnsembleRiskFilter(low_threshold=0.5, high_threshold=1.0)

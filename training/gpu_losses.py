@@ -1,4 +1,5 @@
 """Trading-aware loss functions used by GPU supervised training."""
+
 from __future__ import annotations
 
 import torch
@@ -13,7 +14,7 @@ _MATCH_SHAPE_NONFINITE = 0
 def match_target_shape(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Return target reshaped to pred for scalar regression heads.
 
-    Does **not** silently ``nan_to_num`` targets to 0 — callers must drop or
+    Does **not** silently ``nan_to_num`` targets to 0 - callers must drop or
     fail on non-finite labels (see ``_sanitize_batch_tensors``).
     """
     global _MATCH_SHAPE_NONFINITE
@@ -95,6 +96,14 @@ class SharpeProxyLoss(nn.Module):
         returns = (direction * target).flatten()
         mean = returns.mean()
         var = returns.var(unbiased=False)
-        std = torch.sqrt(var + self.eps)
+
+        # FIX: Detach the standard deviation to prevent "Sharpe Inflation"
+        # If we allow gradients to flow through the variance, the model learns to
+        # cheat by outputting direction = C / target. This makes the batch variance
+        # approach 0, which makes the Sharpe gradient explode to infinity.
+        # By detaching the denominator, the model is forced to actually increase
+        # the mean returns to improve the score, rather than artificially shrinking risk.
+        std = torch.sqrt(var + self.eps).detach()
+
         sharpe_gradient = (mean / std) * self._ann_sqrt
         return base - self.sharpe_weight * sharpe_gradient

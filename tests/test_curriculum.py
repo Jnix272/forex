@@ -2,6 +2,7 @@
 Tests for curriculum learning (Improvement #9):
 Difficulty curriculum, self-paced learning, loss-based weighting, integrated manager.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,6 +25,7 @@ from training.curriculum import (
 # ---------------------------------------------------------------------------
 # Difficulty Curriculum
 # ---------------------------------------------------------------------------
+
 
 def test_difficulty_curriculum_basic():
     """Test basic difficulty curriculum progression."""
@@ -52,7 +54,7 @@ def test_difficulty_curriculum_basic():
 
 def test_difficulty_curriculum_pace_functions():
     """Test different pace functions."""
-    difficulty = np.linspace(0, 1, 1000)
+    np.linspace(0, 1, 1000)
 
     for pace in ["linear", "exp", "sqrt", "step"]:
         config = DifficultyCurriculumConfig(
@@ -89,12 +91,13 @@ def test_difficulty_curriculum_sorted_indices():
 
     curr.update(0)
     idx = curr.get_sorted_indices()
-    assert np.array_equal(difficulty[idx], np.sort(difficulty)[:len(idx)])
+    assert np.array_equal(difficulty[idx], np.sort(difficulty)[: len(idx)])
 
 
 # ---------------------------------------------------------------------------
 # Self-Paced Learning
 # ---------------------------------------------------------------------------
+
 
 def test_self_paced_learning_basic():
     """Test basic self-paced learning."""
@@ -149,6 +152,7 @@ def test_self_paced_pace_functions():
 # Loss-Based Weighting
 # ---------------------------------------------------------------------------
 
+
 def test_loss_weighting_schemes():
     """Test different loss weighting schemes."""
     losses = np.linspace(0, 5, 100)
@@ -196,6 +200,7 @@ def test_loss_weighting_focal():
 # ---------------------------------------------------------------------------
 # Curriculum Manager
 # ---------------------------------------------------------------------------
+
 
 def test_curriculum_manager_difficulty_mode():
     """Test CurriculumManager in difficulty mode."""
@@ -312,12 +317,15 @@ def test_curriculum_manager_state_dict():
 # Difficulty Scoring
 # ---------------------------------------------------------------------------
 
+
 def test_compute_difficulty_scores_margin():
     """Test margin-based difficulty scoring."""
+
     class SimpleClassifier(nn.Module):
         def __init__(self):
             super().__init__()
             self.fc = nn.Linear(10, 3)
+
         def forward(self, x):
             return self.fc(x)
 
@@ -332,10 +340,12 @@ def test_compute_difficulty_scores_margin():
 
 def test_compute_difficulty_scores_loss():
     """Test loss-based difficulty scoring."""
+
     class SimpleClassifier(nn.Module):
         def __init__(self):
             super().__init__()
             self.fc = nn.Linear(10, 3)
+
         def forward(self, x):
             return self.fc(x)
 
@@ -360,18 +370,22 @@ def test_compute_difficulty_scores_entropy():
 # CurriculumDataLoader
 # ---------------------------------------------------------------------------
 
+
 def test_curriculum_dataloader():
     """Test CurriculumDataLoader integration."""
+
     class DummyDataset(torch.utils.data.Dataset):
         def __init__(self, n=1000):
             self.n = n
+
         def __len__(self):
             return self.n
+
         def __getitem__(self, idx):
             return torch.randn(10), torch.randint(0, 2, (1,)).item()
 
     n = 1000
-    diff = np.linspace(0, 1, n)
+    np.linspace(0, 1, n)
     manager = create_curriculum_manager(
         mode="difficulty",
         n_samples=n,
@@ -387,7 +401,7 @@ def test_curriculum_dataloader():
 
     batches = list(loader)
     assert len(batches) > 0
-    x, y = batches[0]
+    x, _y = batches[0]
     assert x.shape[0] <= 32
 
 
@@ -418,10 +432,11 @@ def test_curriculum_manager_trains_gpu_arg(monkeypatch):
     import sys
 
     from training.train_gpu import parse_args
+
     monkeypatch.setattr(
-        sys, "argv",
-        ["train_gpu", "--model", "tft", "--curriculum-manager",
-         "--curriculum-manager-mode", "self_paced"],
+        sys,
+        "argv",
+        ["train_gpu", "--model", "tft", "--curriculum-manager", "--curriculum-manager-mode", "self_paced"],
     )
     args = parse_args()
     assert args.curriculum_manager is True

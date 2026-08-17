@@ -2,6 +2,7 @@
 Tests for validation module (Improvement #11):
 WalkForwardCV, CombCV, OnlineCV, NestedCV, PurgedKFold.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,6 +27,7 @@ from validation.cv import (
 # Fixtures
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @pytest.fixture
 def sample_data():
     """Generate synthetic time-series data."""
@@ -45,6 +47,7 @@ def regime_labels():
 # ═════════════════════════════════════════════════════════════════════════════
 # Helper Functions
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def test_purge_indices():
     """Test _purge_indices function."""
@@ -84,10 +87,11 @@ def test_embargo_indices():
 # WalkForwardCV
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_walk_forward_cv_basic():
     """Test basic WalkForwardCV functionality."""
     X = np.random.randn(1000, 10)
-    y = np.random.randint(0, 2, 1000)
+    np.random.randint(0, 2, 1000)
 
     cv = WalkForwardCV(n_splits=5, purge=5, embargo=5)
     splits = list(cv.split(X))
@@ -109,7 +113,7 @@ def test_walk_forward_cv_expanding():
     assert len(splits) == 4
     train_sizes = [len(s[0]) for s in splits]
     # Expanding window: train size should increase
-    assert all(train_sizes[i] <= train_sizes[i+1] for i in range(len(train_sizes)-1))
+    assert all(train_sizes[i] <= train_sizes[i + 1] for i in range(len(train_sizes) - 1))
 
 
 def test_walk_forward_cv_rolling():
@@ -129,8 +133,7 @@ def test_walk_forward_purge_embargo():
     """Test purge and embargo work correctly."""
     X = np.random.randn(100, 5)
 
-    cv = WalkForwardCV(n_splits=3, initial_train_size=0.5, step_size=0.1,
-                       purge=10, embargo=5, expanding=True)
+    cv = WalkForwardCV(n_splits=3, initial_train_size=0.5, step_size=0.1, purge=10, embargo=5, expanding=True)
     splits = list(cv.split(X))
 
     for train_idx, val_idx in splits:
@@ -158,6 +161,7 @@ def test_walk_forward_cv_metadata():
 # ═════════════════════════════════════════════════════════════════════════════
 # PurgedKFold
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_purged_kfold_basic():
     """Test PurgedKFold basic functionality."""
@@ -205,9 +209,10 @@ def test_purged_kfold_embargo():
 # OnlineCV
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_online_cv_basic():
     """Test OnlineCV basic functionality."""
-    X = np.random.randn(1000, 5)
+    np.random.randn(1000, 5)
 
     cv = OnlineCV(initial_train=0.5, window=0.1, step=0.1, purge=5, expanding=True)
     splits = list(cv.split(np.zeros(1000)))
@@ -220,10 +225,10 @@ def test_online_cv_basic():
 
 def test_online_cv_rolling():
     """Test OnlineCV with rolling window."""
-    X = np.zeros(500)
+    np.zeros(500)
 
     cv = OnlineCV(initial_train=0.4, window=0.1, step=0.1, purge=5, expanding=False)
-    splits = list(cv.split(np.zeros(500)))
+    list(cv.split(np.zeros(500)))
 
     train_sizes = [len(s[0]) for s in cv.split(np.zeros(500))]
     # Rolling window: train size should be roughly constant
@@ -233,6 +238,7 @@ def test_online_cv_rolling():
 # ═════════════════════════════════════════════════════════════════════════════
 # CombCV (Combinatorial Purged CV)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def test_comb_cv_basic():
     """Test CombCV basic functionality."""
@@ -272,6 +278,7 @@ def test_comb_cv_n_splits():
 # NestedCV
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class DummyEstimator(BaseEstimator, ClassifierMixin):
     """Simple dummy estimator for testing."""
 
@@ -288,13 +295,12 @@ class DummyEstimator(BaseEstimator, ClassifierMixin):
 
 def test_nested_cv():
     """Test NestedCV basic functionality."""
-    X = np.random.randn(200, 5)
-    y = np.random.randint(0, 2, 200)
+    np.random.randn(200, 5)
+    np.random.randint(0, 2, 200)
 
-    outer = WalkForwardCV(n_splits=3)
-    inner = WalkForwardCV(n_splits=2)
+    WalkForwardCV(n_splits=3)
+    WalkForwardCV(n_splits=2)
 
-    param_grid = {"C": [0.1, 1.0, 10.0]}
 
     nested = NestedCV(
         outer_cv=WalkForwardCV(n_splits=3),
@@ -328,6 +334,7 @@ def test_nested_cv():
 # Evaluation & Diagnostics
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_evaluate_cv():
     """Test evaluate_cv function."""
     X = np.random.randn(200, 5)
@@ -346,7 +353,7 @@ def test_evaluate_cv():
 
 def test_cv_diagnostics():
     """Test cv_diagnostics function."""
-    X = np.random.randn(200, 10)
+    np.random.randn(200, 10)
 
     cv = WalkForwardCV(n_splits=4, purge=5, embargo=5)
     diag = cv_diagnostics(cv, np.zeros(200))
@@ -377,6 +384,7 @@ def test_purge_embargo_functions():
 # Factory
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_create_cv():
     """Test create_cv factory function."""
     # Walk forward
@@ -396,17 +404,21 @@ def test_create_cv():
     assert isinstance(cv, OnlineCV)
 
     # Nested
-    cv = create_cv("nested",
-                   outer_cv="walk_forward", outer_kwargs={"n_splits": 3},
-                   inner_cv="walk_forward", inner_kwargs={"n_splits": 2},
-                   estimator_factory=lambda: None,
-                   param_grid={})
+    cv = create_cv(
+        "nested",
+        outer_cv="walk_forward",
+        outer_kwargs={"n_splits": 3},
+        inner_cv="walk_forward",
+        inner_kwargs={"n_splits": 2},
+        estimator_factory=lambda: None,
+        param_grid={},
+    )
     assert isinstance(cv, NestedCV)
 
 
 def test_cv_diagnostics_output():
     """Test cv_diagnostics output structure."""
-    X = np.random.randn(200, 10)
+    np.random.randn(200, 10)
     cv = WalkForwardCV(n_splits=5, purge=5, embargo=5)
     diag = cv_diagnostics(cv, np.zeros(200))
 
@@ -421,24 +433,25 @@ def test_cv_diagnostics_output():
 # Edge Cases
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def test_walk_forward_edge_cases():
     """Test edge cases for WalkForwardCV."""
     # Very small data
-    X = np.random.randn(50, 5)
+    np.random.randn(50, 5)
     cv = WalkForwardCV(n_splits=2, initial_train_size=0.4, step_size=0.2)
     splits = list(cv.split(np.zeros(50)))
     assert len(splits) >= 1
 
     # Too small data
-    X = np.random.randn(20, 5)
+    np.random.randn(20, 5)
     cv = WalkForwardCV(n_splits=5, initial_train_size=0.6)
     splits = list(cv.split(np.zeros(20)))
     # Should handle gracefully
 
 
-def test_cv_diagnostics_output():
+def test_cv_diagnostics_output():  # noqa: F811
     """Test cv_diagnostics output structure."""
-    X = np.random.randn(200, 10)
+    np.random.randn(200, 10)
     cv = WalkForwardCV(n_splits=4, purge=5, embargo=5)
     diag = cv_diagnostics(cv, np.zeros(200))
 
@@ -456,15 +469,17 @@ def test_cv_diagnostics_output():
 # train_gpu wiring tests (--cv-strategy)
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def _cv_args(**kw):
     import argparse
-    base = dict(
-        cv_strategy="legacy",
-        walk_forward_folds=6,
-        seq_len=60,
-        lookahead_bars=15,
-        execution_delay_bars=1,
-    )
+
+    base = {
+        "cv_strategy": "legacy",
+        "walk_forward_folds": 6,
+        "seq_len": 60,
+        "lookahead_bars": 15,
+        "execution_delay_bars": 1,
+    }
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -472,6 +487,7 @@ def _cv_args(**kw):
 def test_build_cv_splits_legacy_default():
     """legacy strategy must preserve original walk_forward_splits behavior."""
     from training.train_gpu import _build_cv_splits
+
     splits, label = _build_cv_splits(_cv_args(), 20_000)
     assert label == "legacy"
     assert len(splits) == 6
@@ -484,6 +500,7 @@ def test_build_cv_splits_legacy_default():
 def test_build_cv_splits_alt_strategies(strategy):
     """Alt strategies produce usable non-leaking train/val splits."""
     from training.train_gpu import _build_cv_splits
+
     splits, label = _build_cv_splits(_cv_args(cv_strategy=strategy), 20_000)
     assert label == strategy
     assert len(splits) > 0
@@ -497,6 +514,7 @@ def test_build_cv_splits_alt_strategies(strategy):
 def test_build_cv_splits_unknown_falls_back_legacy():
     """Unknown strategy must fall back to legacy splits without raising."""
     from training.train_gpu import _build_cv_splits
+
     splits, label = _build_cv_splits(_cv_args(cv_strategy="nope"), 20_000)
     assert label == "legacy"
     assert len(splits) > 0
@@ -505,7 +523,8 @@ def test_build_cv_splits_unknown_falls_back_legacy():
 def test_build_cv_splits_small_data_fallback():
     """Small datasets must still return a usable split (embargoed fallback)."""
     from training.train_gpu import _build_cv_splits
-    splits, label = _build_cv_splits(_cv_args(cv_strategy="comb"), 2_000)
+
+    splits, _label = _build_cv_splits(_cv_args(cv_strategy="comb"), 2_000)
     assert len(splits) > 0
     for tr, va in splits:
         assert len(tr) > 0 and len(va) > 0

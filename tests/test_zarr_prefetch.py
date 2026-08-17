@@ -1,4 +1,5 @@
 """Zarr compressor tuning + thread prefetch overlap helpers."""
+
 from __future__ import annotations
 
 import os
@@ -65,12 +66,20 @@ def test_zarr_feature_array_uses_float16(tmp_path: Path):
     X = np.random.randn(4, 8, 3).astype(np.float32)
     y = np.random.randn(4).astype(np.float32)
     _zarr_create(
-        z, "X", shape=X.shape, chunks=X.shape,
-        dtype=ZARR_FEATURE_DTYPE, compressor=None,
+        z,
+        "X",
+        shape=X.shape,
+        chunks=X.shape,
+        dtype=ZARR_FEATURE_DTYPE,
+        compressor=None,
     )
     _zarr_create(
-        z, "y", shape=y.shape, chunks=y.shape,
-        dtype=ZARR_LABEL_DTYPE, compressor=None,
+        z,
+        "y",
+        shape=y.shape,
+        chunks=y.shape,
+        dtype=ZARR_LABEL_DTYPE,
+        compressor=None,
     )
     z["X"][:] = np.asarray(X, dtype=ZARR_FEATURE_DTYPE)
     z["y"][:] = y
@@ -84,7 +93,7 @@ def test_zarr_feature_array_uses_float16(tmp_path: Path):
 
 
 def test_wrap_loader_prefetch_single_process():
-    """When ``num_workers == 0`` the prefetch thread is the only overlap layer — always wrap."""
+    """When ``num_workers == 0`` the prefetch thread is the only overlap layer - always wrap."""
     ds = TensorDataset(torch.randn(8, 2), torch.randn(8))
     dl = DataLoader(ds, batch_size=2, num_workers=0)
     args = SimpleNamespace(thread_prefetch_batches=8, num_workers=0)
@@ -115,8 +124,7 @@ def test_wrap_loader_prefetch_force_when_workers_present():
     ``force_thread_prefetch=True`` (e.g. to hide GPU-step jitter on slow disks)."""
     ds = TensorDataset(torch.randn(8, 2), torch.randn(8))
     dl = DataLoader(ds, batch_size=2, num_workers=4)
-    args = SimpleNamespace(thread_prefetch_batches=4, num_workers=4,
-                           force_thread_prefetch=True)
+    args = SimpleNamespace(thread_prefetch_batches=4, num_workers=4, force_thread_prefetch=True)
     wrapped = wrap_loader_prefetch(dl, args)
     assert isinstance(wrapped, _ThreadPrefetchLoader)
     assert wrapped._prefetch == 4

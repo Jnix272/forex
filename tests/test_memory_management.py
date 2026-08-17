@@ -2,6 +2,7 @@
 Tests for training memory management (Improvement #8):
 streaming datasets, gradient checkpointing, activation offloading, memory profiling.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -25,6 +26,7 @@ from training.memory_management import (
 # Gradient Checkpointing
 # ---------------------------------------------------------------------------
 
+
 def test_checkpoint_policy_default():
     """Test default checkpoint policy."""
     policy = CheckpointPolicy()
@@ -35,6 +37,7 @@ def test_checkpoint_policy_default():
 
 def test_apply_gradient_checkpointing():
     """Test applying gradient checkpointing to a model."""
+
     class TestModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -82,6 +85,7 @@ def test_checkpoint_sequential():
 # ---------------------------------------------------------------------------
 # Streaming Datasets
 # ---------------------------------------------------------------------------
+
 
 def test_streaming_memmap_dataset(tmp_path):
     """Test StreamingMemmapDataset with NPY files."""
@@ -132,10 +136,7 @@ def test_streaming_memmap_dataset_zarr(tmp_path):
 
 def test_prefetch_dataloader():
     """Test PrefetchDataLoader wrapper."""
-    ds = torch.utils.data.TensorDataset(
-        torch.randn(100, 10),
-        torch.randn(100)
-    )
+    ds = torch.utils.data.TensorDataset(torch.randn(100, 10), torch.randn(100))
 
     loader = PrefetchDataLoader(
         ds,
@@ -146,7 +147,7 @@ def test_prefetch_dataloader():
 
     batches = list(loader)
     assert len(batches) > 0
-    x, y = batches[0]
+    x, _y = batches[0]
     assert x.shape == (16, 10)
 
 
@@ -154,15 +155,16 @@ def test_prefetch_dataloader():
 # Memory Profiler
 # ---------------------------------------------------------------------------
 
+
 def test_memory_profiler():
     """Test memory profiler context manager."""
     with memory_profiler() as stats:
         if torch.cuda.is_available():
             x = torch.randn(1000, 1000, device="cuda")
-            y = x @ x.T
+            x @ x.T
         else:
             x = torch.randn(1000, 1000)
-            y = x @ x.T
+            x @ x.T
 
     # Stats dict should be returned
     # (empty dict in current implementation, but no errors)
@@ -182,6 +184,7 @@ def test_memory_monitor():
 
 def test_memory_efficient_training_context():
     """Test memory_efficient_training context manager."""
+
     class SimpleModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -194,7 +197,7 @@ def test_memory_efficient_training_context():
     model = SimpleModel()
     policy = CheckpointPolicy(checkpoint_patterns=["encoder"])
 
-    with memory_efficient_training(model, checkpoint_policy=policy, enable_profiler=False) as mem:
+    with memory_efficient_training(model, checkpoint_policy=policy, enable_profiler=False):
         x = torch.randn(2, 10)
         out = model(x)
         loss = out.sum()
@@ -207,6 +210,7 @@ def test_memory_efficient_training_context():
 # Streaming DataLoader Factory
 # ---------------------------------------------------------------------------
 
+
 def test_create_streaming_dataloader(tmp_path):
     """Test create_streaming_dataloader factory."""
     n = 100
@@ -218,7 +222,10 @@ def test_create_streaming_dataloader(tmp_path):
 
     indices = np.arange(n)
     loader = create_streaming_dataloader(
-        str(tmp_path), indices, batch_size=16, num_workers=0,
+        str(tmp_path),
+        indices,
+        batch_size=16,
+        num_workers=0,
     )
 
     assert isinstance(loader, PrefetchDataLoader)
@@ -243,8 +250,11 @@ def test_create_streaming_dataloader_sequential(tmp_path):
 
     indices = np.arange(n)
     loader = create_streaming_dataloader(
-        str(tmp_path / "test.zarr"), indices, batch_size=16,
-        num_workers=0, sequential=True,
+        str(tmp_path / "test.zarr"),
+        indices,
+        batch_size=16,
+        num_workers=0,
+        sequential=True,
     )
 
     assert isinstance(loader, torch.utils.data.DataLoader)
@@ -254,6 +264,7 @@ def test_create_streaming_dataloader_sequential(tmp_path):
 # Memory Monitor Integration
 # ---------------------------------------------------------------------------
 
+
 def test_memory_monitor_warning():
     """Test MemoryMonitor warning on high memory."""
     if not torch.cuda.is_available():
@@ -262,7 +273,7 @@ def test_memory_monitor_warning():
     monitor = MemoryMonitor(log_interval=1, warn_threshold_gb=0.001)  # Very low threshold
 
     # Allocate some GPU memory
-    x = torch.randn(1000, 1000, device="cuda")
+    torch.randn(1000, 1000, device="cuda")
 
     result = monitor.step()
     assert result is not None
@@ -273,6 +284,7 @@ def test_memory_monitor_warning():
 # ---------------------------------------------------------------------------
 # Integration Tests
 # ---------------------------------------------------------------------------
+
 
 def test_streaming_dataset_pickling(tmp_path):
     """Test that StreamingMemmapDataset can be pickled for multiprocessing."""

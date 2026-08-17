@@ -5,7 +5,6 @@ for inference-time behavior (tighter stops, faster exits for scalping; wider
 parameters for normal/swing).
 """
 
-
 STRATEGY_PROFILES = {
     "scalping": {
         "bar_freq": "5min",

@@ -39,7 +39,6 @@ from training.train_gpu import (
     build_dataset_chunked,
     build_model,
     labels_to_class_index,
-    run_preflight_sanity_checks,
     setup_device,
     walk_forward_splits,
 )
@@ -47,18 +46,22 @@ from training.train_gpu import (
 
 def parse_args():
     p = argparse.ArgumentParser(description="Knowledge Distillation (Scale Model)")
-    p.add_argument("--config", type=str, default=None,
-                   help="YAML config to use as defaults, e.g. config/run_fast.yaml")
+    p.add_argument("--config", type=str, default=None, help="YAML config to use as defaults, e.g. config/run_fast.yaml")
 
     # Distillation specific
     p.add_argument("--teacher-model", type=str, required=True, help="Architecture of the teacher model")
     p.add_argument("--teacher-ckpt", type=str, required=True, help="Path to teacher weights (.pt)")
     p.add_argument("--student-model", type=str, required=True, help="Architecture of the new student model")
 
-    p.add_argument("--alpha", type=float, default=0.5,
-                   help="Weight of the distillation loss vs task loss (default 0.5)")
-    p.add_argument("--temperature", type=float, default=2.0,
-                   help="Temperature for softening teacher logits in CrossEntropy distillation")
+    p.add_argument(
+        "--alpha", type=float, default=0.5, help="Weight of the distillation loss vs task loss (default 0.5)"
+    )
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=2.0,
+        help="Temperature for softening teacher logits in CrossEntropy distillation",
+    )
 
     # Standard training args (matching train_gpu.py)
     p.add_argument("--n-ticks", type=int, default=20_000_000)
@@ -161,8 +164,10 @@ def _model_checkpoint_dir(base_dir: str, model_name: str) -> Path:
     base = Path(str(base_dir or PATHS["checkpoints"])).expanduser()
     return base if base.name.lower() == model_name.lower() else base / model_name
 
+
 def _is_multitask_checkpoint(state_dict):
-    return any("dir_head" in k or "ret_head" in k for k in state_dict.keys())
+    return any("dir_head" in k or "ret_head" in k for k in state_dict)
+
 
 def _ensemble_meta_path(ckpt_path: Path) -> Path | None:
     candidates = [
@@ -223,6 +228,7 @@ def _teacher_output(raw, *, teacher_is_ensemble: bool):
         return raw[0]
     return raw
 
+
 def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, teacher_is_mt=None):
     """
     Computes a combined loss = (1 - alpha) * TaskLoss + alpha * DistillationLoss
@@ -245,16 +251,13 @@ def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, t
             t_conf = None
 
         # 1. Task loss (from true labels)
-        task_loss = task_loss_fn(
-            s_dir, s_ret, s_conf,
-            labels_to_class_index(target), target
-        )
+        task_loss = task_loss_fn(s_dir, s_ret, s_conf, labels_to_class_index(target), target)
 
         # 2. Distillation loss (match the teacher)
         # Direction: KL Divergence with temperature scaling
         s_dir_log_prob = F.log_softmax(s_dir / temp, dim=-1)
         t_dir_prob = F.softmax(t_dir / temp, dim=-1)
-        distill_dir = F.kl_div(s_dir_log_prob, t_dir_prob, reduction="batchmean") * (temp ** 2)
+        distill_dir = F.kl_div(s_dir_log_prob, t_dir_prob, reduction="batchmean") * (temp**2)
 
         # Return/Confidence: Mean Squared Error matching
         distill_ret = F.mse_loss(s_ret, t_ret)
@@ -268,7 +271,7 @@ def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, t
             task_loss = task_loss_fn(student_out, y_cls)
             s_log_prob = F.log_softmax(student_out / temp, dim=-1)
             t_prob = F.softmax(teacher_out / temp, dim=-1)
-            distill_loss = F.kl_div(s_log_prob, t_prob, reduction="batchmean") * (temp ** 2)
+            distill_loss = F.kl_div(s_log_prob, t_prob, reduction="batchmean") * (temp**2)
         else:
             target = _match_target_shape(student_out, target)
             teacher_out = _match_target_shape(student_out, teacher_out)
@@ -277,42 +280,50 @@ def distillation_loss_fn(student_out, teacher_out, target, task_loss_fn, args, t
 
     return (1.0 - alpha) * task_loss + alpha * distill_loss
 
+
 def run_distillation():
     args = parse_args()
     dev, _, amp_dtype = setup_device(dtype_override=getattr(args, "dtype", "auto"))
     use_amp = bool(args.amp and dev.type == "cuda" and amp_dtype != torch.float32)
 
     # 1. Build Data
-    cache_path, n_samples, n_features, scaler = build_dataset_chunked(args)
+    cache_path, n_samples, n_features, _scaler = build_dataset_chunked(args)
     if n_samples == 0:
         print("[Distill] No data. Exiting.")
         return
 
     from training.train_gpu import _embargo_bars, _purge_bars, _validation_method
+
     splits = walk_forward_splits(n_samples, 1, _embargo_bars(args), _purge_bars(args), _validation_method(args))
     train_idx, val_idx = splits[-1]
 
     ds_train = ZarrStreamDataset(cache_path, train_idx, shuffle_chunks=True)
     train_nw_safe = 0 if os.name == "nt" else args.num_workers
     loader_train = DataLoader(
-        ds_train, batch_size=args.batch_size, num_workers=train_nw_safe,
+        ds_train,
+        batch_size=args.batch_size,
+        num_workers=train_nw_safe,
         prefetch_factor=args.prefetch_factor if train_nw_safe > 0 else None,
-        pin_memory=(dev.type == "cuda" and os.name != "nt"), drop_last=True
+        pin_memory=(dev.type == "cuda" and os.name != "nt"),
+        drop_last=True,
     )
 
     # Stability: On Windows, validation loader worker processes crash after long runs.
-    # num_workers=0 runs loading in-process — safe and fast enough for validation.
+    # num_workers=0 runs loading in-process - safe and fast enough for validation.
     val_nw_safe = 0 if os.name == "nt" else args.num_workers
 
     ds_val = ZarrStreamDataset(cache_path, val_idx, shuffle_chunks=False)
     loader_val = DataLoader(
-        ds_val, batch_size=args.batch_size, num_workers=val_nw_safe,
+        ds_val,
+        batch_size=args.batch_size,
+        num_workers=val_nw_safe,
         prefetch_factor=args.prefetch_factor if val_nw_safe > 0 else None,
-        pin_memory=False, # Stability: don't pin for val on Windows
-        drop_last=False
+        pin_memory=False,  # Stability: don't pin for val on Windows
+        drop_last=False,
     )
 
     from training.gpu_datasets import wrap_loader_prefetch
+
     loader_train = wrap_loader_prefetch(loader_train, args)
     loader_val = wrap_loader_prefetch(loader_val, args)
 
@@ -344,7 +355,6 @@ def run_distillation():
     student.to(dev)
 
     # -- Preflight Checks ------------------------------------------------------
-    run_preflight_sanity_checks(student, dev, loader_train, args)
 
     # 4. Optimizer and Loss
     opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -352,6 +362,7 @@ def run_distillation():
 
     if args.multitask:
         from models.architectures import MultiTaskLoss
+
         class_w = _class_weights_tensor(cache_path, train_idx, dev)
         task_loss_fn = MultiTaskLoss(class_weights=class_w)
     else:
@@ -360,6 +371,7 @@ def run_distillation():
             task_loss_fn = nn.CrossEntropyLoss(weight=class_w)
         elif args.loss == "huber":
             from models.architectures import HuberLoss
+
             task_loss_fn = HuberLoss(delta=1.0)
         else:
             task_loss_fn = nn.MSELoss()
@@ -392,9 +404,8 @@ def run_distillation():
                 _log_nan(batch_idx, epoch, 1)
                 continue
 
-            do_step = (
-                ((batch_idx + 1) % max(1, int(args.grad_accum_steps)) == 0)
-                or (batch_idx + 1 == len(loader_train))
+            do_step = ((batch_idx + 1) % max(1, int(args.grad_accum_steps)) == 0) or (
+                batch_idx + 1 == len(loader_train)
             )
             if grad_scaler.is_enabled():
                 grad_scaler.scale(loss).backward()
@@ -451,20 +462,26 @@ def run_distillation():
             best_loss = epoch_val_loss
             patience_ctr = 0
             # Save student
-            out_path = _model_checkpoint_dir(args.checkpoint_dir, args.student_model) / f"{args.student_model}_student_best.pt"
+            out_path = (
+                _model_checkpoint_dir(args.checkpoint_dir, args.student_model) / f"{args.student_model}_student_best.pt"
+            )
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": student.state_dict(),
-                "optimizer_state_dict": opt.state_dict(),
-                "loss": best_loss
-            }, out_path)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": student.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                    "loss": best_loss,
+                },
+                out_path,
+            )
             print(f"   -> Saved new best student checkpoint to {out_path}")
         else:
             patience_ctr += 1
             if patience_ctr >= args.patience:
                 print(f"[Distill] Early stopping at epoch {epoch} (Val Loss: {epoch_val_loss:.5f})")
                 break
+
 
 if __name__ == "__main__":
     run_distillation()

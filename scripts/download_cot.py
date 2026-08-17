@@ -81,10 +81,9 @@ def _release_timestamp_utc(report_dates: pd.Series) -> pd.Series:
     """
     rd = pd.to_datetime(report_dates)
     # Days from the report weekday to Friday within the same week.
-    offsets = rd.dt.weekday.apply(lambda wd: (4 - int(wd)))
+    offsets = rd.dt.weekday.apply(lambda wd: 4 - int(wd))
     release_dates = rd.dt.normalize() + pd.to_timedelta(offsets, unit="D")
-    release_dates = release_dates + pd.Timedelta(hours=COT_RELEASE_TIME_ET.hour,
-                                                  minutes=COT_RELEASE_TIME_ET.minute)
+    release_dates = release_dates + pd.Timedelta(hours=COT_RELEASE_TIME_ET.hour, minutes=COT_RELEASE_TIME_ET.minute)
     if ZoneInfo is not None:
         local = release_dates.dt.tz_localize(CFTC_TZ, ambiguous="NaT", nonexistent="shift_forward")
         return local.dt.tz_convert("UTC")
@@ -101,10 +100,10 @@ def _existing_years(parquet_path: Path) -> set[int]:
         print(f"  -> Could not read existing parquet ({exc}); treating as empty")
         return set()
     if "report_year" in existing.columns:
-        return set(int(y) for y in existing["report_year"].dropna().unique())
+        return {int(y) for y in existing["report_year"].dropna().unique()}
     if "timestamp_utc" in existing.columns:
         # Legacy files lacking report_year: approximate from the release year.
-        return set(int(y) for y in pd.to_datetime(existing["timestamp_utc"]).dt.year.dropna().unique())
+        return {int(y) for y in pd.to_datetime(existing["timestamp_utc"]).dt.year.dropna().unique()}
     return set()
 
 

@@ -12,9 +12,8 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Any, ClassVar, TypeVar, Generic
-from pathlib import Path
+from enum import StrEnum
+from typing import Any, ClassVar, TypeVar
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict
@@ -22,16 +21,18 @@ from pydantic import BaseModel, ConfigDict
 T = TypeVar("T", bound="DataContract")
 
 
-class ContractVersion(str, Enum):
+class ContractVersion(StrEnum):
     """Semantic versioning for contracts"""
+
     V1_0 = "1.0.0"
     V1_1 = "1.1.0"
     V2_0 = "2.0.0"
     CURRENT = V1_1
 
 
-class Stage(str, Enum):
+class Stage(StrEnum):
     """Pipeline stages for contract validation"""
+
     INGESTION = "ingestion"
     RESAMPLING = "resampling"
     FEATURE_ENGINEERING = "feature_engineering"
@@ -43,6 +44,7 @@ class Stage(str, Enum):
 @dataclass(frozen=True)
 class ContractMetadata:
     """Metadata attached to every validated DataFrame"""
+
     contract_version: str
     stage: Stage
     pair: str | None
@@ -55,7 +57,7 @@ class ContractMetadata:
     validated_at: datetime = field(default_factory=datetime.now)
     validator_version: str = "1.0.0"
     warnings: list[str] = field(default_factory=list)
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "contract_version": self.contract_version,
@@ -71,9 +73,9 @@ class ContractMetadata:
             "validator_version": self.validator_version,
             "warnings": self.warnings,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ContractMetadata":
+    def from_dict(cls, data: dict[str, Any]) -> ContractMetadata:
         return cls(
             contract_version=data["contract_version"],
             stage=Stage(data["stage"]),
@@ -92,56 +94,55 @@ class ContractMetadata:
 
 class DataContract(ABC, BaseModel):
     """Base contract for all pipeline data stages"""
-    
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         validate_assignment=True,
         extra="forbid",
     )
-    
+
     # Contract identity
     contract_name: ClassVar[str] = "base"
     contract_version: ClassVar[ContractVersion] = ContractVersion.CURRENT
     stage: ClassVar[Stage] = Stage.INGESTION
-    
+
     # Required columns with Polars dtype specifications
     required_columns: ClassVar[dict[str, pl.DataType]] = {}
     optional_columns: ClassVar[dict[str, pl.DataType]] = {}
-    
+
     # Column-level constraints
     column_constraints: ClassVar[dict[str, dict[str, Any]]] = {}
-    
+
     # Cross-column invariants (Polars expressions as strings)
     invariants: ClassVar[list[str]] = []
-    
+
     # Pair-specific overrides
     pair_overrides: ClassVar[dict[str, dict]] = {}
-    
+
     # Allow unknown columns (for extensibility)
     allow_unknown_columns: ClassVar[bool] = True
-    
+
     @classmethod
     @abstractmethod
-    def validate_frame(cls: type[T], df: pl.DataFrame, pair: str | None = None) -> tuple[pl.DataFrame, ContractMetadata]:
+    def validate_frame(
+        cls: type[T], df: pl.DataFrame, pair: str | None = None
+    ) -> tuple[pl.DataFrame, ContractMetadata]:
         """Validate and return cleaned DataFrame + metadata"""
         pass
-    
+
     @classmethod
     def _compute_schema_hash(cls, df: pl.DataFrame) -> str:
         """Hash of column names + dtypes"""
-        schema_str = json.dumps(
-            [(c, str(df.schema[c])) for c in sorted(df.columns)], 
-            sort_keys=True
-        )
+        schema_str = json.dumps([(c, str(df.schema[c])) for c in sorted(df.columns)], sort_keys=True)
         return hashlib.sha256(schema_str.encode()).hexdigest()[:16]
-    
+
     @classmethod
     def _compute_data_hash(cls, df: pl.DataFrame, sample_size: int = 1000) -> str:
         """Hash of data sample for lineage"""
         sample = df.head(min(sample_size, len(df)))
         data_str = sample.write_csv()
         return hashlib.sha256(data_str.encode()).hexdigest()[:16]
-    
+
     @classmethod
     def _check_required_columns(cls, df: pl.DataFrame) -> list[str]:
         """Return list of missing required columns"""
@@ -152,7 +153,7 @@ class DataContract(ABC, BaseModel):
             elif df.schema[col] != dtype:
                 errors.append(f"Type mismatch for {col}: expected {dtype}, got {df.schema[col]}")
         return errors
-    
+
     @classmethod
     def _check_unknown_columns(cls, df: pl.DataFrame) -> list[str]:
         """Check for columns not in contract"""
@@ -163,41 +164,41 @@ class DataContract(ABC, BaseModel):
         if unknown:
             return [f"Unknown columns not in contract: {unknown}"]
         return []
-    
+
     @classmethod
     def _check_constraints(cls, df: pl.DataFrame, pair: str | None) -> list[str]:
         """Check column-level constraints"""
         errors = []
         overrides = cls.pair_overrides.get(pair or "", {})
-        
+
         for col, constraints in cls.column_constraints.items():
             if col not in df.columns:
                 continue
-                
+
             series = df[col]
-            
+
             # Null check
             if constraints.get("not_null", False) and series.null_count() > 0:
                 errors.append(f"{col}: null values not allowed (found {series.null_count()})")
-            
+
             # Range checks
             if "min" in constraints:
                 min_val = overrides.get(col, {}).get("min", constraints["min"])
                 if series.min() is not None and series.min() < min_val:
                     errors.append(f"{col}: min value {series.min()} < {min_val}")
-            
+
             if "max" in constraints:
                 max_val = overrides.get(col, {}).get("max", constraints["max"])
                 if series.max() is not None and series.max() > max_val:
                     errors.append(f"{col}: max value {series.max()} > {max_val}")
-            
+
             # Allowed values
             if "allowed" in constraints:
                 allowed = set(constraints["allowed"])
                 invalid = set(series.unique().to_list()) - allowed
                 if invalid:
                     errors.append(f"{col}: invalid values {invalid}")
-            
+
             # Custom validator
             if "validator" in constraints:
                 validator_fn = constraints["validator"]
@@ -207,9 +208,9 @@ class DataContract(ABC, BaseModel):
                         errors.append(f"{col}: custom validator failed: {result}")
                 except Exception as e:
                     errors.append(f"{col}: custom validator error: {e}")
-        
+
         return errors
-    
+
     @classmethod
     def _check_invariants(cls, df: pl.DataFrame) -> list[str]:
         """Evaluate cross-column invariants as Polars expressions"""
@@ -227,29 +228,30 @@ class DataContract(ABC, BaseModel):
             except Exception as e:
                 errors.append(f"Invariant evaluation failed: {invariant} ({e})")
         return errors
-    
+
     @classmethod
-    def validate(cls: type[T], df: pl.DataFrame, pair: str | None = None, 
-                 strict: bool = True) -> tuple[pl.DataFrame, ContractMetadata]:
+    def validate(
+        cls: type[T], df: pl.DataFrame, pair: str | None = None, strict: bool = True
+    ) -> tuple[pl.DataFrame, ContractMetadata]:
         """
         Main validation entry point.
-        
+
         Args:
             df: DataFrame to validate
             pair: Currency pair for pair-specific overrides
             strict: If True, raise on validation errors; if False, return warnings
-            
+
         Returns:
             Tuple of (validated DataFrame, metadata)
         """
         all_errors = []
         all_warnings = []
-        
+
         all_errors.extend(cls._check_required_columns(df))
         all_errors.extend(cls._check_unknown_columns(df))
         all_errors.extend(cls._check_constraints(df, pair))
         all_errors.extend(cls._check_invariants(df))
-        
+
         if all_errors:
             error_msg = f"{cls.contract_name} validation failed"
             if pair:
@@ -259,7 +261,7 @@ class DataContract(ABC, BaseModel):
                 raise ValueError(error_msg)
             else:
                 all_warnings.extend(all_errors)
-        
+
         metadata = ContractMetadata(
             contract_version=str(cls.contract_version),
             stage=cls.stage,
@@ -272,16 +274,16 @@ class DataContract(ABC, BaseModel):
             data_hash=cls._compute_data_hash(df),
             warnings=all_warnings,
         )
-        
+
         return df, metadata
 
 
 class ContractRegistry:
     """Registry for all data contracts with version management"""
-    
+
     _contracts: dict[str, type[DataContract]] = {}
     _lock = threading.Lock()
-    
+
     @classmethod
     def register(cls, contract_class: type[DataContract]) -> type[DataContract]:
         """Register a contract class"""
@@ -289,14 +291,14 @@ class ContractRegistry:
             key = f"{contract_class.contract_name}:{contract_class.contract_version}"
             cls._contracts[key] = contract_class
         return contract_class
-    
+
     @classmethod
     def get(cls, name: str, version: ContractVersion | str = ContractVersion.CURRENT) -> type[DataContract] | None:
         """Get a registered contract by name and version"""
         version_str = str(version) if isinstance(version, ContractVersion) else version
         key = f"{name}:{version_str}"
         return cls._contracts.get(key)
-    
+
     @classmethod
     def get_latest(cls, name: str) -> type[DataContract] | None:
         """Get the latest version of a contract by name"""
@@ -306,7 +308,7 @@ class ContractRegistry:
                 return None
             # Sort by version
             return max(matching, key=lambda c: c.contract_version.value)
-    
+
     @classmethod
     def list_contracts(cls) -> list[dict[str, str]]:
         """List all registered contracts"""
@@ -315,9 +317,11 @@ class ContractRegistry:
                 {"name": c.contract_name, "version": str(c.contract_version), "stage": c.stage.value}
                 for c in cls._contracts.values()
             ]
-    
+
     @classmethod
-    def validate_stage(cls, stage: Stage, df: pl.DataFrame, pair: str | None = None) -> tuple[pl.DataFrame, ContractMetadata]:
+    def validate_stage(
+        cls, stage: Stage, df: pl.DataFrame, pair: str | None = None
+    ) -> tuple[pl.DataFrame, ContractMetadata]:
         """Validate using the contract for a specific stage"""
         contract_map = {
             Stage.INGESTION: "tick",
@@ -329,11 +333,11 @@ class ContractRegistry:
         contract_name = contract_map.get(stage)
         if not contract_name:
             raise ValueError(f"No contract registered for stage: {stage}")
-        
+
         contract_class = cls.get_latest(contract_name)
         if not contract_class:
             raise ValueError(f"No contract found for {contract_name}")
-        
+
         return contract_class.validate(df, pair=pair)
 
 

@@ -9,7 +9,7 @@ slice (output length == input length by construction).
 
 Tests:
 1. Numerical equivalence for stride=1 zero-padding (old symmetric+slice is
-   equivalent to new asymmetric for the common case — keeps backward-compat).
+   equivalent to new asymmetric for the common case - keeps backward-compat).
 2. Causality: asymmetric padding never reads input indices past the current
    output index `t`.
 3. Source-level: `MambaBlock.conv1d` and `ConvFFN.conv*` use tuple padding
@@ -33,6 +33,7 @@ if str(_ROOT) not in sys.path:
 # Pure-numpy reference implementations
 # ---------------------------------------------------------------------------
 
+
 def conv_symmetric_slice(x: list, kernel: list, k: int) -> list:
     """OLD code path: symmetric zero-padding `pad=k-1` on both sides
     followed by output slice `[:len(x)]`. Equivalent to PyTorch
@@ -42,10 +43,7 @@ def conv_symmetric_slice(x: list, kernel: list, k: int) -> list:
     padded = [0.0] * pad + list(x) + [0.0] * pad
     N = len(x)
     # Output length BEFORE slice: len(padded) - k + 1 = N + 2*pad - k + 1 = N + (k-1)
-    out_unsliced = [
-        sum(padded[t + i] * kernel[i] for i in range(k))
-        for t in range(N + (k - 1))
-    ]
+    out_unsliced = [sum(padded[t + i] * kernel[i] for i in range(k)) for t in range(N + (k - 1))]
     return out_unsliced[:N]
 
 
@@ -56,24 +54,23 @@ def conv_asymmetric_left(x: list, kernel: list, k: int) -> list:
     padded = [0.0] * pad + list(x)
     N = len(x)
     # Output length: len(padded) - k + 1 = N + pad - k + 1 = N
-    return [
-        sum(padded[t + i] * kernel[i] for i in range(k))
-        for t in range(N)
-    ]
+    return [sum(padded[t + i] * kernel[i] for i in range(k)) for t in range(N)]
 
 
 # ---------------------------------------------------------------------------
 # Numerical equivalence (old symmetric+slice equals new asymmetric for stride=1)
 # ---------------------------------------------------------------------------
 
+
 def test_numerical_equivalence_for_stride_1_zero_pad():
     """For stride=1 with zero-padding on both ends, the OLD symmetric+slice
     and the NEW asymmetric-left give identical outputs. This is why the
-    audit didn't manifest as a live numeric regression — but the OLD form
+    audit didn't manifest as a live numeric regression - but the OLD form
     is fragile (any future edit removing the slice, or any dilated conv,
     would silently leak future data).
     """
     import random
+
     random.seed(0)
     for _ in range(50):
         N = random.randint(4, 10)
@@ -83,15 +80,14 @@ def test_numerical_equivalence_for_stride_1_zero_pad():
         old = conv_symmetric_slice(x, kernel, k)
         new = conv_asymmetric_left(x, kernel, k)
         assert len(old) == len(new) == N
-        for ov, nv in zip(old, new):
-            assert abs(ov - nv) < 1e-9, (
-                f"\u00d7 N={N} k={k} x={x} kernel={kernel}\n  OLD={old}\n  NEW={new}"
-            )
+        for ov, nv in zip(old, new, strict=False):
+            assert abs(ov - nv) < 1e-9, f"\u00d7 N={N} k={k} x={x} kernel={kernel}\n  OLD={old}\n  NEW={new}"
 
 
 # ---------------------------------------------------------------------------
 # Causality check: asymmetric never reads future indices
 # ---------------------------------------------------------------------------
+
 
 def test_asymmetric_padding_never_reads_future_indices():
     """Compute output[t] and verify it doesn't read any x[j] with j > t."""
@@ -107,7 +103,7 @@ def test_asymmetric_padding_never_reads_future_indices():
     # fixed[3] = padded[3..5] = 20+30+40 = 90 (reads x[3])
     # fixed[4] = padded[4..6] = 30+40+50 = 120 (reads x[4])
     expected = [10.0, 30.0, 60.0, 90.0, 120.0]
-    for got, want in zip(fixed, expected):
+    for got, want in zip(fixed, expected, strict=False):
         assert abs(got - want) < 1e-9
 
 
@@ -126,6 +122,7 @@ def test_asymmetric_output_length_equals_input_length():
 # ---------------------------------------------------------------------------
 # Source-level checks
 # ---------------------------------------------------------------------------
+
 
 def _strip_comments(src: str) -> str:
     """Remove comment-only and docstring lines for code-only assertions."""
@@ -188,14 +185,12 @@ def test_convffn_post_hoc_slice_removed():
         pytest.skip("models/architectures.py not found")
     src = path.read_text(encoding="utf-8")
     code = _strip_comments(src)
-    assert "h[:, :, :T]" not in code, (
-        "ConvFFN h[:, :, :T] slice should be removed (asymmetric padding gives length=T)"
-    )
+    assert "h[:, :, :T]" not in code, "ConvFFN h[:, :, :T] slice should be removed (asymmetric padding gives length=T)"
 
 
 def test_existing_correct_causal_pattern_still_present():
     """Sanity-check: the existing correct `F.pad(x, (pad, 0))` patterns
-    (already present in the file) should still be there — they're the
+    (already present in the file) should still be there - they're the
     reference pattern we modelled the fix on.
     """
     path = _ROOT / "models" / "architectures.py"

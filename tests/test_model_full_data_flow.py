@@ -38,9 +38,7 @@ def _get_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     handler = logging.FileHandler(_LOG_PATH, encoding="utf-8")
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
     return logger
 
@@ -112,6 +110,7 @@ def _args(seq_len: int, n_features: int) -> argparse.Namespace:
 @pytest.fixture(scope="module")
 def prepared_sequences():
     import training.train_gpu as _tg
+
     _tg._FIRST_CHUNK_COLS = None  # isolate from other test modules
 
     ticks, pair, source = _load_ticks_real_or_synthetic()
@@ -148,8 +147,7 @@ def prepared_sequences():
         n_features = chunk.n_features
 
     assert len(X_seq) >= FULL_TEST_SAMPLES, (
-        f"Need at least {FULL_TEST_SAMPLES} sequences for the full model test, "
-        f"got {len(X_seq)} from {source} data"
+        f"Need at least {FULL_TEST_SAMPLES} sequences for the full model test, got {len(X_seq)} from {source} data"
     )
     LOGGER.info(
         "Prepared full-test batch: source=%s pair=%s sequences=%s features=%s",
@@ -225,9 +223,7 @@ def test_models_run_full_training_cycle_on_real_or_fake_data(model_name, prepare
         for xb, yb in train_loader:
             optimizer.zero_grad(set_to_none=True)
             out = model(xb)
-            assert out.shape == (xb.shape[0], 3), (
-                f"{model_name} returned {out.shape}, expected ({xb.shape[0]}, 3)"
-            )
+            assert out.shape == (xb.shape[0], 3), f"{model_name} returned {out.shape}, expected ({xb.shape[0]}, 3)"
             assert torch.isfinite(out).all(), (
                 f"{model_name} produced non-finite logits on {prepared_sequences['source']} data"
             )
@@ -267,11 +263,7 @@ def test_models_run_full_training_cycle_on_real_or_fake_data(model_name, prepare
             mean_val,
         )
 
-    grad_found = any(
-        p.grad is not None and torch.isfinite(p.grad).all()
-        for p in model.parameters()
-        if p.requires_grad
-    )
+    grad_found = any(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters() if p.requires_grad)
     assert grad_found, f"{model_name} did not produce usable gradients"
     assert len(train_losses) == EPOCHS
     assert len(val_losses) == EPOCHS

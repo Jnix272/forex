@@ -7,17 +7,17 @@ Converts a trained PyTorch checkpoint -> ONNX, then runs it via
 onnxruntime with the DirectML execution provider (AMD NPU/GPU on Windows).
 Exposes a select_action() interface so it drops straight into LiveTradingEngine.
 
-Usage — export:
+Usage - export:
     python inference/onnx_inference.py export \\
         --checkpoint checkpoints/haelt_best.pt \\
         --model haelt --seq-len 60
 
-Usage — benchmark (compare CUDA / DirectML / CPU):
+Usage - benchmark (compare CUDA / DirectML / CPU):
     python inference/onnx_inference.py benchmark \\
         --onnx checkpoints/haelt_best.onnx \\
         --seq-len 60 --n-feat 128 --runs 500
 
-Usage — live inference only (drop-in for LiveTradingEngine):
+Usage - live inference only (drop-in for LiveTradingEngine):
     from inference.onnx_inference import DirectMLInferenceEngine
     engine = DirectMLInferenceEngine("checkpoints/haelt_best.onnx")
     action = engine.select_action(obs_array)   # obs: (n_features,) float32
@@ -28,13 +28,12 @@ Requirements:
 """
 
 import argparse
-from typing import Any
 import sys
 import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -50,12 +49,20 @@ def torch_load_safe(path, map_location=None):
     """Load a checkpoint with weights_only=True, falling back for legacy pickles."""
     import pickle
 
-    import torch
+    import torch  # pyright: ignore[reportMissingImports]
 
+    serialization_warning = getattr(torch, "SerializationWarning", Warning)
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
-    except (torch.SerializationWarning, pickle.UnpicklingError, AttributeError,
-            TypeError, KeyError, ValueError, ModuleNotFoundError):
+    except (
+        serialization_warning,
+        pickle.UnpicklingError,
+        AttributeError,
+        TypeError,
+        KeyError,
+        ValueError,
+        ModuleNotFoundError,
+    ):
         return torch.load(path, map_location=map_location, weights_only=False)
 
 
@@ -84,6 +91,7 @@ def _read_training_config(ckpt_path: Path, model_name: str) -> dict:
     for path in candidates:
         if path.exists():
             import json
+
             cfg = json.loads(path.read_text(encoding="utf-8"))
             cfg["_config_path"] = str(path)
             return cfg
@@ -113,18 +121,8 @@ def _make_training_args(
 
     n_pairs = int(cfg.get("_n_pairs") or cfg.get("n_pairs") or 1)
     explicit_fpp = cfg.get("_f_per_pair") or cfg.get("f_per_pair")
-    f_per_pair = (
-        int(explicit_fpp)
-        if explicit_fpp is not None
-        else max(1, n_features // max(1, n_pairs))
-    )
-    if (
-        n_pairs == 1
-        and has_pair_embed
-        and f_per_pair > 0
-        and n_features > f_per_pair
-        and n_features % f_per_pair == 0
-    ):
+    f_per_pair = int(explicit_fpp) if explicit_fpp is not None else max(1, n_features // max(1, n_pairs))
+    if n_pairs == 1 and has_pair_embed and f_per_pair > 0 and n_features > f_per_pair and n_features % f_per_pair == 0:
         n_pairs = max(1, n_features // f_per_pair)
         if explicit_fpp is None:
             f_per_pair = max(1, n_features // n_pairs)
@@ -200,7 +198,7 @@ def _policy_to_direction_logits(policy_out):
 
     # ScalingAction mapping:
     # 0 HOLD, 1 OPEN_LONG, 2 OPEN_SHORT, 3/4/5 SCALE_IN, 6/7/8 SCALE_OUT, 9 CLOSE_ALL.
-    # Without live position state, SCALE_IN cannot choose a side — treat as HOLD
+    # Without live position state, SCALE_IN cannot choose a side - treat as HOLD
     # (matches trading.live_actions when position is flat). Do NOT boost both
     # buy and sell (that made scale-in look bullish and bearish at once).
     hold = torch.maximum(q[:, 0], torch.maximum(q[:, 9], q[:, 6:9].amax(dim=1)))
@@ -251,7 +249,7 @@ def _wrap_rl_policy_logits(encoder, policy, obs_size: int):
             h = h.reshape(h.shape[0], -1)
             n_state = max(0, self.policy_obs_size - h.shape[-1])
             if n_state:
-                # Flat/neutral agent state — direction-only export cannot see position.
+                # Flat/neutral agent state - direction-only export cannot see position.
                 state = torch.zeros(h.shape[0], n_state, dtype=h.dtype, device=h.device)
                 obs = torch.cat([h, state], dim=-1)
             else:
@@ -301,8 +299,8 @@ def _wrap_rl_execution_policy(encoder, policy, obs_size: int):
 # EXPORT:  PyTorch checkpoint -> ONNX
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _export_onnx(model, dummy, output_path, opset, input_names, output_name,
-                 dynamic_axes=None):
+
+def _export_onnx(model, dummy, output_path, opset, input_names, output_name, dynamic_axes=None):
     """Export with the default exporter, falling back to the legacy one if the
     model fails to load back into onnxruntime (torch >=2.9 dynamo exporter can
     emit opset-18+ attributes like Split.num_outputs even at lower opsets)."""
@@ -330,7 +328,8 @@ def _export_onnx(model, dummy, output_path, opset, input_names, output_name,
 
     _export()
     try:
-        import onnxruntime as ort
+        import onnxruntime as ort  # pyright: ignore[reportMissingImports]
+
         ort.InferenceSession(str(output_path), providers=["CPUExecutionProvider"])
         return
     except Exception:
@@ -349,12 +348,13 @@ def core_onnx_export(
     scaler: Any = None,
 ) -> str:
     """Core logic to export a loaded PyTorch model to ONNX.
-    
+
     If scaler is provided (StandardScaler with mean_ and scale_ attributes),
     the scaler is fused into the ONNX graph so the exported model accepts
     raw features and internally applies normalization.
     """
     import torch
+
     model.eval()
     try:
         export_device = next(model.parameters()).device
@@ -363,37 +363,38 @@ def core_onnx_export(
 
     # Create a wrapper that includes the scaler if provided
     if scaler is not None:
-        from inference._scaler_load import apply_inference_scaler
         import numpy as np
-        
+
         # Get scaler parameters
         mean = getattr(scaler, "mean_", None)
         scale = getattr(scaler, "scale_", None)
-        
+
         if mean is not None and scale is not None:
             # Create scaler parameters as tensors
             mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
             scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
-            
+
             # Avoid division by zero
             scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
-            
+
             class ScaledModel(torch.nn.Module):
-                def __init__(self, model, mean, scale):
+                def __init__(self, wrapped_model: torch.nn.Module, mean: torch.Tensor, scale: torch.Tensor):
                     super().__init__()
-                    self.model = model
-                    # Register as buffers so they're included in ONNX
-                    self.register_buffer("mean", mean)
-                    self.register_buffer("scale", scale)
-                
-                def forward(self, x):
+                    self._wrapped_model: torch.nn.Module = wrapped_model
+                    # Register as buffers so they're included in ONNX.
+                    self._mean: torch.Tensor
+                    self._scale: torch.Tensor
+                    self.register_buffer("_mean", mean)
+                    self.register_buffer("_scale", scale)
+
+                def forward(self, x: torch.Tensor):
                     # x: (batch, seq_len, n_features)
                     # NaN/Inf sanitization FIRST (same as training)
                     x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
                     # Apply z-score normalization: (x - mean) / scale
-                    x = (x - self.mean) / self.scale
-                    return self.model(x)
-            
+                    x = (x - self._mean) / self._scale
+                    return self._wrapped_model(x)
+
             model = ScaledModel(model, mean_tensor, scale_tensor)
             print(f"[Export] Fused StandardScaler into ONNX graph (n_features={len(mean)})")
 
@@ -421,7 +422,7 @@ def core_rl_execution_onnx_export(
     scaler: Any = None,
 ) -> str:
     """Export a two-input execution policy: features + agent_state -> action logits.
-    
+
     If scaler is provided (StandardScaler with mean_ and scale_ attributes),
     the scaler is fused into the ONNX graph so the exported model accepts
     raw features and internally applies normalization.
@@ -437,35 +438,37 @@ def core_rl_execution_onnx_export(
     # Create a wrapper that includes the scaler if provided
     if scaler is not None:
         import numpy as np
-        
+
         # Get scaler parameters
         mean = getattr(scaler, "mean_", None)
         scale = getattr(scaler, "scale_", None)
-        
+
         if mean is not None and scale is not None:
             # Create scaler parameters as tensors
             mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
             scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
-            
+
             # Avoid division by zero
             scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
-            
+
             class ScaledRLModel(torch.nn.Module):
-                def __init__(self, model, mean, scale):
+                def __init__(self, wrapped_model: torch.nn.Module, mean: torch.Tensor, scale: torch.Tensor):
                     super().__init__()
-                    self.model = model
-                    # Register as buffers so they're included in ONNX
-                    self.register_buffer("mean", mean)
-                    self.register_buffer("scale", scale)
-                
-                def forward(self, features, agent_state):
+                    self._wrapped_model: torch.nn.Module = wrapped_model
+                    # Register as buffers so they're included in ONNX.
+                    self._mean: torch.Tensor
+                    self._scale: torch.Tensor
+                    self.register_buffer("_mean", mean)
+                    self.register_buffer("_scale", scale)
+
+                def forward(self, features: torch.Tensor, agent_state: torch.Tensor):
                     # features: (batch, seq_len, n_features)
                     # NaN/Inf sanitization FIRST (same as training)
                     features = torch.nan_to_num(features, nan=0.0, posinf=1e6, neginf=-1e6)
                     # Apply z-score normalization: (features - mean) / scale
-                    features = (features - self.mean) / self.scale
-                    return self.model(features, agent_state)
-            
+                    features = (features - self._mean) / self._scale
+                    return self._wrapped_model(features, agent_state)
+
             model = ScaledRLModel(model, mean_tensor, scale_tensor)
             print(f"[Export] Fused StandardScaler into RL execution ONNX graph (n_features={len(mean)})")
 
@@ -485,10 +488,7 @@ def core_rl_execution_onnx_export(
         },
     )
     print(f"[Export] Saved RL execution ONNX model: {output_path}")
-    print(
-        f"         n_features={n_features} | seq_len={seq_len} | "
-        f"agent_state={agent_state_size} | opset={opset}"
-    )
+    print(f"         n_features={n_features} | seq_len={seq_len} | agent_state={agent_state_size} | opset={opset}")
     _print_onnx_info(output_path)
     return output_path
 
@@ -515,7 +515,6 @@ def export_to_onnx(
     Returns:
         Path to the exported .onnx file.
     """
-    import torch
 
     ckpt_path = Path(checkpoint_path)
     if not ckpt_path.exists():
@@ -546,24 +545,26 @@ def export_to_onnx(
         n_features = _infer_features_from_state(state_dict)
 
     if n_features is None:
-        config_path = ckpt_path.parent / f"{ckpt_path.stem.replace('_best','')}_config.json"
+        config_path = ckpt_path.parent / f"{ckpt_path.stem.replace('_best', '')}_config.json"
         if config_path.exists():
             import json
+
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
             n_features = int(cfg.get("n_features")) if cfg.get("n_features") else None
 
     if n_features is None:
         raise ValueError(
-            "Cannot infer n_features from checkpoint. "
-            "Pass --n-feat explicitly or retrain with a newer checkpoint."
+            "Cannot infer n_features from checkpoint. Pass --n-feat explicitly or retrain with a newer checkpoint."
         )
 
     if cfg:
         from training.train_gpu import build_model as build_training_model
+
         model_args = _make_training_args(model_name, cfg, state_dict, int(n_features), seq_len)
         seq_len = int(model_args.seq_len)
         if model_name == "ensemble":
             import json as _json
+
             meta_json_path = ckpt_path.parent / "ensemble_meta_final.json"
             if meta_json_path.exists():
                 meta_data = _json.loads(meta_json_path.read_text())
@@ -571,34 +572,53 @@ def export_to_onnx(
             else:
                 base_names = ["haelt", "tft", "transformer", "mamba", "gnn", "expert"]
             from models.ensemble import EnsembleMetaLearner
+
             loaded_bases = []
             for b_name in base_names:
-                b_ckpt = next((p for p in [ckpt_path.parent.parent / b_name / f"{b_name}_best.pt", ckpt_path.parent.parent / f"{b_name}_best.pt"] if p.exists()), None)
+                b_ckpt = next(
+                    (
+                        p
+                        for p in [
+                            ckpt_path.parent.parent / b_name / f"{b_name}_best.pt",
+                            ckpt_path.parent.parent / f"{b_name}_best.pt",
+                        ]
+                        if p.exists()
+                    ),
+                    None,
+                )
                 if b_ckpt:
-                    b_model = build_training_model(b_name, int(n_features), model_args)
+                    b_model = cast(Any, build_training_model(model_name=b_name, input_size=int(n_features), seq_len=int(model_args.seq_len), **vars(model_args)))
                     b_state = torch_load_safe(b_ckpt, map_location="cpu")
                     if isinstance(b_state, dict) and "model_state_dict" in b_state:
                         b_state = b_state["model_state_dict"]
                     elif isinstance(b_state, dict) and "state_dict" in b_state:
                         b_state = b_state["state_dict"]
-                    b_model.load_state_dict(b_state, strict=False)
+                    cast(Any, b_model).load_state_dict(b_state, strict=False)
                     loaded_bases.append(b_model)
             if not loaded_bases:
-                raise FileNotFoundError(
-                    f"No ensemble base checkpoints found next to {ckpt_path.parent}"
-                )
-            model = EnsembleMetaLearner(
+                raise FileNotFoundError(f"No ensemble base checkpoints found next to {ckpt_path.parent}")
+            model = cast(Any, EnsembleMetaLearner)(
                 loaded_bases,
                 context_dim=32,
                 hidden=64,
                 base_names=base_names,
             )
         else:
-            model = build_training_model(model_name, int(n_features), model_args)
+            model = cast(
+                Any,
+                build_training_model(
+                    model_name,
+                    int(n_features),
+                    seq_len=int(model_args.seq_len),
+                    **{k: v for k, v in vars(model_args).items() if k != "seq_len"},
+                ),
+            )
     else:
         from models.architectures import build_model
-        model = build_model(model_name, input_size=int(n_features), seq_len=seq_len)
 
+        model = cast(Any, build_model(model_name, input_size=int(n_features), seq_len=seq_len))
+
+    model = cast(Any, model)
     model.load_state_dict(state_dict, strict=False)
     model = _wrap_logits_output(model)
     model.eval()
@@ -606,14 +626,17 @@ def export_to_onnx(
     # Handle TemperatureScaler wrapper (calibrated checkpoints)
     if "temperature" in ckpt:
         from models.architectures import TemperatureScaler
-        model = TemperatureScaler(model)
-        model.temperature.data.fill_(float(ckpt["temperature"]))
+
+        temp_model = cast(Any, TemperatureScaler(model))
+        temp_model.temperature.data.fill_(float(ckpt["temperature"]))
+        model = temp_model
 
     # Load scaler for ONNX fusion
     scaler = None
     cache_path = ckpt_path.parent
     try:
         from inference._scaler_load import load_inference_scaler
+
         scaler = load_inference_scaler(cache_path)
         if scaler is not None:
             print(f"[Export] Found scaler at {cache_path}/scaler.npz, fusing into ONNX")
@@ -683,7 +706,7 @@ def export_ensemble_to_onnx(
         bases.append(base)
         cfgs[name] = cfg
 
-    model = EnsembleMetaLearner(
+    model = cast(Any, EnsembleMetaLearner)(
         bases,
         context_dim=int(meta.get("context_dim", 32)),
         hidden=int(meta.get("hidden", 64)),
@@ -696,19 +719,20 @@ def export_ensemble_to_onnx(
                 state = state[key]
                 break
     model.load_state_dict(state, strict=False)
-    wrapped = _wrap_ensemble_logits(model).to(dev)
+    wrapped = cast(Any, _wrap_ensemble_logits(model)).to(dev)
     wrapped.eval()
 
     # Load scaler for ONNX fusion
     scaler = None
     try:
         from inference._scaler_load import load_inference_scaler
+
         # Use checkpoint_dir as cache path
         scaler = load_inference_scaler(Path(checkpoint_dir))
         if scaler is not None:
-            print(f"[Export] Found scaler, fusing into ONNX")
+            print("[Export] Found scaler, fusing into ONNX")
         else:
-            print(f"[Export] No scaler found, exporting without normalization")
+            print("[Export] No scaler found, exporting without normalization")
     except Exception as e:
         print(f"[Export] Could not load scaler: {e}")
 
@@ -750,26 +774,28 @@ def export_rl_to_onnx(
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent
-    from training.train_gpu import _core_model
+    from training.model_factory import _core_model
 
     rl_path = Path(rl_checkpoint)
     if not rl_path.exists():
         raise FileNotFoundError(f"RL checkpoint not found: {rl_path}")
 
     dev = torch.device(device)
-    sup_model, n_features, seq_len, arch_name, _scaler = load_pytorch_model(
+    sup_model, n_features, seq_len, _arch_name, _scaler = load_pytorch_model(
         supervised_checkpoint,
         model_name,
         seq_len=int(seq_len),
         n_features=int(n_features),
         device=dev,
     )
-    core = _core_model(sup_model)
-    inner = core.inner if hasattr(core, "inner") else core
-    encoder = inner.backbone if hasattr(inner, "backbone") else inner
-    if hasattr(encoder, "head"):
-        encoder.head = torch.nn.Identity()
-    encoder.eval()
+    core_any = cast(Any, _core_model(sup_model))
+    inner = getattr(core_any, "inner", core_any)
+    encoder = getattr(inner, "backbone", inner)
+    encoder_any = cast(Any, encoder)
+    if hasattr(encoder_any, "head"):
+        encoder_any.head = torch.nn.Identity()
+    encoder_any.eval()
+    encoder = encoder_any
 
     meta_path = rl_path.parent / f"rl_{str(algo).lower()}_best.json"
     meta = {}
@@ -792,8 +818,9 @@ def export_rl_to_onnx(
         if n_actions <= 0:
             n_actions = int(next(reversed(state.values())).shape[0]) if isinstance(state, dict) and state else 3
         agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(dev), **algo_kw)
-        agent.policy_net.load_state_dict(state, strict=False)
-        policy = agent.policy_net
+        agent_any = cast(Any, agent)
+        agent_any.policy_net.load_state_dict(state, strict=False)
+        policy = agent_any.policy_net
     else:
         n_actions = int(meta.get("n_actions", 0) or 0) or 3
         if isinstance(state, dict):
@@ -802,8 +829,9 @@ def export_rl_to_onnx(
                     n_actions = int(value.shape[0])
                     break
         agent = PPOAgent(obs_size=obs_size, n_actions=n_actions, device=str(dev), **algo_kw)
-        agent.net.load_state_dict(state, strict=False)
-        policy = agent.net
+        agent_any = cast(Any, agent)
+        agent_any.net.load_state_dict(state, strict=False)
+        policy = agent_any.net
 
     wrapped = _wrap_rl_policy_logits(encoder, policy, obs_size).to(dev)
     wrapped.eval()
@@ -811,9 +839,9 @@ def export_rl_to_onnx(
     # Use the scaler from load_pytorch_model for ONNX fusion
     scaler = _scaler
     if scaler is not None:
-        print(f"[Export] Found scaler, fusing into ONNX")
+        print("[Export] Found scaler, fusing into ONNX")
     else:
-        print(f"[Export] No scaler found, exporting without normalization")
+        print("[Export] No scaler found, exporting without normalization")
 
     if output_path is None:
         output_path = str(rl_path.with_suffix(".onnx"))
@@ -849,26 +877,28 @@ def export_rl_execution_to_onnx(
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent
-    from training.train_gpu import _core_model
+    from training.model_factory import _core_model
 
     rl_path = Path(rl_checkpoint)
     if not rl_path.exists():
         raise FileNotFoundError(f"RL checkpoint not found: {rl_path}")
 
     dev = torch.device(device)
-    sup_model, n_features, seq_len, arch_name, _scaler = load_pytorch_model(
+    sup_model, n_features, seq_len, _arch_name, _scaler = load_pytorch_model(
         supervised_checkpoint,
         model_name,
         seq_len=int(seq_len),
         n_features=int(n_features),
         device=dev,
     )
-    core = _core_model(sup_model)
-    inner = core.inner if hasattr(core, "inner") else core
-    encoder = inner.backbone if hasattr(inner, "backbone") else inner
-    if hasattr(encoder, "head"):
-        encoder.head = torch.nn.Identity()
-    encoder.eval()
+    core_any = cast(Any, _core_model(sup_model))
+    inner = getattr(core_any, "inner", core_any)
+    encoder = getattr(inner, "backbone", inner)
+    encoder_any = cast(Any, encoder)
+    if hasattr(encoder_any, "head"):
+        encoder_any.head = torch.nn.Identity()
+    encoder_any.eval()
+    encoder = encoder_any
 
     meta_path = rl_path.parent / f"rl_{str(algo).lower()}_best.json"
     meta = {}
@@ -890,14 +920,13 @@ def export_rl_execution_to_onnx(
         n_actions = int(meta.get("n_actions", 0) or 0) or 10
         if int(meta.get("n_actions", 0) or 0) <= 0 and isinstance(state, dict):
             for key, value in reversed(list(state.items())):
-                if getattr(value, "ndim", 0) in (1, 2) and (
-                    key.endswith("net.4.bias") or key.endswith("net.4.weight")
-                ):
+                if getattr(value, "ndim", 0) in (1, 2) and (key.endswith("net.4.bias") or key.endswith("net.4.weight")):
                     n_actions = int(value.shape[0])
                     break
         agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(dev), **algo_kw)
-        agent.policy_net.load_state_dict(state, strict=False)
-        policy = agent.policy_net
+        agent_any = cast(Any, agent)
+        agent_any.policy_net.load_state_dict(state, strict=False)
+        policy = agent_any.policy_net
     else:
         n_actions = int(meta.get("n_actions", 0) or 0) or 10
         if int(meta.get("n_actions", 0) or 0) <= 0 and isinstance(state, dict):
@@ -906,8 +935,9 @@ def export_rl_execution_to_onnx(
                     n_actions = int(value.shape[0])
                     break
         agent = PPOAgent(obs_size=obs_size, n_actions=n_actions, device=str(dev), **algo_kw)
-        agent.net.load_state_dict(state, strict=False)
-        policy = agent.net
+        agent_any = cast(Any, agent)
+        agent_any.net.load_state_dict(state, strict=False)
+        policy = agent_any.net
 
     wrapped = _wrap_rl_execution_policy(encoder, policy, obs_size).to(dev)
     wrapped.eval()
@@ -929,13 +959,12 @@ def export_rl_execution_to_onnx(
 def _print_onnx_info(onnx_path: str):
     """Print ONNX graph summary (input/output shapes, node count)."""
     try:
-        import onnx
+        import onnx  # pyright: ignore[reportMissingImports]
+
         m = onnx.load(onnx_path)
         onnx.checker.check_model(m)
-        inputs  = [(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim])
-                   for i in m.graph.input]
-        outputs = [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim])
-                   for o in m.graph.output]
+        inputs = [(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim]) for i in m.graph.input]
+        outputs = [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim]) for o in m.graph.output]
         n_nodes = len(m.graph.node)
         print(f"         Inputs:  {inputs}")
         print(f"         Outputs: {outputs}")
@@ -948,14 +977,15 @@ def _print_onnx_info(onnx_path: str):
 # INFERENCE ENGINE:  ONNX Runtime + DirectML
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class DirectMLInferenceEngine(BaseInferenceEngine):
     """
     ONNX Runtime inference engine targeting AMD hardware via DirectML.
 
     Provider priority:
-        1. DmlExecutionProvider  — AMD NPU / GPU (Windows, DirectML)
-        2. CUDAExecutionProvider — fallback to NVIDIA if available
-        3. CPUExecutionProvider  — final fallback
+        1. DmlExecutionProvider  - AMD NPU / GPU (Windows, DirectML)
+        2. CUDAExecutionProvider - fallback to NVIDIA if available
+        3. CPUExecutionProvider  - final fallback
 
     Interface matches trained PyTorch models and LiveTradingEngine:
         engine.select_action(obs)  -> model class int (0=sell, 1=hold, 2=buy)
@@ -971,18 +1001,18 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
 
     def __init__(
         self,
-        onnx_path:       str,
-        seq_len:         int  = 60,
-        device_id:       int  = 0,
-        prefer_cpu:      bool = False,
-        hold_threshold:  float = 0.45,
+        onnx_path: str,
+        seq_len: int = 60,
+        device_id: int = 0,
+        prefer_cpu: bool = False,
+        hold_threshold: float = 0.45,
     ):
-        import onnxruntime as ort
+        import onnxruntime as ort  # pyright: ignore[reportMissingImports]
 
-        self.onnx_path      = str(onnx_path)
-        self.seq_len        = seq_len
+        self.onnx_path = str(onnx_path)
+        self.seq_len = seq_len
         self.hold_threshold = hold_threshold
-        self._obs_buffer    = deque(maxlen=int(seq_len))   # rolling window of feature vectors
+        self._obs_buffer = deque(maxlen=int(seq_len))  # rolling window of feature vectors
 
         # Build provider list
         available = ort.get_available_providers()
@@ -991,30 +1021,26 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         else:
             providers = []
             if "DmlExecutionProvider" in available:
-                providers.append(
-                    ("DmlExecutionProvider", {"device_id": device_id})
-                )
+                providers.append(("DmlExecutionProvider", {"device_id": device_id}))
             if "CUDAExecutionProvider" in available:
-                providers.append(
-                    ("CUDAExecutionProvider", {"device_id": device_id})
-                )
+                providers.append(("CUDAExecutionProvider", {"device_id": device_id}))
             providers.append("CPUExecutionProvider")
 
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.execution_mode           = ort.ExecutionMode.ORT_SEQUENTIAL
-        opts.intra_op_num_threads     = 4
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        opts.intra_op_num_threads = 4
 
-        self.session   = ort.InferenceSession(self.onnx_path, opts, providers=providers)
-        self.input_name  = self.session.get_inputs()[0].name
+        self.session = ort.InferenceSession(self.onnx_path, opts, providers=providers)
+        self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
 
         # Report active provider
         active = self.session.get_providers()[0]
         ep_label = {
-            "DmlExecutionProvider":  "AMD DirectML (NPU/GPU)",
+            "DmlExecutionProvider": "AMD DirectML (NPU/GPU)",
             "CUDAExecutionProvider": "NVIDIA CUDA",
-            "CPUExecutionProvider":  "CPU",
+            "CPUExecutionProvider": "CPU",
         }.get(active, active)
         print(f"[DirectML] Session ready | EP: {ep_label} | {Path(onnx_path).name}")
 
@@ -1051,10 +1077,10 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
             window: float32 array of shape (seq_len, n_features).
 
         Returns:
-            Softmax probabilities, shape (3,) — [sell, hold, buy].
+            Softmax probabilities, shape (3,) - [sell, hold, buy].
         """
         x = window[np.newaxis].astype(np.float32)  # (1, seq_len, n_feat)
-        logits = self.session.run([self.output_name], {self.input_name: x})[0]
+        logits = np.asarray(self.session.run([self.output_name], {self.input_name: x})[0])
         logits = logits[0]  # (3,) or (1,)
 
         # Regression head: single value -> convert to buy/hold/sell proba
@@ -1082,8 +1108,8 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         # Infer n_features from model input shape
         shape = self.session.get_inputs()[0].shape
         n_feat = shape[2] if len(shape) >= 3 and isinstance(shape[2], int) else 64
-        dummy  = np.zeros((1, self.seq_len, n_feat), dtype=np.float32)
-        t0     = time.perf_counter()
+        dummy = np.zeros((1, self.seq_len, n_feat), dtype=np.float32)
+        t0 = time.perf_counter()
         self.session.run([self.output_name], {self.input_name: dummy})
         ms = (time.perf_counter() - t0) * 1000
         print(f"[DirectML] Warm-up done in {ms:.1f} ms")
@@ -1093,11 +1119,12 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
 # BENCHMARK:  CUDA vs DirectML vs CPU
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def benchmark(
     onnx_path: str,
-    seq_len:   int = 60,
-    n_feat:    int = 128,
-    runs:      int = 500,
+    seq_len: int = 60,
+    n_feat: int = 128,
+    runs: int = 500,
 ):
     """
     Measure single-sample inference latency across all available execution providers.
@@ -1109,9 +1136,9 @@ def benchmark(
 
     available = ort.get_available_providers()
     candidates = [
-        ("AMD DirectML",  "DmlExecutionProvider"),
-        ("NVIDIA CUDA",   "CUDAExecutionProvider"),
-        ("CPU",           "CPUExecutionProvider"),
+        ("AMD DirectML", "DmlExecutionProvider"),
+        ("NVIDIA CUDA", "CUDAExecutionProvider"),
+        ("CPU", "CPUExecutionProvider"),
     ]
 
     print(f"\n{'Provider':<22} {'Status':<12} {'Median ms':>10} {'P99 ms':>10} {'Throughput':>14}")
@@ -1125,7 +1152,7 @@ def benchmark(
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         try:
-            sess  = ort.InferenceSession(onnx_path, opts, providers=[ep, "CPUExecutionProvider"])
+            sess = ort.InferenceSession(onnx_path, opts, providers=[ep, "CPUExecutionProvider"])
             iname = sess.get_inputs()[0].name
             oname = sess.get_outputs()[0].name
 
@@ -1140,10 +1167,10 @@ def benchmark(
                 sess.run([oname], {iname: dummy})
                 times.append((time.perf_counter() - t0) * 1000)
 
-            times   = sorted(times)
-            median  = times[len(times) // 2]
-            p99     = times[int(len(times) * 0.99)]
-            tput    = 1000.0 / median
+            times = sorted(times)
+            median = times[len(times) // 2]
+            p99 = times[int(len(times) * 0.99)]
+            tput = 1000.0 / median
             print(f"{label:<22} {'ok':<12} {median:>10.3f} {p99:>10.3f} {tput:>12.0f}/s")
 
         except Exception as e:
@@ -1165,13 +1192,11 @@ if __name__ == "__main__":
     # export
     exp = sub.add_parser("export", help="Export .pt checkpoint to ONNX")
     exp.add_argument("--checkpoint", required=True, help="Path to *_best.pt")
-    exp.add_argument("--model",      required=True,
-                     choices=["haelt","tft","transformer","mamba","gnn","expert"])
-    exp.add_argument("--seq-len",    type=int, default=60)
-    exp.add_argument("--n-feat",     type=int, default=None,
-                     help="Number of input features used during training")
-    exp.add_argument("--output",     default=None, help="Output .onnx path")
-    exp.add_argument("--opset",      type=int, default=17)
+    exp.add_argument("--model", required=True, choices=["haelt", "tft", "transformer", "mamba", "gnn", "expert"])
+    exp.add_argument("--seq-len", type=int, default=60)
+    exp.add_argument("--n-feat", type=int, default=None, help="Number of input features used during training")
+    exp.add_argument("--output", default=None, help="Output .onnx path")
+    exp.add_argument("--opset", type=int, default=17)
 
     ens = sub.add_parser("export-ensemble", help="Export EnsembleMetaLearner to one 3-logit ONNX")
     ens.add_argument("--checkpoint", required=True, help="Path to ensemble_meta_best.pt")
@@ -1185,8 +1210,8 @@ if __name__ == "__main__":
     rlx = sub.add_parser("export-rl", help="Export supervised encoder + RL policy to one 3-logit ONNX")
     rlx.add_argument("--rl-checkpoint", required=True, help="Path to rl_<algo>_best.pt")
     rlx.add_argument("--supervised-checkpoint", required=True, help="Path to supervised *_best.pt")
-    rlx.add_argument("--model", required=True, choices=["haelt","tft","transformer","mamba","gnn","expert"])
-    rlx.add_argument("--algo", default="dqn", choices=["dqn","ppo"])
+    rlx.add_argument("--model", required=True, choices=["haelt", "tft", "transformer", "mamba", "gnn", "expert"])
+    rlx.add_argument("--algo", default="dqn", choices=["dqn", "ppo"])
     rlx.add_argument("--seq-len", type=int, default=60)
     rlx.add_argument("--n-feat", type=int, required=True)
     rlx.add_argument("--output", default=None)
@@ -1196,8 +1221,8 @@ if __name__ == "__main__":
     rle = sub.add_parser("export-rl-execution", help="Export RL policy to native 10-action execution ONNX")
     rle.add_argument("--rl-checkpoint", required=True, help="Path to rl_<algo>_best.pt")
     rle.add_argument("--supervised-checkpoint", required=True, help="Path to supervised *_best.pt")
-    rle.add_argument("--model", required=True, choices=["haelt","tft","transformer","mamba","gnn","expert"])
-    rle.add_argument("--algo", default="dqn", choices=["dqn","ppo"])
+    rle.add_argument("--model", required=True, choices=["haelt", "tft", "transformer", "mamba", "gnn", "expert"])
+    rle.add_argument("--algo", default="dqn", choices=["dqn", "ppo"])
     rle.add_argument("--seq-len", type=int, default=60)
     rle.add_argument("--n-feat", type=int, required=True)
     rle.add_argument("--output", default=None)
@@ -1206,17 +1231,16 @@ if __name__ == "__main__":
 
     # benchmark
     bch = sub.add_parser("benchmark", help="Compare provider latencies")
-    bch.add_argument("--onnx",    required=True)
+    bch.add_argument("--onnx", required=True)
     bch.add_argument("--seq-len", type=int, default=60)
-    bch.add_argument("--n-feat",  type=int, default=128)
-    bch.add_argument("--runs",    type=int, default=500)
+    bch.add_argument("--n-feat", type=int, default=128)
+    bch.add_argument("--runs", type=int, default=500)
 
-    # test  — quick smoke test of the full pipeline
+    # test  - quick smoke test of the full pipeline
     tst = sub.add_parser("test", help="Smoke test: export + inference + benchmark")
     tst.add_argument("--checkpoint", required=True)
-    tst.add_argument("--model",      required=True,
-                     choices=["haelt","tft","transformer","mamba","gnn","expert"])
-    tst.add_argument("--seq-len",    type=int, default=60)
+    tst.add_argument("--model", required=True, choices=["haelt", "tft", "transformer", "mamba", "gnn", "expert"])
+    tst.add_argument("--seq-len", type=int, default=60)
 
     args = ap.parse_args()
 
@@ -1282,13 +1306,13 @@ if __name__ == "__main__":
             seq_len=args.seq_len,
         )
         engine = DirectMLInferenceEngine(onnx_path, seq_len=args.seq_len)
-        shape  = engine.session.get_inputs()[0].shape
+        shape = engine.session.get_inputs()[0].shape
         n_feat = shape[2] if len(shape) >= 3 and isinstance(shape[2], int) else 64
 
         # Simulate seq_len bars of features
         print(f"\n[Test] Simulating {args.seq_len} bars of features (n_feat={n_feat})...")
-        for i in range(args.seq_len):
-            obs    = np.random.randn(n_feat).astype(np.float32)
+        for _i in range(args.seq_len):
+            obs = np.random.randn(n_feat).astype(np.float32)
             action = engine.select_action(obs)
         label = {0: "SELL", 1: "HOLD", 2: "BUY"}[action]
         print(f"[Test] Final action after {args.seq_len} bars: {label}")

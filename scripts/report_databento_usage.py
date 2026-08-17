@@ -7,12 +7,16 @@ import humanize
 def get_file_size(path: Path) -> int:
     return path.stat().st_size
 
+
 def human_readable_size(bytes_size: int) -> str:
     return humanize.naturalsize(bytes_size, binary=True)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Report Databento download usage.")
-    parser.add_argument("--dir", type=str, default="data/raw/databento", help="Directory containing Databento parquet files.")
+    parser.add_argument(
+        "--dir", type=str, default="data/raw/databento", help="Directory containing Databento parquet files."
+    )
     args = parser.parse_args()
 
     base_dir = Path(args.dir)
@@ -32,6 +36,7 @@ def main():
     print("\n----------------------------")
     print(f"Total files: {file_count}")
     print(f"Total size: {human_readable_size(total_bytes)} ({total_bytes} bytes)")
+
 
 if __name__ == "__main__":
     main()

@@ -8,6 +8,7 @@ Catches:
   - required market columns for RL/backtest not covered by FEATURE_MASK
   - settings.CURRICULUM vs active YAML schedule drift (epoch_unfreeze / scalars)
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -50,11 +51,7 @@ def iter_group_features(feature_groups: dict | None) -> dict[str, list[str]]:
     for g_name, g_cfg in (feature_groups or {}).items():
         if not isinstance(g_cfg, dict):
             continue
-        feats = [
-            str(f).strip()
-            for f in (g_cfg.get("features") or [])
-            if str(f).strip()
-        ]
+        feats = [str(f).strip() for f in (g_cfg.get("features") or []) if str(f).strip()]
         if feats:
             out[str(g_name)] = feats
     return out
@@ -90,24 +87,18 @@ def audit_curriculum_feature_groups(
             seen_in_group.add(f_name)
             if g_name not in membership[f_name]:
                 membership[f_name].append(g_name)
-            if schema_set and f_name not in schema_set and _base_name(f_name) not in schema_set:
+            if schema_set and f_name not in schema_set and _base_name(f_name) not in schema_set:  # noqa: SIM102
                 if f_name not in missing_from_schema[g_name]:
                     missing_from_schema[g_name].append(f_name)
 
-    overlapping = {
-        feat: groups_for
-        for feat, groups_for in membership.items()
-        if len(groups_for) > 1
-    }
+    overlapping = {feat: groups_for for feat, groups_for in membership.items() if len(groups_for) > 1}
 
     staged = set(membership.keys())
     # Orphans: enabled in FEATURE_MASK, never referenced by any curriculum group.
     orphans = sorted(enabled_mask - staged) if enabled_mask and groups else []
 
     # Masked-off but still staged (won't appear in schema built from FEATURE_MASK).
-    staged_but_masked_off = sorted(
-        f for f in staged if f in mask and not mask.get(f, True)
-    )
+    staged_but_masked_off = sorted(f for f in staged if f in mask and not mask.get(f, True))
 
     warnings: list[str] = []
     if missing_from_schema:
@@ -123,15 +114,10 @@ def audit_curriculum_feature_groups(
         )
     if overlapping:
         sample = [f"{f}∈{gs}" for f, gs in list(overlapping.items())[:5]]
-        warnings.append(
-            f"{len(overlapping)} feature(s) listed in multiple curriculum groups: "
-            + "; ".join(sample)
-        )
+        warnings.append(f"{len(overlapping)} feature(s) listed in multiple curriculum groups: " + "; ".join(sample))
     if intra_group_dupes:
         sample = [f"{g}:{sorted(set(fs))[:3]}" for g, fs in list(intra_group_dupes.items())[:4]]
-        warnings.append(
-            f"Duplicate feature entries inside curriculum group(s): {'; '.join(str(s) for s in sample)}"
-        )
+        warnings.append(f"Duplicate feature entries inside curriculum group(s): {'; '.join(str(s) for s in sample)}")
     if orphans:
         warnings.append(
             f"{len(orphans)} FEATURE_MASK-enabled column(s) are not in any "
@@ -173,14 +159,10 @@ def audit_required_market_columns(
             # Frame provided but none of the candidates exist.
             if role == "spread":
                 warnings.append(
-                    f"No {candidates} column in feature frame — "
-                    "RL market cache will synthesize a default spread."
+                    f"No {candidates} column in feature frame - RL market cache will synthesize a default spread."
                 )
             else:
-                errors.append(
-                    f"Required market role '{role}' missing from feature frame "
-                    f"(tried {candidates})"
-                )
+                errors.append(f"Required market role '{role}' missing from feature frame (tried {candidates})")
             coverage[role] = None
             continue
 
@@ -188,7 +170,7 @@ def audit_required_market_columns(
             coverage[role] = hit
             continue
 
-        # No frame — audit FEATURE_MASK only.
+        # No frame - audit FEATURE_MASK only.
         mask_hit = next((c for c in candidates if mask.get(c, False)), None)
         coverage[role] = mask_hit
         if mask_hit is None and mask:
@@ -196,17 +178,14 @@ def audit_required_market_columns(
             if role == "close":
                 warnings.append(
                     f"FEATURE_MASK has no explicit {candidates} entry "
-                    "(price columns are usually kept outside the mask — OK if build() emits them)."
+                    "(price columns are usually kept outside the mask - OK if build() emits them)."
                 )
             elif role == "spread":
                 warnings.append(
-                    f"FEATURE_MASK enables none of {candidates} — "
-                    "spread may be synthesized at RL cache build time."
+                    f"FEATURE_MASK enables none of {candidates} - spread may be synthesized at RL cache build time."
                 )
             else:
-                warnings.append(
-                    f"FEATURE_MASK enables none of {candidates} for market role '{role}'."
-                )
+                warnings.append(f"FEATURE_MASK enables none of {candidates} for market role '{role}'.")
 
     return {"coverage": coverage, "warnings": warnings, "errors": errors}
 
@@ -217,14 +196,32 @@ def format_audit_warnings(report: dict[str, Any], *, prefix: str = "[CurriculumA
 
 
 # Columns commonly present in FeatureEngineer output but outside FEATURE_MASK.
-_BUILT_SCHEMA_ALLOWLIST: frozenset[str] = frozenset({
-    "open", "high", "low", "close", "mid_close", "volume",
-    "bid_close", "ask_close", "bid_open", "ask_open",
-    "timestamp_utc", "session", "session_label", "regime", "regime_label", "regime_class",
-    "no_trade_score", "latency_ms", "expected_latency_ms", "pair",
-    # DST overlap aux (labeling-only; not required in X)
-    "asia_london",
-})
+_BUILT_SCHEMA_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "mid_close",
+        "volume",
+        "bid_close",
+        "ask_close",
+        "bid_open",
+        "ask_open",
+        "timestamp_utc",
+        "session",
+        "session_label",
+        "regime",
+        "regime_label",
+        "regime_class",
+        "no_trade_score",
+        "latency_ms",
+        "expected_latency_ms",
+        "pair",
+        # DST overlap aux (labeling-only; not required in X)
+        "asia_london",
+    }
+)
 
 # Aux columns required for regime-conditional RL labeling (not necessarily in X).
 _LABELING_AUX_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -293,7 +290,7 @@ def audit_built_dataset_schema(
     warnings.extend(mkt.get("warnings") or [])
 
     # Labeling aux: regime_class should be in the built frame for regime-conditional
-    # barriers; session_label may live only on bars (not in X) — warn if neither
+    # barriers; session_label may live only on bars (not in X) - warn if neither
     # regime_class nor regime_label is present.
     for role, candidates in _LABELING_AUX_CANDIDATES.items():
         if role == "session":
@@ -301,7 +298,7 @@ def audit_built_dataset_schema(
         if not any(c in name_set for c in candidates):
             warnings.append(
                 f"Labeling aux '{role}' missing from built schema "
-                f"(tried {candidates}) — regime/latency labeling may degrade"
+                f"(tried {candidates}) - regime/latency labeling may degrade"
             )
 
     mask = feature_mask or {}
@@ -314,11 +311,13 @@ def audit_built_dataset_schema(
         )
 
     extras = sorted(
-        b for b in bases
+        b
+        for b in bases
         if b not in enabled
         and b not in _BUILT_SCHEMA_ALLOWLIST
-        and not b.startswith(("embed_", "fb_", "factor_", "granger_", "leadlag_",
-                              "vol_regime_", "hurst_", "sent_", "topic_", "ner_"))
+        and not b.startswith(
+            ("embed_", "fb_", "factor_", "granger_", "leadlag_", "vol_regime_", "hurst_", "sent_", "topic_", "ner_")
+        )
     )
     if extras:
         warnings.append(
@@ -442,13 +441,8 @@ def audit_settings_yaml_curriculum_drift(
         s_list = _norm_schedule_list(settings.get(key))
         y_list = _norm_schedule_list(yaml_cur.get(key))
         if s_list != y_list:
-            mismatches.append(
-                {"kind": "schedule_list", "key": key, "settings": s_list, "yaml": y_list}
-            )
-            errors.append(
-                f"curriculum.{key}: settings != {yaml_path} "
-                f"(settings={s_list!r}, yaml={y_list!r})"
-            )
+            mismatches.append({"kind": "schedule_list", "key": key, "settings": s_list, "yaml": y_list})
+            errors.append(f"curriculum.{key}: settings != {yaml_path} (settings={s_list!r}, yaml={y_list!r})")
 
     for key in _SCHEDULE_SCALAR_KEYS:
         s_has = key in settings
@@ -457,28 +451,25 @@ def audit_settings_yaml_curriculum_drift(
             continue
         if s_has and not y_has:
             warnings.append(
-                f"curriculum.{key} present in settings ({settings.get(key)!r}) "
-                f"but missing from {yaml_path}"
+                f"curriculum.{key} present in settings ({settings.get(key)!r}) but missing from {yaml_path}"
             )
             continue
         if y_has and not s_has:
             warnings.append(
-                f"curriculum.{key} present in {yaml_path} ({yaml_cur.get(key)!r}) "
-                f"but missing from settings.CURRICULUM"
+                f"curriculum.{key} present in {yaml_path} ({yaml_cur.get(key)!r}) but missing from settings.CURRICULUM"
             )
             continue
         s_val, y_val = settings.get(key), yaml_cur.get(key)
-        try:
-            same = float(s_val) == float(y_val)
-        except (TypeError, ValueError):
+        if s_val is None or y_val is None:
             same = s_val == y_val
+        else:
+            try:
+                same = float(s_val) == float(y_val)
+            except (TypeError, ValueError):
+                same = s_val == y_val
         if not same:
-            mismatches.append(
-                {"kind": "scalar", "key": key, "settings": s_val, "yaml": y_val}
-            )
-            errors.append(
-                f"curriculum.{key}: settings={s_val!r} != {yaml_path}={y_val!r}"
-            )
+            mismatches.append({"kind": "scalar", "key": key, "settings": s_val, "yaml": y_val})
+            errors.append(f"curriculum.{key}: settings={s_val!r} != {yaml_path}={y_val!r}")
 
     return {
         "shared_groups": shared,

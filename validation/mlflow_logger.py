@@ -6,7 +6,7 @@ MLflow model logger for the Forex Scaling Model.
 Logs the following on every promotion event:
   • All model hyperparameters and training config
   • Promotion gate metrics (Sharpe, profit factor, drawdown, etc.)
-  • Git commit hash (code version) — embedded in every run
+  • Git commit hash (code version) - embedded in every run
   • Walk-forward fold Sharpe distribution
   • The promotion gate JSON report as an MLflow artifact
   • HTML walk-forward report (if path provided)
@@ -30,17 +30,19 @@ warnings.filterwarnings("ignore")
 
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 MLFLOW_EXP = os.getenv("MLFLOW_EXPERIMENT", "forex-scaling-model")
-FALLBACK_LOG_DIR = Path(os.getenv("MLFLOW_FALLBACK_DIR",
-    str(Path(__file__).resolve().parent.parent / "logs" / "mlflow_fallback")))
+FALLBACK_LOG_DIR = Path(
+    os.getenv("MLFLOW_FALLBACK_DIR", str(Path(__file__).resolve().parent.parent / "logs" / "mlflow_fallback"))
+)
 
 
 # ── git helpers ──────────────────────────────────────────────────────────────
+
 
 def _git_hash(short: bool = True) -> str:
     """Return the current git commit hash, or 'untracked' if not in a repo."""
     try:
         cmd = ["git", "rev-parse", "--short" if short else "", "HEAD"]
-        cmd = [c for c in cmd if c]   # remove empty string
+        cmd = [c for c in cmd if c]  # remove empty string
         return subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         return "untracked"
@@ -48,10 +50,11 @@ def _git_hash(short: bool = True) -> str:
 
 def _git_branch() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            stderr=subprocess.DEVNULL
-        ).decode().strip()
+        return (
+            subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
     except Exception:
         return "unknown"
 
@@ -59,10 +62,7 @@ def _git_branch() -> str:
 def _git_dirty() -> bool:
     """True if there are uncommitted changes."""
     try:
-        out = subprocess.check_output(
-            ["git", "status", "--porcelain"],
-            stderr=subprocess.DEVNULL
-        ).decode().strip()
+        out = subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.DEVNULL).decode().strip()
         return len(out) > 0
     except Exception:
         return False
@@ -70,9 +70,11 @@ def _git_dirty() -> bool:
 
 # ── MLflow integration ───────────────────────────────────────────────────────
 
+
 def _mlflow_available() -> bool:
     try:
         import mlflow  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -80,9 +82,10 @@ def _mlflow_available() -> bool:
 
 def _mlflow_server_reachable(uri: str = MLFLOW_URI, timeout: float = 3.0) -> bool:
     if not uri.startswith("http"):
-        return True   # local file URI always OK
+        return True  # local file URI always OK
     import urllib.error
     import urllib.request
+
     try:
         urllib.request.urlopen(uri + "/health", timeout=timeout)
         return True
@@ -100,13 +103,13 @@ class MLflowModelLogger:
 
     def __init__(
         self,
-        tracking_uri: str  = MLFLOW_URI,
-        experiment:   str  = MLFLOW_EXP,
-        verbose:      bool = True,
+        tracking_uri: str = MLFLOW_URI,
+        experiment: str = MLFLOW_EXP,
+        verbose: bool = True,
     ):
-        self._uri        = tracking_uri
-        self._exp        = experiment
-        self._verbose    = verbose
+        self._uri = tracking_uri
+        self._exp = experiment
+        self._verbose = verbose
         self._use_mlflow = _mlflow_available() and _mlflow_server_reachable(tracking_uri)
         if self._verbose:
             mode = "MLflow" if self._use_mlflow else "filesystem fallback"
@@ -116,13 +119,13 @@ class MLflowModelLogger:
 
     def log_promotion(
         self,
-        model_name:        str,
-        gate_result:       dict[str, Any],
-        training_config:   dict | None  = None,
-        fold_sharpes:      list[float] | None = None,
-        report_html_path:  str | None   = None,
-        checkpoint_path:   str | None   = None,
-        extra_tags:        dict | None  = None,
+        model_name: str,
+        gate_result: dict[str, Any],
+        training_config: dict | None = None,
+        fold_sharpes: list[float] | None = None,
+        report_html_path: str | None = None,
+        checkpoint_path: str | None = None,
+        extra_tags: dict | None = None,
     ) -> str:
         """
         Log a model promotion event.
@@ -141,53 +144,54 @@ class MLflowModelLogger:
         -------
         run_id : str  (MLflow run ID, or local file path in fallback mode)
         """
-        git_hash   = _git_hash()
+        git_hash = _git_hash()
         git_branch = _git_branch()
-        git_dirty  = _git_dirty()
-        timestamp  = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        git_dirty = _git_dirty()
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         params = {
-            "model_name":      model_name,
-            "git_hash":        git_hash,
-            "git_branch":      git_branch,
-            "git_dirty":       str(git_dirty),
-            "promoted":        str(gate_result.get("promoted", False)),
-            "emergency_mode":  str(gate_result.get("emergency_mode", False)),
-            "timestamp":       timestamp,
+            "model_name": model_name,
+            "git_hash": git_hash,
+            "git_branch": git_branch,
+            "git_dirty": str(git_dirty),
+            "promoted": str(gate_result.get("promoted", False)),
+            "emergency_mode": str(gate_result.get("emergency_mode", False)),
+            "timestamp": timestamp,
         }
         if training_config:
             for k, v in training_config.items():
                 if isinstance(v, (str, int, float, bool)):
                     params[f"cfg_{k}"] = str(v)
 
-        metrics = {k: float(v) for k, v in gate_result.get("details", {}).items()
-                   if isinstance(v, (int, float))}
+        metrics = {k: float(v) for k, v in gate_result.get("details", {}).items() if isinstance(v, (int, float))}
         if fold_sharpes:
             import math
+
             metrics["fold_sharpe_mean"] = sum(fold_sharpes) / len(fold_sharpes)
-            metrics["fold_sharpe_std"]  = math.sqrt(
-                sum((s - metrics["fold_sharpe_mean"])**2 for s in fold_sharpes)
-                / max(len(fold_sharpes) - 1, 1))
-            metrics["fold_sharpe_min"]  = min(fold_sharpes)
+            metrics["fold_sharpe_std"] = math.sqrt(
+                sum((s - metrics["fold_sharpe_mean"]) ** 2 for s in fold_sharpes) / max(len(fold_sharpes) - 1, 1)
+            )
+            metrics["fold_sharpe_min"] = min(fold_sharpes)
 
         tags = {"git_hash": git_hash, "source": "promotion_gate"}
         if extra_tags:
             tags.update(extra_tags)
 
         if self._use_mlflow:
-            return self._log_to_mlflow(
-                params, metrics, tags, gate_result,
-                report_html_path, checkpoint_path)
+            return self._log_to_mlflow(params, metrics, tags, gate_result, report_html_path, checkpoint_path)
         else:
-            return self._log_to_file(
-                params, metrics, tags, gate_result,
-                report_html_path)
+            return self._log_to_file(params, metrics, tags, gate_result, report_html_path)
 
     # ── internal MLflow logging ──────────────────────────────────────────────
 
     def _log_to_mlflow(
-        self, params, metrics, tags, gate_result,
-        report_html_path, checkpoint_path,
+        self,
+        params,
+        metrics,
+        tags,
+        gate_result,
+        report_html_path,
+        checkpoint_path,
     ) -> str:
         import mlflow
 
@@ -201,8 +205,8 @@ class MLflowModelLogger:
             # Gate report as JSON artifact
             import json as _json
             import tempfile
-            with tempfile.NamedTemporaryFile("w", suffix=".json",
-                                             delete=False) as f:
+
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
                 _json.dump(gate_result, f, indent=2, default=str)
                 f.flush()
                 mlflow.log_artifact(f.name, artifact_path="promotion_gate")
@@ -216,36 +220,45 @@ class MLflowModelLogger:
             run_id = run.info.run_id
             if self._verbose:
                 promoted = gate_result.get("promoted", False)
-                print(f"[MLflowLogger] Run {run_id[:8]} | "
-                      f"{'PROMOTED ✅' if promoted else 'LOGGED (not promoted) ❌'} | "
-                      f"git:{params['git_hash']}")
+                print(
+                    f"[MLflowLogger] Run {run_id[:8]} | "
+                    f"{'PROMOTED ✅' if promoted else 'LOGGED (not promoted) ❌'} | "
+                    f"git:{params['git_hash']}"
+                )
             return run_id
 
     # ── filesystem fallback ──────────────────────────────────────────────────
 
     def _log_to_file(
-        self, params, metrics, tags, gate_result, report_html_path,
+        self,
+        params,
+        metrics,
+        tags,
+        gate_result,
+        report_html_path,
     ) -> str:
         FALLBACK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ts  = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         out = {
             "timestamp": ts,
-            "params":    params,
-            "metrics":   metrics,
-            "tags":      tags,
-            "gate":      gate_result,
+            "params": params,
+            "metrics": metrics,
+            "tags": tags,
+            "gate": gate_result,
         }
         path = FALLBACK_LOG_DIR / f"promotion_{ts}.json"
         with open(path, "w") as f:
             json.dump(out, f, indent=2, default=str)
         if self._verbose:
             promoted = gate_result.get("promoted", False)
-            print(f"[MLflowLogger] Fallback log → {path} | "
-                  f"{'PROMOTED ✅' if promoted else 'REJECT ❌'} | "
-                  f"git:{params['git_hash']}")
+            print(
+                f"[MLflowLogger] Fallback log → {path} | "
+                f"{'PROMOTED ✅' if promoted else 'REJECT ❌'} | "
+                f"git:{params['git_hash']}"
+            )
         return str(path)
 
-    def patch_html_report(self, html_path: str, git_hash: str = None) -> str:
+    def patch_html_report(self, html_path: str, git_hash: str | None = None) -> str:
         """
         Inject the git hash into an existing HTML walk-forward report.
         Returns the (modified) HTML path.
@@ -267,11 +280,17 @@ class MLflowModelLogger:
 
 if __name__ == "__main__":
     from validation.promotion_gate import PromotionGate
+
     gate = PromotionGate()
     result = gate.evaluate(
-        sharpe=1.8, profit_factor=1.6, max_drawdown=0.12, n_trades=700,
+        sharpe=1.8,
+        profit_factor=1.6,
+        max_drawdown=0.12,
+        n_trades=700,
         regime_pnl={"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
-        gross_pnl=10_000.0, transaction_costs=1_500.0, n_obs=700,
+        gross_pnl=10_000.0,
+        transaction_costs=1_500.0,
+        n_obs=700,
     )
 
     logger = MLflowModelLogger()

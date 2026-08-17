@@ -106,10 +106,7 @@ class TestDataPipelineSmoke:
             ticks.with_row_index("_row")
             .with_columns(
                 [
-                    pl.when(pl.col("_row") == 100)
-                    .then(pl.col(col) + 0.5)
-                    .otherwise(pl.col(col))
-                    .alias(col)
+                    pl.when(pl.col("_row") == 100).then(pl.col(col) + 0.5).otherwise(pl.col(col)).alias(col)
                     for col in ("mid", "bid", "ask")
                 ]
             )

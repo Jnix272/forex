@@ -14,7 +14,6 @@ The fix:
 
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 
@@ -43,9 +42,7 @@ def test_warn_called_before_clip():
         fake_clip(None, 1.0)
 
     optimizer_step_body()
-    assert calls == ["warn", "clip"], (
-        f"Expected warn BEFORE clip, got {calls}"
-    )
+    assert calls == ["warn", "clip"], f"Expected warn BEFORE clip, got {calls}"
 
 
 def test_post_clip_norm_is_bounded_by_grad_clip():
@@ -67,7 +64,7 @@ def test_post_clip_norm_is_bounded_by_grad_clip():
     for p in model.parameters():
         if p.grad is not None:
             pre_norm += p.grad.detach().data.norm(2).item() ** 2
-    pre_norm = pre_norm ** 0.5
+    pre_norm = pre_norm**0.5
 
     nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
@@ -76,7 +73,7 @@ def test_post_clip_norm_is_bounded_by_grad_clip():
     for p in model.parameters():
         if p.grad is not None:
             post_norm += p.grad.detach().data.norm(2).item() ** 2
-    post_norm = post_norm ** 0.5
+    post_norm = post_norm**0.5
 
     assert pre_norm > 1.0, "Pre-clip norm should be large"
     assert post_norm <= 1.0 + 1e-6, "Post-clip norm should be ≤ grad_clip"
@@ -86,9 +83,9 @@ def test_post_clip_norm_is_bounded_by_grad_clip():
 def test_warn_threshold_50():
     """The threshold for warning is 50.0. Norms > 50 should warn."""
     threshold = 50.0
-    assert 100.0 > threshold
-    assert 49.9 <= threshold
-    assert 50.0 == threshold
+    assert threshold < 100.0
+    assert threshold >= 49.9
+    assert threshold == 50.0
 
 
 def test_fallback_to_stderr(capfd):
@@ -119,6 +116,7 @@ def test_grad_norm_event_structure():
 
 def test_maybe_warn_grad_norm_signature_accepts_epoch():
     """Verify _maybe_warn_grad_norm accepts an optional epoch parameter."""
+
     # We don't import from supervised_loop directly (torch heavy); we just
     # verify the function signature is compatible via a mock.
     def _maybe_warn_grad_norm(model, batch_idx: int, epoch=None):
@@ -127,7 +125,7 @@ def test_maybe_warn_grad_norm_signature_accepts_epoch():
     # Should accept (model, batch_idx, epoch=...)
     result = _maybe_warn_grad_norm(None, 100, epoch=0)
     assert result is None
-    # Should also accept (model, batch_idx) — epoch defaults
+    # Should also accept (model, batch_idx) - epoch defaults
     result = _maybe_warn_grad_norm(None, 100)
     assert result is None
 
@@ -141,7 +139,7 @@ def test_on_grad_norm_method_exists():
 
     # Method should exist
     assert hasattr(TrainingLogger, "on_grad_norm")
-    assert callable(getattr(TrainingLogger, "on_grad_norm"))
+    assert callable(TrainingLogger.on_grad_norm)
 
 
 if __name__ == "__main__":

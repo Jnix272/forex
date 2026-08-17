@@ -1,6 +1,7 @@
 """
 Tests for meta-labeling & Bayesian barrier search (Improvement #6)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -19,6 +20,7 @@ from labeling.triple_barrier_meta import (
 # Meta-Labeling
 # ---------------------------------------------------------------------------
 
+
 def test_meta_labeler_basic():
     """Test basic meta-labeler fit and predict."""
     rng = np.random.default_rng(0)
@@ -26,9 +28,9 @@ def test_meta_labeler_basic():
 
     # Primary model: predicts long/short/hold
     primary = np.zeros(n)
-    primary[:400] = 1   # long
+    primary[:400] = 1  # long
     primary[400:800] = -1  # short
-    primary[800:] = 0   # hold
+    primary[800:] = 0  # hold
 
     # Labels: TBM outcomes
     labels = np.zeros(n)
@@ -41,10 +43,12 @@ def test_meta_labeler_basic():
     # Holds are 0
 
     # Features for meta-model
-    features = pd.DataFrame({
-        "feat1": rng.normal(size=n),
-        "feat2": rng.normal(size=n),
-    })
+    features = pd.DataFrame(
+        {
+            "feat1": rng.normal(size=n),
+            "feat2": rng.normal(size=n),
+        }
+    )
 
     config = MetaLabelConfig(
         meta_features=["feat1", "feat2"],
@@ -104,16 +108,19 @@ def test_meta_labeler_without_extra_features():
 # Barrier Parameter Evaluation
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_barrier_params():
     """Quick evaluation of barrier parameters."""
     rng = np.random.default_rng(2)
     n = 500
     close = 100 + np.cumsum(rng.normal(0, 0.5, n))
 
-    bars = pd.DataFrame({
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="1h"),
-        "close": close,
-    })
+    bars = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": close,
+        }
+    )
     bars.set_index("timestamp", inplace=True)
 
     features = pd.DataFrame({"atr_6": np.full(n, 0.5)}, index=bars.index)
@@ -122,8 +129,11 @@ def test_evaluate_barrier_params():
         return np.ones(len(bars))  # always long
 
     metrics = evaluate_barrier_params(
-        bars, features,
-        profit_mult=1.5, stop_mult=1.0, vertical_bars=10,
+        bars,
+        features,
+        profit_mult=1.5,
+        stop_mult=1.0,
+        vertical_bars=10,
         primary_pred_fn=dummy_pred,
     )
 
@@ -136,6 +146,7 @@ def test_evaluate_barrier_params():
 # ---------------------------------------------------------------------------
 # Bayesian Barrier Optimizer (requires optuna)
 # ---------------------------------------------------------------------------
+
 
 def test_barrier_search_space():
     space = BarrierSearchSpace(
@@ -163,21 +174,24 @@ def test_barrier_search_config():
 # Integration test (mocked primary model)
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_barrier_params_multiple():
     """Test multiple parameter evaluations."""
     rng = np.random.default_rng(3)
     n = 1000
     close = 100 + np.cumsum(rng.normal(0, 0.3, n))
 
-    bars = pd.DataFrame({
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="30min"),
-        "close": close,
-        "high": close * 1.001,
-        "low": close * 0.999,
-    })
+    bars = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=n, freq="30min"),
+            "close": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+        }
+    )
     bars.set_index("timestamp", inplace=True)
 
-    features = pd.DataFrame({"atr_6": np.full(n, 0.3)}, index=bars.index)
+    pd.DataFrame({"atr_6": np.full(n, 0.3)}, index=bars.index)
 
     def dummy_pred(bars, feats):
         return np.random.choice([-1, 1], len(bars))

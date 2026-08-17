@@ -28,14 +28,22 @@ def _pair_currency_expr() -> pl.Expr:
     cur = pl.col("currency").fill_null("").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
     h = _headline()
     return (
-        pl.when(cur == "EURUSD").then(pl.lit("EUR,USD"))
-        .when(cur == "USDJPY").then(pl.lit("USD,JPY"))
-        .when(cur == "GBPUSD").then(pl.lit("GBP,USD"))
-        .when(cur.is_in(["EUR", "USD", "JPY", "GBP", "GLOBAL", "ALL"])).then(cur)
-        .when(h.str.contains("european central bank|\\becb\\b|\\beuro\\b|eur/usd|eurusd")).then(pl.lit("EUR,USD"))
-        .when(h.str.contains("bank of japan|\\bboj\\b|\\byen\\b|usd/jpy|usdjpy")).then(pl.lit("USD,JPY"))
-        .when(h.str.contains("bank of england|\\bboe\\b|sterling|\\bpound\\b|gbp/usd|gbpusd")).then(pl.lit("GBP,USD"))
-        .when(h.str.contains("federal reserve|\\bfomc\\b|nonfarm payrolls|\\bnfp\\b|\\bcpi\\b|inflation")).then(pl.lit("USD"))
+        pl.when(cur == "EURUSD")
+        .then(pl.lit("EUR,USD"))
+        .when(cur == "USDJPY")
+        .then(pl.lit("USD,JPY"))
+        .when(cur == "GBPUSD")
+        .then(pl.lit("GBP,USD"))
+        .when(cur.is_in(["EUR", "USD", "JPY", "GBP", "GLOBAL", "ALL"]))
+        .then(cur)
+        .when(h.str.contains("european central bank|\\becb\\b|\\beuro\\b|eur/usd|eurusd"))
+        .then(pl.lit("EUR,USD"))
+        .when(h.str.contains("bank of japan|\\bboj\\b|\\byen\\b|usd/jpy|usdjpy"))
+        .then(pl.lit("USD,JPY"))
+        .when(h.str.contains("bank of england|\\bboe\\b|sterling|\\bpound\\b|gbp/usd|gbpusd"))
+        .then(pl.lit("GBP,USD"))
+        .when(h.str.contains("federal reserve|\\bfomc\\b|nonfarm payrolls|\\bnfp\\b|\\bcpi\\b|inflation"))
+        .then(pl.lit("USD"))
         .otherwise(pl.lit("GLOBAL"))
         .alias("currency")
     )
@@ -70,7 +78,7 @@ def _category_expr() -> pl.Expr:
 
 
 def normalize_news(input_path: Path, output_path: Path) -> None:
-    if input_path.suffix == '.parquet':
+    if input_path.suffix == ".parquet":
         df = pl.read_parquet(input_path)
     else:
         df = pl.read_csv(input_path, infer_schema_length=10_000)
@@ -112,7 +120,7 @@ def normalize_news(input_path: Path, output_path: Path) -> None:
         .sort("timestamp_utc")
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.suffix == '.parquet':
+    if output_path.suffix == ".parquet":
         out.write_parquet(output_path)
     else:
         out.write_csv(output_path)
@@ -123,7 +131,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Normalize data/raw/news/historical_news_combined.parquet")
     parser.add_argument("--input", default="data/raw/news/historical_news_combined.parquet")
     parser.add_argument("--output", default="data/raw/news/historical_news.normalized.csv")
-    parser.add_argument("--replace", action="store_true", help="Replace input with output and keep a .raw_bq_backup.csv copy")
+    parser.add_argument(
+        "--replace", action="store_true", help="Replace input with output and keep a .raw_bq_backup.csv copy"
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)

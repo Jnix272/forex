@@ -1,7 +1,7 @@
 """
 tests/test_regime_detection.py
 ==============================
-Tests for features/regime_detection.py — true HMM regime detection,
+Tests for features/regime_detection.py - true HMM regime detection,
 Hurst exponents (R/S and DFA), and Higuchi fractal dimension.
 """
 
@@ -27,6 +27,7 @@ from features.regime_detection import (
 # ─────────────────────────────────────────────────────────────────────────────
 # Hurst exponents
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_hurst_rs_random_walk_approx_half():
     rng = np.random.default_rng(1)
@@ -64,6 +65,7 @@ def test_hurst_handles_nan_and_inf():
 # Fractal dimension (Higuchi)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_fractal_dimension_white_noise_high():
     rng = np.random.default_rng(4)
     x = rng.normal(0, 1, 5000)
@@ -92,12 +94,15 @@ def test_fractal_dimension_short_series():
 # HMM regime detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_regime_hmm_fit_and_states():
     rng = np.random.default_rng(6)
-    features = np.column_stack([
-        np.concatenate([rng.normal(0.0, 0.1, 500), rng.normal(0.0, 2.0, 500)]),
-        np.concatenate([rng.normal(0.0, 1.0, 500), rng.normal(0.0, 1.0, 500)]),
-    ])
+    features = np.column_stack(
+        [
+            np.concatenate([rng.normal(0.0, 0.1, 500), rng.normal(0.0, 2.0, 500)]),
+            np.concatenate([rng.normal(0.0, 1.0, 500), rng.normal(0.0, 1.0, 500)]),
+        ]
+    )
     model = fit_regime_hmm(features, n_states=2)
     assert len(model.states) == 1000
     assert model.state_probs.shape == (1000, 2)
@@ -126,43 +131,51 @@ def test_regime_hmm_predict_before_fit_raises():
 # Polars builders
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _make_bars(n: int = 3000) -> pl.DataFrame:
     rng = np.random.default_rng(7)
-    ret = np.concatenate([
-        rng.normal(0.0003, 0.0005, n // 3),
-        rng.normal(0.0, 0.002, n // 3),
-        rng.normal(-0.0003, 0.0005, n - 2 * (n // 3)),
-    ])
+    ret = np.concatenate(
+        [
+            rng.normal(0.0003, 0.0005, n // 3),
+            rng.normal(0.0, 0.002, n // 3),
+            rng.normal(-0.0003, 0.0005, n - 2 * (n // 3)),
+        ]
+    )
     close = 100 * np.exp(np.cumsum(ret))
     start = datetime(2024, 1, 1, tzinfo=UTC)
     ts = pl.datetime_range(
-        start=start, end=start + timedelta(hours=3 * n), interval="90m",
-        time_zone="UTC", eager=True,
+        start=start,
+        end=start + timedelta(hours=3 * n),
+        interval="90m",
+        time_zone="UTC",
+        eager=True,
     ).head(n)
-    return pl.DataFrame({
-        "timestamp_utc": ts,
-        "open": close, "high": close * 1.001, "low": close * 0.999,
-        "close": close, "volume": rng.integers(10, 100, n),
-    })
+    return pl.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "volume": rng.integers(10, 100, n),
+        }
+    )
 
 
 def test_detect_regimes_polars_output_columns():
     bars = _make_bars()
-    out = detect_regimes_polars(bars, n_states=3, window=60,
-                                hurst_window=120, fractal_window=60)
+    out = detect_regimes_polars(bars, n_states=3, window=60, hurst_window=120, fractal_window=60)
     assert len(out) == len(bars)
     for s in range(3):
         assert f"vol_regime_state_{s}_prob" in out.columns
-    assert {"hurst_rs", "hurst_dfa", "fractal_dim", "regime_label",
-            "regime_class"} <= set(out.columns)
+    assert {"hurst_rs", "hurst_dfa", "fractal_dim", "regime_label", "regime_class"} <= set(out.columns)
     assert out["regime_class"].max() <= 2
     assert set(out["regime_label"].unique().to_list()) <= {-1.0, 0.0, 1.0}
 
 
 def test_detect_regimes_polars_neutral_baseline_at_start():
     bars = _make_bars()
-    out = detect_regimes_polars(bars, n_states=3, window=60,
-                                hurst_window=120, fractal_window=60)
+    out = detect_regimes_polars(bars, n_states=3, window=60, hurst_window=120, fractal_window=60)
     # First row: no lookback yet -> Hurst baseline 0.5, fractal baseline 1.5.
     assert out["hurst_dfa"][0] == 0.5
     assert out["fractal_dim"][0] == 1.5
@@ -170,14 +183,18 @@ def test_detect_regimes_polars_neutral_baseline_at_start():
 
 def test_detect_regimes_polars_step_keeps_length():
     bars = _make_bars()
-    out = detect_regimes_polars(bars, n_states=3, window=60,
-                                hurst_window=120, fractal_window=60, step=5)
+    out = detect_regimes_polars(bars, n_states=3, window=60, hurst_window=120, fractal_window=60, step=5)
     assert len(out) == len(bars)
     assert out["hurst_dfa"].is_null().sum() == 0
     assert set(out.columns) == {
-        "vol_regime_state_0_prob", "vol_regime_state_1_prob",
-        "vol_regime_state_2_prob", "hurst_rs", "hurst_dfa",
-        "fractal_dim", "regime_label", "regime_class",
+        "vol_regime_state_0_prob",
+        "vol_regime_state_1_prob",
+        "vol_regime_state_2_prob",
+        "hurst_rs",
+        "hurst_dfa",
+        "fractal_dim",
+        "regime_label",
+        "regime_class",
     }
 
 

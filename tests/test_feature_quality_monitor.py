@@ -2,6 +2,7 @@
 Tests for feature quality monitor (Improvement #4):
 PSI, IV/WOE, stability index, leakage detection.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -20,6 +21,7 @@ from features.feature_quality_monitor import (
 # ---------------------------------------------------------------------------
 # PSI
 # ---------------------------------------------------------------------------
+
 
 def test_psi_identical_distributions_low():
     rng = np.random.default_rng(0)
@@ -44,6 +46,7 @@ def test_psi_handles_empty_and_constant():
 # ---------------------------------------------------------------------------
 # IV / WOE
 # ---------------------------------------------------------------------------
+
 
 def test_iv_strong_vs_noise():
     rng = np.random.default_rng(2)
@@ -76,6 +79,7 @@ def test_iv_degenerate_target_zero():
 # ---------------------------------------------------------------------------
 # Stability
 # ---------------------------------------------------------------------------
+
 
 def test_stability_static_series_low():
     rng = np.random.default_rng(5)
@@ -110,6 +114,7 @@ def test_ks_statistic():
 # Leakage
 # ---------------------------------------------------------------------------
 
+
 def test_leakage_scan_flags_target_derived_feature():
     rng = np.random.default_rng(9)
     f = rng.normal(size=2000)
@@ -132,18 +137,21 @@ def test_leakage_scan_no_features():
 # Master monitor
 # ---------------------------------------------------------------------------
 
+
 def _panel(n=2000, seed=0):
     rng = np.random.default_rng(seed)
     vals = rng.normal(size=n).tolist()
     for i in range(0, n, 10):
         vals[i] = None
-    return pl.DataFrame({
-        "clean": rng.normal(0, 1, n),
-        "drift": np.concatenate([rng.normal(0, 1, n // 3), rng.normal(3, 1, n - n // 3)]),
-        "const": np.ones(n),
-        "nulls": vals,
-        "timestamp_utc": np.arange(n),
-    })
+    return pl.DataFrame(
+        {
+            "clean": rng.normal(0, 1, n),
+            "drift": np.concatenate([rng.normal(0, 1, n // 3), rng.normal(3, 1, n - n // 3)]),
+            "const": np.ones(n),
+            "nulls": vals,
+            "timestamp_utc": np.arange(n),
+        }
+    )
 
 
 def test_quality_monitor_flags_issues():
@@ -164,9 +172,8 @@ def test_quality_monitor_with_target_leakage():
     feat = rng.normal(size=2000)
     t = (feat > 0).astype(float)
     df = pl.DataFrame({"feature_a": feat, "noise": rng.normal(size=2000)})
-    rep = feature_quality_monitor(df, target_col=None, stability_window=400)
-    rep2 = feature_quality_monitor(df.with_columns(pl.Series("target", t)),
-                                   target_col="target", stability_window=400)
+    feature_quality_monitor(df, target_col=None, stability_window=400)
+    rep2 = feature_quality_monitor(df.with_columns(pl.Series("target", t)), target_col="target", stability_window=400)
     lf = rep2.filter(pl.col("feature") == "feature_a")
     assert lf["leak_flag"].item()
 
@@ -183,20 +190,23 @@ def test_quality_monitor_with_reference_df():
 # filter_features gate
 # ---------------------------------------------------------------------------
 
+
 def test_filter_features_drops_bad_keeps_good():
     from features.feature_quality_monitor import filter_features
+
     rng = np.random.default_rng(3)
     sig = rng.normal(0, 1, 2000)
     t = (sig > 0).astype(float)
-    df = pl.DataFrame({
-        "good_feat": rng.normal(0, 1, 2000),          # genuine noise
-        "leaky_feat": sig + rng.normal(0, 1e-4, 2000),  # near-perfect for t
-        "const_feat": np.ones(2000),
-        "drift_feat": np.concatenate([rng.normal(0, 1, 700), rng.normal(3, 1, 1300)]),
-        "target": t,
-    })
-    kept, report, dropped = filter_features(df, target_col="target",
-                                            stability_window=400, stability_step=100)
+    df = pl.DataFrame(
+        {
+            "good_feat": rng.normal(0, 1, 2000),  # genuine noise
+            "leaky_feat": sig + rng.normal(0, 1e-4, 2000),  # near-perfect for t
+            "const_feat": np.ones(2000),
+            "drift_feat": np.concatenate([rng.normal(0, 1, 700), rng.normal(3, 1, 1300)]),
+            "target": t,
+        }
+    )
+    kept, _report, dropped = filter_features(df, target_col="target", stability_window=400, stability_step=100)
     assert "target" in kept.columns
     assert "const_feat" in dropped
     assert "drift_feat" in dropped

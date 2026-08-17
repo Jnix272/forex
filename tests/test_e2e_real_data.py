@@ -25,10 +25,7 @@ def _check_real_data() -> bool:
     raw_root = _ROOT / "data" / "raw" / "dukascopy"
     if not raw_root.exists():
         return False
-    for pair_dir in raw_root.iterdir():
-        if pair_dir.is_dir() and any(pair_dir.rglob("*.parquet")):
-            return True
-    return False
+    return any(pair_dir.is_dir() and any(pair_dir.rglob("*.parquet")) for pair_dir in raw_root.iterdir())
 
 
 def _discover_trading_window(min_files: int = 3) -> tuple[str, str] | None:
@@ -109,7 +106,9 @@ def setup_logging():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _check_real_data(), reason="No real Dukascopy data downloaded. Run scripts/download_data.py first.")
+@pytest.mark.skipif(
+    not _check_real_data(), reason="No real Dukascopy data downloaded. Run scripts/download_data.py first."
+)
 def test_full_pipeline_with_real_data(setup_logging, request):
     """
     Run train_gpu.py via subprocess to ensure the actual training CLI
@@ -127,21 +126,29 @@ def test_full_pipeline_with_real_data(setup_logging, request):
     python_exe = sys.executable
     try:
         from scripts._python_env import python_exe as _resolve
+
         python_exe = _resolve()
     except Exception:
         pass
 
     cmd = [
-        python_exe, "training/train_gpu.py",
-        "--data-source", "dukascopy",
-        "--model", "haelt",
-        "--epochs", "2",
-        "--batch-size", "128",
+        python_exe,
+        "training/train_gpu.py",
+        "--data-source",
+        "dukascopy",
+        "--model",
+        "haelt",
+        "--epochs",
+        "2",
+        "--batch-size",
+        "128",
         "--no-wandb",
         "--force-rebuild",
         "--quick-mode",
-        "--data-start", data_start,
-        "--data-end", data_end,
+        "--data-start",
+        data_start,
+        "--data-end",
+        data_end,
     ]
 
     if request.config.getoption("--quick-mode", default=False):
@@ -181,8 +188,7 @@ def test_full_pipeline_with_real_data(setup_logging, request):
     output_l = output_str.lower()
 
     if exit_code != 0 and any(
-        marker in output_l
-        for marker in ("no bars", "empty", "0 rows", "insufficient data", "no data")
+        marker in output_l for marker in ("no bars", "empty", "0 rows", "insufficient data", "no data")
     ):
         pytest.skip(
             f"Discovered window {data_start}->{data_end} had insufficient Dukascopy bars "
@@ -190,10 +196,8 @@ def test_full_pipeline_with_real_data(setup_logging, request):
         )
 
     assert exit_code == 0, f"train_gpu.py failed with exit code {exit_code}. See logs at {_LOG_FILE} for details."
-    assert (
-        "training complete" in output_l
-        or "evaluation" in output_l
-        or "model=" in output_l
-    ), f"Training finished but success markers missing. See {_LOG_FILE}."
+    assert "training complete" in output_l or "evaluation" in output_l or "model=" in output_l, (
+        f"Training finished but success markers missing. See {_LOG_FILE}."
+    )
 
     logger.info("End-to-end real data test passed successfully!")

@@ -1,4 +1,5 @@
 """Regression tests for DS-002 feature warmup and news PIT joins."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -31,11 +32,15 @@ def test_join_asof_available_delays_same_bar_sentiment():
         .with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
     )
 
-    # Sentiment published at 12:00 — with 1m delay becomes available at 12:01.
-    sent = pl.from_pandas(pd.DataFrame({
-        "timestamp_utc": [pd.Timestamp("2024-01-01 12:00:00", tz="UTC")],
-        "sentiment": [0.9],
-    })).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
+    # Sentiment published at 12:00 - with 1m delay becomes available at 12:01.
+    sent = pl.from_pandas(
+        pd.DataFrame(
+            {
+                "timestamp_utc": [pd.Timestamp("2024-01-01 12:00:00", tz="UTC")],
+                "sentiment": [0.9],
+            }
+        )
+    ).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
 
     joined = _join_asof_available(bars, sent)
     vals = joined["sentiment"].to_list()
@@ -53,16 +58,18 @@ def test_news_ok_kill_zone_is_post_release_only():
         interval="1m",
         eager=True,
     )
-    bars = pl.DataFrame({
-        "timestamp_utc": ts,
-        "open": [1.0] * len(ts),
-        "high": [1.01] * len(ts),
-        "low": [0.99] * len(ts),
-        "close": [1.0] * len(ts),
-        "volume": [100.0] * len(ts),
-        "bid_close": [0.999] * len(ts),
-        "ask_close": [1.001] * len(ts),
-    }).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
+    bars = pl.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "open": [1.0] * len(ts),
+            "high": [1.01] * len(ts),
+            "low": [0.99] * len(ts),
+            "close": [1.0] * len(ts),
+            "volume": [100.0] * len(ts),
+            "bid_close": [0.999] * len(ts),
+            "ask_close": [1.001] * len(ts),
+        }
+    ).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
 
     ev = pd.Timestamp("2024-01-01 12:05:00", tz="UTC")
     fe = FeatureEngineer(news_buf=2)

@@ -1,5 +1,5 @@
 """
-Tests for Phase 3 — Retrain Orchestrator: ModelRegistry, promotion gates,
+Tests for Phase 3 - Retrain Orchestrator: ModelRegistry, promotion gates,
 trigger evaluation, and orchestrator lifecycle.
 """
 
@@ -23,6 +23,7 @@ from retraining.orchestrator import (
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures
 # ════════════════════════════════════════════════════════════════════════════
+
 
 @pytest.fixture
 def tmp_registry(tmp_path) -> ModelRegistry:
@@ -51,6 +52,7 @@ def seeded_registry(tmp_path) -> ModelRegistry:
 # ════════════════════════════════════════════════════════════════════════════
 # ModelRegistry
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestModelRegistry:
     def test_register_creates_record(self, tmp_registry):
@@ -158,62 +160,71 @@ class TestModelRegistry:
 # Promotion Gates
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestPromotionGates:
     def test_passes_good_metrics(self):
-        passed, reasons = check_promotion_gates({
-            "val_sharpe": 2.0,  # Higher to pass PSR
-            "profit_factor": 1.5,
-            "max_drawdown": 0.08,
-            "val_loss": 0.5,
-            "n_trades": 1000,
-            "gross_pnl": 5000.0,
-            "transaction_costs": 800.0,
-            "n_backtest_trials": 1,
-            "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
-            "n_obs": 1000,
-        })
+        passed, reasons = check_promotion_gates(
+            {
+                "val_sharpe": 2.0,  # Higher to pass PSR
+                "profit_factor": 1.5,
+                "max_drawdown": 0.08,
+                "val_loss": 0.5,
+                "n_trades": 1000,
+                "gross_pnl": 5000.0,
+                "transaction_costs": 800.0,
+                "n_backtest_trials": 1,
+                "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
+                "n_obs": 1000,
+            }
+        )
         print(f"passed={passed}, reasons={reasons}")
         assert passed
         # reasons contains all gates with status, check that all passed
         assert all("✓" in r for r in reasons)
 
     def test_fails_low_sharpe(self):
-        passed, reasons = check_promotion_gates({
-            "val_sharpe": 0.3,
-            "profit_factor": 1.5,
-            "max_drawdown": 0.08,
-            "n_trades": 1000,
-            "gross_pnl": 5000.0,
-            "transaction_costs": 800.0,
-            "n_backtest_trials": 1,
-            "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
-            "n_obs": 1000,
-        })
+        passed, reasons = check_promotion_gates(
+            {
+                "val_sharpe": 0.3,
+                "profit_factor": 1.5,
+                "max_drawdown": 0.08,
+                "n_trades": 1000,
+                "gross_pnl": 5000.0,
+                "transaction_costs": 800.0,
+                "n_backtest_trials": 1,
+                "regime_pnl": {"trending": 0.5, "neutral": 0.3, "mean_rev": 0.2},
+                "n_obs": 1000,
+            }
+        )
         print(f"passed={passed}, reasons={reasons}")
         assert not passed
         # Check that at least one sharpe-related gate failed
         assert any("sharpe" in r.lower() and "✗" in r for r in reasons)
 
     def test_fails_high_drawdown(self):
-        passed, reasons = check_promotion_gates({
-            "val_sharpe": 1.0,
-            "profit_factor": 1.5,
-            "max_drawdown": 0.25,
-        })
+        passed, reasons = check_promotion_gates(
+            {
+                "val_sharpe": 1.0,
+                "profit_factor": 1.5,
+                "max_drawdown": 0.25,
+            }
+        )
         assert not passed
         assert any("drawdown" in r for r in reasons)
 
     def test_fails_multiple_gates(self):
-        passed, reasons = check_promotion_gates({
-            "val_sharpe": 0.2,
-            "profit_factor": 0.8,
-            "max_drawdown": 0.30,
-        })
+        passed, reasons = check_promotion_gates(
+            {
+                "val_sharpe": 0.2,
+                "profit_factor": 0.8,
+                "max_drawdown": 0.30,
+            }
+        )
         assert not passed
         assert len(reasons) >= 2
 
     def test_empty_metrics_fails(self):
-        passed, reasons = check_promotion_gates({})
+        passed, _reasons = check_promotion_gates({})
         assert not passed
 
 
@@ -221,16 +232,15 @@ class TestPromotionGates:
 # RetrainOrchestrator
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestRetrainOrchestrator:
     def _orch(self, tmp_store, tmp_path):
         """Helper: create orchestrator with isolated model root."""
-        return RetrainOrchestrator(
-            tmp_store, config=RetrainConfig(model_root=tmp_path / "models")
-        )
+        return RetrainOrchestrator(tmp_store, config=RetrainConfig(model_root=tmp_path / "models"))
 
     def test_should_retrain_initial(self, tmp_store, tmp_path):
         orch = self._orch(tmp_store, tmp_path)
-        should, reason, ctx = orch.should_retrain("haelt")
+        should, reason, _ctx = orch.should_retrain("haelt")
         assert should
         assert reason == RetrainReason.INITIAL.value
 
@@ -238,7 +248,7 @@ class TestRetrainOrchestrator:
         orch = self._orch(tmp_store, tmp_path)
         orch.registry.register("haelt", "initial", "/tmp/ckpt")
         orch.registry.update_status("haelt", 1, ModelStatus.PROMOTED)
-        should, reason, ctx = orch.should_retrain("haelt", force=True)
+        should, reason, _ctx = orch.should_retrain("haelt", force=True)
         assert should
         assert reason == RetrainReason.MANUAL.value
 
@@ -247,7 +257,7 @@ class TestRetrainOrchestrator:
         orch.registry.register("haelt", "initial", "/tmp/ckpt")
         orch.registry.update_status("haelt", 1, ModelStatus.PROMOTED)
         orch.registry.get_version("haelt", 1).promoted_at = datetime.now(UTC).isoformat()
-        should, reason, ctx = orch.should_retrain("haelt")
+        should, _reason, _ctx = orch.should_retrain("haelt")
         assert not should
 
     def test_retrain_dry_run(self, tmp_store, tmp_path):
@@ -327,11 +337,14 @@ class TestRetrainOrchestrator:
 # Drift + Retrain Integration
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestDriftRetrainIntegration:
     def test_auto_retrain_on_drift_no_data(self, tmp_store, tmp_path):
         from retraining.orchestrator import auto_retrain_on_drift
+
         result = auto_retrain_on_drift(
-            tmp_store, config=RetrainConfig(model_root=tmp_path / "drift_retrain"),
+            tmp_store,
+            config=RetrainConfig(model_root=tmp_path / "drift_retrain"),
             dry_run=True,
         )
         assert result["dry_run"]

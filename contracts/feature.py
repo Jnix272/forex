@@ -4,23 +4,24 @@ Feature Data Contract
 Contract for engineered feature data validation.
 """
 
-from contracts.base import DataContract, Stage, ContractVersion, ContractMetadata
-import polars as pl
-from datetime import datetime
 from typing import ClassVar
+
+import polars as pl
+
 from config.feature_mask import FEATURE_MASK
+from contracts.base import ContractMetadata, ContractVersion, DataContract, Stage
 
 
 class FeatureContract(DataContract):
     contract_name = "feature"
     contract_version = ContractVersion.V1_1
     stage = Stage.FEATURE_ENGINEERING
-    
+
     # Core required columns (always present)
     required_columns = {
         "timestamp_utc": pl.Datetime("ns", "UTC"),
     }
-    
+
     # Market data columns (should be present from bars)
     market_columns: ClassVar[dict[str, pl.DataType]] = {
         "open": pl.Float64,
@@ -33,14 +34,20 @@ class FeatureContract(DataContract):
         "ask_close": pl.Float64,
         "pair": pl.String,
     }
-    
+
     # Feature columns from FEATURE_MASK (enabled features)
     @classmethod
     def _get_feature_columns(cls) -> dict[str, pl.DataType]:
         """Get feature columns from FEATURE_MASK"""
-        # This will be populated at runtime from the actual FEATURE_MASK
-        return {}
-    
+        try:
+            from config.feature_mask import FEATURE_MASK, enabled_feature_names
+            enabled = enabled_feature_names(FEATURE_MASK)
+            # All features are float32 in the training matrix
+            return dict.fromkeys(enabled, pl.Float32)
+        except Exception:
+            # Fallback if FEATURE_MASK not available
+            return {}
+
     # Combined optional columns
     optional_columns = {
         **market_columns,
@@ -80,7 +87,7 @@ class FeatureContract(DataContract):
         "max_position_lots": pl.Float32,
         "risk_per_lot": pl.Float32,
     }
-    
+
     column_constraints = {
         "timestamp_utc": {"not_null": True},
         "close": {"not_null": True, "min": 0.0},
@@ -111,47 +118,62 @@ class FeatureContract(DataContract):
         "max_position_lots": {"min": 0.0},
         "risk_per_lot": {"min": 0.0},
     }
-    
+
     invariants = [
         "timestamp_utc IS NOT NULL",
         # Regime probabilities - at least one not null
         "vol_regime_state_0_prob IS NOT NULL OR vol_regime_state_1_prob IS NOT NULL OR vol_regime_state_2_prob IS NOT NULL",
     ]
-    
+
     # Features that must not have lookahead bias
     no_lookahead_features: ClassVar[set[str]] = {
-        "ret_5", "ret_20", "ret_60",
-        "rsi_14", "macd", "macd_sig", "macd_hist",
-        "bb_pct", "bb_width",
-        "atr_6", "atr_20", "atr_60",
-        "vol_6", "vol_20", "vol_60",
-        "ofi", "obi_proxy", "vpin",
-        "stoch_k", "stoch_d", "williams_r", "cci",
+        "ret_5",
+        "ret_20",
+        "ret_60",
+        "rsi_14",
+        "macd",
+        "macd_sig",
+        "macd_hist",
+        "bb_pct",
+        "bb_width",
+        "atr_6",
+        "atr_20",
+        "atr_60",
+        "vol_6",
+        "vol_20",
+        "vol_60",
+        "ofi",
+        "obi_proxy",
+        "vpin",
+        "stoch_k",
+        "stoch_d",
+        "williams_r",
+        "cci",
     }
-    
+
     allow_unknown_columns = True  # Allow dynamic feature columns
-    
+
     @classmethod
     def validate_frame(cls, df: pl.DataFrame, pair: str | None = None) -> tuple[pl.DataFrame, ContractMetadata]:
         errors = []
         warnings = []
-        
+
         errors.extend(cls._check_required_columns(df))
         errors.extend(cls._check_constraints(df, pair))
         errors.extend(cls._check_invariants(df))
-        
+
         # Check for NaN/inf in numeric columns
         numeric_cols = df.select(pl.col(pl.NUMERIC_DTYPES)).columns
         for col in numeric_cols:
             null_count = df[col].null_count()
             if null_count > 0:
                 warnings.append(f"Feature column '{col}' has {null_count} null values")
-            
+
             # Check for inf
             inf_count = df.select(pl.col(col).is_infinite().sum()).item()
             if inf_count > 0:
                 errors.append(f"Feature column '{col}' has {inf_count} infinite values")
-        
+
         # Check FEATURE_MASK compliance if available
         try:
             enabled_features = {k for k, v in FEATURE_MASK.items() if v}
@@ -161,10 +183,10 @@ class FeatureContract(DataContract):
                 warnings.append(f"FEATURE_MASK enabled features missing from build: {sorted(missing_enabled)[:10]}")
         except Exception:
             pass  # FEATURE_MASK not available
-        
+
         if errors:
             raise ValueError(f"FeatureContract validation failed for {pair}: {'; '.join(errors)}")
-        
+
         metadata = ContractMetadata(
             contract_version=str(cls.contract_version),
             stage=cls.stage,
@@ -177,10 +199,11 @@ class FeatureContract(DataContract):
             data_hash=cls._compute_data_hash(df),
             warnings=warnings,
         )
-        
+
         return df, metadata
 
 
 # Register the contract
-from contracts.base import ContractRegistry
+from contracts.base import ContractRegistry  # noqa: E402
+
 ContractRegistry.register(FeatureContract)

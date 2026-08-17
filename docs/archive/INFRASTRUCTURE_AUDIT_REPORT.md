@@ -102,7 +102,7 @@ calibration_report = {
     "ece": compute_ece(val_probs, val_labels),
     "brier_score": brier_score_loss(val_labels, val_probs),
     "calibration_set_rows": len(cal_dataset),
-    "timestamp": datetime.utcnow().isoformat()
+    "timestamp": datetime.utcnow().isoformat(),
 }
 with open(checkpoint_dir / "calibration_report.json", "w") as f:
     json.dump(calibration_report, f, indent=2)
@@ -159,6 +159,7 @@ from datetime import datetime, timezone
 
 log = structlog.get_logger()
 
+
 class ExecutionLogger:
     def __init__(self, log_dir: str = "logs/execution"):
         self.path = Path(log_dir)
@@ -166,16 +167,34 @@ class ExecutionLogger:
         self.audit_file = self.path / f"audit_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
 
     def log_signal(self, pair, direction, confidence, features_hash):
-        self._write({"event": "SIGNAL", "pair": pair, "direction": direction,
-                     "confidence": confidence, "features_hash": features_hash})
+        self._write(
+            {
+                "event": "SIGNAL",
+                "pair": pair,
+                "direction": direction,
+                "confidence": confidence,
+                "features_hash": features_hash,
+            }
+        )
 
     def log_order(self, order_id, pair, side, size, price, sl, tp):
-        self._write({"event": "ORDER_PLACED", "order_id": order_id, "pair": pair,
-                     "side": side, "size": size, "price": price, "sl": sl, "tp": tp})
+        self._write(
+            {
+                "event": "ORDER_PLACED",
+                "order_id": order_id,
+                "pair": pair,
+                "side": side,
+                "size": size,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+            }
+        )
 
     def log_fill(self, order_id, fill_price, slippage_pips):
-        self._write({"event": "ORDER_FILLED", "order_id": order_id,
-                     "fill_price": fill_price, "slippage_pips": slippage_pips})
+        self._write(
+            {"event": "ORDER_FILLED", "order_id": order_id, "fill_price": fill_price, "slippage_pips": slippage_pips}
+        )
 
     def log_rejection(self, order_id, reason):
         self._write({"event": "ORDER_REJECTED", "order_id": order_id, "reason": reason})
@@ -230,11 +249,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 
+
 @dataclass
 class ReadinessReport:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     feed_connected: bool = False
-    feed_latency_ms: float = float('inf')
+    feed_latency_ms: float = float("inf")
     broker_connected: bool = False
     positions_reconciled: bool = False
     risk_limits_loaded: bool = False
@@ -245,13 +265,20 @@ class ReadinessReport:
 
     @property
     def is_ready(self) -> bool:
-        return all([self.feed_connected, self.broker_connected,
-                    self.model_warmed_up, self.risk_limits_loaded,
-                    self.schema_matched])
+        return all(
+            [
+                self.feed_connected,
+                self.broker_connected,
+                self.model_warmed_up,
+                self.risk_limits_loaded,
+                self.schema_matched,
+            ]
+        )
 
     def save(self, path="logs/live_readiness_report.json"):
         with open(path, "w") as f:
             json.dump(self.__dict__, f, indent=2)
+
 
 def run_preflight(config) -> ReadinessReport:
     report = ReadinessReport()
@@ -284,11 +311,13 @@ Column schema is hashed but the actual data content is not. You can verify that 
 ```python
 import hashlib, polars as pl
 
+
 def fingerprint_dataset(df: pl.DataFrame) -> str:
     """Hash the timestamp index + shape to detect data substitution."""
     index_bytes = df["timestamp_utc"].cast(pl.Utf8).to_frame().write_csv().encode()
     shape_str = f"{df.shape[0]}x{df.shape[1]}".encode()
     return hashlib.sha256(index_bytes + shape_str).hexdigest()[:16]
+
 
 # Store in _manifest.json:
 manifest["dataset_fingerprint"] = fingerprint_dataset(df)
@@ -339,19 +368,19 @@ There is no database or store connecting live trade outcomes back to the trainin
 **Recommended Fix — Live Feedback Pipeline:**
 ```python
 # In execution_logger.py — add trade outcome logging
-def log_trade_close(self, order_id, entry_price, exit_price, pnl_pips,
-                    hit_sl: bool, slippage_pips: float):
+def log_trade_close(self, order_id, entry_price, exit_price, pnl_pips, hit_sl: bool, slippage_pips: float):
     record = {
         "event": "TRADE_CLOSED",
         "order_id": order_id,
         "pnl_pips": pnl_pips,
         "hit_sl": hit_sl,
         "slippage_pips": slippage_pips,
-        "is_hard_example": hit_sl or slippage_pips > 2.0
+        "is_hard_example": hit_sl or slippage_pips > 2.0,
     }
     self._write(record)
     if record["is_hard_example"]:
         self._flag_for_retraining(order_id)
+
 
 # In retraining/orchestrator.py — add live error ingestion
 def ingest_live_errors(self, audit_jsonl_path: str):

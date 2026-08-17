@@ -22,6 +22,7 @@ def test_atomic_copy_success(tmp_path):
     files = list(dst_dir.glob(".*.tmp"))
     assert len(files) == 0
 
+
 def test_promote_best_fold_flat_dir(tmp_path):
     """Test _promote_best_fold correctly selects the best fold and writes fold_selection.json."""
     model_name = "test_model"
@@ -51,6 +52,7 @@ def test_promote_best_fold_flat_dir(tmp_path):
     assert data["selected_fold"] == 1
     assert data["metric_value"] == 2.5
 
+
 def test_promote_best_fold_nested_dir(tmp_path):
     """Test that _promote_best_fold searches nested directories if flat ones don't exist."""
     model_name = "nested_model"
@@ -71,6 +73,7 @@ def test_promote_best_fold_nested_dir(tmp_path):
     assert promoted.exists()
     assert promoted.read_text() == "nested weights"
 
+
 def test_promote_best_fold_tie_breaker(tmp_path):
     """Test that tie breaker (val_loss) is used when sharpe is identical."""
     model_name = "tie_model"
@@ -80,10 +83,14 @@ def test_promote_best_fold_tie_breaker(tmp_path):
         ckpt.write_text(f"weights fold {fold}")
 
         cfg = tmp_path / f"{model_name}_fold{fold}_config.json"
-        cfg.write_text(json.dumps({
-            "best_val_sharpe_proxy": 2.0,
-            "best_val_loss": 1.0 if fold == 0 else 0.5  # Fold 1 has lower loss!
-        }))
+        cfg.write_text(
+            json.dumps(
+                {
+                    "best_val_sharpe_proxy": 2.0,
+                    "best_val_loss": 1.0 if fold == 0 else 0.5,  # Fold 1 has lower loss!
+                }
+            )
+        )
 
     cv_hist = [
         {"fold": 0, "best_metric": 2.0},

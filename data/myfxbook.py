@@ -52,7 +52,7 @@ DEFAULT_MYFXBOOK_DATA_DIR = str(_DATA_DIR / "raw" / "myfxbook")
 
 # Typical half-spread per pair (in price units) used to synthesise bid/ask
 # when only OHLCV mid prices are available.
-# Values represent ~1–2 pip typical spread for each pair.
+# Values represent ~1–2 pip typical spread for each pair.  # noqa: RUF003
 _TYPICAL_HALF_SPREAD: dict[str, float] = {
     "EURUSD": 0.00005,
     "GBPUSD": 0.00008,
@@ -73,6 +73,7 @@ def _pair_half_spread(pair: str) -> float:
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
+
 
 def _parse_myfxbook_csv(filepath: str | Path, pair: str) -> pd.DataFrame:
     """
@@ -114,8 +115,9 @@ def _parse_myfxbook_csv(filepath: str | Path, pair: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Normalise column names
-    df.columns = [c.strip().lower().replace("(", "_").replace(")", "")
-                  .replace("%", "pct").replace("/", "_") for c in df.columns]
+    df.columns = [
+        c.strip().lower().replace("(", "_").replace(")", "").replace("%", "pct").replace("/", "_") for c in df.columns
+    ]
     # Expected: date, open, high, low, close, change_pips, change_pct
 
     if "date" not in df.columns or "close" not in df.columns:
@@ -123,9 +125,7 @@ def _parse_myfxbook_csv(filepath: str | Path, pair: str) -> pd.DataFrame:
 
     # Parse date (MM/DD/YYYY HH:MM -> UTC)
     try:
-        df["timestamp"] = pd.to_datetime(
-            df["date"], format="%m/%d/%Y %H:%M", utc=True, errors="coerce"
-        )
+        df["timestamp"] = pd.to_datetime(df["date"], format="%m/%d/%Y %H:%M", utc=True, errors="coerce")
     except Exception:
         df["timestamp"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
 
@@ -137,12 +137,13 @@ def _parse_myfxbook_csv(filepath: str | Path, pair: str) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["change_pips"] = pd.to_numeric(df.get("change_pips", np.nan), errors="coerce")
-    df["change_pct"]  = pd.to_numeric(df.get("change_pct",  np.nan), errors="coerce")
+    df["change_pct"] = pd.to_numeric(df.get("change_pct", np.nan), errors="coerce")
 
     return df.dropna(subset=["close"])
 
 
 # ── Loader class ──────────────────────────────────────────────────────────────
+
 
 class MyfxbookLoader:
     """
@@ -169,10 +170,10 @@ class MyfxbookLoader:
     def __init__(
         self,
         data_dir: str = DEFAULT_MYFXBOOK_DATA_DIR,
-        verbose:  bool = True,
+        verbose: bool = True,
     ):
         self.data_dir = Path(data_dir)
-        self.verbose  = verbose
+        self.verbose = verbose
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     # ── public API ─────────────────────────────────────────────────────────────
@@ -186,16 +187,16 @@ class MyfxbookLoader:
         The daily bar is represented as a single "tick" at midnight UTC.
         """
         pair = pair.upper().replace("/", "")
-        raw  = _parse_myfxbook_csv(filepath, pair)
+        raw = _parse_myfxbook_csv(filepath, pair)
         if raw.empty:
             return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
         return self._to_tick_schema(raw, pair)
 
     def load(
         self,
-        pair:  str,
+        pair: str,
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
         """
         Load and concatenate all CSVs found in data_dir/<pair>/.
@@ -206,8 +207,8 @@ class MyfxbookLoader:
         start : optional ISO date filter "YYYY-MM-DD"
         end   : optional ISO date filter "YYYY-MM-DD"
         """
-        pair      = pair.upper().replace("/", "")
-        pair_dir  = self.data_dir / pair
+        pair = pair.upper().replace("/", "")
+        pair_dir = self.data_dir / pair
 
         if not pair_dir.exists():
             if self.verbose:
@@ -235,11 +236,7 @@ class MyfxbookLoader:
         if not frames:
             return pd.DataFrame(columns=pd.Index(TICK_COLUMNS))
 
-        combined = (
-            pd.concat(frames)
-            .sort_index()
-            [~pd.concat(frames).sort_index().index.duplicated(keep="last")]
-        )
+        combined = pd.concat(frames).sort_index()[~pd.concat(frames).sort_index().index.duplicated(keep="last")]
 
         # Date filter
         if start:
@@ -258,9 +255,9 @@ class MyfxbookLoader:
 
     def load_ohlcv(
         self,
-        pair:  str,
+        pair: str,
         start: str | None = None,
-        end:   str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
         """
         Return raw daily OHLCV DataFrame (no bid/ask synthesis).
@@ -268,8 +265,8 @@ class MyfxbookLoader:
         Columns: open, high, low, close, change_pips, change_pct
         Index:   UTC DatetimeIndex (daily)
         """
-        pair      = pair.upper().replace("/", "")
-        pair_dir  = self.data_dir / pair
+        pair = pair.upper().replace("/", "")
+        pair_dir = self.data_dir / pair
 
         if not pair_dir.exists():
             return pd.DataFrame()
@@ -302,13 +299,14 @@ class MyfxbookLoader:
 
         Returns the destination path.
         """
-        pair     = pair.upper().replace("/", "")
+        pair = pair.upper().replace("/", "")
         dest_dir = self.data_dir / pair
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        src  = Path(filepath)
+        src = Path(filepath)
         dest = dest_dir / src.name
         import shutil
+
         shutil.copy2(src, dest)
         if self.verbose:
             print(f"[Myfxbook] Ingested {src.name} -> {dest}")
