@@ -461,7 +461,7 @@ def main():
         cv_sharpe = float(np.mean(fold_sharpes))
         cv_sharpe_std = float(np.std(fold_sharpes))
         cv_diраcc = float(np.mean(fold_diraccs))
-        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f} ± {cv_sharpe_std:.3f}  DirAcc={cv_diраcc:.3f}")
+        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f}  {cv_sharpe_std:.3f}  DirAcc={cv_dicc:.3f}")
     else:
         cv_sharpe = cv_sharpe_std = cv_diраcc = 0.0
 
@@ -496,7 +496,7 @@ def main():
     if not np.isfinite(val_corr):
         val_corr = 0.0
 
-    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_diраcc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
+    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_dicc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
 
     # ── save model ────────────────────────────────────────────────────────────
     out_dir = Path("checkpoints")

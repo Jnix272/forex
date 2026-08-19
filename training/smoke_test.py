@@ -455,7 +455,7 @@ def _print_results_rich(
         style="green" if n_fail == 0 else "red",
     )
     if n_fail == 0:
-        _console.print("[bold green]✓ All models passed - safe to start full training.[/]")
+        _console.print("[bold green] All models passed - safe to start full training.[/]")
     else:
         failed = [r.name for r in results if not r.passed]
         _console.print(
@@ -634,7 +634,7 @@ def main() -> int:
             f"batch={cfg['batch_size']}[/]"
         )
     else:
-        print(f"\n{'═' * 62}")
+        print(f"\n{'' * 62}")
         print("  Forex Scaling Model - Pre-flight Smoke Test")
         print(f"  Device  : {device_str}")
         print(f"  AMP     : {use_amp}")
@@ -643,7 +643,7 @@ def main() -> int:
             f"  Config  : samples={cfg['n_samples']}  seq={cfg['seq_len']}  "
             f"features={cfg['n_features']}  epochs={cfg['epochs']}"
         )
-        print("═" * 62)
+        print("" * 62)
 
     # ── Run tests ─────────────────────────────────────────────────────────────
     results: list[ModelResult] = []

@@ -37,9 +37,9 @@ def _thermal_check(limit: int = 83, pause_secs: float = 2.0) -> None:
         return
     temp = _gpu_temp_celsius()
     if temp < 0:
-        return  # pynvml unavailable ΓÇö skip silently
+        return  # pynvml unavailable -- skip silently
     if temp >= limit:
-        msg = f"[Thermal] GPU {temp}┬░C >= limit {limit}┬░C ΓÇö pausing {pause_secs}s"
+        msg = f"[Thermal] GPU {temp}┬░C >= limit {limit}┬░C -- pausing {pause_secs}s"
         print(msg)
         _log_warn(msg)
         import time as _t

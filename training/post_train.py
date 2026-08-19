@@ -49,9 +49,9 @@ def run_ensemble_meta(
     then train the meta-network with a diversity penalty.
 
     The diversity penalty has two components:
-      1. Weight entropy maximisation ΓÇö prevents the meta from collapsing to
+      1. Weight entropy maximisation -- prevents the meta from collapsing to
          a single model (all weight on the best base model).
-      2. Base-output correlation penalty ΓÇö rewards the meta for up-weighting
+      2. Base-output correlation penalty -- rewards the meta for up-weighting
          models whose predictions disagree with each other.
 
     Only runs when --train-ensemble is passed and at least 2 base checkpoints
@@ -106,7 +106,7 @@ def run_ensemble_meta(
 
     if len(loaded_bases) < 2:
         print(
-            "[EnsembleMeta] Need >= 2 trained base models ΓÇö skipping "
+            "[EnsembleMeta] Need >= 2 trained base models -- skipping "
             f"(found {len(loaded_bases)}: {loaded_names}). "
             "Train with --all-models first."
         )
@@ -265,7 +265,7 @@ def run_profiler(
     if device.type == "cuda":
         activities.append(ProfilerActivity.CUDA)
 
-    print(f"\n[Profiler] Warmup 3 batches, active 5 batches ΓÇö trace -> {trace_path}/")
+    print(f"\n[Profiler] Warmup 3 batches, active 5 batches -- trace -> {trace_path}/")
     _log_info(f"[Profiler] trace path: {trace_path}")
 
     model.train()
@@ -581,7 +581,7 @@ def _promote_best_fold(
             best_metrics = {"sharpe": sharpe_val or 0.0, "val_loss": loss_val or 0.0, "gen_gap": gen_gap}
 
     if best_fold is None:
-        print(f"[BestFold] {model_name}: could not determine best fold ΓÇö skipping promotion.")
+        print(f"[BestFold] {model_name}: could not determine best fold -- skipping promotion.")
         return
 
     src_flat = ckpt_dir / f"{model_name}_fold{best_fold}_best.pt"
@@ -1098,7 +1098,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
 
             result.setdefault("details", {})["optimal_confidence_threshold"] = opt_thr
 
-            print(f"[ThresholdSweep] {model_name}: optimal={opt_thr} (Sharpe={opt_sr}) ╬ô├Ñ├å {written}")
+            print(f"[ThresholdSweep] {model_name}: optimal={opt_thr} (Sharpe={opt_sr})  {written}")
 
         else:
             print(
@@ -1124,7 +1124,7 @@ def _auto_tune_next_run(
     """Audit every hyperparameter proposal and (optionally) apply it.
 
     Always writes ``logs/auto_tune/<run_name>_proposal.json`` with structured
-    records ΓÇö whether or not dry_tune is set and whether or not any changes
+    records -- whether or not dry_tune is set and whether or not any changes
     are made.  High-risk fields (data_range, label_method, checkpoint_dir,
     production thresholds) are never mutated.
     """
@@ -1180,18 +1180,18 @@ def _auto_tune_next_run(
             backup = cfg_path.with_name(cfg_path.name + ".bak")
             shutil.copy2(cfg_path, backup)
         except ImportError:
-            print("[Auto-Tune] ruamel.yaml not installed ΓÇö proposal-only mode.")
+            print("[Auto-Tune] ruamel.yaml not installed -- proposal-only mode.")
         except Exception as e:
             print(f"[Auto-Tune] Could not read config: {e}")
     else:
-        print(f"[Auto-Tune] Config not found at {cfg_path} ΓÇö proposal-only mode.")
+        print(f"[Auto-Tune] Config not found at {cfg_path} -- proposal-only mode.")
 
     # P3: detect whether this config was written by Optuna; if so skip heuristics
     # that would clobber the curriculum schedule Optuna already optimised.
     _optuna_applied = bool((data or {}).get("optuna", {}).get("applied", False)) if data else False
     if _optuna_applied:
         print(
-            "[Auto-Tune] Optuna-applied config detected ΓÇö all config mutations skipped "
+            "[Auto-Tune] Optuna-applied config detected -- all config mutations skipped "
             "(proposals still recorded for audit)."
         )
 
@@ -1293,7 +1293,7 @@ def _auto_tune_next_run(
             _set("model", "dropout", float(f"{new_do:.2f}"))
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 2 ΓÇö Premature early stopping
+    # HEURISTIC 2 -- Premature early stopping
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     if total_epochs > 0 and best_epoch is not None and best_epoch < total_epochs * 0.25:
         old_lr = float(_get("training", "lr", 5e-5))
@@ -1312,7 +1312,7 @@ def _auto_tune_next_run(
         _set("training", "lr", float(f"{new_lr:.2e}"))
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 3 ΓÇö Sharpe collapse: peaked early then degraded
+    # HEURISTIC 3 -- Sharpe collapse: peaked early then degraded
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     val_sharpe_curve = history.get("val_sharpe", []) if isinstance(history, dict) else []
     if val_sharpe_curve and len(val_sharpe_curve) >= 4:
@@ -1359,7 +1359,7 @@ def _auto_tune_next_run(
                 _set("training", "patience", new_pat)
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 4 ΓÇö Gate failure on drawdown
+    # HEURISTIC 4 -- Gate failure on drawdown
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     reasons = gate_result.get("reasons", []) if gate_result else []
     if any("drawdown" in str(r).lower() for r in reasons):  # noqa: SIM102
@@ -1381,7 +1381,7 @@ def _auto_tune_next_run(
                 data["rl"]["reward"]["drawdown"] = float(f"{new_pen:.2f}")
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 5 ΓÇö Gate failure on profit factor
+    # HEURISTIC 5 -- Gate failure on profit factor
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     if any("profit factor" in str(r).lower() for r in reasons):
         old_tx = float(_get("execution", "slippage_vol_alpha", 0.5))
@@ -1400,7 +1400,7 @@ def _auto_tune_next_run(
         _set("execution", "slippage_vol_alpha", float(f"{new_tx:.2f}"))
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 6 ΓÇö Frequent Curriculum Stalls (Noisy Gradients / Hard Data)
+    # HEURISTIC 6 -- Frequent Curriculum Stalls (Noisy Gradients / Hard Data)
     # P3: skipped when Optuna already optimised the curriculum schedule.
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     stalls_curve = history.get("curriculum_stalls", []) if isinstance(history, dict) else []
@@ -1458,7 +1458,7 @@ def _auto_tune_next_run(
         pass  # all mutations blocked when optuna.applied or class balance is quarantined.
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    # HEURISTIC 7 ΓÇö Perfect Stability (Too Easy / Underfitting)
+    # HEURISTIC 7 -- Perfect Stability (Too Easy / Underfitting)
     # P3: skipped when Optuna already optimised the curriculum schedule.
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     if stalls_curve and stalls_curve[-1] == 0 and not _optuna_applied and not _auto_tune_quarantined:  # noqa: SIM102

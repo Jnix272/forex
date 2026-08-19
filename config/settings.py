@@ -514,6 +514,9 @@ LABELING = {
     # Triple-barrier: Numba-accelerated scans (parallel over bars; auto fallback if Numba missing)
     "tbm_numba": True,
     "tbm_parallel": True,
+    # Multi-pair consensus: threshold for averaging direction labels across pairs.
+    # If |mean(pairs)| < consensus_threshold, label = Hold (0); else sign(mean).
+    "consensus_threshold": 0.33,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

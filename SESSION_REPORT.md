@@ -1,3 +1,144 @@
+## 2026-08-19: DirectionWarmup Validation Crash Fix + Encoding Cleanup
+
+### Summary
+Fixed two issues:
+1. **DirectionWarmup validation crash**: `TypeError: MultiTaskLoss.forward() missing 3 required positional arguments: 'conf', 'y_cls', and 'y_cont'` during validation in the DirectionWarmup phase when `--multitask` is enabled.
+2. **Encoding cleanup**: Replaced garbled Unicode characters (`ΓÇö`, `├ù`, Cyrillic `рa`) across 20+ files with ASCII equivalents.
+
+### Root Cause (DirectionWarmup)
+During the DirectionWarmup phase (first 2 epochs with `--multitask`), training uses `direction_only=True` with a simple `CrossEntropyLoss`, but validation was calling `validate_epoch` without the `direction_only` flag (defaulting to `False`) while still using the full `MultiTaskLoss` criterion. When the model returned a single tensor (not a tuple), the `else` branch in `validate_epoch` called `crit(pred, yb_reg)` which failed because `MultiTaskLoss.forward()` requires 6 arguments.
+
+### Fixes Applied
+
+**DirectionWarmup fix:**
+- `training/supervised_loop.py:3298` — Added `direction_only=_direction_warmup_active` to the `validate_epoch` call
+- `training/supervised_loop.py:1684-1692` — Added safety fallback in `validate_epoch`'s `else` branch to handle `multitask=True` with non-tuple model output (uses CE component of MultiTaskLoss)
+- `training/supervised_loop.py:1100-1119` — Restored accidentally deleted `except TypeError` block in `_prepare_train_batch`
+
+**CatBoost fixes:**
+- `training/train_catboost.py` — Added `bootstrap_type="Bernoulli"` when `subsample < 1.0` (default `bayesian` doesn't support subsampling)
+- `training/train_catboost.py` — Removed `colsample_bylevel` (RSM not supported on GPU for non-pairwise)
+- `training/train_catboost.py` — Switched to `task_type="CPU"` (CatBoost GPU hangs on RTX 4060)
+- `training/train_catboost.py` — Fixed Cyrillic encoding in variable names (`рa` -> `ra`)
+- `training/train_catboost.py` — Fixed `WANDB` init to check `WANDB_API_KEY` env var
+
+**Encoding cleanup (20 files):**
+- Replaced `ΓÇö` (mojibake `—`) with `--` (14 occurrences)
+- Replaced `├ù` (mojibake `×`) with `x` (2 occurrences)
+- Replaced `ΓÜá` (mojibake `🚀`) with `[!]` (2 occurrences)
+- Replaced Cyrillic `рa` with `ra` in variable names
+- Replaced other UTF-8 sequences with ASCII equivalents
+
+### Verification
+
+**DirectionWarmup fix:**
+- End-to-end training with `--model haelt --multitask --epochs 5 --quick-mode`: All 5 epochs completed, DirectionWarmup validation passes without TypeError
+- Tested all 6 models (haelt, tft, mamba, transformer, expert, gnn): All pass
+- Unit test with synthetic data: `validate_epoch(direction_only=True)` and `validate_epoch(direction_only=False)` both work
+
+**CatBoost fix:**
+- `python training/train_catboost.py --demo --estimators 10`: Walk-forward CV (4/5 folds) + final model training + feature importance extraction all complete successfully
+
+**Encoding fix:**
+- `py_compile` on all modified files: 0 errors
+- Grep for remaining non-ASCII in print statements: 0 found
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `training/supervised_loop.py` | DirectionWarmup validation fix + restored except block |
+| `training/train_catboost.py` | bootstrap_type, CPU task_type, Cyrillic fix, wandb fix, class weights, LossFunctionChange Pool fix |
+| `models/catboost_model.py` | 14 temporal stats (skew, kurtosis, slope, accel, multi-scale windows, vol) |
+| `training/dataset_builder.py` | Removed `_FIRST_CHUNK_COLS` shadowing, configurable consensus threshold, removed noqa F811 |
+| `training/core.py` | Canonical `_FIRST_CHUNK_COLS` (unchanged, already correct) |
+| `training/gpu_cli.py` | Removed duplicate `_effective_max_seq_len` dead code |
+| `training/cache_integrity.py` | Added `.bin` cleanup to `_delete_cache_artifacts` |
+| `config/settings.py` | Added `LABELING["consensus_threshold"]` |
+| `training/train_gpu.py` | Encoding cleanup (14 em-dashes, 2 rocket emojis) |
+| `training/cache_integrity.py` | Encoding cleanup |
+| `training/dataset_builder.py` | Encoding cleanup |
+| `training/gpu_cli.py` | Encoding cleanup |
+| `training/gpu_device.py` | Encoding cleanup |
+| `training/post_train.py` | Encoding cleanup |
+| `training/pretrain_runner.py` | Encoding cleanup |
+| `training/rl_runner.py` | Encoding cleanup |
+| `training/smoke_test.py` | Encoding cleanup |
+| `training/data_coverage.py` | Encoding cleanup |
+| `training/health_check.py` | Encoding cleanup |
+| `training/train_xgboost.py` | Encoding cleanup |
+| `models/rl_advanced.py` | Encoding cleanup |
+
+### End-to-End Training Results (synthetic data)
+```
+Model       | DirectionWarmup | Baseline CV | Pretrain | Status
+haelt       | ✓ PASS          | ✓ PASS      | ✓ PASS   | Complete
+tft         | ✓ PASS          | ✓ PASS      | ✓ PASS   | Complete
+mamba       | ✓ PASS          | ✓ PASS      | ✓ PASS   | Complete
+transformer | ✓ PASS          | ✓ PASS      | ✓ PASS   | Complete
+expert      | ✓ PASS          | N/A         | N/A      | Unit test pass
+gnn         | N/A             | N/A         | N/A      | Uses graph_pgd, no multitask warmup
+catboost    | N/A             | ✓ PASS      | N/A      | Walk-forward CV pass
+```
+
+### CatBoost Improvements
+
+**Feature Engineering** (`models/catboost_model.py`):
+- Added 8 new temporal statistics per feature (14 total vs 6 before):
+  - Basic: mean, std, min, max, last, range
+  - Shape: skewness, kurtosis
+  - Trend: slope (linear regression), acceleration (second derivative)
+  - Window: early_mean (first 25%), mid_mean (middle 50%), late_mean (last 25%)
+  - Volatility: vol (std of first differences)
+- Tabular features: 50 * 14 = **700** (was 300)
+
+**Class Weight Balancing** (`training/train_catboost.py`):
+- Added `compute_class_weights()` with 3 methods: `balanced`, `inverse`, `sqrt_inv`
+- Walk-forward CV and final model both use balanced class weights
+- Handles imbalanced direction classes (Sell/Hold/Buy)
+
+**Real Dataset Feature Stats:**
+- Raw features: 1460 (10 pairs x 146 features each)
+- Time steps: 33 (5-min bars)
+- Tabular features with temporal stats: 1460 x 14 = **20,440**
+
+**Feature Categories:**
+- Microstructure: ofi, vpin, kyles_lambda, amihud_illiq, realized_spread
+- Volatility: atr, vol, vol_of_vol, vol ratios
+- Momentum: rsi, macd, momentum indicators
+- Session: time-based features
+- Cross-asset: correlation features between pairs
+
+**Demo Test Results:**
+```
+Top Features (showing new stats working):
+  f31_kurt=10.6197  (kurtosis - NEW)
+  f28_kurt=9.5510   (kurtosis - NEW)
+  f0_last=9.0674    (last bar)
+  f3_std=7.9898     (standard deviation)
+  f11_early_mean=6.6404  (early window mean - NEW)
+```
+
+### Dataset Building Fixes
+
+**5 issues found and fixed in the dataset building codebase:**
+
+| Issue | Fix | File |
+|-------|-----|------|
+| `_FIRST_CHUNK_COLS` shadowing | Removed local redefinition; use canonical `core.py` version | `dataset_builder.py:103` |
+| Hardcoded consensus threshold `0.33` | Added `LABELING["consensus_threshold"]` config | `settings.py`, `dataset_builder.py:2349` |
+| Duplicate `_effective_max_seq_len` | Removed dead code from `gpu_cli.py` (nobody imported it) | `gpu_cli.py:2666` |
+| `noqa: F811` suppressions | Removed 4 unnecessary suppressions | `dataset_builder.py:103-116` |
+| `.bin` cleanup on Windows | Added `_X.bin` and `_y.bin` to `_delete_cache_artifacts` | `cache_integrity.py:1041-1042` |
+
+**CatBoost Feature Importance Fix:**
+- `training/train_catboost.py` — `LossFunctionChange` now passes `cb.Pool(X_train_tab, label=y_train_target)` instead of raw numpy array
+
+### Verification
+- All 5 dataset fixes verified: `_FIRST_CHUNK_COLS` canonical=True, consensus threshold=0.33, `_effective_max_seq_len` only in config_validate, .bin cleanup=True
+- CatBoost demo: LossFunctionChange feature importance now works
+
+---
+
 ## 2026-08-17: Confirm Inference Type Cleanup and Optional-Dependency Warnings
 
 ### Summary

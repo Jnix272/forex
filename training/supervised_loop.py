@@ -191,7 +191,7 @@ _OVERCONF_PENALTY: OverconfidencePenalty | None = None  # D: set in supervised_t
 # -----------------------------------------------------------------------------
 # A: FEATURE STABILITY MONITORING
 #
-# Most training failures don't show up as loss spikes ΓÇö they show up as
+# Most training failures don't show up as loss spikes -- they show up as
 # features whose distributions silently shift, causing gradients to chase
 # moving targets.  The model "learns" the shift artefact rather than the
 # underlying signal, producing good training metrics but poor live performance.
@@ -200,15 +200,15 @@ _OVERCONF_PENALTY: OverconfidencePenalty | None = None  # D: set in supervised_t
 # moving average (EMA).  Each epoch:
 #   1. Sample a batch from the training data
 #   2. Compute per-feature mean / std across (B, T) positions
-#   3. Compute shift score = |Deltamean| / (ema_std + eps) ΓÇö standard deviations shifted
-#   4. Compute var  score  = |Deltastd|  / (ema_std + eps) ΓÇö variance change magnitude
+#   3. Compute shift score = |Deltamean| / (ema_std + eps) -- standard deviations shifted
+#   4. Compute var  score  = |Deltastd|  / (ema_std + eps) -- variance change magnitude
 #   5. Mark features as noisy (score > soft_threshold) or frozen (score > hard_threshold
 #      for freeze_after consecutive epochs)
 #   6. Output a float32 mask (1.0=stable, damping_factor=noisy, 0.0=frozen)
-#   7. Apply mask to xb in train_epoch: xb = xb * mask ΓÇö unstable dims zeroed out
+#   7. Apply mask to xb in train_epoch: xb = xb * mask -- unstable dims zeroed out
 #
 # Effect: gradients for frozen features are effectively zeroed (input = 0).
-# Noisy features receive a reduced signal (input ├ù damping_factor).
+# Noisy features receive a reduced signal (input x damping_factor).
 # Once the distribution stabilises, the feature is automatically re-enabled.
 # -----------------------------------------------------------------------------
 
@@ -311,7 +311,7 @@ class FeatureStabilityMonitor:
         # Freeze: hard threshold OR soft streak exceeded
         newly_frozen = above_hard | (self._soft_streak >= self.freeze_af)
 
-        # Enforce min_active_pct ΓÇö never freeze too many features
+        # Enforce min_active_pct -- never freeze too many features
         n_frozen = int(newly_frozen.sum())
         max_freeze = int(self.n * (1.0 - self.min_active))
         if n_frozen > max_freeze:
@@ -390,7 +390,7 @@ class FeatureStabilityMonitor:
 # penalises correlated predictions across models with the same role.
 #
 # Why post-training (not during individual training):
-#   During individual training each model only has its own output ΓÇö there are
+#   During individual training each model only has its own output -- there are
 #   no peer outputs to compare against.  A diversity fine-tuning phase loads
 #   ALL trained checkpoints simultaneously, runs the same batch through every
 #   model, and uses DiversityLoss to push same-role models' predictions apart
@@ -404,7 +404,7 @@ class FeatureStabilityMonitor:
 #   transformer -> context
 #   expert      -> confirmation
 #
-# Same-role pairs (tft+transformer, haelt+expert) receive a 2├ù diversity
+# Same-role pairs (tft+transformer, haelt+expert) receive a 2x diversity
 # penalty to ensure they specialise rather than duplicate.
 # -----------------------------------------------------------------------------
 
@@ -439,7 +439,7 @@ def run_diversity_finetune(
         args           : Training args namespace (loss, seq_len, etc.).
         device         : torch.device.
         epochs         : Fine-tuning epochs (3 is usually sufficient).
-        lr             : Learning rate (much lower than training ΓÇö fine-tuning).
+        lr             : Learning rate (much lower than training -- fine-tuning).
         div_weight     : DiversityLoss weight multiplier.
         same_role_mult : Extra multiplier for same-role pairs.
         batch_size     : Batch size for joint forward pass.
@@ -460,7 +460,7 @@ def run_diversity_finetune(
         if not ckpt_path.exists():
             ckpt_path = ckpt_dir / f"{name}_best.pt"
         if not ckpt_path.exists():
-            print(f"  [DivFT] Skipping {name} ΓÇö checkpoint not found at {ckpt_path}")
+            print(f"  [DivFT] Skipping {name} -- checkpoint not found at {ckpt_path}")
             continue
         try:
             model_args = _model_build_args(args, name)
@@ -485,7 +485,7 @@ def run_diversity_finetune(
             print(f"  [DivFT] Could not load {name}: {e}")
 
     if len(loaded_models) < 2:
-        print("  [DivFT] Need >=2 models for diversity fine-tuning ΓÇö skipping.")
+        print("  [DivFT] Need >=2 models for diversity fine-tuning -- skipping.")
         return
 
     print(f"\n[DivFT] Diversity fine-tuning: {loaded_names}")
@@ -511,10 +511,10 @@ def run_diversity_finetune(
         roles=loaded_roles,
     ).to(device)  # type: ignore
 
-    # -- Data loader (val split ΓÇö fine-tune on held-out data only) ------------
+    # -- Data loader (val split -- fine-tune on held-out data only) ------------
     n_samples = int(_on_disk_sequence_count(cache_path) or 0)
     if n_samples <= 0:
-        print("  [DivFT] Could not determine dataset size ΓÇö skipping.")
+        print("  [DivFT] Could not determine dataset size -- skipping.")
         return
     val_start = int(n_samples * 0.80)
     val_idx = np.arange(val_start, n_samples)
@@ -562,7 +562,7 @@ def run_diversity_finetune(
                     task_loss = task_loss + crit(out, _match_target_shape(out, yb))
             task_loss = task_loss / len(model_list)
 
-            # Scalar outputs for diversity loss ΓÇö extract scalar per model per sample
+            # Scalar outputs for diversity loss -- extract scalar per model per sample
             scalar_outs = []
             for out in outputs:
                 if isinstance(out, tuple):
@@ -1108,7 +1108,12 @@ def _prepare_train_batch(
                     y_adv = y_adv.long().clamp(0, 2)
             else:
                 y_adv = yb
-            res = adversarial_gen(model, xb, y_adv, crit)
+            proxy_crit = (
+                (lambda o, y: torch.nn.functional.cross_entropy(o, y))
+                if multitask
+                else crit
+            )
+            res = adversarial_gen(model, xb, y_adv, proxy_crit)
             xb = res[0] if isinstance(res, (tuple, list)) else res
         except TypeError:
             with torch.no_grad():
@@ -1836,7 +1841,7 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
     ckpt_path = next((p for p in candidates if p.exists()), None)
     if ckpt_path is None:
         print(
-            f"[PretrainΓåÆSup] No contrastive encoder checkpoint in {ckpt_dir} ΓÇö "
+            f"[PretrainΓåÆSup] No contrastive encoder checkpoint in {ckpt_dir} -- "
             "skipping transfer (was pretraining run?)."
         )
         return False
@@ -1866,7 +1871,7 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
         )
     except Exception:
         pass
-    print(f"[PretrainΓåÆSup] Loaded contrastive encoder from {ckpt_path.name} into backbone.")
+    print(f"[PretrainSup] Loaded contrastive encoder from {ckpt_path.name} into backbone.")
     return True
 
 
@@ -2188,7 +2193,7 @@ def supervised_train(
     pf = int(args.prefetch_factor) if nw > 0 else None
     # Validation: keep fewer batches in flight than training. Pinning large batches
     # in worker threads can trip CUDA OOM on Windows (WDDM + driver) even when
-    # train fits ΓÇö the error often surfaces as pin_memory(..., device=0).
+    # train fits -- the error often surfaces as pin_memory(..., device=0).
     val_nw = max(2, nw // 2)
     val_pf = min(int(pf), 2) if pf is not None else None
 
@@ -2232,7 +2237,7 @@ def supervised_train(
     _bn_train_dl = train_dl  # full-distribution loader for SWA BN update (never filtered)
     # On Windows, DataLoader worker processes crash unexpectedly during validation
     # after many training epochs (memory pressure kills subprocesses silently).
-    # num_workers=0 runs loading in the main process ΓÇö safe, and fast enough for val
+    # num_workers=0 runs loading in the main process -- safe, and fast enough for val
     # since there's no backward pass.
     val_dl = DataLoader(
         val_ds,
@@ -2333,7 +2338,7 @@ def supervised_train(
 
     if n_gpus > 1:
         model = nn.DataParallel(model)
-        print(f"[Model] DataParallel ├ù {n_gpus} GPUs")
+        print(f"[Model] DataParallel x {n_gpus} GPUs")
 
     # -- torch.compile (PyTorch >= 2.0) - ~20-30 % extra throughput on Ada ----
     # Enabled by default (GPU.torch_compile=True). LSTM/GRU/RNN cells stay
@@ -2348,7 +2353,7 @@ def supervised_train(
         train_idx=train_idx if (classification or multitask) else None,
     )
     direction_crit = nn.CrossEntropyLoss().to(device)  # type: ignore
-    # D: OverconfidencePenalty ΓÇö active for regression modes only
+    # D: OverconfidencePenalty -- active for regression modes only
     global _OVERCONF_PENALTY
     if not classification and getattr(args, "overconf_penalty", True):
         _oc_w = float(getattr(args, "overconf_weight", 0.3))
@@ -2357,11 +2362,11 @@ def supervised_train(
     else:
         _OVERCONF_PENALTY = None
     opt = build_adamw(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    # Gradient accumulation: effective batch = batch_size ├ù accum_steps
+    # Gradient accumulation: effective batch = batch_size x accum_steps
     _accum = max(1, int(getattr(args, "grad_accum_steps", 1)))
     # OneCycleLR must be stepped once per OPTIMIZER UPDATE (not per batch).
     # steps_per_epoch = ceil(batches / accum_steps) so the total cycle length
-    # equals epochs ├ù optimizer-updates-per-epoch.
+    # equals epochs x optimizer-updates-per-epoch.
     _eff_steps = max(1, -(-len(train_dl) // _accum))  # ceiling div
     _sched_kind = (
         str(getattr(args, "lr_schedule", "warmup_cosine")).strip().lower()
@@ -2654,7 +2659,7 @@ def supervised_train(
                 continue
             param.requires_grad_(True)
 
-    # -- B: Difficulty curriculum ΓÇö load diff sidecar once, filter each epoch -
+    # -- B: Difficulty curriculum -- load diff sidecar once, filter each epoch -
     _diff_arr = _load_diff_array(cache_path, n_samples)
     _feature_schema = _load_feature_schema(cache_path, n_features)
     if _feature_schema is None:
@@ -2704,7 +2709,7 @@ def supervised_train(
     _feat_stability = FeatureStabilityMonitor(
         n_features=n_features,
         ema_alpha=0.90,
-        soft_threshold=2.0,  # sigma shift -> noisy (dampen to 0.5├ù)
+        soft_threshold=2.0,  # sigma shift -> noisy (dampen to 0.5x)
         hard_threshold=4.0,  # sigma shift -> immediately freeze
         freeze_after=3,  # consecutive soft epochs -> freeze
         damping_factor=0.50,
@@ -2768,7 +2773,7 @@ def supervised_train(
                 },
                 crash_path,
             )
-            print(f"\n[Train] Crash checkpoint saved ΓåÆ {crash_path}")
+            print(f"\n[Train] Crash checkpoint saved  {crash_path}")
             print("[Train] Resume from last clean epoch with: --resume")
             if _rich_display is not None:
                 _rich_display.__exit__(None, None, None)
@@ -3093,7 +3098,7 @@ def supervised_train(
             _log_warn(f"[Curriculum] Mask generation failed: {_curr_exc}")
 
         # Reset frozen features if difficulty stage increased
-        # -- B: Difficulty curriculum ΓÇö rebuild dataloader with filtered indices --
+        # -- B: Difficulty curriculum -- rebuild dataloader with filtered indices --
         ep_train_idx = train_idx
         if _curriculum_mgr is not None:
             _cm_mask = _curriculum_mgr.get_inclusion_mask(ep)
@@ -3624,7 +3629,7 @@ def supervised_train(
             print(f"[SWA] BN update warning (non-fatal): {_swa_bn_e}")
         _swa_path = ckpt_dir / f"{model_name}{fold_suffix}_swa.pt"
         _safe_save(_swa_model.module.state_dict(), _swa_path)
-        print(f"[SWA] Averaged model saved ΓåÆ {_swa_path}")
+        print(f"[SWA] Averaged model saved  {_swa_path}")
 
     # -- D: Post-training temperature calibration ------------------------------
     if getattr(args, "calibrate", False):

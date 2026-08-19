@@ -413,7 +413,7 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
 
     Path(ckpt).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model_state": _enc_state, "method": "multi_task"}, ckpt)
-    print(f"[Pretrain] Saved multi-task encoder checkpoint → {ckpt}")
+    print(f"[Pretrain] Saved multi-task encoder checkpoint -> {ckpt}")
 
     try:
         _update_pretrain_report(
@@ -782,7 +782,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     # Compute a VRAM-safe batch size for the contrastive trainer.
     # With no_grad on pos/neg views, only 1 encoder pass retains activation graphs.
     # But the LSTM still allocates large hidden-state buffers proportional to
-    # input_size ├ù hidden_size ├ù seq_len, so we budget conservatively.
+    # input_size x hidden_size x seq_len, so we budget conservatively.
     try:
         import torch as _torch
 
@@ -835,8 +835,8 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         f"(configured={_cfg_bs}, budget={_pt_bs_vram}, cap={_max_bs})"
     )
 
-    # Infer encoder output dim via dummy forward. Strip the prediction head first ΓÇö
-    # same as BYOLTrainer / TSCLTrainer ΓÇö or backbones like GNN return (B,) logits
+    # Infer encoder output dim via dummy forward. Strip the prediction head first --
+    # same as BYOLTrainer / TSCLTrainer -- or backbones like GNN return (B,) logits
     # and we would mis-read encoder_dim as batch size (e.g. 1) instead of hidden dim.
     _saved_head = None
     if hasattr(encoder, "head"):
@@ -988,12 +988,12 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         trainer = TSCLTrainer(encoder=encoder, **common)
 
     # Train epoch-by-epoch with fresh windows each time so the encoder sees
-    # n_windows ├ù n_epochs unique samples instead of repeating the same n_windows.
+    # n_windows x n_epochs unique samples instead of repeating the same n_windows.
     #
     # BYOL multi-block: each outer epoch runs _n_blocks independent blocks so the
-    # encoder sees _n_blocks ├ù n_windows windows per epoch instead of just n_windows.
+    # encoder sees _n_blocks x n_windows windows per epoch instead of just n_windows.
     # With n_windowsΓëê2270 (RAM limit on 16 GB), 3 blocks gives ~6,800 windows and
-    # ~26 batches per epoch ΓÇö enough gradient signal to actually move the loss.
+    # ~26 batches per epoch -- enough gradient signal to actually move the loss.
     auto_blocks = max(1, 6_000 // max(1, n_windows)) if _method in _PRETRAIN_MULTI_BLOCK else 1
     _n_blocks = (
         _coerce_auto_int(
@@ -1089,7 +1089,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         _extra = f" | drift_dist={_diag.get('drift_margin', 0):.4f}"
                 print(
                     f"[Pretrain] Ep {_ep + 1:2d}/{target_epochs} | loss={ls:.4f}"
-                    f"  ({_n_blocks} blocks ├ù {n_windows:,} windows = "
+                    f"  ({_n_blocks} blocks x {n_windows:,} windows = "
                     f"{_n_blocks * n_windows:,} total){_extra}"
                 )
                 if run and hasattr(run, "log"):

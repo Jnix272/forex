@@ -309,7 +309,7 @@ def print_coverage_summary(report: dict):
     print(f"{'=' * 60}")
 
     # Pair coverage
-    print("\n📊 Pair Coverage:")
+    print("\n Pair Coverage:")
     for r in report["sections"].get("pair_coverage", []):
         icon = {"OK": "✅", "LOW": "⚠️", "SKIPPED": "❌", "MISSING": "❌", "EMPTY": "❌"}.get(r["status"], "?")
         print(f"  {icon} {r['pair']:8s} - {r['message']}")
@@ -317,30 +317,30 @@ def print_coverage_summary(report: dict):
     # Issues
     issues = report.get("issues", [])
     if issues:
-        print(f"\n🚨 Issues ({len(issues)}):")
+        print(f"\n Issues ({len(issues)}):")
         for i in issues:
-            print(f"  • {i}")
+            print(f"   {i}")
 
     # Valid pairs
     valid = report.get("valid_pairs", [])
-    print(f"\n📈 Valid training pairs: {', '.join(valid) if valid else 'NONE'}")
+    print(f"\n Valid training pairs: {', '.join(valid) if valid else 'NONE'}")
 
     # Recommendations
     recs = report.get("recommendations", [])
     if recs:
-        print("\n💡 Recommendations:")
+        print("\n Recommendations:")
         for r in recs:
-            print(f"  → {r}")
+            print(f"  -> {r}")
 
     # News stats
     news = report["sections"].get("news", {})
     if news.get("stats"):
-        print(f"\n📰 News: {news['stats'].get('rows', 0):,} rows")
+        print(f"\n News: {news['stats'].get('rows', 0):,} rows")
 
     # Sources
     sources = report["sections"].get("sources", {})
     if sources.get("empty"):
-        print(f"\n📁 Empty dirs: {', '.join(sources['empty'])}")
+        print(f"\n Empty dirs: {', '.join(sources['empty'])}")
 
     print(f"{'=' * 60}\n")
 

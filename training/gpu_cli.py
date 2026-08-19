@@ -616,7 +616,7 @@ def _resolve_seq_len(val, bar_freq: str) -> int:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Forex Model ΓÇö 20M Tick GPU Trainer")
+    p = argparse.ArgumentParser(description="Forex Model -- 20M Tick GPU Trainer")
     p.set_defaults(curriculum=SETTINGS_CURRICULUM)
     p.set_defaults(execution=SETTINGS_EXECUTION)
     p.set_defaults(risk=None)
@@ -776,7 +776,7 @@ def parse_args():
     # Training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument(
-        "--batch-size", type=int, default=2048, help="Batch size ΓÇö 2048 optimal for 20M samples on RTX 4090"
+        "--batch-size", type=int, default=2048, help="Batch size -- 2048 optimal for 20M samples on RTX 4090"
     )
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument(
@@ -949,7 +949,7 @@ def parse_args():
         action="store_true",
         default=False,
         dest="no_amp",
-        help="Disable AMP ΓÇö forces FP32 training. Eliminates NaN-grad skips on 2240-feature inputs at the cost of ~30% slower throughput.",
+        help="Disable AMP -- forces FP32 training. Eliminates NaN-grad skips on 2240-feature inputs at the cost of ~30% slower throughput.",
     )
     p.add_argument(
         "--dtype",
@@ -1093,7 +1093,7 @@ def parse_args():
         default=0.85,
         help="Minimum confidence required to execute a trade during validation (Disagreement Gating).",
     )
-    p.add_argument("--num-workers", type=int, default=8, help="DataLoader workers ΓÇö 8 is sweet spot for H100/A100")
+    p.add_argument("--num-workers", type=int, default=8, help="DataLoader workers -- 8 is sweet spot for H100/A100")
     p.add_argument(
         "--prefetch-factor", type=int, default=4, help="DataLoader prefetch (per worker); lower on 16GB RAM PCs"
     )
@@ -2661,20 +2661,6 @@ def _latest_resumable_fold(model_name: str, checkpoint_dir: str | Path, n_folds:
         return None
     candidates.sort()
     return int(candidates[-1][1])
-
-
-def _effective_max_seq_len(args) -> int:
-    """Max sequence length required by training config + curriculum schedule."""
-    seqs = [int(getattr(args, "seq_len", 60) or 60)]
-    cur = getattr(args, "curriculum", None)
-    if cur is None or cur is False or cur == "none" or cur == "":
-        return max(seqs)
-    if not isinstance(cur, dict):
-        cur = SETTINGS_CURRICULUM
-    for entry in cur.get("seq_schedule") or []:
-        if isinstance(entry, dict) and entry.get("seq_len") is not None:
-            seqs.append(int(entry["seq_len"]))
-    return max(seqs)
 
 
 def _load_cv_fold_entry(

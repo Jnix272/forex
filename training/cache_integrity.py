@@ -29,7 +29,7 @@ from training.gpu_cache_io import (  # noqa: E402
 )
 
 # -----------------------------------------------------------------------------
-# PHASE 1 ΓÇö CHUNKED DATA PIPELINE
+# PHASE 1 -- CHUNKED DATA PIPELINE
 # -----------------------------------------------------------------------------
 
 
@@ -329,7 +329,7 @@ def _clamp_n_samples_to_disk(cache_path: str, n_samples: int) -> int:
         return n_samples
     print(
         f"[Data] WARN: on-disk arrays have {n_disk:,} rows but pipeline reported "
-        f"{n_samples:,} ΓÇö clamping to {n_disk:,} (check X/Y export parity)"
+        f"{n_samples:,} -- clamping to {n_disk:,} (check X/Y export parity)"
     )
     return n_disk
 
@@ -445,7 +445,7 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
             if legacy_meta.exists():
                 manifest_path = legacy_meta
             else:
-                # Zarr stores may only have attrs (no sidecar) ΓÇö synthesize a manifest
+                # Zarr stores may only have attrs (no sidecar) -- synthesize a manifest
                 p_cache = Path(cache_path)
                 if ZARR and p_cache.is_dir() and (p_cache / ".zgroup").exists():
                     try:
@@ -1019,7 +1019,7 @@ def _delete_cache_artifacts(cache_path: str) -> None:
     import shutil as _shutil
 
     p = Path(cache_path)
-    # Zarr is a directory ΓÇö use shutil.rmtree
+    # Zarr is a directory -- use shutil.rmtree
     if p.is_dir() and str(cache_path).endswith(".zarr"):
         _shutil.rmtree(p)
         print(f"[Data] Removed corrupt zarr store: {p}")
@@ -1041,6 +1041,9 @@ def _delete_cache_artifacts(cache_path: str) -> None:
         Path(str(cache_path) + "_resume.json"),
         Path(str(cache_path) + "_feature_schema.json"),
         Path(str(cache_path) + "_pair_readiness_report.json"),
+        # Clean up .bin intermediate files (Windows fallback)
+        Path(str(cache_path) + "_X.bin"),
+        Path(str(cache_path) + "_y.bin"),
     ):
         if fp.exists():
             fp.unlink()

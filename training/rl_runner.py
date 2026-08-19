@@ -55,9 +55,9 @@ def _build_rl_market_arrays(y_labels, base_price: float = 1.085, base_spread: fl
 
     Priority
     --------
-    1. ``_try_rl_market_from_features`` ΓÇö denormalized ret/atr/spread from cached
+    1. ``_try_rl_market_from_features`` -- denormalized ret/atr/spread from cached
        feature windows (same bars as supervised training; preferred when scaler exists).
-    2. Label integration (this function) ΓÇö treat forward-reward labels as a signed
+    2. Label integration (this function) -- treat forward-reward labels as a signed
        return walk when OHLC/features are unavailable.
 
     The feature cache stores scaled windows, not raw OHLC. When no scaler/feature
@@ -225,7 +225,7 @@ def _build_rl_env(
             prices, atr, spreads = _build_rl_market_arrays(y_env)
             _market_source = "synthetic"
     if _market_source != "cache":
-        print(f"[RL] WARN: market source={_market_source} ΓÇö rebuild cache for real OHLC")
+        print(f"[RL] WARN: market source={_market_source} -- rebuild cache for real OHLC")
 
     obs_feats = None
     if bool(getattr(args, "rl_encoder_obs", True)):
@@ -740,11 +740,11 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
                     )
             except Exception as exc:
                 print(f"[RL] ONNX export/deploy skipped: {exc}")
-            print(f"[RL] Saved best policy ΓåÆ {ckpt_dir / f'rl_{_algo}_best.pt'}")
+            print(f"[RL] Saved best policy  {ckpt_dir / f'rl_{_algo}_best.pt'}")
         else:
             print(
                 f"[RL] Val Sharpe {_val_sharpe:.3f} below min_val_sharpe {_min_val_sharpe:.3f} "
-                "ΓÇö rl_*_best not updated"
+                "-- rl_*_best not updated"
             )
 
     _save_rl_checkpoint(agent, ckpt_dir, _algo, "last")
@@ -770,7 +770,7 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     )
     if _TRAIN_LOGGER is not None:
         _TRAIN_LOGGER.info(
-            f"[RL] {args.rl_algo.upper()} complete ΓÇö "
+            f"[RL] {args.rl_algo.upper()} complete -- "
             f"return={s['total_return_pct']:+.2f}% sharpe={s['sharpe']:.3f} "
             f"val_sharpe={rl_stats['rl/val_sharpe']:.3f}"
         )

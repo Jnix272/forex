@@ -100,11 +100,11 @@ from training.gpu_cache_io import (
 )
 
 # Local module state (was train_gpu globals)
-_FIRST_CHUNK_COLS: list | None = None  # noqa: F811
+# _FIRST_CHUNK_COLS is canonical in training.core -- imported above, do NOT redeclare.
 # Defaults until bind_host overlays train_gpu symbols
 ZARR = _ZARR_DEFAULT
-_x_path = _x_path_default  # noqa: F811
-_y_path = _y_path_default  # noqa: F811
+_x_path = _x_path_default
+_y_path = _y_path_default
 _pq_path = _pq_path_default
 _y_cls_path = _y_cls_path_default
 _diff_path = _diff_path_default
@@ -113,11 +113,11 @@ _atr_path = _atr_path_default
 _spread_path = _spread_path_default
 _base_path = _base_path_default
 _scaler_npz_path = _scaler_npz_path_default
-_zarr_open_group = _zarr_open_group_default  # noqa: F811
+_zarr_open_group = _zarr_open_group_default
 _zarr_create = _zarr_create_default
 _PAIR_READINESS_STATS: dict = {}
 _PAIR_ALIGNMENT_STATS: dict = {}
-_TRAIN_LOGGER = None  # mirrored from train_gpu via bind_host / logging shims  # noqa: F811
+_TRAIN_LOGGER = None  # mirrored from train_gpu via bind_host / logging shims
 
 
 # DS-002: historical context loaded before each real-data window so EMA/MACD
@@ -1170,15 +1170,15 @@ def _compute_difficulty_scores(feats: pd.DataFrame, seq_len: int) -> np.ndarray:
     Spread signal (liquidity):
       Uses `liquidity_vacuum` if available (spread / median_spread ratio),
       else falls back to `spread_avg` / rolling median.
-      1 = medium if spread > 1.5├ù median
-      2 = hard   if spread > 2.0├ù median
+      1 = medium if spread > 1.5x median
+      2 = hard   if spread > 2.0x median
 
     News window signal:
       2 = hard when `news_ok == 0` (within ┬▒15 min of high-impact release)
       1 = medium when `eco_surprise` is nonzero (data release bar itself)
 
     Volatility spike signal:
-      2 = hard when `vol_ok == 0` (ATR > 3├ù rolling mean ΓÇö spike / flash crash)
+      2 = hard when `vol_ok == 0` (ATR > 3x rolling mean -- spike / flash crash)
 
     The difficulty of window i is that of its *last* bar (index i + seq_len - 1),
     matching how labels are assigned.
@@ -2095,15 +2095,15 @@ def _build_multipair_chunk(
     Process raw ticks for P pairs into joint sequences.
 
     pair_ticks : {pair_name: pd.DataFrame}
-    scalers    : {pair_name: StandardScaler}  ΓÇö one per pair, fitted in-place
+    scalers    : {pair_name: StandardScaler}  -- one per pair, fitted in-place
 
     Returns
     -------
-    X : (N, T, P * F_per_pair)   ΓÇö pairs concatenated on feature axis
-    y : (N,)                      ΓÇö mean label across pairs
-    y_cls : (N,)                  ΓÇö consensus direction {-1,0,+1} across pairs
-    pq : (N,)                     ΓÇö mean path-quality across pairs
-    diff : (N,) uint8             ΓÇö max difficulty across pairs (curriculum)
+    X : (N, T, P * F_per_pair)   -- pairs concatenated on feature axis
+    y : (N,)                      -- mean label across pairs
+    y_cls : (N,)                  -- consensus direction {-1,0,+1} across pairs
+    pq : (N,)                     -- mean path-quality across pairs
+    diff : (N,) uint8             -- max difficulty across pairs (curriculum)
     close/atr/spread : (N,) from the first pair with valid sequences (RL market path)
     n_features_total : int
     """
@@ -2345,8 +2345,9 @@ def _build_multipair_chunk(
 
     y_multi = np.mean(np.stack(y_list, axis=1), axis=1).astype(np.float32)  # (N,)
     cls_mean = np.mean(np.stack(ycls_list, axis=1), axis=1)
+    consensus_threshold = float(LABELING.get("consensus_threshold", 0.33))
     y_cls_multi = np.where(
-        np.abs(cls_mean) < 0.33,
+        np.abs(cls_mean) < consensus_threshold,
         0.0,
         np.sign(cls_mean),
     ).astype(np.float32)
@@ -2599,7 +2600,7 @@ def _build_multipair_dataset(
         _coverage_valid, _coverage_report = pairs, []
     _skipped = [p for p in pairs if p not in _coverage_valid]
     if _skipped:
-        print(f"[Coverage] ⚠  {len(_skipped)}/{len(pairs)} pairs have insufficient data (<2 years)")
+        print(f"[Coverage]   {len(_skipped)}/{len(pairs)} pairs have insufficient data (<2 years)")
         print(f"[Coverage]    Skipped: {', '.join(_skipped)}")
         print(f"[Coverage]    Training on: {', '.join(_coverage_valid) if _coverage_valid else 'NONE'}")
         if len(_coverage_valid) < 2:
@@ -2612,7 +2613,7 @@ def _build_multipair_dataset(
     else:
         low = [r["pair"] for r in _coverage_report if r["status"] == "LOW"]
         if low:
-            print(f"[Coverage] ℹ  {len(low)} pairs have shorter-than-expected history (low coverage): {', '.join(low)}")  # noqa: RUF001
+            print(f"[Coverage]   {len(low)} pairs have shorter-than-expected history (low coverage): {', '.join(low)}")  # noqa: RUF001
 
     use_real_cross = args.cross_asset_mode == "real" or (
         args.cross_asset_mode == "auto" and args.data_source != "synthetic"
@@ -2631,7 +2632,7 @@ def _build_multipair_dataset(
             sentiment_pipe = SentimentPipeline(prefer_backend=pref, use_cache=True)
             print(f"[Sentiment] mode={args.sentiment_mode} enabled")
         except Exception as e:
-            print(f"[Sentiment] WARN: init failed ({e}) ΓÇö disabling sentiment features")
+            print(f"[Sentiment] WARN: init failed ({e}) -- disabling sentiment features")
             sentiment_pipe = None
     if sentiment_pipe is not None and str(getattr(args, "historical_news_mode", "calendar")).lower() == "full":
         try:
@@ -2661,7 +2662,7 @@ def _build_multipair_dataset(
                 f"(source={cross_asset_source}, cache={cross_asset_cache_dir})"
             )
         except Exception as e:
-            print(f"[CrossAsset] WARN: external load failed ({e}) ΓÇö falling back to synthetic")
+            print(f"[CrossAsset] WARN: external load failed ({e}) -- falling back to synthetic")
             cross_asset = None
 
     scalers = {p: StandardScaler() for p in pairs}
@@ -3180,7 +3181,7 @@ def _build_multipair_dataset(
             n_features = n_feat
             total_samples = len(X_seq)
             _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq)
-            print(f"  {total_samples:,} joint sequences ├ù {n_features} features")
+            print(f"  {total_samples:,} joint sequences x {n_features} features")
             if not getattr(args, "_feature_schema_checked", False):
                 args._feature_schema_checked = True
                 _enforce_dataset_feature_schema(
@@ -3320,7 +3321,7 @@ def _build_multipair_dataset(
 
     _postprocess_cache_integrity_check(str(cache_path), args, context="MultiPair")
 
-    print(f"\n[MultiPair] Dataset built: {total_samples:,} samples ├ù {n_features} features")
+    print(f"\n[MultiPair] Dataset built: {total_samples:,} samples x {n_features} features")
     _verify_dataset(str(cache_path), args, total_samples, n_features, context="MultiPair")
     print(f"            Cached: {cache_path}")
 
@@ -3511,7 +3512,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         ok, reason = _validate_cache_integrity(str(cache_path), args)
         if not ok:
             if getattr(args, "auto_rebuild_on_mismatch", False):
-                print(f"[Data] WARN: cache integrity mismatch ({reason}) — auto rebuilding.")
+                print(f"[Data] WARN: cache integrity mismatch ({reason}) -- auto rebuilding.")
                 _delete_cache_artifacts(str(cache_path))
             elif getattr(args, "integrity_gate", True):
                 raise RuntimeError(
@@ -3528,11 +3529,11 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             n_features = int(_zx.shape[2])
             scaler = _load_scaler_npz(Path(cache_path)) or _identity_scaler(n_features)
             n_samples = _clamp_n_samples_to_disk(str(cache_path), n_samples)
-            print(f"[Data] {n_samples:,} samples × {n_features} features (zarr cache)")
+            print(f"[Data] {n_samples:,} samples x {n_features} features (zarr cache)")
             _warn_multitask_cache_sidecars(str(cache_path), args)
             return str(cache_path), n_samples, n_features, scaler
         pass
-    print(f"\n[Data] Building 20M tick dataset ΓÇö chunk size: {args.chunk_size:,}")
+    print(f"\n[Data] Building 20M tick dataset -- chunk size: {args.chunk_size:,}")
     _pairs_display = ", ".join(pairs)
     print(f"       Source: {args.data_source} | Pairs: {_pairs_display}")
     print(f"       News mode: {_news_mode} | Cache engine: {_cache_engine.upper()}")
@@ -3557,7 +3558,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
                 f"(source={cross_asset_source}, cache={cross_asset_cache_dir})"
             )
         except Exception as e:
-            print(f"[CrossAsset] WARN: external load failed ({e}) ΓÇö falling back to synthetic")
+            print(f"[CrossAsset] WARN: external load failed ({e}) -- falling back to synthetic")
             cross_asset = None
 
     fe = FeatureEngineer(
@@ -3998,7 +3999,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
     if readiness_report.get("status") == "fail":
         raise RuntimeError(f"Pair Readiness Gate Failed. See {cache_path!s}_pair_readiness_report.json")
 
-    print(f"\n[Data] Dataset built: {total_samples:,} samples ├ù {n_features_total} features ├ù seq_len {args.seq_len}")
+    print(f"\n[Data] Dataset built: {total_samples:,} samples x {n_features_total} features x seq_len {args.seq_len}")
     _postprocess_cache_integrity_check(str(cache_path), args, context="Data")
     _verify_dataset(str(cache_path), args, total_samples, n_features_total, context="Data")
     print(f"       Cached at: {cache_path}")

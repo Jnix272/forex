@@ -581,4 +581,4 @@ if __name__ == "__main__":
     print(f"  Actions: {actions}")
     print(f"  Portfolio: {coord.portfolio_summary()}")
 
-    print("\nAll RL advanced tests passed ✓")
+    print("\nAll RL advanced tests passed ")

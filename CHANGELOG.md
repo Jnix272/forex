@@ -38,6 +38,10 @@ All notable changes to this project will be documented in this file.
   - Fixed `supervised_loop.py` indentation error in epoch loop.
 
 ### Fixed
+- **2026-08-19 — DirectionWarmup Validation Crash Fix**:
+  - During the DirectionWarmup phase (first 2 epochs when `--multitask` is enabled), validation crashed with `TypeError: MultiTaskLoss.forward() missing 3 required positional arguments: 'conf', 'y_cls', and 'y_cont'`. Training used `direction_only=True` with a simple `CrossEntropyLoss`, but validation was calling `validate_epoch` without the `direction_only` flag while still using the full `MultiTaskLoss` criterion.
+  - Fix: Added `direction_only=_direction_warmup_active` to the `validate_epoch` call in `supervised_loop.py:3298` so validation uses the same direction-only loss computation as training during warmup. Added a safety fallback in `validate_epoch` (lines 1684-1692) to handle edge cases where `multitask=True` but the model returns a single tensor.
+
 - **2026-08-16 — Windows quick-mode training pipeline (end-to-end synthetic smoke now passes, Errors: 0)**:
   - `supervised_loop.py`: adversarial class targets cast `y_adv.long().clamp(0, 2)` before the PGD step — the cache stores direction labels as `{-1,0,1}` float (12 rows are `-1`); un-clamped long targets crashed CrossEntropyLoss with a CUDA device-side assert (`t >= 0 && t < n_classes`) in `adversarial_generator.py:205`. Matches the `MultiTaskLoss.forward` / `lightning_trainer` clamp convention.
   - `supervised_loop.py`: aliased the local `from pathlib import Path` to `_Path` (was `UnboundLocalError` at the checkpoint-dir write); aliased `SummaryWriter` import to `_SummaryWriter` (was `NameError`); added `_RichDisplay` to `_HOST_DEPS` so `bind_host` copies it from `train_gpu` (was `NameError` on non-quick runs).

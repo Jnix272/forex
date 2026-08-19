@@ -36,7 +36,7 @@ from models.catboost_model import CatBoostForecaster  # noqa: E402
 try:
     import wandb
 
-    WANDB = True
+    WANDB = bool(os.environ.get("WANDB_API_KEY"))
 except ImportError:
     WANDB = False
 
@@ -158,6 +158,32 @@ def compute_dir_accuracy(pred_dir: np.ndarray, y_dir: np.ndarray) -> float:
     return float((pred_dir == y_dir).mean())
 
 
+def compute_class_weights(y: np.ndarray, n_classes: int = 3, method: str = "balanced") -> dict:
+    """
+    Compute class weights for imbalanced classification.
+
+    method:
+      - "balanced": n_samples / (n_classes * n_samples_per_class) -- sklearn-style
+      - "inverse": 1 / frequency -- simple inverse frequency
+      - "sqrt_inv": sqrt(1 / frequency) -- softer rebalancing
+    """
+    counts = np.bincount(y.astype(int).ravel(), minlength=n_classes).astype(np.float64)
+    total = counts.sum()
+    if total == 0:
+        return {i: 1.0 for i in range(n_classes)}
+    freq = counts / total
+    if method == "balanced":
+        weights = total / (n_classes * np.maximum(counts, 1))
+    elif method == "inverse":
+        weights = 1.0 / np.maximum(freq, 1e-6)
+    elif method == "sqrt_inv":
+        weights = np.sqrt(1.0 / np.maximum(freq, 1e-6))
+    else:
+        weights = np.ones(n_classes)
+    weights = weights / weights.mean()  # normalize to mean=1
+    return {i: float(w) for i, w in enumerate(weights)}
+
+
 # ---------------------------------------------------------------------------
 # Walk-forward folds (purged/embargoed via training.cv_splits)
 # ---------------------------------------------------------------------------
@@ -214,6 +240,8 @@ def _native_cb_params(params: dict) -> dict:
         if key in drop:
             continue
         out[alias.get(key, key)] = value
+    if out.get("subsample", 1.0) < 1.0 and "bootstrap_type" not in out:
+        out["bootstrap_type"] = "Bernoulli"
     return out
 
 
@@ -241,6 +269,10 @@ def tune_hyperparams(
     print(f"[Tune] Searching {len(combos)} hyperparameter combinations...")
     for combo in combos:
         params = dict(zip(keys, combo, strict=False))
+        if params.get("subsample", 1.0) < 1.0:
+            params["bootstrap_type"] = "Bernoulli"
+        params.pop("colsample_bylevel", None)
+        _tune_task = "CPU"
         if task == "classification":
             m = cb.CatBoostClassifier(
                 classes_count=3,
@@ -248,7 +280,7 @@ def tune_hyperparams(
                 learning_rate=lr,
                 eval_metric="MultiClass",
                 verbose=0,
-                task_type="GPU",
+                task_type=_tune_task,
                 **params,
             )
             m.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
@@ -256,7 +288,7 @@ def tune_hyperparams(
             score = compute_dir_accuracy(preds, y_val)
         else:
             m = cb.CatBoostRegressor(
-                loss_function="RMSE", learning_rate=lr, eval_metric="RMSE", verbose=0, task_type="GPU", **params
+                loss_function="RMSE", learning_rate=lr, eval_metric="RMSE", verbose=0, task_type=_tune_task, **params
             )
             m.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
             preds = m.predict(X_val)
@@ -276,13 +308,17 @@ def tune_hyperparams(
 # Feature label generation
 # ---------------------------------------------------------------------------
 
-_TEMPORAL_STAT_NAMES = ["mean", "std", "min", "max", "last", "range"]
+_TEMPORAL_STAT_NAMES = [
+    "mean", "std", "min", "max", "last", "range",
+    "skew", "kurt", "slope", "accel",
+    "early_mean", "mid_mean", "late_mean", "vol",
+]
 
 
 def _build_feature_labels(n_raw_features: int, sequence_mode: str, n_tab_features: int) -> list[str]:
     """
     Generate human-readable labels for tabular CatBoost features.
-    When sequence_mode='temporal', each raw feature gets 6 summary stats.
+    When sequence_mode='temporal', each raw feature gets 14 summary stats.
     Falls back to f0, f1, ... if the count doesn't match.
     """
     if sequence_mode == "temporal":
@@ -421,7 +457,6 @@ def main():
             "depth": best_params.get("depth", args.depth),
             "learning_rate": args.lr,
             "subsample": best_params.get("subsample", args.subsample),
-            "colsample_bylevel": best_params.get("colsample_bylevel", args.colsample),
             "l2_leaf_reg": _env_l2,
         }
     )
@@ -440,20 +475,25 @@ def main():
             yva_dir = y_dir[va_idx]
             yva_ret = y_ret[va_idx]
 
+            _cb_task = "CPU"
             if args.task == "classification":
+                cw = compute_class_weights(ytr, n_classes=3, method="balanced")
+                class_weights = [cw[0], cw[1], cw[2]]
+                print(f"  Fold {fold_i + 1} class weights: Sell={class_weights[0]:.3f} Hold={class_weights[1]:.3f} Buy={class_weights[2]:.3f}")
                 m = cb.CatBoostClassifier(
                     classes_count=3,
                     loss_function="MultiClass",
                     eval_metric="MultiClass",
                     verbose=0,
-                    task_type="GPU",
+                    task_type=_cb_task,
+                    class_weights=class_weights,
                     **cb_params,
                 )
                 m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False, early_stopping_rounds=_early_stop)
                 preds = m.predict(Xva)
             else:
                 m = cb.CatBoostRegressor(
-                    loss_function="RMSE", eval_metric="RMSE", verbose=0, task_type="GPU", **cb_params
+                    loss_function="RMSE", eval_metric="RMSE", verbose=0, task_type=_cb_task, **cb_params
                 )
                 m.fit(Xtr, ytr, eval_set=(Xva, yva), verbose=False, early_stopping_rounds=_early_stop)
                 preds = m.predict(Xva)
@@ -466,10 +506,10 @@ def main():
 
         cv_sharpe = float(np.mean(fold_sharpes))
         cv_sharpe_std = float(np.std(fold_sharpes))
-        cv_diраcc = float(np.mean(fold_diraccs))
-        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f} ± {cv_sharpe_std:.3f}  DirAcc={cv_diраcc:.3f}")
+        cv_diracc = float(np.mean(fold_diraccs))
+        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f}  {cv_sharpe_std:.3f}  DirAcc={cv_diracc:.3f}")
     else:
-        cv_sharpe = cv_sharpe_std = cv_diраcc = 0.0
+        cv_sharpe = cv_sharpe_std = cv_diracc = 0.0
 
     # ── final model on full 80% train ─────────────────────────────────────────
     if WANDB:
@@ -477,7 +517,9 @@ def main():
 
     _wrap_kwargs = dict(cb_params)
     if args.task == "classification":
-        _wrap_kwargs.update(loss_function="MultiClass", eval_metric="MultiClass")
+        cw = compute_class_weights(y_train_target, n_classes=3, method="balanced")
+        _wrap_kwargs.update(loss_function="MultiClass", eval_metric="MultiClass", class_weights=[cw[0], cw[1], cw[2]])
+        print(f"Final model class weights: Sell={cw[0]:.3f} Hold={cw[1]:.3f} Buy={cw[2]:.3f}")
     else:
         _wrap_kwargs.update(loss_function="RMSE", eval_metric="RMSE")
     model = CatBoostForecaster(
@@ -500,13 +542,13 @@ def main():
     # ── validation metrics ────────────────────────────────────────────────────
     val_preds_raw = model.model.predict(X_val_tab)
     val_sharpe = compute_sharpe(val_preds_raw, y_val_ret)
-    val_diраcc = compute_dir_accuracy(val_preds_raw, y_val_dir)
+    val_diracc = compute_dir_accuracy(val_preds_raw, y_val_dir)
     val_mse = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
     val_corr = float(np.corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) if len(y_val_target) > 1 else 0.0
     if not np.isfinite(val_corr):
         val_corr = 0.0
 
-    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_diраcc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
+    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_diracc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
 
     # ── save model ────────────────────────────────────────────────────────────
     out_dir = Path("checkpoints")
@@ -534,13 +576,13 @@ def main():
                 "historical_news_file": news_file,
                 "train_time_s": train_time_s,
                 "validation_sharpe": val_sharpe,
-                "validation_dir_acc": val_diраcc,
+                "validation_dir_acc": val_diracc,
                 "validation_loss": val_mse,
                 "validation_corr": val_corr,
                 "cv_folds": args.folds,
                 "cv_sharpe_mean": cv_sharpe,
                 "cv_sharpe_std": cv_sharpe_std,
-                "cv_dir_acc_mean": cv_diраcc,
+                "cv_dir_acc_mean": cv_diracc,
                 "fold_sharpes": fold_sharpes,
                 "params": cb_params,
                 "tuned": args.tune,
@@ -557,12 +599,14 @@ def main():
             # Using get_booster() would raise AttributeError and fail silently.
             cb_model = model.model  # the underlying CatBoost model object
             fi_report: dict = {}
-            for imp_type in ["PredictionValuesChange", "LossFunctionChange", "ShapValues"]:
+            for imp_type in ["PredictionValuesChange", "LossFunctionChange"]:
                 try:
-                    if imp_type == "ShapValues":
-                        # ShapValues requires passing data; skip unless X_val is small
-                        continue
-                    raw_scores = cb_model.get_feature_importance(type=imp_type)
+                    # LossFunctionChange requires passing the training dataset as a Pool
+                    if imp_type == "LossFunctionChange":
+                        train_pool = cb.Pool(X_train_tab, label=y_train_target)
+                        raw_scores = cb_model.get_feature_importance(type=imp_type, data=train_pool)
+                    else:
+                        raw_scores = cb_model.get_feature_importance(type=imp_type)
                     feature_names = (
                         cb_model.feature_names_
                         if hasattr(cb_model, "feature_names_")
@@ -604,7 +648,7 @@ def main():
         wandb.log(
             {
                 "val_sharpe": val_sharpe,
-                "val_dir_acc": val_diраcc,
+                "val_dir_acc": val_diracc,
                 "val_mse": val_mse,
                 "cv_sharpe": cv_sharpe,
             }

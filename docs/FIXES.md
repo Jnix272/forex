@@ -105,7 +105,17 @@ Fix options: wire the four factories into the pipeline (supervised_loop adversar
 
 ---
 
-## 9. DEEP CODEBASE AUDIT — Additional Critical & High Issues (2026-08-09)
+## 9. DirectionWarmup Validation Crash (2026-08-19)
+
+During the DirectionWarmup phase (first 2 epochs when `--multitask` is enabled), training uses `direction_only=True` with a simple `CrossEntropyLoss` (`direction_crit`), but validation was calling `validate_epoch` without the `direction_only` flag (defaulting to `False`) while still using the full `MultiTaskLoss` criterion.
+
+The model (wrapped with `MultiTaskWrapper`) returns a tuple `(logits, ret_hat, conf)`, but the validation code's `else` branch was treating `pred` as a single tensor and calling `crit(pred, yb_reg)` with only 2 arguments — causing the `TypeError: MultiTaskLoss.forward() missing 3 required positional arguments: 'conf', 'y_cls', and 'y_cont'`.
+
+**Fixes applied:**
+1. **Pass `direction_only` to validation** (line 3298): Added `direction_only=_direction_warmup_active` to the `validate_epoch` call so validation uses the same direction-only loss computation as training during warmup.
+2. **Safety fallback in `validate_epoch`** (lines 1684-1692): Added a check in the `else` branch to handle the edge case where `multitask=True` but the model returns a single tensor — it now uses the CE component of `MultiTaskLoss` on the prediction tensor (treated as logits) instead of trying to call the full multi-task forward.
+
+## 10. DEEP CODEBASE AUDIT — Additional Critical & High Issues (2026-08-09)
 
 Comprehensive audit of 50+ files across 10 subsystems. **15 Critical (P0), 20 High (P1), 15 Medium (P2)** issues found.
 

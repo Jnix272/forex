@@ -1,5 +1,5 @@
 """
-training/train_gpu.py  (v4 ΓÇö 20M tick scale)
+training/train_gpu.py  (v4 -- 20M tick scale)
 =============================================
 Purpose-built to train on 20,000,000 ticks without running out of RAM.
 
@@ -11,17 +11,17 @@ Memory math
 
 Architecture
 ------------
-  Phase 1 ΓÇö CHUNK INGESTION
+  Phase 1 -- CHUNK INGESTION
     Split 20M ticks into 500k-tick chunks.
     Each chunk: ticks -> bars -> features -> RL labels -> append to Zarr store.
     Peak RAM per chunk: ~120 MB.  Total disk: ~250 MB Zarr (LZ4 compressed).
 
-  Phase 2 ΓÇö MEMORY-MAPPED TRAINING
+  Phase 2 -- MEMORY-MAPPED TRAINING
     MemmapSequenceDataset reads sequences directly from Zarr / NPY on disk.
-    Workers pre-fetch batches asynchronously ΓÇö GPU is never waiting.
+    Workers pre-fetch batches asynchronously -- GPU is never waiting.
     Effective throughput: ~1,200 batches/sec on RTX 4090 with AMP.
 
-  Phase 3 ΓÇö RL TRAINING
+  Phase 3 -- RL TRAINING
     ForexTradingEnv streams samples from the same memory-mapped arrays.
     DQN replay buffer stays on GPU (pinned memory).
 
@@ -595,7 +595,7 @@ def main():
         print(f"[Discord] Failed to send training_started: {e}")
 
     print(f"\n{'=' * 62}")
-    print("  Forex Scaling Model ΓÇö 20M Tick GPU Trainer")
+    print("  Forex Scaling Model -- 20M Tick GPU Trainer")
     print(f"  Run: {run_name}  |  Ticks: {args.n_ticks:,}  |  Mode: {_model_display}")
     if _queue_display:
         print(f"  Model queue: {_queue_display}")
@@ -616,10 +616,10 @@ def main():
         print(f"  Ensemble meta-learner: ON  (epochs={args.ensemble_epochs}  div_weight={args.ensemble_div_weight})")
     print(f"{'=' * 62}")
 
-    # ΓÜá∩╕Å  Synthetic data warning ΓÇö always visible
+    # [!]∩╕C  Synthetic data warning -- always visible
     if getattr(args, "data_source", "dukascopy") == "synthetic":
         print(f"\n{'!' * 62}")
-        print("  ΓÜá  WARNING: SYNTHETIC DATA")
+        print("  [!]  WARNING: SYNTHETIC DATA")
         print("  Training on artificially generated price data.")
         print("  Results DO NOT reflect real market performance.")
         print("  Use --data-source dukascopy for real data.")
@@ -673,7 +673,7 @@ def main():
     if scaler is not None and hasattr(scaler, "feature_names_in_"):
         _fp = int(getattr(args, "_f_per_pair", n_features) or n_features)
         args._feat_names = list(scaler.feature_names_in_)[:_fp]
-    print(f"\n[Dataset] {n_samples:,} sequences ├ù {n_features} features ├ù seq_len {args.seq_len}")
+    print(f"\n[Dataset] {n_samples:,} sequences x {n_features} features x seq_len {args.seq_len}")
 
     if getattr(args, "data_quality_check", False):
         print("\n[DataQuality] Running data quality check...")
@@ -711,7 +711,7 @@ def main():
             print("[DriftGate] PASS")
         except Exception as e:
             if getattr(args, "drift_fail_open", False):
-                print(f"[DriftGate] WARN: {e} ΓÇö continuing due to --drift-fail-open")
+                print(f"[DriftGate] WARN: {e} -- continuing due to --drift-fail-open")
             else:
                 raise
 
@@ -804,7 +804,7 @@ def main():
                 run_name=f"{model_name}_{run_name}",
                 seq_len=getattr(model_args, "seq_len", None),
             )
-            print("[Profiler] Done ΓÇö exiting (remove --profile to run full training).")
+            print("[Profiler] Done -- exiting (remove --profile to run full training).")
             return
 
         # Optional HPO
@@ -822,7 +822,7 @@ def main():
                 ta.patience = 3
                 ta.resume = False
                 ta.all_models = False
-                # Architecture search changes hidden/d_model ΓÇö existing contrastive
+                # Architecture search changes hidden/d_model -- existing contrastive
                 # checkpoints won't transfer; skip pretrain for proxy trials.
                 ta.pretrain = False
                 ta.disable_pretrain_load = True
@@ -844,7 +844,7 @@ def main():
             )
             if study.best_trial is None:
                 raise RuntimeError(
-                    f"[HPO] All {model_args.n_trials} trials failed ΓÇö "
+                    f"[HPO] All {model_args.n_trials} trials failed -- "
                     "check logs above; try scripts/optuna_tune.py for curriculum/arch search."
                 )
             for k, v in study.best_params.items():
@@ -1050,7 +1050,7 @@ def main():
             except Exception as _te:
                 print(f"[TuneEval] Evaluation failed (non-fatal): {_te}")
 
-        # Write train_summary.json ΓÇö distinct from manifest, contains only training metrics
+        # Write train_summary.json -- distinct from manifest, contains only training metrics
         _history_for_tune = (
             _history_for_auto_tune(cv_hist)
             if model_args.walk_forward_cv and "cv_hist" in locals()
@@ -1381,7 +1381,7 @@ def main():
                     except Exception as e:
                         print(f"[Discord] Failed to send promotion_gate_failed: {e}")
 
-            # Write deployment.json ΓÇö full transaction record regardless of outcome
+            # Write deployment.json -- full transaction record regardless of outcome
             _dep_dir = model_artifact_dir
             _dep_dir.mkdir(parents=True, exist_ok=True)
             _dep_doc = {
@@ -1781,7 +1781,7 @@ def main():
                 _rl_args.checkpoint_dir = str(Path(args.checkpoint_dir) / _rl_m)
                 _sup = Path(_rl_args.checkpoint_dir) / f"{_rl_m}_best.pt"
                 if not _sup.exists():
-                    print(f"[RL] Skipping {_rl_m} ΓÇö no {_sup.name}")
+                    print(f"[RL] Skipping {_rl_m} -- no {_sup.name}")
                     continue
                 print(f"\n[RL] Per-model pass: {_rl_m}")
                 with _timer.stage(f"rl_{_rl_m}"):

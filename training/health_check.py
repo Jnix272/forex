@@ -957,10 +957,10 @@ class HealthCheck:
         print(f"   Errors   : {len(self._errors)}")
         if self._warnings:
             for w in self._warnings[:3]:
-                print(f"   ⚠  [{w['source']}] {w['message'][:120]}")
+                print(f"     [{w['source']}] {w['message'][:120]}")
         if self._errors:
             for e in self._errors[:3]:
-                print(f"   ✗  [{e['source']}] {e['message'][:120]}")
+                print(f"     [{e['source']}] {e['message'][:120]}")
         print(f"   Report   : {out_path}\n")
 
         return report
@@ -1043,7 +1043,7 @@ def _self_test():
         assert isinstance(report, dict)
         assert "passed" in report
         print(f"Self-test complete. Warnings: {len(hc._warnings)}, Errors: {len(hc._errors)}")
-        print("PASS ✓")
+        print("PASS ")
 
 
 if __name__ == "__main__":
