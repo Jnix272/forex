@@ -84,18 +84,9 @@ def main():
         print(f"{'=' * 60}")
 
         # Show storage savings
-        import subprocess
-
-        raw_size = subprocess.run(["du", "-sh", "data/raw/dukascopy"], capture_output=True, text=True).stdout.strip()
-        compact_size = subprocess.run(
-            ["du", "-sh", "data/compact/dukascopy"], capture_output=True, text=True
-        ).stdout.strip()
-        print("\nStorage:")
-        print(f"  Raw (hourly):    {raw_size}")
-        print(f"  Compact ({args.granularity}): {compact_size}")
-
+        print("\nStorage savings omitted (Windows does not support 'du')")
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        print(f"\n ERROR: {e}")
         import traceback
 
         traceback.print_exc()

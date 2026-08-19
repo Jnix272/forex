@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: forex_questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"  # REST API and Web Console
+      - "9009:9009"  # InfluxDB Line Protocol (ILP)
+      - "8812:8812"  # Postgres wire protocol
+    volumes:
+      - questdb_data:/root/.questdb
+    environment:
+      - QDB_CAIRO_COMMIT_LAG=100  # Optimize for high-frequency commit
+
+volumes:
+  questdb_data:

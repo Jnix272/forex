@@ -86,14 +86,14 @@ labeling:
 
 # Dataset Building Configuration
 dataset:
-  seq_len: 80
+  seq_len: 120
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
   chunk_size: 500000
   chunk_overlap: 200
   output_format: "zarr"  # zarr, npy, parquet
-  output_dir: "data/processed"
+  output_dir: "data/processed_2016_2025"
   compression: "lz4"
   compression_level: 1
   pairs:

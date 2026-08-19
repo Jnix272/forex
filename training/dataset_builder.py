@@ -3106,7 +3106,8 @@ def _build_multipair_dataset(
                 scalers,
                 args.seq_len,
                 chunk_n,
-                args.label_method,
+                win_start=None,
+                label_method=args.label_method,
                 target_col=_cache_target_col(args),
                 execution_delay_bars=int(getattr(args, "execution_delay_bars", 1)),
                 bar_freq=str(getattr(args, "bar_freq", "5min")),
@@ -4096,7 +4097,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         )
 
         # Compute basic quality stats from cache
-        feat_nan_rates = {str(i): float(np.isnan(X_sample).mean(axis=0)[i]) for i in range(X_sample.shape[2])}
+        _nan_means = np.isnan(X_sample).mean(axis=(0, 1))
+        feat_nan_rates = {str(i): float(_nan_means[i]) for i in range(X_sample.shape[2])}
         class_balance = {}
         if y_cls is not None:
             labels = y_cls[y_cls != 0]

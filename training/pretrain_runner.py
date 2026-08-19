@@ -6,8 +6,8 @@ from __future__ import annotations
 
 _PRETRAIN_MULTI_BLOCK = ("vicreg", "simclr", "barlow")
 _PRETRAIN_STD_QUALITY = ("vicreg", "simclr", "barlow")
-_VALID_PRETRAIN_METHODS = ("byol", "simclr", "vicreg", "barlow", "tscl", "vae", "mae", "mask", "mask_reconstruct")
-_PRETRAIN_SINGLE_PASS = ("byol", "vae", "mae", "mask", "mask_reconstruct")
+_VALID_PRETRAIN_METHODS = ("byol", "simclr", "vicreg", "barlow", "tscl", "vae", "mae", "mask", "mask_reconstruct", "masked")
+_PRETRAIN_SINGLE_PASS = ("byol", "vae", "mae", "mask", "mask_reconstruct", "masked")
 
 
 import json
@@ -1134,7 +1134,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         "pt_loss": ls,
                         "pt_align": al,
                         "pt_unif": un,
-                        "pt_temp": trainer.temp.item(),
+                        "pt_temp": getattr(trainer, "temp", torch.tensor(0.0)).item(),
                     },
                 )
 

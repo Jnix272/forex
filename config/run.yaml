@@ -258,7 +258,7 @@ curriculum:
   # ── Sequence-length schedule (bars per sample) ──────────────────────────
   seq_schedule:
   - epoch_start: 0
-    seq_len: 80
+    seq_len: 120
 # ── Data source, tick ingestion, and feature-pipeline config ────────────────
 data:
   auto_rebuild_on_mismatch: true
@@ -647,7 +647,7 @@ training:
   resume: false
   save_every: 5
   seed: 1337
-  seq_len: "6h40m"
+  seq_len: 120
   # Annualisation: auto-detected from bar_freq × lookahead_bars.
   # The hard-coded 140.0 was incorrect because it applied a per-bar
   # factor to a per-trade (per-lookahead) return stream, inflating

@@ -42,7 +42,8 @@ def _rl_train_val_slices(total, args):
 
 
 def _rl_algo_kwargs(args, algo):
-    return getattr(args, "rl_algo_overrides", {}) or {}
+    overrides = getattr(args, "rl_algo_overrides", {}) or {}
+    return overrides.get(algo, {})
 
 # -----------------------------------------------------------------------------
 # RL TRAINING

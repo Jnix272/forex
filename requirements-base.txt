@@ -38,6 +38,7 @@ clickhouse-driver>=0.2.7
 databento>=0.32.0
 alpha_vantage>=2.3.1
 yfinance>=0.2.40
+questdb>=3.1.2
 kafka-python>=2.0.2
 
 # NLP / sentiment

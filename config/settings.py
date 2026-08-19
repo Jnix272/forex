@@ -265,7 +265,7 @@ TRAINING = {
     "weight_decay": 0.001,
     "amp": True,
     "val_split": 0.2,
-    "seq_len": "6h40m",  # matches config/run.yaml + curriculum
+    "seq_len": 120,  # matches config/run.yaml + curriculum
     "lr_warmup_epochs": 2,  # matches config/run.yaml training.lr_warmup_epochs
     "lr_schedule": "warmup_cosine",
     "checkpoint_dir": PATHS["checkpoints"],
@@ -1003,7 +1003,7 @@ LABEL_REGIME = {
 CURRICULUM = {
     # A3: Sequence-length schedule (bars per sample) - matches run.yaml
     "seq_schedule": [
-        {"epoch_start": 0, "seq_len": 80},
+        {"epoch_start": 0, "seq_len": 120},
     ],
     # A4: Feature group freeze schedule (unfreeze at epoch_unfreeze)
     # Canonical feature lists: config/run.yaml → curriculum.feature_groups

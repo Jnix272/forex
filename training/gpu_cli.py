@@ -626,7 +626,7 @@ def parse_args():
     p.add_argument(
         "--config",
         type=str,
-        default=None,
+        default="config/run.yaml",
         help="Path to a YAML run config (e.g. config/run.yaml). "
         "Values are used as defaults; explicit CLI flags override them.",
     )
@@ -806,7 +806,7 @@ def parse_args():
         default=10.0,
         help="OneCycleLR peak multiplier over base lr (legacy path).",
     )
-    p.add_argument("--seq-len", type=str, default="60")
+    p.add_argument("--seq-len", type=str, default="120")
     p.add_argument("--patience", type=int, default=10)
     p.add_argument(
         "--seed",
@@ -2046,64 +2046,14 @@ def parse_args():
         # Synthetic/quick smokes are too small for purged walk-forward
         # (embargo ≈ seq_len+lookahead often exceeds the sample count).
         if str(getattr(args, "data_source", "")).lower() == "synthetic":
-            args.walk_forward_cv = False
-            args.walk_forward_folds = 1
-        else:
-            args.walk_forward_cv = True
-            args.walk_forward_folds = min(max(int(args.walk_forward_folds), 1), 2)
-        # Short windows (synthetic or brief real ranges) cannot satisfy
-        # direction class-prior / probe floors - keep smoke training going.
-        args.direction_probe = False
-        args.ignore_preflight = True
-        args.epochs = min(int(args.epochs), 8)
-        args.pretrain_epochs = min(int(args.pretrain_epochs), 5)
-        args.patience = min(int(args.patience), 4)
-        # Quick mode always disables ensemble/RL - make the override loud when YAML
-        # had them enabled so operators do not think a "full" pipeline ran.
-        _ens_was = bool(getattr(args, "train_ensemble", False))
-        _rl_was = bool(getattr(args, "rl_train", False))
-        args.train_ensemble = False
-        args.rl_train = False
-        if _ens_was or _rl_was:
-            print(
-                "[Quick] WARN: quick.enabled forced ensemble="
-                f"{'off (was on)' if _ens_was else 'off'} | "
-                f"rl={'off (was on)' if _rl_was else 'off'}. "
-                "Set quick.enabled: false in run.yaml for a full post-train path."
-            )
-        # reduce-overhead CUDAGraphs + tiny synthetic batches can RecursionError
-        # on teardown; keep quick smokes in eager mode.
-        args.torch_compile = False
-        # Rich live display teardown has been observed to RecursionError after
-        # TRAINING COMPLETE on short smoke runs - use tqdm-only progress.
-        args.no_rich = True
-        try:
-            from config import settings as _settings
-
-            _settings.GPU["torch_compile"] = False
-        except Exception:
-            pass
-        try:
-            if isinstance(_GPU_CFG, dict):
-                _GPU_CFG["torch_compile"] = False
-        except Exception:
-            pass
-        # Time-anchored seq_len resolution (resolve string like "6h40m" -> integer bars before quick-mode caps)
-        _bf = getattr(args, "bar_freq", "5m")
-        args.seq_len = _resolve_seq_len(args.seq_len, _bf)
-
-        # Synthetic short windows (~80–200 bars from 10k–50k ticks) cannot  # noqa: RUF003
-        # form sequences when seq_len + lookahead_bars exceeds bar count
-        # (e.g. seq=64 + LH=30 on ~84 bars → zero samples).
-        if str(getattr(args, "data_source", "")).lower() == "synthetic":
             _lh = int(getattr(args, "lookahead_bars", 30) or 30)
             _delay = int(getattr(args, "execution_delay_bars", 1) or 1)
-            _cap = max(16, 48 - _lh // 2)  # keep headroom for LH=30 → seq≈32
-            if int(args.seq_len) > _cap:
-                print(
-                    f"[Quick] synthetic seq_len {args.seq_len} → {_cap} (headroom for lookahead={_lh}+delay={_delay})"
-                )
-                args.seq_len = _cap
+            _chunk_size = int(getattr(args, "chunk_size", 500000))
+            if _chunk_size <= 50000:
+                _cap = max(16, 48 - _lh // 2)
+                if int(args.seq_len) > _cap:
+                    print(f"[Quick] synthetic seq_len {args.seq_len} -> {_cap} (headroom for lookahead={_lh}+delay={_delay})")
+                    args.seq_len = _cap
         cur = getattr(args, "curriculum", None)
         if isinstance(cur, dict):
             capped = []

@@ -434,9 +434,9 @@ def main():
     if args.folds > 0:
         print(f"\n[WalkForward] {args.folds} folds...")
         for fold_i, (tr_idx, va_idx) in enumerate(walk_forward_splits(N, args.folds, cfg)):
-            Xtr = X_tab[tr_idx]
+            Xtr = np.where(np.isinf(X_tab[tr_idx]), np.nan, X_tab[tr_idx])
             ytr = y_target[tr_idx]
-            Xva = X_tab[va_idx]
+            Xva = np.where(np.isinf(X_tab[va_idx]), np.nan, X_tab[va_idx])
             yva = y_target[va_idx]
             yva_dir = y_dir[va_idx]
             yva_ret = y_ret[va_idx]

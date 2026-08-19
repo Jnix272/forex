@@ -13,6 +13,6 @@ model:
   dropout: 0.25
 training:
   lr: 3.0e-4
-  # 80 bars at 5-min = 6h40m — must match run.yaml training.seq_len
+  # 120 bars at 5-min = 10h — must match run.yaml training.seq_len
   # and config/models.py haelt entry to avoid silent profile override.
-  seq_len: 80
+  seq_len: 120

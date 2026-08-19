@@ -252,7 +252,7 @@ def migrate_to_duckdb(
     # Indexes
     print("\nCreating indexes...")
     conn = duckdb.connect(str(output), config={"temp_directory": str(spill_dir)})
-    conn.execute("SET memory_limit = '6GB'")
+    conn.execute("SET memory_limit = '12GB'")
     conn.execute("SET threads = 1")
     try:
         for sql, name in [

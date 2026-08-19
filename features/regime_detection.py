@@ -28,11 +28,12 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 try:
-    from numba import njit
+    from numba import njit, prange
 
     _NUMBA_OK = True
 except ImportError:  # pragma: no cover - optional / version-skew fallback
     _NUMBA_OK = False
+    prange = range
 
     def njit(*args, **kwargs):  # type: ignore[misc]
         if args and callable(args[0]) and len(args) == 1 and not kwargs:
@@ -549,6 +550,37 @@ def vol_regime_quantile_probs(n_states: int = 3, window: int = 60) -> list:
     return exprs
 
 
+@njit(parallel=True, cache=True)
+def _scan_outcomes_numba_parallel(close, hurst_rs_arr, hurst_dfa_arr, fractal_arr, hurst_window, fractal_window, step):
+    n = len(close)
+    
+    h_steps = (n - hurst_window + step - 1) // step
+    for idx in prange(h_steps):
+        i = hurst_window + idx * step
+        if i >= n: continue
+        w = close[i - hurst_window : i]
+        w_clean = w[np.isfinite(w)]
+        if len(w_clean) > 0:
+            h_rs = _hurst_rs_numba(w_clean)
+            h_dfa = _hurst_dfa_numba(w_clean, 4)
+            for j in range(step):
+                if i + j < n:
+                    hurst_rs_arr[i + j] = h_rs
+                    hurst_dfa_arr[i + j] = h_dfa
+
+    f_steps = (n - fractal_window + step - 1) // step
+    for idx in prange(f_steps):
+        i = fractal_window + idx * step
+        if i >= n: continue
+        w = close[i - fractal_window : i]
+        w_clean = w[np.isfinite(w)]
+        if len(w_clean) > 0:
+            k_max = min(32, len(w_clean) // 2)
+            fd = _fractal_dimension_numba(w_clean, k_max)
+            for j in range(step):
+                if i + j < n:
+                    fractal_arr[i + j] = fd
+
 def detect_regimes_polars(
     df,
     close_col: str = "close",
@@ -560,20 +592,6 @@ def detect_regimes_polars(
 ) -> pl.DataFrame:
     """
     Full regime feature builder over a Polars bar frame.
-
-    Emits:
-      - ``vol_regime_state_N_prob``   true-HMM state probabilities
-      - ``hurst_rs`` / ``hurst_dfa``  Hurst exponents (R/S and DFA)
-      - ``fractal_dim``               Higuchi fractal dimension
-      - ``regime_label``              -1 mean-revert / 0 neutral / +1 trend
-      - ``regime_class``              0 low-vol, 1 normal, 2 high-vol (HMM)
-
-    ``step`` > 1 evaluates the (expensive) rolling Hurst / fractal estimators
-    every ``step`` bars and forward-fills in between - a standard trade-off for
-    slow estimators that keeps output length identical.
-
-    Missing lookback values are forward-filled with the neutral baseline
-    (0.5 for Hurst, 1.5 for fractal dimension, 0 for regime label).
     """
     import polars as pl
 
@@ -597,12 +615,19 @@ def detect_regimes_polars(
     hurst_dfa_arr = np.full(n, 0.5)
     fractal_arr = np.full(n, 1.5)
     step = max(1, int(step))
-    for i in range(hurst_window, n, step):
-        w = close[i - hurst_window : i]
-        hurst_rs_arr[i : i + step] = hurst_rs(w)
-        hurst_dfa_arr[i : i + step] = hurst_dfa(w)
-    for i in range(fractal_window, n, step):
-        fractal_arr[i : i + step] = fractal_dimension(close[i - fractal_window : i])
+    
+    if _NUMBA_OK:
+        _scan_outcomes_numba_parallel(
+            close, hurst_rs_arr, hurst_dfa_arr, fractal_arr,
+            hurst_window, fractal_window, step
+        )
+    else:
+        for i in range(hurst_window, n, step):
+            w = close[i - hurst_window : i]
+            hurst_rs_arr[i : i + step] = hurst_rs(w)
+            hurst_dfa_arr[i : i + step] = hurst_dfa(w)
+        for i in range(fractal_window, n, step):
+            fractal_arr[i : i + step] = fractal_dimension(close[i - fractal_window : i])
 
     trend_label = np.where(hurst_dfa_arr > 0.55, 1.0, np.where(hurst_dfa_arr < 0.45, -1.0, 0.0))
 

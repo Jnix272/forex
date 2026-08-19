@@ -1681,8 +1681,16 @@ def validate_epoch(
                         pred_cls = _accumulate_class_diag(pred, y_cls_idx)
                         d = pred_cls.float() - 1.0
                     else:
-                        yb_reg = _match_target_shape(pred, yb)
-                        loss = crit(pred, yb_reg)
+                        if multitask or isinstance(crit, MultiTaskLoss):
+                            y_cls_idx = _direction_class_index(yb, y_cls_b, classification=True)
+                            if isinstance(crit, MultiTaskLoss):
+                                loss = cast(Any, crit).ce(pred, y_cls_idx.reshape(-1).clamp(0, 2)).mean()
+                            else:
+                                loss = crit(pred, y_cls_idx)
+                            yb_reg = _match_target_shape(pred, yb)
+                        else:
+                            yb_reg = _match_target_shape(pred, yb)
+                            loss = crit(pred, yb_reg)
                         if not (torch.isfinite(loss) and torch.isfinite(pred).all()):
                             nan_skips += 1
                             if pbar is not None:
@@ -1735,8 +1743,9 @@ def validate_epoch(
     if nan_skips:
         print(f"[Val] NaN summary: skipped {nan_skips} batch(es) this epoch.")
 
+    _cfg_ann = TRAINING.get("sharpe_annualization_factor")
     ann = float(
-        sharpe_ann_factor if sharpe_ann_factor is not None else TRAINING.get("sharpe_annualization_factor", 1.0)
+        sharpe_ann_factor if sharpe_ann_factor is not None else (_cfg_ann if _cfg_ann is not None else 1.0)
     )
     val_loss = total.item() / max(valid_batches, 1)
     dir_acc = correct.item() / max(n_acc, 1)
@@ -2363,6 +2372,8 @@ def supervised_train(
         _warmup_steps = _warmup_ep * _eff_steps
         if _warmup_steps <= 0:
             _warmup_steps = max(1, int(_total_steps * float(getattr(args, "lr_warmup_pct", 0.1))))
+        # Guard: warmup must never exceed total steps (breaks short --epochs N runs)
+        _warmup_steps = min(_warmup_steps, max(1, int(_total_steps * 0.3)))
         _min_ratio = float(getattr(args, "lr_min_ratio", 0.05))
         _min_ratio = min(max(_min_ratio, 0.0), 1.0)
         _decay_steps = max(1, _total_steps - _warmup_steps)
@@ -2662,7 +2673,7 @@ def supervised_train(
     )
 
     _feature_ablation_mask = (
-        torch.from_numpy(_feature_ablation_mask_np).to(device)  # type: ignore if _feature_ablation_mask_np is not None else None
+        torch.from_numpy(_feature_ablation_mask_np).to(device) if _feature_ablation_mask_np is not None else None
     )
 
     if _feature_ablation_report.get("enabled"):
@@ -3285,6 +3296,7 @@ def supervised_train(
                 lookahead_bars=int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30)),
                 sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                 return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
+                direction_only=_direction_warmup_active,
             )
             _class_counts = getattr(validate_epoch, "last_class_counts", {"pred": [0, 0, 0], "true": [0, 0, 0]})
 

@@ -786,6 +786,7 @@ def main():
         _set_global_seed(getattr(model_args, "seed", None))
         model_artifact_dir = Path(model_args.checkpoint_dir)
         model_artifact_dir.mkdir(parents=True, exist_ok=True)
+        model_args.seq_len = args.seq_len
         model = build_model(model_name, n_features, model_args).to(device)
 
 

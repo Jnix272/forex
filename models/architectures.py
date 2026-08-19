@@ -34,10 +34,14 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
         print(f"[Model] Stub for {name} (torch not installed)")
         return None
 
-    if name.lower() not in MODEL_REGISTRY:
+    base_name = name.lower()
+    if base_name.startswith("baseline_"):
+        base_name = base_name.replace("baseline_", "", 1)
+        
+    if base_name not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{name}'. Options: {list(MODEL_REGISTRY)}")
 
-    cls = MODEL_REGISTRY[name.lower()]
+    cls = MODEL_REGISTRY[base_name]
     if isinstance(seq_len, argparse.Namespace):
         for k, v in vars(seq_len).items():
             if k not in kwargs:
@@ -84,8 +88,29 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
         else:
             raise e
 
-    n_params = sum(p.numel() for p in model.parameters())
+    try:
+        n_params = sum(p.numel() for p in model.parameters())
+    except ValueError:
+        n_params = 0
     print(f"[Model] {name.upper()} | {n_params:,} parameters | applied_params={list(valid_kwargs.keys())}")
+
+    if kwargs.get("multitask", False) or getattr(kwargs.get("args", None), "multitask", False):
+        head_in = getattr(model, "d_model", getattr(model, "hidden_size", getattr(model, "embed_dim", 128)))
+        if name.lower() == "haelt":
+            head_in = kwargs.get("d_model", 128) * 2  # haelt uses cat(lstm, transformer)
+        
+        if TORCH:
+            model = MultiTaskWrapper(
+                model,
+                head_in=head_in,
+                hidden=64,
+                dropout=kwargs.get("dropout", 0.1),
+                proj_threshold=1024,
+                proj_to=256,
+                force_project=True,
+            )
+            print(f"[Model] {name.upper()} | MultiTask wrapper (head_in={head_in}) applied.")
+
     return model
 
 
@@ -1343,9 +1368,10 @@ if TORCH:
         Serves as an ultra-fast, lightweight baseline against complex deep learning models.
         """
 
-        def __init__(self, input_size: int, num_classes: int, seq_len: int = 16):
+        def __init__(self, input_size: int, num_classes: int = 3, seq_len: int = 16):
             super().__init__()
             self.seq_len = seq_len
+            self.d_model = input_size * seq_len
             self.input_norm = nn.LayerNorm(input_size)
             self.flatten = nn.Flatten(start_dim=1)
             # Use LazyLinear to elegantly handle the flattened dimension (seq_len * input_size)
