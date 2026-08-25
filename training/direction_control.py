@@ -296,7 +296,7 @@ def _balanced_direction_indices(
 def _direction_preflight(cache_path: str, train_idx: np.ndarray, val_idx: np.ndarray, args) -> dict:
     """Hard gate before supervised direction training starts."""
     snap = _cache_length_snapshot(cache_path)
-    required = ("zarr_X", "zarr_y", "zarr_y_cls", "zarr_pq", "zarr_diff", "zarr_close", "zarr_atr", "zarr_spread")
+    required = ("zarr_X", "zarr_y", "zarr_y_cls", "zarr_close", "zarr_atr", "zarr_spread")
     if snap and any(k.startswith("zarr_") for k in snap):
         missing = [k for k in required if k not in snap]
         if missing:

@@ -113,17 +113,21 @@ def load_data_from_store(
     total_samples = int(z["X"].shape[0])
     n_samples = min(total_samples, max_samples)
 
-    X = np.array(z["X"][-n_samples:], dtype=np.float32)  # (N, T, F)
     y_all = np.array(z["y"][-n_samples:], dtype=np.float32)  # (N,) or (N, K)
 
-    if y_all.ndim == 2 and y_all.shape[1] >= 2:
+    if "y_cls" in z:
+        # RL builder saves labels as -1 (Short), 0 (Hold), 1 (Long).
+        # We shift by +1 to match CatBoost's expected 0, 1, 2 encoding.
+        y_dir = (np.array(z["y_cls"][-n_samples:], dtype=np.int8) + 1).astype(np.int8)
+        y_ret = y_all.ravel().astype(np.float32)
+    elif y_all.ndim == 2 and y_all.shape[1] >= 2:
         y_dir = y_all[:, 0].astype(np.int8)  # direction class  (col 0)
         y_ret = y_all[:, 1].astype(np.float32)  # continuous return (col 1)
     else:
         y_dir = np.zeros(n_samples, dtype=np.int8)
         y_ret = y_all.ravel().astype(np.float32)
 
-    return X, y_dir, y_ret
+    return z, y_dir, y_ret, n_samples
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +144,12 @@ def compute_sharpe(pred_dir: np.ndarray, y_ret: np.ndarray, bars_per_day: int = 
     pred_dir : predicted class (0=Short, 1=Flat, 2=Long) or probabilities
     y_ret    : true continuous returns per bar
     """
-    if pred_dir.ndim == 2:
+    pred = np.asarray(pred_dir, dtype=np.float64).squeeze()
+    if pred.ndim == 2:
         # Probability array -> argmax
-        pred_dir = pred_dir.argmax(axis=1)
+        pred = pred.argmax(axis=1).astype(np.float64)
     # Map 0->-1, 1->0, 2->+1
-    signals = np.where(pred_dir == 2, 1.0, np.where(pred_dir == 0, -1.0, 0.0))
+    signals = np.where(pred == 2, 1.0, np.where(pred == 0, -1.0, 0.0))
     pnl = signals * y_ret
     if pnl.std() < 1e-12:
         return 0.0
@@ -153,9 +158,11 @@ def compute_sharpe(pred_dir: np.ndarray, y_ret: np.ndarray, bars_per_day: int = 
 
 
 def compute_dir_accuracy(pred_dir: np.ndarray, y_dir: np.ndarray) -> float:
-    if pred_dir.ndim == 2:
-        pred_dir = pred_dir.argmax(axis=1)
-    return float((pred_dir == y_dir).mean())
+    pred = np.asarray(pred_dir, dtype=np.float64).squeeze()
+    if pred.ndim == 2:
+        pred = pred.argmax(axis=1).astype(np.float64)
+    # y_dir is 0, 1, 2
+    return float(np.mean(pred == y_dir))
 
 
 def compute_class_weights(y: np.ndarray, n_classes: int = 3, method: str = "balanced") -> dict:
@@ -272,10 +279,11 @@ def tune_hyperparams(
         if params.get("subsample", 1.0) < 1.0:
             params["bootstrap_type"] = "Bernoulli"
         params.pop("colsample_bylevel", None)
-        _tune_task = "CPU"
+        _tune_task = "GPU"
         if task == "classification":
             m = cb.CatBoostClassifier(
                 classes_count=3,
+                class_names=[0, 1, 2],
                 loss_function="MultiClass",
                 learning_rate=lr,
                 eval_metric="MultiClass",
@@ -412,23 +420,41 @@ def main():
         y_dir = np.random.randint(0, 3, N).astype(np.int8)
         y_ret = np.random.randn(N).astype(np.float32) * 0.001
     else:
-        X, y_dir, y_ret = load_data_from_store(
+        z_store, y_dir, y_ret, n_samples = load_data_from_store(
             data_dir,
             args.samples,
             args.cache_path,
             expected_start=data_start if args.config else None,
             expected_end=data_end if args.config else None,
         )
-        if X is None:
+        if z_store is None:
             sys.exit(1)
 
-    N = len(X)
+    N = n_samples if not args.demo else 2000
     y_target = y_dir if args.task == "classification" else y_ret
 
     # ── build tabular features ────────────────────────────────────────────────
     _tmp = CatBoostForecaster(sequence_mode=args.sequence_mode)
-    X_tab = _tmp._prepare_inputs(X)
-    print(f"Data: N={N:,}  raw_features={X.shape[2]}  tabular_features={X_tab.shape[1]}  task={args.task}")
+    if args.demo:
+        X_tab = _tmp._prepare_inputs(X)
+        raw_features = X.shape[2]
+        seq_len = X.shape[1]
+    else:
+        print("[Memory] Processing Zarr array into tabular features in chunks...")
+        X_zarr = z_store["X"]
+        total_samples = int(X_zarr.shape[0])
+        start_idx = total_samples - n_samples
+        chunk_size = 10000
+        X_tab_list = []
+        for i in range(start_idx, total_samples, chunk_size):
+            end_idx = min(i + chunk_size, total_samples)
+            X_chunk = np.array(X_zarr[i:end_idx], dtype=np.float32)
+            X_tab_list.append(_tmp._prepare_inputs(X_chunk))
+        X_tab = np.concatenate(X_tab_list, axis=0)
+        raw_features = X_zarr.shape[2]
+        seq_len = X_zarr.shape[1]
+        
+    print(f"Data: N={N:,}  raw_features={raw_features}  tabular_features={X_tab.shape[1]}  task={args.task}")
 
     # ── purged/embargoed split for tuning / final early-stop ──────────────────
     tr_idx, va_idx = _tune_train_val_split(N, cfg)
@@ -475,13 +501,14 @@ def main():
             yva_dir = y_dir[va_idx]
             yva_ret = y_ret[va_idx]
 
-            _cb_task = "CPU"
+            _cb_task = "GPU"
             if args.task == "classification":
                 cw = compute_class_weights(ytr, n_classes=3, method="balanced")
                 class_weights = [cw[0], cw[1], cw[2]]
                 print(f"  Fold {fold_i + 1} class weights: Sell={class_weights[0]:.3f} Hold={class_weights[1]:.3f} Buy={class_weights[2]:.3f}")
                 m = cb.CatBoostClassifier(
                     classes_count=3,
+                    class_names=[0, 1, 2],
                     loss_function="MultiClass",
                     eval_metric="MultiClass",
                     verbose=0,
@@ -522,6 +549,8 @@ def main():
         print(f"Final model class weights: Sell={cw[0]:.3f} Hold={cw[1]:.3f} Buy={cw[2]:.3f}")
     else:
         _wrap_kwargs.update(loss_function="RMSE", eval_metric="RMSE")
+    
+    _wrap_kwargs.update(task_type="GPU")
     model = CatBoostForecaster(
         num_classes=3 if args.task == "classification" else 1,
         sequence_mode=args.sequence_mode,
@@ -564,9 +593,9 @@ def main():
                 "model": "catboost",
                 "task": args.task,
                 "sequence_mode": args.sequence_mode,
-                "n_features_raw": int(X.shape[2]),
+                "n_features_raw": int(raw_features),
                 "n_features_tabular": int(X_tab.shape[1]),
-                "seq_len": int(X.shape[1]),
+                "seq_len": int(seq_len),
                 "is_classifier": args.task == "classification",
                 "data_dir": str(data_dir),
                 "cache_path": str(args.cache_path or ""),
@@ -625,7 +654,7 @@ def main():
             if hasattr(model.model, "feature_importances_"):
                 importances = model.model.feature_importances_
                 n_tab_feats = X_tab.shape[1]
-                n_raw_feats = X.shape[2]
+                n_raw_feats = raw_features
                 feature_labels = _build_feature_labels(n_raw_feats, args.sequence_mode, n_tab_feats)
                 labeled = sorted(
                     zip(feature_labels, importances.tolist(), strict=False),

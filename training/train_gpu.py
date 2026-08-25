@@ -81,23 +81,19 @@ import asyncio
 
 if sys.platform == "win32":
     import warnings
-
     warnings.filterwarnings(
         "ignore",
         category=DeprecationWarning,
         module="asyncio",
     )
-    if sys.version_info < (3, 16):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    else:
-        # No special policy needed on Python ΓëÑ3.16 ΓÇô the default is fine.
-        pass
-# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    if sys.version_info < (3, 16) and __name__ == "__main__":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 try:
     import yaml as _yaml  # noqa: F401
 
@@ -392,6 +388,7 @@ from training.pretrain_runner import (
     _parse_pretrain_ablation_models,
     _pretrain_ablation_verdict,
     _read_json_dict,
+    _run_multi_task_pretrain,
     _update_pretrain_report,
     run_pretrain,
 )
@@ -401,8 +398,28 @@ from training.rl_runner import (
     run_rl,
 )
 from training.supervised_loop import (
+    FeatureStabilityMonitor,
+    _sanitize_batch_tensors,
+    train_epoch,
+    validate_epoch,
     run_diversity_finetune,
     supervised_train,
+)
+# Backward-compat re-exports for older test modules (symbols moved to
+# direction_control / cache_integrity / dataset_builder during the
+# supervised_loop extraction; tests still import them via train_gpu).
+from training.direction_control import (  # noqa: F401
+    _balanced_direction_indices,
+    _direction_gate_failed,
+    _reward_to_class_index,
+    labels_to_class_index,
+)
+from training.cache_integrity import (  # noqa: F401, F811
+    _postprocess_cache_integrity_check,
+    _validate_cache_integrity,
+)
+from training.dataset_builder import (  # noqa: F401, F811
+    _build_chunk,
 )
 
 # Settings aliases expected by gpu_cli host bind / older tests
@@ -441,6 +458,7 @@ class _StageTimer:
             sample["gpu_temp_c"] = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
             mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
             sample["gpu_mem_mb"] = float(mem.used / 1_000_000)
+            pynvml.nvmlShutdown()
         except Exception:
             try:
                 import torch

@@ -11,7 +11,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from data.feature_store import FeatureStore, MaterializationStrategy
+from feature_store.polars_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import (
     DriftSeverity,
     DriftTracker,

@@ -1,0 +1,202 @@
+# ── Deep Learning Model Config ───────────────────────────────────────────────
+# Explicit named alias for the deep learning pipeline (HAELT, TFT, Transformer, Mamba, GNN).
+# Functionally equivalent to run.yaml but named so each model family has its own entry point.
+#
+# Usage:
+#   python -m training.train_gpu --config config/run_deep.yaml
+#   python -m training.train_gpu --config config/run_deep.yaml --build-only
+#
+# Dataset: seq_len=120, 584 features (4 pairs), RL reward labels, 20M ticks
+# Dataset size: ~35 GB  |  Build time: ~9 hours
+#
+# See config/run_tabular.yaml for CatBoost / XGBoost.
+
+data:
+  auto_rebuild_on_mismatch: true
+  chunk_size: 250000
+  corr_window: 20
+  corr_window_long: 60
+  dataset_build_workers: 2
+  end: '2025-12-31'
+  full_day_data: false
+  integrity_gate: true
+  momentum_window: 20
+  n_ticks: 20000000
+  min_pair_years: 2
+  expected_pair_years: 10
+  chunk_rows: "auto"
+  shuffle_buffer_size: 16384
+  use_feature_cache: false
+  feature_cache_dir: "data/features"
+  pair: EURUSD
+  pair_align: outer
+  pair_embed_dim: 16
+  pairs:
+  - EURUSD
+  - USDJPY
+  - GBPUSD
+  - USDCAD
+  parallel_window_workers: 1
+  real_data_window_days: 7
+  source: dukascopy
+  start: '2015-01-01'
+  use_cache: true
+  window_batch_days: 1
+  zarr_cname: auto
+  zarr_clevel: null
+  scaler_type: robust
+  scaler_quantile_range: [5, 95]
+
+features:
+  atr_windows: [6, 20, 60]
+  chop_window: 14
+  corr_window: 60
+  momentum_windows: [5, 20, 60]
+  ofi_windows: [5, 20, 60]
+  regime_window: 240
+  vol_windows: [6, 20, 60]
+  volatility_window: 120
+  vwap_window: 60
+
+pip_sizes:
+  BTC: 1.0
+  ETH: 0.01
+  JPY: 0.01
+  XAG: 0.001
+  XAU: 0.1
+  default: 0.0001
+
+strategy:
+  bar_freq: "5m"
+  lookahead_bars: 30
+  mode: scalping
+  profit_target_atr: 1.2
+  stop_loss_atr: 0.8
+
+training:
+  amp: true
+  batch_size: 256
+  epochs: 40
+  grad_accum_steps: 2
+  grad_clip: 0.75
+  label_method: rl_reward
+  label_smoothing: 0.05
+  loss: sharpe_huber
+  lr: 1.95e-05
+  lr_min_ratio: 0.08
+  lr_schedule: warmup_cosine
+  lr_warmup_epochs: 2
+  max_bad_frac: 0.05
+  max_zero_frac: 0.80
+  patience: 6
+  resume: false
+  save_every: 5
+  seed: 1337
+  seq_len: 120
+  sharpe_annualization_factor: null
+  fx_full_day: true
+  sharpe_weight: 0.25
+  swa_enabled: true
+  swa_lr: 1.0e-05
+  swa_start_frac: 0.75
+  training_memory: true
+  use_mixup: true
+  use_volatility_sampler: true
+  val_split: 0.2
+  weight_decay: 0.001
+  direction_weight: 0.75
+  early_stop_metric: sharpe
+  early_stop_min_delta: 0.01
+  cross_asset_mode: auto
+  cross_asset_provider: auto
+
+model:
+  all_models: false
+  d_model: 256
+  dropout: 0.25
+  hidden_size: 256
+  name: haelt
+  nhead: 8
+  num_layers: 3
+
+multitask:
+  class_balance_weight: 1.0
+  direction_weight_floor: 0.5
+  enabled: true
+  entropy_weight: 0.01
+  focal_gamma: 2.0
+  w_conf: 0.05
+  w_ret: 0.08
+
+pretrain:
+  enabled: true
+  epochs: 18
+  method: byol
+  sample_windows: 4096
+  min_epochs: 1
+  ema_decay: 0.996
+  lr: 0.0001
+  batch: 256
+  projection_dim: 256
+  pred_dim: 128
+  recon_hidden_dim: 512
+  regime_aware: true
+
+ensemble:
+  deploy: false
+  enabled: true
+  epochs: 10
+  div_weight: 0.1
+  explicit_diversity: true
+
+rl:
+  enabled: true
+  algo: dqn
+  deploy: true
+  episodes: 500
+  encoder_obs: true
+  episode_len: 2048
+  val_frac: 0.15
+  min_val_sharpe: -999.0
+
+validation:
+  embargo_bars: 60
+  method: purged_embargo
+  min_train_size: 50000
+  n_splits: 7
+  purge_bars: 120
+
+walk_forward:
+  enabled: true
+  folds: 7
+
+paths:
+  checkpoint_dir: checkpoints/forex_4pair_2015_2025_haelt
+  data_cache: ./data/processed
+
+news:
+  economic_calendar_file: data/raw/eco_calendar/events.csv
+  historical_mode: full
+  historical_news_file: data/raw/news/historical_news_combined.parquet
+
+hardware:
+  num_workers: 2
+  persistent_workers: false
+  pin_memory: true
+  prefetch_factor: 2
+  profile: auto
+  torch_compile: true
+  torch_compile_mode: reduce-overhead
+  val_num_workers: 0
+
+tracking:
+  auto_tune: true
+  dry_tune: true
+  no_wandb: true
+  run_name: deep_haelt_4pair
+
+quick:
+  enabled: false
+
+maturity:
+  stage: paper

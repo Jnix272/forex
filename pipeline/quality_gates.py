@@ -226,8 +226,13 @@ class DataQualityGates:
 
                 if not passed:
                     if check.severity == "error":
+                        # An unresolved error always wins; do not let a later
+                        # remediated warning downgrade it to REMEDIATED.
                         overall_result = QualityGateResult.FAIL
-                    elif check.severity == "warning" and overall_result == QualityGateResult.PASS:
+                    elif check.severity == "warning" and overall_result in (
+                        QualityGateResult.PASS,
+                        QualityGateResult.WARN,
+                    ):
                         overall_result = QualityGateResult.WARN
 
                 # Apply remediation if needed
@@ -249,11 +254,17 @@ class DataQualityGates:
                             }
                         )
 
-                        overall_result = QualityGateResult.REMEDIATED
+                        # Only mark REMEDIATED if no hard error failure is
+                        # still outstanding; an error-level failure stays FAIL.
+                        if overall_result != QualityGateResult.FAIL:
+                            overall_result = QualityGateResult.REMEDIATED
 
                     except Exception as e:
                         check_result["remediation_error"] = str(e)
                         warnings.warn(f"Remediation failed for {check.name}: {e}", stacklevel=2)
+                        # A failed remediation for an error check must remain FAIL.
+                        if check.severity == "error":
+                            overall_result = QualityGateResult.FAIL
 
                 report.checks.append(check_result)
 
@@ -396,7 +407,7 @@ class DataQualityGates:
             if "timestamp_utc" in df.columns:
                 original_len = len(df)
                 df = df.filter(
-                    ~pl.col("timestamp_utc").dt.weekday().is_in([6, 7])  # Sat=6, Sun=7
+                    ~pl.col("timestamp_utc").dt.weekday().is_in([5, 6])  # Sat=5, Sun=6
                 )
                 return df, {"rows_removed": original_len - len(df)}
             return df, {"rows_removed": 0}
@@ -429,8 +440,8 @@ class DataQualityGates:
         inf_info = {}
         total_inf = 0
         for col in numeric_cols:
-            inf_count = df.select(pl.col(col).is_infinite().sum()).item()
-            if inf_count > 0:
+            inf_count = df.select(pl.col(col).is_infinite().fill_null(False).sum()).item()
+            if inf_count is not None and inf_count > 0:
                 inf_info[col] = inf_count
                 total_inf += inf_count
 
@@ -465,7 +476,7 @@ class DataQualityGates:
         if "timestamp_utc" not in df.columns:
             return True, "No timestamp column", {}
 
-        weekend_count = df.filter(pl.col("timestamp_utc").dt.weekday().is_in([6, 7])).height
+        weekend_count = df.filter(pl.col("timestamp_utc").dt.weekday().is_in([5, 6])).height
 
         if weekend_count > 0:
             return False, f"Found {weekend_count} weekend rows", {"weekend_count": weekend_count}

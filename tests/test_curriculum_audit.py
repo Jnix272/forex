@@ -228,10 +228,11 @@ def test_enforce_dataset_feature_schema_raises_when_gated(tmp_path):
 def test_settings_yaml_section_mismatch_flags_critical_keys():
     from config.config_mismatch_audit import audit_settings_yaml_section_mismatches
 
-    # Real settings.TRAINING vs a fake YAML that drifts on critical keys
+    # Real settings.TRAINING vs a YAML that drifts on critical keys.
+    # Use the canonical yaml name so profile-scale exemptions don't apply.
     report = audit_settings_yaml_section_mismatches(
         {"training": {"seq_len": 12, "loss": "mse", "sharpe_annualization_factor": 1.0}},
-        yaml_path="fake.yaml",
+        yaml_path="run.yaml",
         sections={"training": "TRAINING"},
     )
     assert report["errors"], report

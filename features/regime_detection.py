@@ -463,14 +463,21 @@ def _causal_hmm_decode(
         for i in range(n_states):
             framelogprob[:, i] = multivariate_normal.logpdf(Z_full, mean=means[i], cov=covars[i])
 
-        # Forward algorithm with frozen parameters
+        # Forward algorithm with frozen parameters.
+        # Guard against exact-zero probabilities (a state absent from the warm-up
+        # yields startprob_/transmat entries of 0.0 -> log(0) = -inf, which
+        # propagates as NaN through logsumexp). Clip to a tiny positive floor.
         from scipy.special import logsumexp
+
+        _EPS = 1e-12
+        startprob = np.clip(startprob, _EPS, 1.0)
+        transmat = np.clip(transmat, _EPS, 1.0)
 
         logprob = np.zeros((n, n_states))
         logprob[0] = np.log(startprob) + framelogprob[0]
         for t in range(1, n):
             # log P(S_t | O_{1:t}) = logsumexp(log P(S_{t-1} | O_{1:t-1}) + log A_{S_{t-1}, S_t}) + log P(O_t | S_t)
-            logprob[t] = logsumexp(logprob[t - 1, :, np.newaxis] + np.log(transmat.T + 1e-12), axis=0) + framelogprob[t]
+            logprob[t] = logsumexp(logprob[t - 1, :, np.newaxis] + np.log(transmat.T), axis=0) + framelogprob[t]
 
         # Normalize to get causal probabilities
         log_norm = np.asarray(logsumexp(logprob, axis=1, keepdims=True), dtype=float)

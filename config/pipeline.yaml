@@ -185,3 +185,79 @@ use_gpu: true
 tags:
   environment: "development"
   team: "forex-ml"
+
+# ── Per-Model Training Stages ────────────────────────────────────────────────
+# Each model family uses its own config and dataset for optimal performance.
+#
+#  Model Family  | Config                    | Label Method    | seq_len | Dataset Size
+#  Deep (DL)     | config/run_deep.yaml      | rl_reward       | 120     | ~35 GB / ~9 hrs
+#  RL agents     | config/run_rl.yaml        | rl_reward       | 60      | ~15 GB / ~4-5 hrs
+#  Tabular (CB)  | config/run_tabular.yaml   | triple_barrier  | 30      | ~500 MB / ~2 hrs
+#  Tabular (XGB) | config/run_tabular.yaml   | triple_barrier  | 30      | shared with CB
+#
+# Run order:
+#   Step 1 - Build deep dataset:
+#     python -m training.train_gpu --config config/run_deep.yaml --build-only
+#
+#   Step 2 - Train deep models (after step 1):
+#     python -m training.train_gpu --config config/run_deep.yaml
+#
+#   Step 3 - Build RL dataset (intermediate, can run in parallel with step 1):
+#     python -m training.train_gpu --config config/run_rl.yaml --build-only
+#
+#   Step 4 - Train RL agent (after step 3):
+#     python -m training.train_gpu --config config/run_rl.yaml --rl-train --rl-algo dqn
+#
+#   Step 5 - Build tabular dataset (can run in parallel with steps 1 and 3):
+#     python -m training.train_gpu --config config/run_tabular.yaml --build-only
+#     # shorthand:
+#     python -m training.train_gpu --tabular-build-only
+#
+#   Step 6 - Train CatBoost (after step 5):
+#     python -m training.train_catboost --config config/run_tabular.yaml
+#
+#   Step 7 - Train XGBoost (after step 5):
+#     python -m training.train_xgboost --config config/run_tabular.yaml
+#
+# Note: Steps 1, 3, and 5 can run concurrently on separate terminals/GPUs.
+stages:
+  - name: build_deep_dataset
+    config: config/run_deep.yaml
+    cmd: "python -m training.train_gpu --config config/run_deep.yaml --build-only"
+    description: "Build the 10-year RL-reward dataset for deep learning models (35 GB, ~9 hrs)"
+
+  - name: build_rl_dataset
+    config: config/run_rl.yaml
+    cmd: "python -m training.train_gpu --config config/run_rl.yaml --build-only"
+    description: "Build the 8-year RL-reward dataset for RL agents (15 GB, ~4-5 hrs)"
+
+  - name: build_tabular_dataset
+    config: config/run_tabular.yaml
+    cmd: "python -m training.train_gpu --config config/run_tabular.yaml --build-only"
+    # shorthand via training/gpu_cli.py:
+    # cmd: "python -m training.train_gpu --tabular-build-only"
+    description: "Build the 7-year triple-barrier dataset for tree models (500 MB, ~2 hrs)"
+
+  - name: train_deep
+    depends_on: build_deep_dataset
+    config: config/run_deep.yaml
+    cmd: "python -m training.train_gpu --config config/run_deep.yaml"
+    description: "Train HAELT / TFT / Transformer / Mamba / GNN deep learning models"
+
+  - name: train_rl
+    depends_on: build_rl_dataset
+    config: config/run_rl.yaml
+    cmd: "python -m training.train_gpu --config config/run_rl.yaml --rl-train --rl-algo dqn"
+    description: "Train DQN/PPO RL agent on RL dataset (60-bar state, rl_reward)"
+
+  - name: train_catboost
+    depends_on: build_tabular_dataset
+    config: config/run_tabular.yaml
+    cmd: "python -m training.train_catboost --config config/run_tabular.yaml"
+    description: "Train CatBoost classifier on tabular triple-barrier dataset"
+
+  - name: train_xgboost
+    depends_on: build_tabular_dataset
+    config: config/run_tabular.yaml
+    cmd: "python -m training.train_xgboost --config config/run_tabular.yaml"
+    description: "Train XGBoost classifier on tabular triple-barrier dataset"

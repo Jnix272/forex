@@ -28,8 +28,9 @@ if str(ROOT) not in sys.path:
 
 from config.settings import PATHS
 from models.ensemble import EnsembleMetaLearner, train_meta_learner
-from training.cache_integrity import _trainable_max_index as _trainable_prefix_end
-from training.train_gpu import ZarrStreamDataset, _on_disk_sequence_count, build_model
+from training.cache_integrity import _on_disk_sequence_count, _trainable_max_index as _trainable_prefix_end
+from training.gpu_datasets import ZarrStreamDataset
+from training.model_factory import build_model
 
 DEFAULT_CACHE = (
     ROOT

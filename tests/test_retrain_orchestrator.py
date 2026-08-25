@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from data.feature_store import FeatureStore
+from feature_store.polars_store import FeatureStore
 from retraining.orchestrator import (
     ModelRegistry,
     ModelStatus,

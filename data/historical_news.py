@@ -350,8 +350,8 @@ def load_historical_news_bundle(
         end_ts = end_ts.tz_convert("UTC")
 
     _t0_bundle = time.perf_counter()
-    raw = _load_events(news_file, calendar_file, start_ts=start_ts - pd.Timedelta(days=2), end_ts=end_ts)
-    df = _filter_relevant(raw, start_ts - pd.Timedelta(days=2), end_ts, pair)
+    raw = _load_events(news_file, calendar_file, start_ts=start_ts - pd.Timedelta(2, unit="D"), end_ts=end_ts)
+    df = _filter_relevant(raw, start_ts - pd.Timedelta(2, unit="D"), end_ts, pair)
     if len(df) == 0:
         log_data_load(
             "historical_news_bundle",
@@ -473,7 +473,7 @@ def collect_headlines_for_range(
     """
     import pandas as pd
 
-    start_ts = pd.Timestamp(start, tz="UTC") - pd.Timedelta(days=2)
+    start_ts = pd.Timestamp(start, tz="UTC") - pd.Timedelta(2, unit="D")
     end_ts = pd.Timestamp(end, tz="UTC")
 
     raw = _load_events(news_file, calendar_file, start_ts=start_ts, end_ts=end_ts)

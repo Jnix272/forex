@@ -31,7 +31,7 @@ def _scaler_npz_path(cache_path: str | Path) -> Path:
 
 
 def load_inference_scaler(cache_path: str | Path | None) -> Any | None:
-    """Return a ready-to-use :class:`StandardScaler` or ``None`` if no scaler file exists.
+    """Return a ready-to-use scaler (RobustScaler or StandardScaler) or ``None`` if no scaler file exists.
 
     Reconstruction mirrors :func:`training.dataset_builder._load_scaler_npz`
     exactly so train/live transformation is bit-identical. We avoid importing
@@ -44,7 +44,7 @@ def load_inference_scaler(cache_path: str | Path | None) -> Any | None:
     if not path.exists():
         return None
     try:
-        from sklearn.preprocessing import StandardScaler  # type: ignore
+        from sklearn.preprocessing import RobustScaler, StandardScaler  # type: ignore
     except Exception:  # pragma: no cover - sklearn unavailable in slim envs
         return None
     # Try non-pickled load first; feature_names is the only object-typed
@@ -69,11 +69,22 @@ def load_inference_scaler(cache_path: str | Path | None) -> Any | None:
                 feature_names = None
     except Exception:
         feature_names = None
-    s = StandardScaler()
-    s.mean_ = np.asarray(z["mean"], dtype=np.float64)
-    s.scale_ = np.asarray(z["scale"], dtype=np.float64)
-    s.var_ = np.asarray(z["var"], dtype=np.float64)
-    s.n_features_in_ = int(z["n_features_in_"])
+
+    scaler_type = str(z.get("scaler_type", "standard")) if "scaler_type" in z.files else "standard"
+
+    if scaler_type == "robust":
+        s = RobustScaler()
+        s.center_ = np.asarray(z["center"], dtype=np.float64) if "center" in z.files else np.zeros(int(z["n_features_in_"]))
+        s.scale_ = np.asarray(z["scale"], dtype=np.float64)
+        s.scale_[s.scale_ == 0] = 1.0
+        s.n_features_in_ = int(z["n_features_in_"])
+    else:
+        s = StandardScaler()
+        s.mean_ = np.asarray(z["mean"], dtype=np.float64)
+        s.scale_ = np.asarray(z["scale"], dtype=np.float64)
+        s.var_ = np.asarray(z["var"], dtype=np.float64)
+        s.n_features_in_ = int(z["n_features_in_"])
+
     if "n_samples_seen_" in z.files:
         s.n_samples_seen_ = int(z["n_samples_seen_"])
     if feature_names is not None:

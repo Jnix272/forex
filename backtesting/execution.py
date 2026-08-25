@@ -36,27 +36,7 @@ except ImportError:  # pragma: no cover
     pd = None  # type: ignore[assignment]
 
 from backtesting.improvements import SlippageCalibrator
-
-
-@dataclass
-class Trade:
-    trade_id: int
-    entry_time: object
-    entry_price: float
-    entry_lots: float
-    direction: int
-    stop_loss: float
-    take_profit: float
-    exit_time: object | None = None
-    exit_price: float | None = None
-    exit_lots: float | None = None
-    pnl_pips: float = 0.0
-    gross_pnl_usd: float = 0.0
-    pnl_usd: float = 0.0
-    commission: float = 0.0
-    slippage_pips: float = 0.0
-    exit_reason: str = ""
-    scale_additions: list = field(default_factory=list)
+from backtesting.backtest import Trade  # Reuse canonical Trade dataclass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Queue Position & Order Book Models

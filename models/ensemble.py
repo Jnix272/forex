@@ -461,7 +461,7 @@ if TORCH:
 
     # ── 3. MULTI-TIMEFRAME ATTENTION ──────────────────────────────────────────────
 
-    from training.dataset_builder import build_multitf_dataset, build_multitf_tensors  # noqa: F401
+    from common.model_utils import build_multitf_dataset, build_multitf_tensors  # noqa: F401
 
     class MultiTimeframeAttention(nn.Module):
         """
@@ -479,11 +479,11 @@ if TORCH:
 
         Data pipeline
         -------------
-        Use ``training.dataset_builder.build_multitf_tensors`` (also re-exported
+        Use ``common.model_utils.build_multitf_tensors`` (also re-exported
         from this module as ``build_multitf_tensors``) to produce the input list
         from a standard 1-min ``X_seq`` array without any lookahead bias::
 
-            from training.dataset_builder import build_multitf_tensors
+            from common.model_utils import build_multitf_tensors
             tf_views = build_multitf_tensors(X_seq)   # [x_1m, x_5m, x_15m]
             x_list = [torch.from_numpy(v) for v in tf_views]
             pred = model(x_list)                      # (B,)

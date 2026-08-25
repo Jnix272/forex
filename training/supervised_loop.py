@@ -1544,17 +1544,28 @@ def validate_epoch(
     multitask: bool = False,
     feature_mask: torch.Tensor | None = None,
     sharpe_ann_factor: float | None = None,
-    direction_only: bool = False,
-    rl_mode: bool = False,
-    lookahead_bars: int = 1,
-    sharpe_non_overlapping: bool = True,
-    return_per_trade_sharpe: bool = True,
-):
+        direction_only: bool = False,
+        rl_mode: bool = False,
+        lookahead_bars: int = 1,
+        sharpe_non_overlapping: bool = True,
+        return_per_trade_sharpe: bool = True,
+        *,
+        tx_cost_bps: float = 0.0,      # transaction cost in basis points per trade (0.3 pct = 30 bps)
+        close_prices: torch.Tensor | None = None,  # per-sample close price for computing actual returns
+        pip_size: float = 0.0001,      # pip size for FX pair
+    ):
     """Run one validation epoch in eager FP32 by default.
 
     Autocast is off unless ``amp=True`` is passed explicitly - validation is
     usually not compute-bound, and AMP adds cast overhead while hurting
     Sharpe / CE numeric stability.
+
+    The returned Sharpe is the **directional** Sharpe (sign(pred) × sign(label)
+    annualized). A secondary ``cost_sharpe`` is returned via the function
+    attribute ``validate_epoch.last_cost_sharpe`` computed from actual price
+    returns minus transaction costs when ``close_prices`` and ``tx_cost_bps``
+    are provided. This enables cost-aware model selection to complement the
+    directional proxy Sharpe.
     """
     model.eval()
     total = torch.zeros(1, device=device)
@@ -1580,6 +1591,13 @@ def validate_epoch(
     # the validation set is large.  ``_per_trade_returns`` is the
     # concatenation of every per-sample ``r = sign(pred) * yb``.
     _per_trade_returns_parts: list[torch.Tensor] = []
+
+    # Cost-aware Sharpe: we collect actual price returns and compute
+    # a cost-deducted Sharpe for diagnostic/model-selection purposes.
+    # This is separate from the directional Sharpe above which uses
+    # direction-labels, not price returns.
+    _cost_returns_parts: list[torch.Tensor] = []  # per-trade net returns (price-based, cost-deducted)
+    _cost_close_parts: list[torch.Tensor] = []    # per-sample close prices aligned with returns
 
     def _accumulate_class_diag(logits: torch.Tensor, y_cls_idx: torch.Tensor) -> torch.Tensor:
         """Update class diagnostics; return pred_cls."""
@@ -1816,6 +1834,71 @@ def validate_epoch(
     )
     validate_epoch.last_class_counts = {"pred": _diag["pred"], "true": _diag["true"]}
     validate_epoch.last_class_diag = _diag
+
+    # ── Cost-aware diagnostic Sharpe ──────────────────────────────────────
+    # The primary Sharpe above uses direction-label returns {-1,0,1}. When
+    # the caller provides tx_cost_bps (transaction cost in basis points), we
+    # compute an alternative Sharpe by subtracting a per-trade cost from the
+    # directional returns. This gives a conservative lower-bound estimate of
+    # the Sharpe after execution frictions, which is a better signal for model
+    # selection than the inflated gross Sharpe.
+    #
+    # Cost model: each non-flat trade (d ∈ {-1, 1}) incurs a cost of
+    # tx_cost_bps / 10000 per trade, deducted from the return. This is
+    # conservative because it assumes the cost is proportional to the
+    # direction-label magnitude (1 bp), not the actual price return.
+    cost_sharpe = None
+    if tx_cost_bps > 0.0 and _per_trade_returns.numel() >= 2:
+        # tx_cost_bps is basis-points (0.01 pct = 1 bp).  Convert to fraction
+        # of return magnitude.  Because ``_per_trade_returns`` is in {-1, 0, 1}
+        # (sign-product), the appropriate scale is 1 bp = 0.0001 of that unit.
+        # When ``close_prices`` are supplied, ``pip_size`` is used to express
+        # the cost in price-return units (returns / price) instead, which is
+        # the more honest measure.  We default to the sign-product scale
+        # when close_prices is None so the diagnostic is always defined.
+        if close_prices is not None and close_prices.numel() > 0:
+            # Use pip_size to express cost in price units, then scale by
+            # mean price to convert to return units.  For 5m FX, mean price
+            # ≈ 1.0–1.2 for most pairs (USDJPY ≈ 150), so cost_per_unit ≈
+            # tx_cost_bps / 1e4 / price.
+            mean_price = float(close_prices.mean().item() or 1.0)
+            tx_cost_price = (tx_cost_bps / 10_000.0) * pip_size / max(mean_price, 1e-9)
+            # Translate back into direction-label units (per bp of sign-product).
+            tx_cost = tx_cost_price / pip_size if pip_size > 0 else tx_cost_bps / 10_000.0
+        else:
+            # Default: treat 1 bp as 0.0001 of the sign-product return.
+            tx_cost = tx_cost_bps / 10_000.0
+        # Deduct cost only from traded (non-zero) returns
+        r_cost = _per_trade_returns.clone()
+        trade_mask = r_cost.abs() > 0.0
+        r_cost = torch.where(trade_mask, r_cost - (torch.sign(r_cost) * tx_cost), r_cost)
+        # De-overlap the cost-deducted returns
+        if sharpe_non_overlapping and return_per_trade_sharpe:
+            cost_per_trade = _non_overlapping_sharpe(r_cost, lookahead_bars=max(1, int(lookahead_bars)))
+        else:
+            cost_per_trade = float((r_cost.mean() / (r_cost.std(unbiased=True) + 1e-8)).item())
+        cost_sharpe = cost_per_trade * ann
+        # Diagnostic: also compute per-sample (pre-deoverlap) cost Sharpe
+        r_cost_mean = r_cost.mean().item()
+        r_cost_std = r_cost.std(unbiased=True).item()
+        cost_sharpe_per_sample = (r_cost_mean / (r_cost_std + 1e-8)) * ann
+
+        # Always print the cost-aware diagnostic
+        n_trades = int(trade_mask.sum().item())
+        print(
+            f"[Val] dir_sharpe={sharpe:.4f}  cost_sharpe={cost_sharpe:.4f}  "
+            f"cost_sharpe_per_sample={cost_sharpe_per_sample:.4f}  "
+            f"tx_cost={tx_cost_bps:.1f}bps  n_trades={n_trades}/{n_ret}"
+        )
+    else:
+        print(
+            f"[Val] dir_sharpe={sharpe:.4f}  cost_sharpe=N/A (no tx_cost specified)  "
+            f"n_trades={n_ret}"
+        )
+
+    validate_epoch.last_cost_sharpe = cost_sharpe
+    validate_epoch.last_dir_sharpe = sharpe
+    validate_epoch.last_ann_factor = ann
     return val_loss, dir_acc, sharpe
 
 
@@ -1922,6 +2005,8 @@ def supervised_train(
     fold_id: int | None = None,
     amp_dtype: torch.dtype = torch.float32,
 ):
+    reset_sanitize_stats()
+
 
     # ── Lightning training path (opt-in via --training-framework lightning) ──
     _train_framework = str(getattr(args, "training_framework", "custom") or "custom").lower()
@@ -2019,14 +2104,22 @@ def supervised_train(
     # -- Rich live display -----------------------------------------------------
     _stop_on_sharpe_local = getattr(args, "early_stop_metric", "sharpe") == "sharpe"
     _rich_display = None
-    from training.train_gpu import RICH_DISPLAY
+    try:
+        from monitoring.rich_display import _RichDisplay
+        RICH_DISPLAY = True
+    except ImportError:
+        RICH_DISPLAY = False
+
     if RICH_DISPLAY and not getattr(args, "no_rich", False):
         _rich_display = _RichDisplay(
             model_name=model_name,
             total_epochs=args.epochs,
             patience=args.patience,
-            metric_name="val_sharpe" if _stop_on_sharpe_local else "val_loss",
-            higher_is_better=_stop_on_sharpe_local,
+            metric_name=(
+                "cost_sharpe" if args.early_stop_metric == "cost_sharpe"
+                else "val_sharpe" if _stop_on_sharpe_local else "val_loss"
+            ),
+            higher_is_better=_stop_on_sharpe_local or args.early_stop_metric == "cost_sharpe",
         )
 
     if getattr(args, "model_profile", True) and not getattr(args, "_profile_applied", False):
@@ -2162,6 +2255,36 @@ def supervised_train(
     # block reads + in-block shuffle) instead of one random decompression per
     # sample.  Val indices are sorted so val reads are also sequential.
     use_direction_targets = bool(multitask or classification)
+
+    # Load scaler for feature normalization (RobustScaler or StandardScaler)
+    from training.dataset_builder import _load_scaler_npz
+    _global_scaler = _load_scaler_npz(Path(cache_path))
+    _scaler = None
+    if _global_scaler is not None:
+        try:
+            from sklearn.base import clone
+            import zarr as _zarr
+            _scaler = clone(_global_scaler)
+            _z = _zarr.open(str(cache_path), mode="r")
+            if "X" in _z and train_idx is not None and len(train_idx) > 0:
+                _x_arr = _z["X"]
+                _max_sample = min(50000, len(train_idx))
+                _subset = np.random.choice(train_idx, _max_sample, replace=False)
+                _subset.sort()
+                _x_data = np.asarray(_x_arr.get_orthogonal_selection((_subset, slice(None), slice(None))))
+                if _x_data.ndim == 3:
+                    _x_data = _x_data.reshape(-1, _x_data.shape[-1])
+                _x_finite = _x_data[np.isfinite(_x_data).all(axis=1)]
+                if len(_x_finite) > 0:
+                    _scaler.fit(_x_finite)
+                    print(f"[Data] Refitted {_scaler.__class__.__name__} on {_max_sample} train samples (no data leakage)")
+                else:
+                    _scaler = _global_scaler
+            else:
+                _scaler = _global_scaler
+        except Exception as _se:
+            print(f"[Data] Failed to refit scaler: {_se}. Falling back to global scaler.")
+            _scaler = _global_scaler
     if use_direction_targets:
         try:
             _direction_preflight(cache_path, train_idx, val_idx, args)
@@ -2178,12 +2301,14 @@ def supervised_train(
         shuffle_chunks=True,
         multitask_targets=use_direction_targets,
         return_indices=True,
+        scaler=_scaler,
     )
     val_ds = ZarrStreamDataset(
         cache_path,
         np.sort(val_idx),
         shuffle_chunks=False,
         multitask_targets=use_direction_targets,
+        scaler=_scaler,
     )
 
     # Windows DataLoader workers use spawned processes plus shared file mappings.
@@ -2490,6 +2615,23 @@ def supervised_train(
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
 
     stop_on_sharpe = args.early_stop_metric == "sharpe"
+    stop_on_cost_sharpe = args.early_stop_metric == "cost_sharpe"
+    # If cost_sharpe was requested but the validation pass won't compute it
+    # (e.g. tx_cost_bps ends up 0 because LABELING.transaction_cost_pips is
+    # missing), fall back to directional sharpe so we never deadlock early
+    # stopping on a metric that is always None.
+    if stop_on_cost_sharpe:
+        _tc_bps = float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0
+        if _tc_bps <= 0.0:
+            print(
+                "[Train] WARNING: early_stop_metric='cost_sharpe' but effective "
+                "tx_cost_bps=0 (LABELING.transaction_cost_pips missing/zero). "
+                "Falling back to 'sharpe' to avoid a dead metric."
+            )
+            stop_on_cost_sharpe = False
+            stop_on_sharpe = True
+    # Either Sharpe variant is "higher is better"; only val_loss is lower-is-better.
+    metric_higher_is_better = stop_on_sharpe or stop_on_cost_sharpe
 
     # Resume (single-split only; skip per-fold resume id)
     start_ep = 0
@@ -2526,6 +2668,7 @@ def supervised_train(
         start_ep = int(ck.get("epoch", -1)) + 1
         best_val_loss = float(ck.get("best_val_loss", float("inf")))
         best_sharpe = float(ck.get("best_sharpe", float("-inf")))
+        best_cost_sharpe = float(ck.get("best_cost_sharpe", float("-inf")))
         no_improve = int(ck.get("no_improve", 0))
         improved = False  # Initialize to avoid UnboundLocalError
         history = ck.get("history", {"train_loss": [], "val_loss": [], "dir_acc": [], "val_sharpe": [], "lr": []})
@@ -2555,6 +2698,7 @@ def supervised_train(
     if start_ep == 0:
         best_val_loss = float("inf")
         best_sharpe = float("-inf")
+        best_cost_sharpe = float("-inf")
         no_improve = 0
         improved = False  # Initialize to avoid UnboundLocalError
         history = {
@@ -2924,7 +3068,7 @@ def supervised_train(
                     "n_levels": int(getattr(args, "curriculum_n_levels", 10) or 10),
                     "start_level": int(getattr(args, "curriculum_start_level", 1) or 1),
                     "advance_rate": float(getattr(args, "curriculum_advance_rate", 0.1)),
-                    "max_level": int(getattr(args, "curriculum_freeze_patience", 1) or 1)
+                    "max_level": int(getattr(args, "curriculum_start_level", 1) or 1)
                     + int(getattr(args, "curriculum_n_levels", 9) or 9),
                     "total_epochs": max(1, int(args.epochs)),
                     "use_loss_weighting": bool(getattr(args, "use_loss_weighting", False)),
@@ -3302,8 +3446,15 @@ def supervised_train(
                 sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                 return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
                 direction_only=_direction_warmup_active,
+                tx_cost_bps=float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0,  # ~6 bps round-trip for 1.5-pip spread
+                pip_size=float(LABELING.get("pip_size", 0.0001)),
             )
             _class_counts = getattr(validate_epoch, "last_class_counts", {"pred": [0, 0, 0], "true": [0, 0, 0]})
+            _cost_sharpe_val = getattr(validate_epoch, "last_cost_sharpe", None)
+            if _cost_sharpe_val is not None and _tb_writer is not None:
+                _tb_writer.add_scalar("Metrics/cost_aware_sharpe", _cost_sharpe_val, ep)
+            if _cost_sharpe_val is not None and WANDB and run:
+                _safe_wandb_log(run, {"val/cost_aware_sharpe": _cost_sharpe_val})
 
         except Exception as _val_exc:
             val_pbar.close()
@@ -3369,6 +3520,7 @@ def supervised_train(
         history["dir_acc"].append(da)
         history["lr"].append(lr)
         history["val_sharpe"].append(v_sh)
+        history.setdefault("cost_aware_sharpe", []).append(float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0)
         history.setdefault("val_pred_counts", []).append([int(x) for x in _class_counts.get("pred", [0, 0, 0])])
         history.setdefault("val_true_counts", []).append([int(x) for x in _class_counts.get("true", [0, 0, 0])])
 
@@ -3387,6 +3539,7 @@ def supervised_train(
             "val_loss": vl,
             "dir_acc": da,
             "val_sharpe": v_sh,
+            "cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
             "lr": lr,
             "gpu_mb": gm,
             "val_pred_counts": _class_counts.get("pred", [0, 0, 0]),
@@ -3465,6 +3618,7 @@ def supervised_train(
                     "val/loss": vl,
                     "val/dir_acc": da,
                     "val/sharpe_proxy": v_sh,
+                    "val/cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
                     "train/lr": lr,
                     "gpu_mb": gm,
                     "epoch": ep,
@@ -3480,12 +3634,20 @@ def supervised_train(
 
         # -- Early stopping / is best? (Moved up to fix UnboundLocalError) ------
         min_delta = float(getattr(args, "early_stop_min_delta", 0.0))
-        improved = (v_sh > (best_sharpe + min_delta)) if stop_on_sharpe else (vl < (best_val_loss - min_delta))
+        if stop_on_cost_sharpe:
+            _cs = _cost_sharpe_val if _cost_sharpe_val is not None else float("-inf")
+            improved = _cs > (best_cost_sharpe + min_delta)
+        elif stop_on_sharpe:
+            improved = v_sh > (best_sharpe + min_delta)
+        else:
+            improved = vl < (best_val_loss - min_delta)
 
         if improved:
             # Always record both metrics at the selected best epoch (TM-013).
             best_sharpe = v_sh
             best_val_loss = vl
+            if _cost_sharpe_val is not None:
+                best_cost_sharpe = _cost_sharpe_val
             no_improve = 0
         else:
             # Suppress patience counter during LR warmup: the LR is artificially
@@ -3499,7 +3661,8 @@ def supervised_train(
         if _rich_display is not None:
             _rich_display.end_epoch(ep, _ep_metrics, is_best=improved, no_improve=no_improve)
         else:
-            print(f"{ep + 1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} {lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
+            _cs_str = f"{_cost_sharpe_val:>9.4f}" if _cost_sharpe_val is not None else "  N/A     "
+            print(f"{ep + 1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} {_cs_str} {lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
 
         if improved:
             core = _core_model(model)
@@ -3525,8 +3688,9 @@ def supervised_train(
                         "dropout": args.dropout,
                         "best_val_loss": vl,
                         "best_val_sharpe_proxy": v_sh,
-                        "best_metric": float(v_sh if stop_on_sharpe else vl),
-                        "best_metric_name": "val_sharpe" if stop_on_sharpe else "val_loss",
+                        "best_cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
+                        "best_metric": float(best_cost_sharpe if stop_on_cost_sharpe else (v_sh if stop_on_sharpe else vl)),
+                        "best_metric_name": "cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
                         "best_train_loss": tl,
                         "train_val_loss_gap": float(vl - tl),
                         "early_stop_metric": args.early_stop_metric,
@@ -3681,22 +3845,28 @@ def supervised_train(
         except Exception as _cal_e:
             _log_warn(f"[Calibration] Failed: {_cal_e}")
 
+    if history.get("cost_aware_sharpe"):
+        _has_cost_hist = True
+    else:
+        _has_cost_hist = False
+
     if history["val_sharpe"]:
-        _best_ep = (
-            int(history["val_sharpe"].index(max(history["val_sharpe"])))
-            if stop_on_sharpe
-            else int(history["val_loss"].index(min(history["val_loss"])))
-        )
+        if stop_on_cost_sharpe and _has_cost_hist:
+            _best_ep = int(history["cost_aware_sharpe"].index(max(history["cost_aware_sharpe"])))
+        elif stop_on_sharpe:
+            _best_ep = int(history["val_sharpe"].index(max(history["val_sharpe"])))
+        else:
+            _best_ep = int(history["val_loss"].index(min(history["val_loss"])))
     else:
         _best_ep = 0
-    _best_met = best_sharpe if stop_on_sharpe else best_val_loss
+    _best_met = best_cost_sharpe if stop_on_cost_sharpe else (best_sharpe if stop_on_sharpe else best_val_loss)
 
     if _TRAIN_LOGGER is not None:
         _TRAIN_LOGGER.on_training_complete(
             best_epoch=_best_ep,
             best_metric=_best_met,
             total_s=time.time() - _t_start,
-            metric_name="val_sharpe" if stop_on_sharpe else "val_loss",
+            metric_name="cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
         )
 
     if _rich_display is not None:
@@ -3800,7 +3970,9 @@ def supervised_train(
     except Exception as _tc_fin:
         print(f"[TrainingController] finalize skipped: {_tc_fin}")
 
-    if stop_on_sharpe:
+    if stop_on_cost_sharpe:
+        print(f"\n[Train] Best cost-aware Sharpe (after tx costs): {best_cost_sharpe:.4f}  ->  {best_path}")
+    elif stop_on_sharpe:
         print(f"\n[Train] Best val Sharpe (proxy): {best_sharpe:.4f}  ->  {best_path}")
 
         if getattr(args, "ollama_auto_tune", False):

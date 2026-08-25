@@ -81,10 +81,17 @@ class ForexTradingEnv:
         # 252 * 24 * (60 // m) for m-minute bars (e.g. 3024 for 5-min).
         bars_per_year: int = 252 * 24 * 60,
     ):
-        self.features = features.astype(np.float32)
-        self.prices = prices.astype(np.float32)
-        self.atr = atr.astype(np.float32)
-        self.spreads = spreads.astype(np.float32)
+        self.features = np.nan_to_num(features.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
+        self.prices = np.nan_to_num(prices.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
+        self.atr = np.nan_to_num(atr.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
+        self.spreads = np.nan_to_num(spreads.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
+        # Guard against degenerate inputs: a single NaN/inf bar must not propagate
+        # into observations, rewards, or equity (a real tick feed can contain bad
+        # bars). Sanitize once at construction; the rest of the env can assume
+        # finite inputs. Floor ATR/spread at a tiny positive value so SL/TP math
+        # (which divides by ATR) can never divide by zero.
+        self.atr = np.where(self.atr > 0, self.atr, 1e-8)
+        self.spreads = np.where(self.spreads > 0, self.spreads, 1e-8)
         self.initial_equity = initial_equity
         self.lot_size = lot_size
         self.max_lots = max_lots
@@ -738,17 +745,19 @@ if TORCH:
         def sample(self, n):
             if len(self.buf) == 0:
                 return []
-            buf_len = len(self.buf)
             # Rebuild weights only when invalidated (see push() above)
-            if self._cached_weights is None or self._cached_len != buf_len:
+            if self._cached_weights is None:
+                buf_len = len(self.buf)
                 # Precompute inverse-frequency weight per action class
                 inv_freq = {a: 1.0 / (c + 1e-3) for a, c in self.class_counts.items()}
                 weights = np.array([inv_freq.get(t[1], 1.0) for t in self.buf])
                 weights /= weights.sum()
                 self._cached_weights = weights
                 self._cached_len = buf_len
+                
             self._sample_calls += 1
-            indices = np.random.choice(buf_len, size=min(n, buf_len), p=self._cached_weights, replace=True)
+            valid_len = self._cached_len
+            indices = np.random.choice(valid_len, size=min(n, valid_len), p=self._cached_weights, replace=True)
             return [self.buf[i] for i in indices]
 
         def __len__(self):

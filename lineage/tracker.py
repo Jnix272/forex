@@ -16,11 +16,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from lineage.store import LineageStore
+if TYPE_CHECKING:
+    from lineage.store import LineageStore
 
 
 class LineageEventType(StrEnum):

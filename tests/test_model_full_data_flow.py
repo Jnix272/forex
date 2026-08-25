@@ -18,7 +18,8 @@ from data.data_ingestion import generate_synthetic_tick_data
 from data.sources import _enforce_schema
 from features.feature_engineering import FeatureEngineer
 from models.architectures import MODEL_REGISTRY
-from training.train_gpu import _build_chunk, build_model
+from training.dataset_builder import _build_chunk
+from training.train_gpu import build_model
 
 SEQ_LEN = 60
 FULL_TEST_SAMPLES = 160

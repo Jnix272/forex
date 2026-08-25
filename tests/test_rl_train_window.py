@@ -12,12 +12,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from training.train_gpu import (
-    _promotion_holdout_n,
-    _rl_reward_weights,
-    _rl_train_val_slices,
-    _trainable_max_index,
-)
+from training.cache_integrity import _promotion_holdout_n, _trainable_max_index
+from training.rl_runner import _rl_reward_weights, _rl_train_val_slices
 
 
 def _args(**kw):

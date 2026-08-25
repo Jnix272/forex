@@ -27,7 +27,7 @@ from models.ensemble import EnsembleMetaLearner
 from models.rl_advanced import CurriculumScheduler
 from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, train_agent
 from scripts.train_ensemble_meta import load_base_model, resolve_checkpoint
-from training.train_gpu import ZarrStreamDataset
+from training.gpu_datasets import ZarrStreamDataset
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 

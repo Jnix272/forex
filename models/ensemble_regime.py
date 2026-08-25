@@ -202,7 +202,7 @@ def export_regime_ensemble_onnx(
     model: RegimeEnsembleMetaLearner,
     output_path: str,
     seq_len: int = 80,
-    n_features: int = 227,
+    n_features: int = 584,
     n_regime_features: int = 2,
     opset_version: int = 17,
 ) -> None:

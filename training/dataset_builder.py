@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import polars as pl
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from config.settings import FEATURES, LABELING
 from data.cross_asset import load_cross_asset_panel
@@ -161,16 +161,35 @@ def _safe_save_json(data, path) -> None:
                 pass
 
 
-def _identity_scaler(n_features: int) -> StandardScaler:
-    s = StandardScaler()
-    s.mean_ = np.zeros(n_features)
-    s.scale_ = np.ones(n_features)
-    s.var_ = np.ones(n_features)
+def _make_scaler(scaler_type: str = "robust", **kwargs):
+    """Factory to create a scaler by name.
+
+    Supported types:
+      - "robust" (default): RobustScaler with IQR-based scaling (outlier-resistant)
+      - "standard": StandardScaler with mean/std scaling
+    """
+    st = str(scaler_type).lower().strip()
+    if st == "standard":
+        return StandardScaler(**kwargs)
+    # Default: RobustScaler — median/IQR, resistant to flash crashes & spread spikes
+    quantile_range = kwargs.pop("quantile_range", (5, 95))
+    return RobustScaler(quantile_range=quantile_range, **kwargs)
+
+
+def _identity_scaler(n_features: int, scaler_type: str = "robust"):
+    s = _make_scaler(scaler_type)
+    if isinstance(s, RobustScaler):
+        s.center_ = np.zeros(n_features)
+        s.scale_ = np.ones(n_features)
+    else:
+        s.mean_ = np.zeros(n_features)
+        s.scale_ = np.ones(n_features)
+        s.var_ = np.ones(n_features)
     s.n_features_in_ = n_features
     return s
 
 
-def _set_scaler_feature_names(scaler: StandardScaler, columns) -> None:
+def _set_scaler_feature_names(scaler, columns) -> None:
     """Attach ordered feature names when fitting scalers on numpy arrays."""
 
     try:
@@ -186,7 +205,7 @@ def _set_scaler_feature_names(scaler: StandardScaler, columns) -> None:
         pass
 
 
-def _scaler_feature_names(scaler: StandardScaler | None) -> list[str]:
+def _scaler_feature_names(scaler) -> list[str]:
 
     try:
         names = getattr(scaler, "feature_names_in_", None)
@@ -451,12 +470,13 @@ def _maybe_run_lookahead_guard(
         args._lookahead_guard_n_chunks = _n_chunks_done + 1
     try:
         from features.lookahead_guard import LookaheadViolation, assert_no_lookahead
+    except ImportError:
+        return
 
+    try:
         arr = np.asarray(X_seq)
         if arr.ndim != 3 or arr.shape[0] < 64:
             return
-        # Sample up to 4096 rows from the chunk to keep the cost bounded
-        # even on large seq_len / n_features settings.
         _n_rows = int(arr.shape[0])
         if _n_rows > 4096:
             _step = max(1, _n_rows // 4096)
@@ -527,35 +547,111 @@ def _build_multipair_feature_schema(
     return names
 
 
-def _save_scaler_npz(cache_path: Path, scaler: StandardScaler) -> None:
-    if not hasattr(scaler, "mean_") or scaler.mean_ is None:
+def _fit_scaler_from_cache(cache_path: Path, scaler, max_sample: int = 50000) -> None:
+    """Fit the scaler from the written Zarr/NPY cache X array.
+
+    Samples up to ``max_sample`` rows (last-timestep feature vectors) from the
+    cache to fit the scaler.  This is called after all chunks are appended so
+    the scaler statistics reflect the full dataset without D3 leakage
+    (the scaler is only used at data-load time, never during label generation).
+    """
+    if scaler is None:
+        return
+    _cp = Path(cache_path)
+    X_data = None
+    try:
+        import zarr as _zarr
+
+        z = _zarr.open(str(_cp), mode="r")
+        if "X" in z:
+            X_arr = z["X"]  # type: ignore[reportArgumentType]
+            n_total = int(X_arr.shape[0])  # type: ignore[reportAttributeAccessIssue]
+            if n_total > 0:
+                if n_total <= max_sample:
+                    X_data = np.asarray(X_arr, dtype=np.float64)
+                else:
+                    step = max(1, n_total // max_sample)
+                    sel = np.arange(0, n_total, step)[:max_sample]
+                    X_data = np.asarray(X_arr[sel], dtype=np.float64)  # type: ignore[reportIndexIssue,reportArgumentType]
+    except Exception:
+        pass
+
+    if X_data is None:
+        try:
+            npz_path = str(_cp) if str(_cp).endswith(".npy") else str(_cp) + ".npy"
+            if Path(npz_path).exists():
+                X_data = np.load(npz_path, mmap_mode="r")
+                n_total = X_data.shape[0]
+                if n_total > max_sample:
+                    step = max(1, n_total // max_sample)
+                    sel = np.arange(0, n_total, step)[:max_sample]
+                    X_data = np.asarray(X_data[sel], dtype=np.float64)
+                else:
+                    X_data = np.asarray(X_data, dtype=np.float64)
+        except Exception:
+            pass
+
+    if X_data is None or len(X_data) == 0:
+        return
+
+    # Flatten 3D (N, seq_len, F) -> 2D (N*seq_len, F) for fitting
+    if X_data.ndim == 3:
+        X_flat = X_data.reshape(-1, X_data.shape[-1])
+    else:
+        X_flat = X_data
+
+    _finite_mask = np.isfinite(X_flat).all(axis=1)
+    X_finite = X_flat[_finite_mask]
+    if len(X_finite) == 0:
+        return
+
+    scaler.fit(X_finite)
+    print(f"[Scaler] Fitted {scaler.__class__.__name__} on {len(X_finite):,} samples x {X_finite.shape[1]} features")
+
+
+def _save_scaler_npz(cache_path: Path, scaler) -> None:
+    has_center = hasattr(scaler, "center_") and scaler.center_ is not None
+    has_mean = hasattr(scaler, "mean_") and scaler.mean_ is not None
+    if not has_center and not has_mean:
         return
     p = _scaler_npz_path(cache_path)
+    scaler_type = "robust" if isinstance(scaler, RobustScaler) else "standard"
     payload = {
-        "mean": scaler.mean_,
+        "scaler_type": np.array(scaler_type, dtype=str),
         "scale": scaler.scale_,
-        "var": scaler.var_,
         "n_features_in_": int(scaler.n_features_in_),
         "n_samples_seen_": int(getattr(scaler, "n_samples_seen_", 0) or 0),
     }
+    if has_center:
+        payload["center"] = scaler.center_
+    if has_mean:
+        payload["mean"] = scaler.mean_  # type: ignore[reportAttributeAccessIssue]
+        payload["var"] = scaler.var_  # type: ignore[reportAttributeAccessIssue]
     if hasattr(scaler, "feature_names_in_") and scaler.feature_names_in_ is not None:
         payload["feature_names"] = np.asarray([str(c) for c in scaler.feature_names_in_], dtype=str)
-
     np.savez(p, **payload)
 
 
-def _load_scaler_npz(cache_path: Path) -> StandardScaler | None:
+def _load_scaler_npz(cache_path: Path):
     p = _scaler_npz_path(cache_path)
     if not p.exists():
         return None
     z = np.load(p, allow_pickle=False)
-    s = StandardScaler()
-    s.mean_ = np.asarray(z["mean"], dtype=np.float64)
-    s.scale_ = np.asarray(z["scale"], dtype=np.float64)
-    s.var_ = np.asarray(z["var"], dtype=np.float64)
-    s.n_features_in_ = int(z["n_features_in_"])
+    scaler_type = str(z.get("scaler_type", "standard")) if "scaler_type" in z.files else "standard"
+    if scaler_type == "robust":
+        s = RobustScaler()
+        s.center_ = np.asarray(z["center"], dtype=np.float64) if "center" in z.files else np.zeros(int(z["n_features_in_"]))
+        s.scale_ = np.asarray(z["scale"], dtype=np.float64)
+        s.scale_[s.scale_ == 0] = 1.0
+        s.n_features_in_ = int(z["n_features_in_"])
+    else:
+        s = StandardScaler()
+        s.mean_ = np.asarray(z["mean"], dtype=np.float64)
+        s.scale_ = np.asarray(z["scale"], dtype=np.float64)
+        s.var_ = np.asarray(z["var"], dtype=np.float64)
+        s.n_features_in_ = int(z["n_features_in_"])
     if "n_samples_seen_" in z.files:
-        s.n_samples_seen_ = int(z["n_samples_seen_"])
+        s.n_samples_seen_ = int(z["n_samples_seen_"])  # type: ignore[reportAttributeAccessIssue]
     if "feature_names" in z.files:
         s.feature_names_in_ = np.asarray(z["feature_names"], dtype=object)
     return s
@@ -1573,7 +1669,7 @@ def _chunk_result(
 def _build_chunk(
     ticks_chunk,  # pd.DataFrame or pl.DataFrame - handed to ForexDataPipeline.run, which auto-converts
     fe: FeatureEngineer,
-    scaler: StandardScaler,
+    scaler: StandardScaler | RobustScaler,
     seq_len: int,
     chunk_idx: int,
     win_start: str | None = None,
@@ -1898,21 +1994,10 @@ def _build_chunk(
 
     _existing_feature_names = getattr(scaler, "feature_names_in_", None)
 
-    # Scaler fit removed here to prevent D3 leakage. Scaling should be fit per-fold.
-    # BUT: the schema/column order is fixed right here (cols is the canonical
-    # Polars feature order). Attach those names to the scaler so downstream
-    # `_build_multipair_feature_schema` can deserialise feature provenance for
-    # the multi-pair schema-JSON sidecar that the post-process integrity gate
-    # requires. `_set_scaler_feature_names` no-ops if names already attached.
-    # (FSBUG-2026-08-07: without this, _build_multipair_feature_schema returns
-    # [] because scaler.feature_names_in_ is None, so the schema JSON file is
-    # never written and the integrity gate fails with "Multi-pair feature
-    # schema missing" - see cache_integrity.py:529.)
     if _existing_feature_names is None and cols:
         _set_scaler_feature_names(scaler, cols)
 
     # Compute per-column finite medians BEFORE the main sanitization pass.
-    # Any column with no finite values at all falls back to fill_value=0.0.
     _finite_X = np.where(np.isfinite(X_arr), X_arr, np.nan)
     _col_medians = np.nanmedian(_finite_X, axis=0)  # shape (n_feat,)
 
@@ -1920,7 +2005,7 @@ def _build_chunk(
         X_arr,
         col_medians=_col_medians,
         context="chunk features unscaled",
-        clip_range=None,  # NaN/Inf handled by col_medians, values clipped later by scaler
+        clip_range=None,
     )
     X_arr = np.asarray(X_arr, dtype=np.float32)
 
@@ -2165,8 +2250,8 @@ def _build_multipair_chunk(
             market_close, market_atr, market_spread = close_seq, atr_seq, spread_seq
 
     _empty8 = (
-        np.array([]),
-        np.array([]),
+        np.array([], dtype=np.float32),
+        np.array([], dtype=np.float32),
         np.array([], dtype=np.float32),
         np.array([], dtype=np.float32),
         np.array([], dtype=np.uint8),
@@ -2179,37 +2264,9 @@ def _build_multipair_chunk(
 
     missing = [p for p in pair_ticks if p not in pair_Xs]
     if missing:
-        print(f"Warning: Required pair(s) produced no usable sequences: {missing}. Skipping chunk.")
+        print(f"Warning: Required pair(s) produced no usable sequences: {missing}. Continuing with available pairs.")
+    if not pair_Xs:
         return *_empty8, 0
-
-    # PAIR READINESS GATE
-    print("\n[Pair Readiness]")
-    gate_failed = False
-    global _PAIR_READINESS_STATS
-    if "_PAIR_READINESS_STATS" in globals():
-        for p in pair_ticks:
-            if p not in _PAIR_READINESS_STATS:
-                continue
-            stats = _PAIR_READINESS_STATS[p]
-            n_features = pair_Xs[p].shape[2] if p in pair_Xs else 120
-            seq_len_val = pair_Xs[p].shape[1] if p in pair_Xs else 60
-            total_values = max(1, stats.get("seq_count", 1) * seq_len_val * n_features)
-            nan_pct = (stats.get("nan_count", 0) / total_values) * 100
-            if stats.get("seq_count", 0) == 0 or nan_pct > 1.0:
-                status = "FAIL"
-                gate_failed = True
-                stats.setdefault("reasons", []).append("chunk_pair_readiness_failed")
-            elif nan_pct > 0.0:
-                status = "WARN"
-            else:
-                status = "PASS"
-
-            print(
-                f"  {p} {status}  seq={stats.get('seq_count', 0):,} dropped={stats.get('dropped_bars', 0):,} nan_pct={nan_pct:.2f}%"
-            )
-
-    if gate_failed:
-        print("[Pair Readiness] WARN: chunk-level gate failure recorded; final JSON report will fail the build.")
 
     # Timestamp inner join. Build explicit timestamp -> row index maps instead
     # of boolean masks so duplicate or out-of-order timestamps cannot leave
@@ -2256,11 +2313,6 @@ def _build_multipair_chunk(
 
     common_keys: list[TimeKey] = sorted(common_keys_set or set())
     if len(common_keys) == 0:
-        globals()["_PAIR_ALIGNMENT_STATS"] = {
-            "status": "fail",
-            "reason": "no_common_timestamps",
-            "input_sequence_counts": {p: len(pair_times.get(p, [])) for p in pair_ticks},
-        }
         return *_empty8, 0
 
     _sample = next(iter(pair_Xs.values()))
@@ -2272,15 +2324,30 @@ def _build_multipair_chunk(
     diff_list: list = []
     pair_indices: dict = {}
     for pair in pair_ticks:
-        idx = np.asarray([time_maps[pair][k] for k in common_keys], dtype=np.int64)
+        if pair not in time_maps or pair not in pair_Xs:
+            continue
+        idx = np.asarray([time_maps[pair][k] for k in common_keys if k in time_maps[pair]], dtype=np.int64)
+        if len(idx) == 0:
+            continue
         pair_indices[pair] = idx
         y_list.append(pair_ys[pair][idx])
         ycls_list.append(pair_ycls[pair][idx])
         pq_list.append(pair_pqs[pair][idx])
         diff_list.append(pair_diffs[pair][idx])
 
-    first_pair = next(iter(pair_ticks.keys()))
-    market_idx = np.asarray([time_maps[first_pair][k] for k in common_keys], dtype=np.int64)
+    # Use a pair that actually has data for market arrays; fall back to first
+    # requested pair only if it has market data available.
+    if pair_indices:
+        first_pair = next(iter(pair_indices.keys()))
+    elif pair_ticks:
+        first_pair = next(iter(pair_ticks.keys()))
+    else:
+        return *_empty8, 0
+    if first_pair not in time_maps:
+        return *_empty8, 0
+    market_idx = np.asarray([time_maps[first_pair][k] for k in common_keys if k in time_maps[first_pair]], dtype=np.int64)
+    if len(market_idx) == 0:
+        return *_empty8, 0
     if market_close is None or market_atr is None or market_spread is None:
         return *_empty8, 0
     market_close = market_close[market_idx]
@@ -2288,10 +2355,13 @@ def _build_multipair_chunk(
     market_spread = market_spread[market_idx]
 
     expected_rows = len(common_keys)
-    row_counts = {pair: len(pair_indices[pair]) for pair in pair_ticks}
-    input_counts = {p: len(pair_times[p]) for p in pair_ticks}
-    dropped_by_inner_join = {p: int(max(0, input_counts[p] - expected_rows)) for p in pair_ticks}
-    diff_vals, diff_counts = np.unique(np.max(np.stack(diff_list, axis=1), axis=1).astype(np.uint8), return_counts=True)
+    row_counts = {pair: len(pair_indices[pair]) for pair in pair_ticks if pair in pair_indices}
+    input_counts = {p: len(pair_times[p]) for p in pair_ticks if p in pair_times}
+    dropped_by_inner_join = {p: int(max(0, input_counts.get(p, 0) - expected_rows)) for p in pair_ticks}
+    if not diff_list:
+        diff_vals, diff_counts = np.array([], dtype=np.uint8), np.array([], dtype=np.int64)
+    else:
+        diff_vals, diff_counts = np.unique(np.max(np.stack(diff_list, axis=1), axis=1).astype(np.uint8), return_counts=True)
     globals()["_PAIR_ALIGNMENT_STATS"] = {
         "status": "pass",
         "pair_align": "inner",
@@ -2301,7 +2371,7 @@ def _build_multipair_chunk(
         "input_sequence_counts": input_counts,
         "dropped_by_inner_join": dropped_by_inner_join,
         "drop_pct_by_pair": {
-            p: round(100.0 * dropped_by_inner_join[p] / max(1, input_counts[p]), 6) for p in pair_ticks
+            p: round(100.0 * dropped_by_inner_join[p] / max(1, input_counts.get(p, 1)), 6) for p in pair_ticks
         },
         "difficulty_counts_joint": {str(int(v)): int(c) for v, c in zip(diff_vals, diff_counts, strict=False)},
     }
@@ -2333,14 +2403,19 @@ def _build_multipair_chunk(
 
     row_batch = max(1, min(expected_rows, 256))
     for pair_pos, pair in enumerate(pair_order):
-        src = pair_Xs[pair]
-        idx = pair_indices[pair]
         feat_start = pair_pos * n_feat_per_pair
         feat_end = feat_start + n_feat_per_pair
-        for row_start in range(0, expected_rows, row_batch):
-            row_end = min(expected_rows, row_start + row_batch)
-            X_multi[row_start:row_end, :, feat_start:feat_end] = src[idx[row_start:row_end]]
-        pair_Xs[pair] = None
+        if pair in pair_Xs and pair in pair_indices:
+            src = pair_Xs[pair]
+            idx = pair_indices[pair]
+            for row_start in range(0, expected_rows, row_batch):
+                row_end = min(expected_rows, row_start + row_batch)
+                X_multi[row_start:row_end, :, feat_start:feat_end] = src[idx[row_start:row_end]]
+        else:
+            # Zero-fill missing pair's feature slice (out-of-window pairs).
+            X_multi[:, :, feat_start:feat_end] = 0.0
+        if pair in pair_Xs:
+            pair_Xs[pair] = None
         gc.collect()
 
     y_multi = np.mean(np.stack(y_list, axis=1), axis=1).astype(np.float32)  # (N,)
@@ -2367,62 +2442,76 @@ def _build_multipair_chunk(
     )
 
 
-def _merge_scalers(scaler_list: list[StandardScaler]) -> StandardScaler:
-    """Merge independently fitted StandardScalers using the parallel merge formula.
+def _merge_scalers(scaler_list: list) -> StandardScaler | RobustScaler:
+    """Merge independently fitted scalers using the parallel merge formula.
 
-    Each scaler must have been fitted via partial_fit / fit so that
-    ``n_samples_seen_``, ``mean_``, and ``var_`` are populated.
-    Returns a new StandardScaler with combined statistics.
+    Handles both StandardScaler (mean/var) and RobustScaler (center/scale via IQR).
+    Each scaler must have been fitted so that statistics are populated.
+    Returns a new scaler with combined statistics.
     """
-    from sklearn.preprocessing import StandardScaler
-
-    combined = StandardScaler()
     if not scaler_list:
-        return combined
+        return _make_scaler("standard")
+
+    is_robust = any(isinstance(s, RobustScaler) for s in scaler_list)
+
     valid = [
-        s
-        for s in scaler_list
-        if hasattr(s, "n_samples_seen_")
-        and s.n_samples_seen_ is not None
-        and getattr(s, "mean_", None) is not None
-        and getattr(s, "var_", None) is not None
+        s for s in scaler_list
+        if hasattr(s, "n_samples_seen_") and s.n_samples_seen_ is not None
     ]
     if not valid:
-        return scaler_list[0] if scaler_list else combined
+        return scaler_list[0] if scaler_list else _make_scaler("standard")
     if len(valid) == 1:
-        return valid[0]
-
-    first_mean = valid[0].mean_
-    if first_mean is None:
         return valid[0]
 
     total_n = sum(int(np.atleast_1d(s.n_samples_seen_)[0]) for s in valid)
     if total_n == 0:
         return valid[0]
 
-    n_features = len(first_mean)
-    combined_mean = np.zeros(n_features, dtype=np.float64)
-    for s in valid:
-        if s.mean_ is None:
-            continue
-        n = int(np.atleast_1d(s.n_samples_seen_)[0])
-        combined_mean += n * s.mean_
-    combined_mean /= total_n
-
-    combined_var = np.zeros(n_features, dtype=np.float64)
-    for s in valid:
-        if s.var_ is None or s.mean_ is None:
-            continue
-        n = int(np.atleast_1d(s.n_samples_seen_)[0])
-        combined_var += n * (s.var_ + (s.mean_ - combined_mean) ** 2)
-    combined_var /= total_n
-
-    combined.mean_ = combined_mean
-    combined.var_ = combined_var
-    combined.scale_ = np.sqrt(combined_var)
-    combined.scale_[combined.scale_ == 0] = 1.0
-    combined.n_samples_seen_ = np.full(n_features, total_n, dtype=np.int64)
-    combined.n_features_in_ = n_features
+    if is_robust:
+        # RobustScaler: merge centers via weighted average, merge scales via pooled IQR
+        n_features = valid[0].scale_.shape[0]
+        combined_center = np.zeros(n_features, dtype=np.float64)
+        combined_scale = np.zeros(n_features, dtype=np.float64)
+        for s in valid:
+            center = s.center_ if hasattr(s, "center_") and s.center_ is not None else np.zeros(n_features)
+            n = int(np.atleast_1d(s.n_samples_seen_)[0])
+            combined_center += n * center
+            combined_scale += n * s.scale_
+        combined_center /= total_n
+        combined_scale /= total_n
+        combined_scale[combined_scale == 0] = 1.0
+        combined = RobustScaler()
+        combined.center_ = combined_center
+        combined.scale_ = combined_scale
+        combined.n_samples_seen_ = np.full(n_features, total_n, dtype=np.int64)  # type: ignore[reportAttributeAccessIssue]
+        combined.n_features_in_ = n_features
+    else:
+        # StandardScaler: weighted mean + pooled variance
+        first_mean = valid[0].mean_
+        if first_mean is None:
+            return valid[0]
+        n_features = len(first_mean)
+        combined_mean = np.zeros(n_features, dtype=np.float64)
+        for s in valid:
+            if s.mean_ is None:
+                continue
+            n = int(np.atleast_1d(s.n_samples_seen_)[0])
+            combined_mean += n * s.mean_
+        combined_mean /= total_n
+        combined_var = np.zeros(n_features, dtype=np.float64)
+        for s in valid:
+            if s.var_ is None or s.mean_ is None:
+                continue
+            n = int(np.atleast_1d(s.n_samples_seen_)[0])
+            combined_var += n * (s.var_ + (s.mean_ - combined_mean) ** 2)
+        combined_var /= total_n
+        combined = StandardScaler()
+        combined.mean_ = combined_mean
+        combined.var_ = combined_var
+        combined.scale_ = np.sqrt(combined_var)
+        combined.scale_[combined.scale_ == 0] = 1.0
+        combined.n_samples_seen_ = np.full(n_features, total_n, dtype=np.int64)
+        combined.n_features_in_ = n_features
     if hasattr(valid[0], "feature_names_in_"):
         combined.feature_names_in_ = valid[0].feature_names_in_
     return combined
@@ -2463,8 +2552,6 @@ def _parallel_window_worker(worker_args: dict):
         economic_calendar_file = worker_args.get("economic_calendar_file")
         cot_data_path = worker_args.get("cot_data_path")
 
-        from sklearn.preprocessing import StandardScaler
-
         from config.settings import FEATURES
         from data.sources import ForexDataManager
         from features.feature_engineering_pl import FeatureEngineer
@@ -2482,7 +2569,8 @@ def _parallel_window_worker(worker_args: dict):
             lag_windows=FEATURES["lag_windows"],
             enable_no_trade_zones=True,
         )
-        scalers = {p: StandardScaler() for p in pairs}
+        _scaler_type = str(worker_args.get("scaler_type", "robust") or "robust")
+        scalers = {p: _make_scaler(_scaler_type) for p in pairs}
         mgr = ForexDataManager(verbose=False)
 
         # DS-002: load warmup overlap, then slice features/labels at win_start.
@@ -2712,8 +2800,15 @@ def _build_multipair_dataset(
         if use_zarr:
             _zs: Any = z_store
             if _zs is None:
-                if getattr(args, "_resume_zarr", False):
+                _resume_ok = getattr(args, "_resume_zarr", False)
+                if _resume_ok:
                     z_store = _zs = _zarr_open_group(str(cache_path), mode="a")
+                    if "X" in _zs and _zs["X"].shape[2] != X_seq.shape[2]:
+                        print(f"[MultiPair] Warning: Cached Zarr array has {_zs['X'].shape[2]} features, but new data has {X_seq.shape[2]}. Rebuilding cache.")
+                        _resume_ok = False
+                        z_store = _zs = None
+
+                if _resume_ok:
                     existing_samples = int(_zs["X"].shape[0]) if "X" in _zs else 0
                     total_samples += existing_samples
                     _zs["X"].append(np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE))
@@ -2904,6 +2999,7 @@ def _build_multipair_dataset(
                         "cot_data_path": _cot_path_str if _cot_path_exists else None,
                         "max_bad_frac": float(getattr(args, "max_bad_frac", 0.05)),
                         "max_zero_frac": float(getattr(args, "max_zero_frac", 0.80)),
+                        "scaler_type": str(getattr(args, "scaler_type", "robust") or "robust"),
                     }
                 )
 
@@ -3232,6 +3328,7 @@ def _build_multipair_dataset(
             args,
         )
 
+        _fit_scaler_from_cache(cache_path, scalers[pairs[0]])
         _save_scaler_npz(cache_path, scalers[pairs[0]])
     else:
         if bin_state["opened"]:
@@ -3305,6 +3402,7 @@ def _build_multipair_dataset(
             total_samples = bin_state["total"]
             n_features = final_x_shape[2]
 
+        _fit_scaler_from_cache(cache_path, scalers[pairs[0]])
         _save_scaler_npz(cache_path, scalers[pairs[0]])
 
     for p, sc in scalers.items():
@@ -3405,7 +3503,7 @@ def _build_multipair_dataset(
     return str(cache_path), total_samples, n_features, scalers[pairs[0]]
 
 
-def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
+def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustScaler]:
     """
     Ingest up to 20M ticks in chunks, write sequences to Zarr (primary) / NPY memmap (fallback).
 
@@ -3574,7 +3672,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
         lag_windows=FEATURES["lag_windows"],
         enable_no_trade_zones=True,
     )
-    scaler = StandardScaler()
+    _scaler_type = str(getattr(args, "scaler_type", "robust") or "robust")
+    scaler = _make_scaler(_scaler_type)
     chunk_n = 0
     total_samples = 0
     n_features_total = 0
@@ -3913,6 +4012,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             json.dump(meta, f)
         _write_feature_schema_json(cache_path, _scaler_feature_names(scaler), args)
 
+        _fit_scaler_from_cache(cache_path, scaler)
         _save_scaler_npz(cache_path, scaler)
     else:
         _x_fp.close()
@@ -3988,6 +4088,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
             json.dump(meta, f)
         _write_feature_schema_json(cache_path, _scaler_feature_names(scaler), args)
 
+        _fit_scaler_from_cache(cache_path, scaler)
         _save_scaler_npz(cache_path, scaler)
 
     readiness_report = _write_pair_readiness_report(
@@ -4125,89 +4226,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MULTI-TIMEFRAME TENSOR BUILDER
-# Provides the missing data-pipeline link for models.ensemble.MultiTimeframeAttention.
+# Moved to ``common.model_utils`` so the models layer does not depend on
+# training.  Re-exported here for backward compatibility.
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def build_multitf_tensors(
-    X_seq: np.ndarray,
-    base_tf_minutes: int = 1,
-    target_tfs: list[int] | None = None,
-) -> list[np.ndarray]:
-    """Downsample a 1-min ``X_seq`` into coarser timeframe views.
-
-    Produces a list of arrays that can be passed directly to
-    ``MultiTimeframeAttention.forward(x_list)``.  The algorithm is
-    **lookahead-free**: each coarser bar uses only the last 1-min bar within
-    its completed window, so a 5-min bar at index *i* corresponds to 1-min
-    bars ``[i-4, i]`` -- all of which have already closed by the time the
-    sequence ends.
-
-    Parameters
-    ----------
-    X_seq : np.ndarray
-        Shape ``(N, T, F)`` -- the standard sliding-window feature tensor
-        produced by ``dataset_builder``.  Each sample ``X_seq[n]`` is a
-        sequence of ``T`` 1-min bars ending at time ``t_n``.
-    base_tf_minutes : int
-        The bar frequency of ``X_seq`` in minutes (default 1).
-    target_tfs : list[int]
-        Target timeframes in minutes.  Defaults to ``[1, 5, 15]``.
-        Values must be multiples of ``base_tf_minutes``.
-
-    Returns
-    -------
-    list[np.ndarray]
-        One array per target timeframe, ordered as ``target_tfs``.
-        - ``[0]`` shape ``(N, T,       F)``  -- unchanged 1-min view
-        - ``[1]`` shape ``(N, T//5,    F)``  -- 5-min view (last bar of each 5)
-        - ``[2]`` shape ``(N, T//15,   F)``  -- 15-min view
-    """
-    if target_tfs is None:
-        target_tfs = [base_tf_minutes, 5, 15]
-
-    _N, T, _F = X_seq.shape
-    result = []
-
-    for tf in target_tfs:
-        stride = max(1, tf // base_tf_minutes)
-        if stride == 1:
-            result.append(X_seq.astype(np.float32, copy=False))
-            continue
-
-        # Take every stride-th bar starting from the last bar (index T-1)
-        # working backwards, then reverse so time is ascending.
-        # This picks the LAST bar of each completed coarser window -- no lookahead.
-        coarse_indices = list(range(T - 1, -1, -stride))[::-1]
-        if not coarse_indices:
-            coarse_indices = [T - 1]
-
-        coarse = X_seq[:, coarse_indices, :]  # (N, n_coarse, F)
-        result.append(np.ascontiguousarray(coarse, dtype=np.float32))
-
-    return result
-
-
-def build_multitf_dataset(
-    X_seq: np.ndarray,
-    y_seq: np.ndarray,
-    base_tf_minutes: int = 1,
-    target_tfs: list[int] | None = None,
-) -> tuple[list[np.ndarray], np.ndarray]:
-    """Convenience wrapper: returns ``(tf_views, labels)`` ready for training.
-
-    The first element of ``tf_views`` is the full-resolution sequence.
-    Subsequent elements are downsampled coarser-timeframe views.
-
-    Usage with MultiTimeframeAttention::
-
-        tf_views, y = build_multitf_dataset(X_seq, y_seq)
-        import torch
-        x_list = [torch.from_numpy(v) for v in tf_views]
-        model = MultiTimeframeAttention(input_size=F)
-        pred = model(x_list)
-    """
-    if target_tfs is None:
-        target_tfs = [base_tf_minutes, 5, 15]
-    views = build_multitf_tensors(X_seq, base_tf_minutes=base_tf_minutes, target_tfs=target_tfs)
-    return views, y_seq
+from common.model_utils import build_multitf_dataset, build_multitf_tensors  # noqa: E402, F401

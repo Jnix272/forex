@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 import retraining.pipeline as pipeline_module
-from data.feature_store import FeatureStore, MaterializationStrategy
+from feature_store.polars_store import FeatureStore, MaterializationStrategy
 from monitoring.drift_detection import DriftTracker
 from retraining.orchestrator import RetrainConfig, RetrainOrchestrator, RetrainReason
 from retraining.pipeline import FullPipeline, PipelineConfig, load_config_from_yaml

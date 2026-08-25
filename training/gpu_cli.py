@@ -78,6 +78,7 @@ _YAML_MAP = {
     "data.window_batch_days": "window_batch_days",
     "data.dataset_build_workers": "dataset_build_workers",
     "data.parallel_window_workers": "parallel_window_workers",
+    "data.scaler_type": "scaler_type",
     "data.use_cache": None,  # handled as force_rebuild inversion below
     "model.name": "model",
     "model.all_models": "all_models",
@@ -1729,6 +1730,15 @@ def parse_args():
         help="Ignore cached Zarr/NPY store and rebuild from scratch",
     )
     p.add_argument("--build-only", action="store_true", help="Only build the dataset pipeline and exit")
+    p.add_argument(
+        "--tabular-build-only",
+        dest="tabular_build_only",
+        action="store_true",
+        default=False,
+        help="Shorthand for --config config/run_tabular.yaml --build-only — build the "
+        "5M-tick triple_barrier tabular dataset (500 MB, ~2-3h) via the GPU pipeline "
+        "without training. Equivalent to training.train_gpu with the tabular config.",
+    )
     p.add_argument("--quick-mode", action="store_true", help="Fast sanity run: fewer folds/epochs, no ensemble or RL.")
     p.add_argument(
         "--drift-gate",
@@ -2002,6 +2012,12 @@ def parse_args():
     )
 
     # -- Pre-parse to find --config, then apply YAML defaults before full parse --
+    # --tabular-build-only is a shorthand for --config run_tabular.yaml --build-only
+    # If present without an explicit --config, force the tabular config before YAML overlay.
+    _has_tabular_flag = "--tabular-build-only" in sys.argv
+    _has_explicit_config = any(a == "--config" or a.startswith("--config=") for a in sys.argv)
+    if _has_tabular_flag and not _has_explicit_config:
+        p.set_defaults(config="config/run_tabular.yaml")
     pre, _ = p.parse_known_args()
     if pre.config:
         _apply_yaml_config(p, pre.config)
@@ -2010,6 +2026,14 @@ def parse_args():
         apply_optuna_overlay_if_needed(p, pre.config, getattr(pre, "auto_optuna", None), _apply_yaml_config)
 
     args = p.parse_args()
+    # --tabular-build-only: imply --build-only and tabular config
+    if getattr(args, "tabular_build_only", False):
+        args.build_only = True
+        if not _has_explicit_config:
+            args.config = "config/run_tabular.yaml"
+            print("[Config] --tabular-build-only: building tabular dataset (config/run_tabular.yaml, --build-only)")
+        else:
+            print(f"[Config] --tabular-build-only + --config {args.config}: --build-only enabled (explicit config takes precedence)")
     # --no-amp: force FP32 regardless of --dtype or hardware profile
     if getattr(args, "no_amp", False):
         args.dtype = "fp32"

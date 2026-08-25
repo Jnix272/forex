@@ -23,7 +23,7 @@ from typing import Any
 import polars as pl
 
 from data.feature_materializers import materialize_feature_set
-from data.feature_store import FeatureStore
+from feature_store.polars_store import FeatureStore
 from monitoring.drift_detection import (
     DriftReport,
     DriftSeverity,

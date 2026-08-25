@@ -8,7 +8,7 @@ Edit here to change per-architecture specs; `settings.MODELS` re-exports this di
 from typing import Any
 
 # Keys accepted by train_gpu --model and build_model()
-SUPPORTED_SUPERVISED: frozenset[str] = frozenset({"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm"})
+SUPPORTED_SUPERVISED: frozenset[str] = frozenset({"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm", "patchtst"})
 
 BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
     "xgboost": {
@@ -125,6 +125,19 @@ MODELS: dict[str, dict[str, Any]] = {
         "dropout": 0.1,
         "seq_len": 120,
         "learning_rate": 1e-4,
+    },
+    "patchtst": {
+        "decision_role": "channel_independent_patching",
+        "use_when": "Need to efficiently process long sequences by treating variables as independent channels.",
+        "default_use": "Advanced transformer baseline.",
+        "seq_len": 120,
+        "learning_rate": 1e-4,
+        "patch_len": 12,
+        "stride": 12,
+        "d_model": 128,
+        "nhead": 8,
+        "num_layers": 3,
+        "dropout": 0.1,
     },
 }
 

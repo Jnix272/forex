@@ -21,6 +21,7 @@ try:
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+    import torch.utils.checkpoint  # noqa: F401  (attribute access via torch.utils.checkpoint)
 
     TORCH = True
 except ImportError:
@@ -78,6 +79,12 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
         if "lstm_hidden" in kwargs and "hidden_size" in kwargs:
             kwargs["lstm_hidden"] = kwargs["hidden_size"] // 2
 
+    # Direction-classification is the primary use-case (3-class sell/hold/buy
+    # logits). Default to 3 classes when the caller (e.g. the full-data-flow
+    # training test, or train_gpu) does not specify num_classes explicitly.
+    if "num_classes" in params and "num_classes" not in kwargs:
+        kwargs["num_classes"] = 3
+
     valid_kwargs = {k: v for k, v in kwargs.items() if k in params}
     try:
         model = cls(**valid_kwargs)
@@ -87,6 +94,43 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
             model = cls(input_size=input_size)
         else:
             raise e
+
+    # -- Multi-pair embedding wrapper ------------------------------------------
+    # Restored from the original train_gpu.build_model: when training on
+    # multiple pairs with pair_embed_dim > 0, wrap the backbone in
+    # MultiPairWrapper. The backbone must be built with the combined input
+    # width (pairs_flat + cross-interaction features), so recompute it here
+    # and rebuild when the caller passed the flat width.
+    n_pairs = int(kwargs.get("_n_pairs", 1) or 1)
+    embed_dim = int(kwargs.get("pair_embed_dim", 0) or 0)
+    f_per_pair = int(kwargs.get("_f_per_pair", 0) or 0)
+    use_pair_emb = n_pairs > 1 and embed_dim > 0
+    if use_pair_emb:
+        _fpp = f_per_pair if f_per_pair > 0 else max(1, int(input_size) // n_pairs)
+        _n_cross = n_pairs * (n_pairs - 1) // 2
+        _n_interaction = 3 * _n_cross + n_pairs + 2
+        backbone_input = n_pairs * (_fpp + embed_dim) + _n_interaction
+        _orig_input = int(valid_kwargs.get("input_size", input_size))
+        if _orig_input != backbone_input:
+            rebuild_kwargs = dict(valid_kwargs)
+            rebuild_kwargs["input_size"] = backbone_input
+            model = cls(**rebuild_kwargs)
+        m = MultiPairWrapper(
+            model,
+            n_pairs=n_pairs,
+            f_per_pair=_fpp,
+            embed_dim=embed_dim,
+            corr_window=int(kwargs.get("corr_window", 20) or 20),
+            corr_window_long=int(kwargs.get("corr_window_long", 60) or 60),
+            momentum_window=int(kwargs.get("momentum_window", 20) or 20),
+        )
+        print(
+            f"[Model] {name.upper()} | MultiPair wrapper "
+            f"({n_pairs}P x {_fpp}F + {embed_dim}E | "
+            f"corr={kwargs.get('corr_window', 20)}/{kwargs.get('corr_window_long', 60)}bar "
+            f"mom={kwargs.get('momentum_window', 20)}bar) applied."
+        )
+        model = m
 
     try:
         n_params = sum(p.numel() for p in model.parameters())
@@ -217,7 +261,7 @@ if TORCH:
             )
             tnz = target.abs() > 0.05
             wrong = tnz & (torch.sign(pred) != torch.sign(target))
-            extra = wrong.float() * target.abs().clamp(min=0.1)
+            extra = wrong.float() * a * target.abs().clamp(min=0.1)
             loss = huber + self.sign_weight * extra
             if weight is not None:
                 loss = loss * weight
@@ -412,7 +456,7 @@ if TORCH:
                 var = returns.var(unbiased=False)
                 # DETACH std to prevent the network from artificially shrinking batch variance
                 std = torch.sqrt(var + self.sharpe_eps).detach()
-                sharpe = mean / std * self.sharpe_sqrt
+                sharpe = (mean / std * self.sharpe_sqrt).clamp(min=-20.0, max=20.0)
                 loss = loss - self.w_sharpe * sharpe
             if self.class_balance_weight:
                 probs = torch.softmax(logits, dim=-1)
@@ -709,7 +753,9 @@ if TORCH:
                     if self.training and self.corr_dropout_p > 0.0:
                         xi_c = xi - xi.mean(dim=-1, keepdim=True)
                         xj_c = xj - xj.mean(dim=-1, keepdim=True)
-                        pair_corr = (xi_c * xj_c).sum(dim=-1) / (xi_c.norm(dim=-1) * xj_c.norm(dim=-1)).clamp(min=1e-8)
+                        var_i = (xi_c ** 2).sum(dim=-1).clamp(min=1e-8)
+                        var_j = (xj_c ** 2).sum(dim=-1).clamp(min=1e-8)
+                        pair_corr = (xi_c * xj_c).sum(dim=-1) / torch.sqrt(var_i * var_j)
 
                         drop = (pair_corr.abs() > 0.90) & (torch.rand_like(pair_corr) < self.corr_dropout_p)
                         drop = drop.view(-1, 1, 1).expand_as(sc)
@@ -1160,9 +1206,15 @@ if TORCH:
             self.n_nodes = n_nodes
             self.num_classes = num_classes
             self.node_embed = nn.Linear(node_features, hidden)
-            # Input-dependent adjacency: edge weights are a function of node
-            # features so the graph structure can adapt across market regimes.
-            self.adj_net = nn.Sequential(
+            # Input-dependent, DIRECTED adjacency: separate query/key projections so
+            # edge weight A_ij can differ from A_ji (a single shared projection would
+            # force A_ij == A_ji, collapsing the graph to an undirected similarity).
+            self.adj_q = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.Tanh(),
+                nn.Linear(hidden, n_nodes),
+            )
+            self.adj_k = nn.Sequential(
                 nn.Linear(hidden, hidden),
                 nn.Tanh(),
                 nn.Linear(hidden, n_nodes),
@@ -1186,8 +1238,9 @@ if TORCH:
                 A = adj
             else:
                 # Attention-style dot-product adjacency: A_ij = softmax_j(q_i·k_j)
-                q = self.adj_net(h)  # (B, N, N)
-                k = self.adj_net(h)
+                # (separate q/k projections => directed edges A_ij != A_ji).
+                q = self.adj_q(h)  # (B, N, N)
+                k = self.adj_k(h)
                 A = torch.softmax(torch.bmm(q, k.transpose(1, 2)) / (self.n_nodes**0.5), dim=-1)
             for attn, norm in zip(self.attn_layers, self.norms, strict=False):
                 h_n = norm(h)
@@ -1361,6 +1414,128 @@ if TORCH:
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o
 
+    class PatchTSTScalper(nn.Module):
+        """
+        PatchTST: Patch Time Series Transformer.
+        Groups adjacent timesteps into patches to capture local semantic information 
+        and drastically reduce the effective sequence length for the Transformer.
+        Employs Channel Independence (treats features as independent sequences).
+        """
+        def __init__(
+            self,
+            input_size: int = 64,
+            seq_len: int = 60,
+            patch_len: int = 12,
+            stride: int = 12,
+            d_model: int = 128,
+            nhead: int = 8,
+            num_layers: int = 3,
+            dropout: float = 0.1,
+            num_classes: int = 3,
+            use_gradient_checkpointing: bool = True
+        ):
+            super().__init__()
+            self.num_classes = num_classes
+            self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
+            self.input_size = input_size
+            self.seq_len = seq_len
+            
+            # Patching configuration
+            self.patch_len = patch_len
+            self.stride = stride
+            self.patch_num = int((seq_len - patch_len) / stride + 1)
+            
+            # If sequence cannot be cleanly patched, we will pad it in forward
+            self.padding = stride - (seq_len - patch_len) % stride if (seq_len - patch_len) % stride != 0 else 0
+            if self.padding != 0 and self.padding != stride:
+                self.patch_num += 1
+            else:
+                self.padding = 0
+
+            # Linear embedding for the patch
+            self.value_embedding = nn.Linear(patch_len, d_model)
+            
+            # Positional embedding
+            self.position_embedding = nn.Embedding(self.patch_num, d_model)
+            
+            # Channel-independent Transformer blocks
+            self.layers = nn.ModuleList(
+                [
+                    nn.ModuleDict(
+                        {
+                            "attn": _FlashMHA(d_model, nhead, dropout=dropout),
+                            "norm1": nn.LayerNorm(d_model),
+                            "norm2": nn.LayerNorm(d_model),
+                            "ffn": nn.Sequential(
+                                nn.Linear(d_model, d_model * 4),
+                                nn.GELU(),
+                                nn.Dropout(dropout),
+                                nn.Linear(d_model * 4, d_model),
+                                nn.Dropout(dropout),
+                            ),
+                        }
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
+            
+            self.head_norm = nn.LayerNorm(d_model)
+            
+            self.flatten = nn.Flatten(start_dim=1)
+            self.head = nn.Linear(self.input_size * self.patch_num * d_model, num_classes)
+            
+            _kaiming_init_module(self)
+            
+        def _layer_forward(self, layer, h):
+            # h: (B * input_size, patch_num, d_model)
+            h = h + layer["attn"](layer["norm1"](h))
+            h = h + layer["ffn"](layer["norm2"](h))
+            return h
+
+        def forward(self, x):
+            # x: (B, T, F_in)
+            B, T, F_in = x.size()
+            
+            if self.padding > 0:
+                x = F.pad(x, (0, 0, self.padding, 0), mode='replicate')
+                T += self.padding
+            
+            # Channel independence: we treat the feature dimension as batch dimension
+            # (B, T, F_in) -> (B, F_in, T)
+            x = x.transpose(1, 2)
+            
+            # Create patches: (B, F_in, T) -> (B, F_in, patch_num, patch_len)
+            x = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
+            patch_num = x.size(-2)
+            
+            # Reshape to (B * F_in, patch_num, patch_len)
+            x = x.reshape(B * F_in, patch_num, self.patch_len)
+            
+            # Embed patches: (B * F_in, patch_num, d_model)
+            h = self.value_embedding(x)
+            
+            # Add positional embedding
+            pos = self.position_embedding(torch.arange(patch_num, device=x.device))
+            h = h + pos.unsqueeze(0)
+            
+            for layer in self.layers:
+                def _run(t, _layer=layer):
+                    return self._layer_forward(_layer, t)
+                h = _maybe_checkpoint(_run, h, enabled=self.use_gradient_checkpointing)
+            
+            h = self.head_norm(h)
+            
+            # Reshape back: (B, F_in, patch_num, d_model)
+            h = h.reshape(B, F_in, patch_num, -1)
+            
+            # Flatten to (B, F_in * patch_num * d_model)
+            h_flat = self.flatten(h)
+            
+            o = self.head(h_flat)
+            if isinstance(self.head, nn.Identity):
+                return o
+            return o.squeeze(-1) if self.num_classes == 1 else o
+
     class GLMBaseline(nn.Module):
         """Generalized Linear Model (GLM) baseline.
 
@@ -1395,6 +1570,7 @@ if TORCH:
         "transformer": "context",  # iTransformer - variate-level attention
         "expert": "confirmation",  # EXPERT encoder - conv-based local confirmation
         "glm": "baseline",  # Generalized Linear Model baseline
+        "patchtst": "context",  # PatchTST captures local semantics for context
     }
 
     class DiversityLoss(nn.Module):
@@ -1443,7 +1619,9 @@ if TORCH:
                     # Pearson correlation
                     p_i_c = p_i - p_i.mean()
                     p_j_c = p_j - p_j.mean()
-                    denom = (p_i_c.norm() * p_j_c.norm()).clamp(min=1e-8)
+                    var_i = (p_i_c ** 2).sum().clamp(min=1e-8)
+                    var_j = (p_j_c ** 2).sum().clamp(min=1e-8)
+                    denom = torch.sqrt(var_i * var_j)
                     corr = (p_i_c * p_j_c).sum() / denom
                     # Role multiplier
                     mult = 1.0
@@ -1580,6 +1758,7 @@ if TORCH:
         "gnn": GNNFromSequence,
         "expert": EXPERTEncoder,
         "glm": GLMBaseline,
+        "patchtst": PatchTSTScalper,
     }
 
 
@@ -1601,6 +1780,7 @@ else:
     GNNCrossAsset = cast(Any, _TorchUnavailableStub)
     GNNFromSequence = cast(Any, _TorchUnavailableStub)
     EXPERTEncoder = cast(Any, _TorchUnavailableStub)
+    PatchTSTScalper = cast(Any, _TorchUnavailableStub)
     MultiTaskHead = cast(Any, _TorchUnavailableStub)
     MultiTaskLoss = cast(Any, _TorchUnavailableStub)
     MultiTaskWrapper = cast(Any, _TorchUnavailableStub)
@@ -1626,6 +1806,7 @@ if __name__ == "__main__" and TORCH:
         ("HAELT", HAELTHybrid),
         ("Mamba", MambaScalper),
         ("EXPERT", EXPERTEncoder),
+        ("PatchTST", PatchTSTScalper),
     ]:
         try:
             m = Cls(input_size=F_IN)

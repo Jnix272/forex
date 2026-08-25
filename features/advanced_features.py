@@ -113,7 +113,10 @@ def correlation_regime_features(returns_df, window=60):
     rs = F["corr_avg"].rolling(window * 3).std() + 1e-9
     F["corr_zscore"] = (F["corr_avg"] - rm) / rs
     F["corr_break"] = (F["corr_zscore"].abs() > 2.0).astype(float)
-    return F.ffill().fillna(0)
+    
+    F = F.ffill()
+    F["corr_eigenratio"] = F["corr_eigenratio"].fillna(1.0)
+    return F.fillna(0.0)
 
 
 def hurst_exponent(arr):
@@ -121,6 +124,7 @@ def hurst_exponent(arr):
     if n < 20:
         return 0.5
     lags = range(4, min(50, n // 2))
+    valid_lags = []
     tau = []
     for lag in lags:
         sub = arr[-lag * 2 :]
@@ -138,12 +142,15 @@ def hurst_exponent(arr):
             if rs > 0:
                 rs_vals.append(rs)
         if rs_vals:
-            tau.append(np.mean(rs_vals))
-    tau = [t for t in tau if t > 0 and np.isfinite(t)]
+            mean_rs = np.mean(rs_vals)
+            if mean_rs > 0 and np.isfinite(mean_rs):
+                tau.append(mean_rs)
+                valid_lags.append(lag)
+                
     if len(tau) < 4:
         return 0.5
     try:
-        H, _ = np.polyfit(np.log(list(lags)[: len(tau)]), np.log(tau), 1)
+        H, _ = np.polyfit(np.log(valid_lags), np.log(tau), 1)
         return float(np.clip(H, 0.1, 0.9))
     except (np.linalg.LinAlgError, ValueError, FloatingPointError):
         return 0.5
@@ -152,9 +159,13 @@ def hurst_exponent(arr):
 def rolling_hurst(series, window=120, step=20):
     n = len(series)
     val = np.full(n, np.nan)
-    for i in range(window, n, step):
-        h = hurst_exponent(series.values[i - window : i])
-        val[i - step : i] = h
+    if n >= window:
+        for i in range(window, n + 1, step):
+            h = hurst_exponent(series.values[i - window : i])
+            val[i - 1] = h
+        if (n - window) % step != 0:
+            h = hurst_exponent(series.values[n - window : n])
+            val[n - 1] = h
     return pd.Series(val, index=series.index).ffill().fillna(0.5).rename("hurst")
 
 
@@ -179,7 +190,7 @@ def fractal_dimension(series, window=30):
     arr = series.values.astype(float)
     n = len(arr)
     fd = np.full(n, np.nan)
-    for i in range(window, n):
+    for i in range(window, n + 1):
         sub = arr[i - window : i]
         Lm = []
         for k in range(1, window // 2):
@@ -189,9 +200,9 @@ def fractal_dimension(series, window=30):
         if len(Lm) > 2:
             try:
                 s, _ = np.polyfit(np.log(np.arange(1, len(Lm) + 1)), np.log(np.maximum(Lm, 1e-12)), 1)
-                fd[i] = float(np.clip(-s, 1.0, 2.0))
+                fd[i - 1] = float(np.clip(-s, 1.0, 2.0))
             except (np.linalg.LinAlgError, ValueError, FloatingPointError):
-                fd[i] = 1.5
+                fd[i - 1] = 1.5
     return pd.Series(fd, index=series.index).ffill().fillna(1.5).rename("fractal_dim")
 
 
@@ -201,13 +212,13 @@ def regime_label(h):
 
 def options_proxy_features(bars, window=20):
     F = pd.DataFrame(index=bars.index)
-    r = np.log(bars["close"] / bars["close"].shift(1))
-    c = np.log(bars["close"])
-    h = np.log(bars["high"])
-    l = np.log(bars["low"])  # noqa: E741
-    F["iv_proxy"] = np.sqrt(
-        (0.5 * (h - l) ** 2 - (2 * np.log(2) - 1) * (c - c.shift(1)) ** 2).rolling(window).mean()
-    ) * np.sqrt(252)
+    c_clip = bars["close"].clip(lower=1e-12)
+    r = np.log(c_clip / c_clip.shift(1))
+    c = np.log(c_clip)
+    h = np.log(bars["high"].clip(lower=1e-12))
+    l = np.log(bars["low"].clip(lower=1e-12))  # noqa: E741
+    var_proxy = (0.5 * (h - l) ** 2 - (2 * np.log(2) - 1) * (c - c.shift(1)) ** 2).rolling(window).mean()
+    F["iv_proxy"] = np.sqrt(var_proxy.clip(lower=1e-12)) * np.sqrt(252)
     F["skew_proxy"] = r.rolling(window).skew()
     F["term_proxy"] = (r.rolling(5).std() * np.sqrt(252) / (r.rolling(60).std() * np.sqrt(252) + 1e-9)).clip(0.3, 3.0)
     up = r[r > 0].rolling(window, min_periods=5).std() * np.sqrt(252)
@@ -315,9 +326,8 @@ def rolling_hurst_fractal(bars, windows=None):
 
     if windows is None:
         windows = [30, 60, 120]
-    log_ret = pd.Series(np.log(bars["close"].values / bars["close"].shift(1).bfill().values), index=bars.index).fillna(
-        0
-    )
+    c_clip = pd.Series(bars["close"]).clip(lower=1e-12)
+    log_ret = pd.Series(np.log(c_clip / c_clip.shift(1).bfill()), index=bars.index).fillna(0.0)
     df = pd.DataFrame(index=bars.index)
     for w in windows:
         h = rolling_hurst(log_ret, window=w, step=1)
@@ -422,7 +432,8 @@ def compute_multipair_features(
             bars = b_pd
 
         bars_aligned = bars.reindex(idx, method="ffill")
-        ret = pd.Series(np.log(bars_aligned["close"] / bars_aligned["close"].shift(1)), index=idx)
+        c_clip = bars_aligned["close"].clip(lower=1e-12)
+        ret = pd.Series(np.log(c_clip / c_clip.shift(1)), index=idx)
         returns[pair] = ret.fillna(0.0)
         # ATR proxy: rolling true-range mean
         prev_c = bars_aligned["close"].shift(1)
@@ -510,7 +521,6 @@ def compute_realized_moments(close: pl.Series, window: int = 20) -> pl.DataFrame
 
     df = df.with_columns(
         [
-            pl.col("ret").rolling_skew(window_size=window).alias(f"rolling_skew_{window}"),
             pl.col("ret").rolling_mean(window_size=window).alias("mu"),
             (pl.col("ret") ** 2).rolling_mean(window_size=window).alias("mu2"),
             (pl.col("ret") ** 3).rolling_mean(window_size=window).alias("mu3"),
@@ -521,9 +531,14 @@ def compute_realized_moments(close: pl.Series, window: int = 20) -> pl.DataFrame
     )
 
     df = df.with_columns([(pl.col("mu2") - pl.col("mu") ** 2).alias("var")])
+    df = df.with_columns([pl.when(pl.col("var") < 0.0).then(0.0).otherwise(pl.col("var")).alias("var")])
 
     df = df.with_columns(
         [
+            (
+                (pl.col("mu3") - 3 * pl.col("mu") * pl.col("mu2") + 2 * (pl.col("mu") ** 3))
+                / (pl.col("var").pow(1.5) + 1e-9)
+            ).alias(f"rolling_skew_{window}"),
             (
                 (
                     pl.col("mu4")

@@ -267,12 +267,11 @@ class FreeLBAttack(AdversarialAttack):
             if mask is not None:
                 loss = loss * mask
                 loss = loss.mean()
-            loss.backward()
-
+            grad = torch.autograd.grad(loss, delta, retain_graph=False, create_graph=False)[0]
+            
             # Update perturbation
-            delta.data = delta.data + self.alpha * delta.grad.sign()
+            delta.data = delta.data + self.alpha * grad.sign()
             delta.data = torch.clamp(delta.data, -self.eps, self.eps)
-            delta.grad.zero_()
 
         # Final adversarial example
         x_adv = x + delta.detach()

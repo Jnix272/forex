@@ -76,12 +76,14 @@ class XGBoostForecaster(nn.Module if TORCH else object):
         Statistics per feature across the T time steps:
           mean, std, min, max, last-bar value, range (max-min)
         """
-        mean = x.mean(axis=1)  # (B, F)
-        std = x.std(axis=1)  # (B, F)
-        xmin = x.min(axis=1)  # (B, F)
-        xmax = x.max(axis=1)  # (B, F)
-        last = x[:, -1, :]  # (B, F)
-        rng = xmax - xmin  # (B, F)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mean = np.nanmean(x, axis=1)  # (B, F)
+            std = np.nanstd(x, axis=1)   # (B, F)
+            xmin = np.nanmin(x, axis=1)  # (B, F)
+            xmax = np.nanmax(x, axis=1)  # (B, F)
+            last = x[:, -1, :]           # (B, F)
+            rng = xmax - xmin            # (B, F)
         return np.concatenate([mean, std, xmin, xmax, last, rng], axis=1)
 
     def _prepare_inputs(self, x: Union[np.ndarray, "torch.Tensor"]) -> np.ndarray:

@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from training.train_gpu import _apply_model_profile
+from training.gpu_cli import _apply_model_profile
 
 
 def _approx(a: float, b: float, tol: float = 1e-12) -> bool:

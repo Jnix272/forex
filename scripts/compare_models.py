@@ -17,7 +17,7 @@ if str(_ROOT) not in sys.path:
 from backtesting.backtest import ForexScalingBacktest
 from models.ensemble import EnsembleMetaLearner
 from models.xgboost_model import XGBoostForecaster
-from training.train_gpu import build_model
+from training.model_factory import build_model
 
 
 def _fold_stability(model_name: str, ckpt_path: str) -> dict:

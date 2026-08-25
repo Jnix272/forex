@@ -280,7 +280,7 @@ class MacroYieldFeatureBuilder:
 
         # Normalise to UTC pd.Timestamp for fetching
         try:
-            start = pd.Timestamp(str(min_dt)) - pd.Timedelta(days=35)
+            start = pd.Timestamp(str(min_dt)) - pd.Timedelta(35, unit="D")
             end = pd.Timestamp(str(max_dt))
         except Exception:
             return pl.DataFrame()

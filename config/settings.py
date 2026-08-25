@@ -13,7 +13,7 @@ from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    from backports.zoneinfo import ZoneInfo
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
 
 # Load .env from project root so WANDB_API_KEY, MLFLOW_TRACKING_URI, etc.
@@ -212,6 +212,16 @@ FEATURES = {
     "lag_windows": [5, 20, 60],
     "sentiment_decay_lambda": 0.1,
     "buzz_window_minutes": 5,
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE SCALING
+# ─────────────────────────────────────────────────────────────────────────────
+SCALING = {
+    "scaler_type": "robust",  # "robust" (default) or "standard"
+    # RobustScaler: uses median + IQR, resistant to flash crashes & spread spikes
+    # StandardScaler: uses mean + std, sensitive to outliers
+    "quantile_range": (5, 95),  # RobustScaler: 5th-95th percentile range
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -458,6 +468,8 @@ BACKTEST = {
     "commission_per_lot": 3.5,
     "execution_delay_bars": 1,
     "mc_sims": 500,
+    "risk_free_rate": 0.02,  # 2% annual (US T-bill proxy)
+    "volatility_adaptive_slippage": False,  # Scale slippage by ATR ratio
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

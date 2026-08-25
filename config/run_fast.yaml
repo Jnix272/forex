@@ -8,6 +8,8 @@ data:
     - EURUSD
     - GBPUSD
     - USDJPY
+    - USDCAD
+
   pair_embed_dim: 4
   pair_align: inner
   corr_window: 10

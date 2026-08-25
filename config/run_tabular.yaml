@@ -1,0 +1,153 @@
+# ── Tabular Model Dataset Config (CatBoost / XGBoost) ───────────────────────
+# Optimized for tree-based models:
+#   - triple_barrier labels: cleaner directional 3-class targets vs RL reward
+#   - seq_len=30: trees reduce sequences to summary stats; shorter = faster build
+#   - n_ticks=5M: trees don't benefit from massive history depth like DL models
+#   - dataset builds in ~2-3h vs 9+h for the deep learning dataset
+
+data:
+  source: dukascopy
+  pair: EURUSD
+  pairs:
+    - EURUSD
+    - USDJPY
+    - GBPUSD
+    - USDCAD
+  start: '2018-01-01'
+  end: '2025-12-31'
+  n_ticks: 5000000
+  chunk_size: 150000
+  use_cache: true
+  auto_rebuild_on_mismatch: true
+  integrity_gate: true
+  pair_align: outer
+  pair_embed_dim: 16
+  corr_window: 20
+  corr_window_long: 60
+  momentum_window: 20
+  real_data_window_days: 7
+  window_batch_days: 1
+  parallel_window_workers: 1
+  dataset_build_workers: 2
+  min_pair_years: 2
+  expected_pair_years: 7
+  chunk_rows: auto
+  shuffle_buffer_size: 8192
+  use_feature_cache: false
+  feature_cache_dir: data/features
+  zarr_cname: auto
+  zarr_clevel: null
+  scaler_type: robust
+  scaler_quantile_range: [5, 95]
+  full_day_data: false
+
+features:
+  atr_windows: [6, 20, 60]
+  chop_window: 14
+  corr_window: 60
+  momentum_windows: [5, 20, 60]
+  ofi_windows: [5, 20, 60]
+  regime_window: 240
+  vol_windows: [6, 20, 60]
+  volatility_window: 120
+  vwap_window: 60
+
+pip_sizes:
+  JPY: 0.01
+  default: 0.0001
+
+strategy:
+  bar_freq: "5m"
+  mode: scalping
+  lookahead_bars: 20
+  profit_target_atr: 1.5
+  stop_loss_atr: 1.0
+
+training:
+  seq_len: 30
+  label_method: triple_barrier
+  seed: 1337
+  val_split: 0.2
+  max_bad_frac: 0.05
+  max_zero_frac: 0.80
+  amp: false
+  batch_size: 256
+  epochs: 1
+  grad_clip: 1.0
+  loss: cross_entropy
+  lr: 0.0001
+  early_stop_metric: sharpe
+  patience: 5
+  cross_asset_mode: auto
+  cross_asset_provider: auto
+
+catboost:
+  enabled: true
+  task: classification
+  sequence_mode: temporal
+  iterations: 500
+  depth: 7
+  learning_rate: 0.03
+  subsample: 0.8
+  colsample_bylevel: 0.8
+  l2_leaf_reg: 2.0
+  early_stopping_rounds: 20
+  folds: 5
+  tune: false
+  tune_trials: 20
+  max_samples: 2000000
+
+xgboost:
+  enabled: true
+  task: classification
+  sequence_mode: temporal
+  n_estimators: 500
+  max_depth: 7
+  learning_rate: 0.03
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 5
+  gamma: 0.2
+  reg_alpha: 0.1
+  reg_lambda: 2.0
+  early_stopping_rounds: 20
+  folds: 5
+  tune: false
+  tune_trials: 20
+  max_samples: 2000000
+  feature_importance: true
+  feature_importance_top_n: 50
+
+paths:
+  checkpoint_dir: checkpoints/tabular
+  data_cache: ./data/processed
+
+news:
+  economic_calendar_file: data/raw/eco_calendar/events.csv
+  historical_mode: full
+  historical_news_file: data/raw/news/historical_news_combined.parquet
+
+validation:
+  embargo_bars: 30
+  method: purged_embargo
+  min_train_size: 20000
+  n_splits: 7
+  purge_bars: 60
+
+walk_forward:
+  enabled: true
+  folds: 5
+
+quick:
+  enabled: false
+
+hardware:
+  num_workers: 2
+  profile: auto
+
+tracking:
+  no_wandb: true
+  run_name: tabular_triple_barrier
+
+maturity:
+  stage: paper

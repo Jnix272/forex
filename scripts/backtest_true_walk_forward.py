@@ -30,7 +30,7 @@ from scripts.backtest_model import (
     _to_pandas_bars,
     _write_df,
 )
-from training.train_gpu import build_model
+from training.model_factory import build_model
 
 
 def log(m: str) -> None:
@@ -133,8 +133,8 @@ def run_true_walkforward():
 
         inf_start_idx = max(0, val_start_idx - args.seq_len)
 
-        val_start_date = base_bars.index[val_start_idx]
-        val_end_date = base_bars.index[val_end_idx - 1]
+        val_start_date = base_bars.index[val_start_idx]  # type: ignore[reportAttributeAccessIssue]
+        val_end_date = base_bars.index[val_end_idx - 1]  # type: ignore[reportAttributeAccessIssue]
 
         log(f"\n--- Fold {k} ---")
         log(f"Val slice: index {val_start_idx} to {val_end_idx}")
@@ -155,10 +155,10 @@ def run_true_walkforward():
 
         # FIX W1: build features only up to val_end_idx to prevent data leakage.
         # Rolling indicators (ATR, lags, regime) must not see bars beyond this fold.
-        fold_bars = base_bars.iloc[:val_end_idx]
-        f_base_fold = fe.build(fold_bars)
+        fold_bars = base_bars.iloc[:val_end_idx]  # type: ignore[reportAttributeAccessIssue]
+        f_base_fold = fe.build(fold_bars)  # type: ignore[reportArgumentType]
         f_adv_fold = afb.build(fold_bars, base_features=f_base_fold)
-        features_df = pd.concat([f_base_fold, f_adv_fold], axis=1).reindex(fold_bars.index).ffill().fillna(0.0)
+        features_df = pd.concat([f_base_fold, f_adv_fold], axis=1).reindex(fold_bars.index).ffill().fillna(0.0)  # type: ignore[reportArgumentType]
 
         model_kwargs = {
             "d_model": cfg.get("d_model", 256),
@@ -231,8 +231,8 @@ def run_true_walkforward():
         fold_signals = []
 
         regime_vals = X_slice["regime_label"].values if "regime_label" in X_slice.columns else None
-        close_vals = base_bars["close"].values
-        ts_vals = base_bars.index
+        close_vals = base_bars["close"].values  # type: ignore[reportAttributeAccessIssue]
+        ts_vals = base_bars.index  # type: ignore[reportAttributeAccessIssue]
 
         for off, c in enumerate(cls):
             i = inf_start_idx + args.seq_len + off
@@ -272,7 +272,7 @@ def run_true_walkforward():
 
             if act:
                 last_signal_i = i
-                kelly_frac = 0.25
+                kelly_frac = float(getattr(args, "kelly_fraction", 0.25))
                 win_prob = float(conf[off])
                 reward_to_risk = args.take_pips / max(args.stop_pips, 1e-5)
                 if reward_to_risk > 0:
@@ -307,9 +307,9 @@ def run_true_walkforward():
 
     # FIX W5: clamp bars lower bound so the backtest never gets an empty frame
     # when sig_df.index[0] precedes the first bar (e.g. due to execution delay)
-    bars_start = max(base_bars.index[0], sig_df.index[0])
+    bars_start = max(base_bars.index[0], sig_df.index[0])  # type: ignore[reportAttributeAccessIssue]
     bt = ForexScalingBacktest(
-        bars=base_bars.loc[bars_start:],
+        bars=base_bars.loc[bars_start:],  # type: ignore[reportAttributeAccessIssue]
         signals=sig_df,
         initial_equity=args.equity,
         commission_per_lot=args.commission_per_lot,

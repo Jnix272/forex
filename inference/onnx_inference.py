@@ -365,38 +365,43 @@ def core_onnx_export(
     if scaler is not None:
         import numpy as np
 
-        # Get scaler parameters
+        # Get scaler parameters (supports both StandardScaler and RobustScaler)
         mean = getattr(scaler, "mean_", None)
+        center = getattr(scaler, "center_", None)
         scale = getattr(scaler, "scale_", None)
 
-        if mean is not None and scale is not None:
+        # Use center_ for RobustScaler, mean_ for StandardScaler
+        offset = center if center is not None else mean
+
+        if offset is not None and scale is not None:
             # Create scaler parameters as tensors
-            mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
+            offset_tensor = torch.from_numpy(np.asarray(offset, dtype=np.float32)).to(export_device)
             scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
 
             # Avoid division by zero
             scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
 
             class ScaledModel(torch.nn.Module):
-                def __init__(self, wrapped_model: torch.nn.Module, mean: torch.Tensor, scale: torch.Tensor):
+                def __init__(self, wrapped_model: torch.nn.Module, offset: torch.Tensor, scale: torch.Tensor):
                     super().__init__()
                     self._wrapped_model: torch.nn.Module = wrapped_model
                     # Register as buffers so they're included in ONNX.
-                    self._mean: torch.Tensor
+                    self._offset: torch.Tensor
                     self._scale: torch.Tensor
-                    self.register_buffer("_mean", mean)
+                    self.register_buffer("_offset", offset)
                     self.register_buffer("_scale", scale)
 
                 def forward(self, x: torch.Tensor):
                     # x: (batch, seq_len, n_features)
                     # NaN/Inf sanitization FIRST (same as training)
                     x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
-                    # Apply z-score normalization: (x - mean) / scale
-                    x = (x - self._mean) / self._scale
+                    # Apply normalization: (x - offset) / scale
+                    x = (x - self._offset) / self._scale
                     return self._wrapped_model(x)
 
-            model = ScaledModel(model, mean_tensor, scale_tensor)
-            print(f"[Export] Fused StandardScaler into ONNX graph (n_features={len(mean)})")
+            model = ScaledModel(model, offset_tensor, scale_tensor)
+            scaler_name = "RobustScaler" if center is not None else "StandardScaler"
+            print(f"[Export] Fused {scaler_name} into ONNX graph (n_features={len(offset)})")
 
     # Dummy input
     dummy = torch.randn(batch_size, seq_len, n_features, device=export_device)
@@ -423,7 +428,7 @@ def core_rl_execution_onnx_export(
 ) -> str:
     """Export a two-input execution policy: features + agent_state -> action logits.
 
-    If scaler is provided (StandardScaler with mean_ and scale_ attributes),
+    If scaler is provided (RobustScaler or StandardScaler with center_/mean_ and scale_ attributes),
     the scaler is fused into the ONNX graph so the exported model accepts
     raw features and internally applies normalization.
     """
@@ -439,38 +444,43 @@ def core_rl_execution_onnx_export(
     if scaler is not None:
         import numpy as np
 
-        # Get scaler parameters
+        # Get scaler parameters (supports both StandardScaler and RobustScaler)
         mean = getattr(scaler, "mean_", None)
+        center = getattr(scaler, "center_", None)
         scale = getattr(scaler, "scale_", None)
 
-        if mean is not None and scale is not None:
+        # Use center_ for RobustScaler, mean_ for StandardScaler
+        offset = center if center is not None else mean
+
+        if offset is not None and scale is not None:
             # Create scaler parameters as tensors
-            mean_tensor = torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(export_device)
+            offset_tensor = torch.from_numpy(np.asarray(offset, dtype=np.float32)).to(export_device)
             scale_tensor = torch.from_numpy(np.asarray(scale, dtype=np.float32)).to(export_device)
 
             # Avoid division by zero
             scale_tensor = torch.where(scale_tensor == 0, torch.ones_like(scale_tensor), scale_tensor)
 
             class ScaledRLModel(torch.nn.Module):
-                def __init__(self, wrapped_model: torch.nn.Module, mean: torch.Tensor, scale: torch.Tensor):
+                def __init__(self, wrapped_model: torch.nn.Module, offset: torch.Tensor, scale: torch.Tensor):
                     super().__init__()
                     self._wrapped_model: torch.nn.Module = wrapped_model
                     # Register as buffers so they're included in ONNX.
-                    self._mean: torch.Tensor
+                    self._offset: torch.Tensor
                     self._scale: torch.Tensor
-                    self.register_buffer("_mean", mean)
+                    self.register_buffer("_offset", offset)
                     self.register_buffer("_scale", scale)
 
                 def forward(self, features: torch.Tensor, agent_state: torch.Tensor):
                     # features: (batch, seq_len, n_features)
                     # NaN/Inf sanitization FIRST (same as training)
                     features = torch.nan_to_num(features, nan=0.0, posinf=1e6, neginf=-1e6)
-                    # Apply z-score normalization: (features - mean) / scale
-                    features = (features - self._mean) / self._scale
+                    # Apply normalization: (features - offset) / scale
+                    features = (features - self._offset) / self._scale
                     return self._wrapped_model(features, agent_state)
 
-            model = ScaledRLModel(model, mean_tensor, scale_tensor)
-            print(f"[Export] Fused StandardScaler into RL execution ONNX graph (n_features={len(mean)})")
+            model = ScaledRLModel(model, offset_tensor, scale_tensor)
+            scaler_name = "RobustScaler" if center is not None else "StandardScaler"
+            print(f"[Export] Fused {scaler_name} into RL execution ONNX graph (n_features={len(offset)})")
 
     dummy_features = torch.randn(batch_size, seq_len, n_features, device=export_device)
     dummy_state = torch.zeros(batch_size, int(agent_state_size), device=export_device)
@@ -558,7 +568,7 @@ def export_to_onnx(
         )
 
     if cfg:
-        from training.train_gpu import build_model as build_training_model
+        from training.model_factory import build_model as build_training_model
 
         model_args = _make_training_args(model_name, cfg, state_dict, int(n_features), seq_len)
         seq_len = int(model_args.seq_len)

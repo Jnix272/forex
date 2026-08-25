@@ -52,7 +52,7 @@ nvidia-ml-py>=12.535.108
 loguru>=0.7.0
 prometheus_client>=0.20.0
 wandb>=0.16.0
-quickfix>=1.15.1
+# quickfix>=1.15.1
 
 # Monitoring / observability (new)
 pydantic>=2.0.0

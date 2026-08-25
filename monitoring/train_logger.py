@@ -337,7 +337,7 @@ class TrainingLogger:
             self._watchdog.start()
 
         # ── Session header ───────────────────────────────────────────────────
-        sep = "═" * 72
+        sep = "=" * 72
         header = (
             f"\n{sep}\n"
             f"  TRAINING SESSION  |  model={self.model_name}  |  run={self.run_name}\n"

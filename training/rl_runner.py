@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from config.settings import RISK, RL, SIZING
 from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, evaluate_agent, train_agent
@@ -32,11 +32,21 @@ from training.post_train import _safe_save
 
 
 def _rl_reward_weights(args):
-    return getattr(args, "reward_weights", {}) or {}
+    # Accept both spellings: gpu_cli maps YAML rl.reward -> args.rl_reward_weights,
+    # while older code paths/tests may pass args.reward_weights directly.
+    return getattr(args, "rl_reward_weights", None) or getattr(args, "reward_weights", {}) or {}
 
 
 def _rl_train_val_slices(total, args):
-    val_split = getattr(args, "rl_val_split", 0.1)
+    # Clamp to the promotion-holdout-safe trainable region so RL train/val
+    # never touch the forward-holdout window reserved for PromotionGate.
+    try:
+        from training.cache_integrity import _trainable_max_index
+
+        total = min(int(total), int(_trainable_max_index(int(total), args)))
+    except Exception:
+        pass
+    val_split = getattr(args, "rl_val_split", getattr(args, "rl_val_frac", 0.1))
     val_n = int(total * val_split)
     return 0, total - val_n, total - val_n, val_n
 
@@ -83,23 +93,38 @@ def _build_rl_market_arrays(y_labels, base_price: float = 1.085, base_spread: fl
 
 def _try_rl_market_from_features(
     X_last: np.ndarray,
-    scaler: StandardScaler | None,
+    scaler: StandardScaler | RobustScaler | None,
     feat_names: list | None,
     f_per_pair: int,
     base_price: float = 1.085,
     base_spread: float = 0.00008,
 ) -> tuple | None:
     """Build RL price/ATR/spread arrays from denormalized feature columns."""
-    if scaler is None or not hasattr(scaler, "mean_") or scaler.mean_ is None:
+    if scaler is None:
         return None
+    # Check scaler is fitted
+    if isinstance(scaler, RobustScaler):
+        if not hasattr(scaler, "center_") or scaler.center_ is None:
+            return None
+    else:
+        if not hasattr(scaler, "mean_") or scaler.mean_ is None:
+            return None
     X = np.asarray(X_last, dtype=np.float64)
     if X.ndim != 2 or X.shape[0] < 2:
         return None
     sl = X[:, : min(f_per_pair, X.shape[1])]
-    mean = np.asarray(scaler.mean_, dtype=np.float64)[: sl.shape[1]]
-    scale = np.asarray(scaler.scale_, dtype=np.float64)[: sl.shape[1]]
-    scale = np.where(scale > 1e-12, scale, 1.0)
-    raw = sl * scale + mean
+    # Inverse transform: (x - center) / scale -> x * scale + center (RobustScaler)
+    # or (x - mean) / scale -> x * scale + mean (StandardScaler)
+    if isinstance(scaler, RobustScaler):
+        center = np.asarray(scaler.center_, dtype=np.float64)[: sl.shape[1]]
+        scale = np.asarray(scaler.scale_, dtype=np.float64)[: sl.shape[1]]
+        scale = np.where(scale > 1e-12, scale, 1.0)
+        raw = sl * scale + center
+    else:
+        mean = np.asarray(scaler.mean_, dtype=np.float64)[: sl.shape[1]]
+        scale = np.asarray(scaler.scale_, dtype=np.float64)[: sl.shape[1]]
+        scale = np.where(scale > 1e-12, scale, 1.0)
+        raw = sl * scale + mean
 
     names = list(feat_names or [])[: sl.shape[1]]
     ri, ai = _resolve_pair_feat_indices(names, sl.shape[1])
@@ -142,6 +167,12 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
         raise FileNotFoundError(f"no supervised checkpoint for {args.model} under {ckpt_dir}")
     model = build_model(args.model, n_features, args).to(device)
     core = _core_model(model)
+    
+    # Dry run to initialize Lazy modules before loading weights
+    with torch.no_grad():
+        _dummy = torch.zeros(1, getattr(args, "seq_len", 60), n_features, device=device)
+        _ = core(_dummy)
+
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
@@ -151,8 +182,8 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
     if hasattr(encoder, "head"):
         saved_head = encoder.head
         encoder.head = nn.Identity()
-    encoder.eval()
-    for p in encoder.parameters():
+    core.eval()
+    for p in core.parameters():
         p.requires_grad_(False)
 
     if ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir():
@@ -160,11 +191,11 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
         _Xs = _z["X"]
 
         def _read(a, b):
-            return np.asarray(_Xs[start + a : start + b], dtype=np.float32)
+            return np.asarray(_Xs[start + a : start + b], dtype=np.float32)  # type: ignore[reportArgumentType]
     else:
         _Xm = np.load(_x_path(cache_path), mmap_mode="r")
 
-        def _read(a, b):  # pyright: ignore[reportRedeclaration]
+        def _read(a, b):  # type: ignore[reportRedeclaration]
             return np.asarray(_Xm[start + a : start + b], dtype=np.float32)
 
     embs = []
@@ -176,6 +207,8 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
             h = encoder(xb)
             if h.ndim == 3:
                 h = h[:, -1, :]
+            if hasattr(core, "proj") and not isinstance(core.proj, nn.Identity):
+                h = core.proj(h)
             embs.append(h.float().cpu().numpy())
     if saved_head is not None:
         encoder.head = saved_head
@@ -186,8 +219,8 @@ def _load_rl_slice(cache_path: str, start: int, n_bars: int) -> tuple[np.ndarray
     """Load y and last-timestep features for an RL window."""
     if ZARR and cache_path.endswith(".zarr") and Path(cache_path).is_dir():
         _z = _zarr_open_group(cache_path, mode="r")
-        y_env = np.asarray(_z["y"][start : start + n_bars], dtype=np.float32)
-        X_last = np.asarray(_z["X"][start : start + n_bars, -1, :], dtype=np.float32)
+        y_env = np.asarray(_z["y"][start : start + n_bars], dtype=np.float32)  # type: ignore[reportArgumentType]
+        X_last = np.asarray(_z["X"][start : start + n_bars, -1, :], dtype=np.float32)  # type: ignore[reportArgumentType]
     else:
         y_env = np.asarray(np.load(_y_path(cache_path), mmap_mode="r")[start : start + n_bars], dtype=np.float32)
         X_last = np.asarray(
@@ -267,7 +300,7 @@ def _save_rl_checkpoint(agent, ckpt_dir: Path, algo: str, tag: str) -> Path:
 
 def _production_onnx_paths(args) -> tuple[Path, Path]:
     try:
-        from monitoring.demotion_monitor import PROD_CHECKPOINT as _prod
+        from monitoring.demotion_monitor import PROD_CHECKPOINT as _prod  # type: ignore[reportAttributeAccessIssue]
 
         prod_onnx = Path(_prod).with_suffix(".onnx")
     except Exception:
@@ -490,7 +523,7 @@ def _run_rl_via_adapter(cache_path, n_features, args, device, framework="cleanrl
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     cfg = RLConfig(
-        algorithm=_algo,
+        algorithm=_algo,  # type: ignore[reportArgumentType]
         learning_rate=float(_algo_cfg.get("lr", 3e-4)),
         gamma=float(_algo_cfg.get("gamma", 0.99)),
         n_steps=int(_algo_cfg.get("n_steps", 2048)),
@@ -505,7 +538,7 @@ def _run_rl_via_adapter(cache_path, n_features, args, device, framework="cleanrl
         log_dir=str(ckpt_dir / "logs"),
         save_path=str(ckpt_dir / f"rl_{_algo}_adapter.pt"),
     )
-    adapter = create_rl_adapter(framework, _algo, cfg)
+    adapter = create_rl_adapter(framework, _algo, cfg)  # type: ignore[reportArgumentType]
 
     metrics = run_rl_with_adapter(
         adapter,
@@ -522,7 +555,7 @@ def _run_rl_via_adapter(cache_path, n_features, args, device, framework="cleanrl
     _save_path = cfg.save_path
     if getattr(adapter, "model", None) is not None and hasattr(adapter, "save"):
         try:
-            adapter.save(_save_path)
+            adapter.save(_save_path)  # type: ignore[reportArgumentType]
             print(f"[RL] Saved adapter policy -> {_save_path}")
         except Exception as _save_exc:
             print(f"[RL] Adapter checkpoint save skipped: {_save_exc}")

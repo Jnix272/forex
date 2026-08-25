@@ -64,6 +64,7 @@ class CatBoostForecaster(nn.Module if TORCH else object):
         else:
             self.model = cb.CatBoostClassifier(
                 classes_count=self.num_classes if self.num_classes > 2 else None,
+                class_names=[0, 1, 2] if self.num_classes == 3 else None,
                 verbose=False,
                 **cb_kwargs,
             )
@@ -85,51 +86,53 @@ class CatBoostForecaster(nn.Module if TORCH else object):
         """
         B, T, F = x.shape
 
-        # Basic statistics
-        mean = x.mean(axis=1)  # (B, F)
-        std = x.std(axis=1)  # (B, F)
-        xmin = x.min(axis=1)  # (B, F)
-        xmax = x.max(axis=1)  # (B, F)
-        last = x[:, -1, :]  # (B, F)
-        rng = xmax - xmin  # (B, F)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            # Basic statistics
+            mean = np.nanmean(x, axis=1)  # (B, F)
+            std = np.nanstd(x, axis=1)  # (B, F)
+            xmin = np.nanmin(x, axis=1)  # (B, F)
+            xmax = np.nanmax(x, axis=1)  # (B, F)
+            last = x[:, -1, :]  # (B, F)
+            rng = xmax - xmin  # (B, F)
 
-        # Shape statistics (skewness, kurtosis)
-        from scipy import stats as scipy_stats
+            # Shape statistics (skewness, kurtosis)
+            from scipy import stats as scipy_stats
 
-        skew = scipy_stats.skew(x, axis=1, nan_policy="omit").astype(np.float32)  # (B, F)
-        kurt = scipy_stats.kurtosis(x, axis=1, nan_policy="omit").astype(np.float32)  # (B, F)
+            skew = scipy_stats.skew(x, axis=1, nan_policy="omit").astype(np.float32)  # (B, F)
+            kurt = scipy_stats.kurtosis(x, axis=1, nan_policy="omit").astype(np.float32)  # (B, F)
 
-        # Trend: linear slope via least-squares
-        t_idx = np.arange(T, dtype=np.float32)
-        t_mean = t_idx.mean()
-        t_var = ((t_idx - t_mean) ** 2).sum()
-        if t_var > 0:
-            x_mean = x.mean(axis=1, keepdims=True)  # (B, 1, F)
-            t_centered = (t_idx - t_mean).reshape(1, -1, 1)  # (1, T, 1)
-            slope = ((x - x_mean) * t_centered).sum(axis=1) / t_var  # (B, F)
-            # Acceleration: slope of the slope (second derivative proxy)
-            half = T // 2
-            x_first_mean = x[:, :half, :].mean(axis=1, keepdims=True)  # (B, 1, F)
-            x_second_mean = x[:, half:, :].mean(axis=1, keepdims=True)  # (B, 1, F)
-            t_first_centered = (t_idx[:half] - t_idx[:half].mean()).reshape(1, -1, 1)  # (1, half, 1)
-            t_second_centered = (t_idx[half:] - t_idx[half:].mean()).reshape(1, -1, 1)  # (1, T-half, 1)
-            slope_first = ((x[:, :half, :] - x_first_mean) * t_first_centered).sum(axis=1) / max(1, ((t_idx[:half] - t_idx[:half].mean()) ** 2).sum())  # (B, F)
-            slope_second = ((x[:, half:, :] - x_second_mean) * t_second_centered).sum(axis=1) / max(1, ((t_idx[half:] - t_idx[half:].mean()) ** 2).sum())  # (B, F)
-            accel = slope_second - slope_first  # (B, F)
-        else:
-            slope = np.zeros((B, F), dtype=np.float32)
-            accel = np.zeros((B, F), dtype=np.float32)
+            # Trend: linear slope via least-squares
+            t_idx = np.arange(T, dtype=np.float32)
+            t_mean = t_idx.mean()
+            t_var = ((t_idx - t_mean) ** 2).sum()
+            if t_var > 0:
+                x_mean = np.nanmean(x, axis=1, keepdims=True)  # (B, 1, F)
+                t_centered = (t_idx - t_mean).reshape(1, -1, 1)  # (1, T, 1)
+                slope = np.nansum((x - x_mean) * t_centered, axis=1) / t_var  # (B, F)
+                # Acceleration: slope of the slope (second derivative proxy)
+                half = T // 2
+                x_first_mean = np.nanmean(x[:, :half, :], axis=1, keepdims=True)  # (B, 1, F)
+                x_second_mean = np.nanmean(x[:, half:, :], axis=1, keepdims=True)  # (B, 1, F)
+                t_first_centered = (t_idx[:half] - t_idx[:half].mean()).reshape(1, -1, 1)  # (1, half, 1)
+                t_second_centered = (t_idx[half:] - t_idx[half:].mean()).reshape(1, -1, 1)  # (1, T-half, 1)
+                slope_first = np.nansum((x[:, :half, :] - x_first_mean) * t_first_centered, axis=1) / max(1, ((t_idx[:half] - t_idx[:half].mean()) ** 2).sum())  # (B, F)
+                slope_second = np.nansum((x[:, half:, :] - x_second_mean) * t_second_centered, axis=1) / max(1, ((t_idx[half:] - t_idx[half:].mean()) ** 2).sum())  # (B, F)
+                accel = slope_second - slope_first  # (B, F)
+            else:
+                slope = np.zeros((B, F), dtype=np.float32)
+                accel = np.zeros((B, F), dtype=np.float32)
 
-        # Multi-scale window means
-        q1 = max(1, T // 4)
-        q3 = T - max(1, T // 4)
-        early_mean = x[:, :q1, :].mean(axis=1)  # (B, F) first 25%
-        mid_mean = x[:, q1:q3, :].mean(axis=1)  # (B, F) middle 50%
-        late_mean = x[:, q3:, :].mean(axis=1)  # (B, F) last 25%
+            # Multi-scale window means
+            q1 = max(1, T // 4)
+            q3 = T - max(1, T // 4)
+            early_mean = np.nanmean(x[:, :q1, :], axis=1)  # (B, F) first 25%
+            mid_mean = np.nanmean(x[:, q1:q3, :], axis=1)  # (B, F) middle 50%
+            late_mean = np.nanmean(x[:, q3:, :], axis=1)  # (B, F) last 25%
 
-        # Volatility: std of first differences
-        diffs = np.diff(x, axis=1)  # (B, T-1, F)
-        vol = diffs.std(axis=1)  # (B, F)
+            # Volatility: std of first differences
+            diffs = np.diff(x, axis=1)  # (B, T-1, F)
+            vol = np.nanstd(diffs, axis=1)  # (B, F)
 
         return np.concatenate([
             mean, std, xmin, xmax, last, rng,  # 6F

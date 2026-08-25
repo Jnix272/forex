@@ -17,7 +17,7 @@ from enum import Enum
 
 import numpy as np
 
-from data.feature_store import FeatureStore
+from feature_store.polars_store import FeatureStore
 
 try:
     from scipy import stats as _sp_stats

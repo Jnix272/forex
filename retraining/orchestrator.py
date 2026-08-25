@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from data.feature_store import FeatureStore
+from feature_store.polars_store import FeatureStore
 
 # ════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -613,7 +613,7 @@ def auto_retrain_on_drift(
 
 if __name__ == "__main__":
     # Demo
-    from data.feature_store import get_feature_store
+    from feature_store.polars_store import get_feature_store
 
     store = get_feature_store()
     orch = RetrainOrchestrator(store)

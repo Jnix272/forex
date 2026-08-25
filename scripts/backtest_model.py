@@ -22,7 +22,7 @@ from features.advanced_features import AdvancedFeatureBuilder
 from features.feature_engineering import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
 from models.ensemble import EnsembleMetaLearner
-from training.train_gpu import build_model
+from training.model_factory import build_model
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "EURGBP", "NZDUSD", "EURJPY", "GBPJPY"]
 PIP_SIZES = {
@@ -422,6 +422,7 @@ def _load_ensemble_manifest(ckpt: Path) -> dict:
 
 def _load_checkpoint_config(ckpt: Path) -> dict:
     candidates = [
+        ckpt.with_name(ckpt.name + ".json"),
         ckpt.with_name(ckpt.stem + "_config.json"),
         ckpt.parent / f"{ckpt.stem.replace('_best', '')}_config.json",
         ckpt.parent / f"{ckpt.stem.replace('_best', '')}_fold0_config.json",
@@ -594,8 +595,8 @@ def run_backtest():
     ensemble_manifest = _load_ensemble_manifest(ckpt) if args.model.lower() == "ensemble" else {}
     manifest_schema = ensemble_manifest.get("schema", {}) if isinstance(ensemble_manifest, dict) else {}
     n_pairs_arg = max(1, int(args.n_pairs))
-    default_width = int(ckpt_cfg.get("n_features") or 0)
-    n_features = int(ckpt_cfg.get("n_features") or (default_width if default_width > 0 else 0) or 0)
+    default_width = int(ckpt_cfg.get("n_features_raw") or ckpt_cfg.get("n_features") or 0)
+    n_features = int(ckpt_cfg.get("n_features_raw") or ckpt_cfg.get("n_features") or (default_width if default_width > 0 else 0) or 0)
     if args.model.lower() == "ensemble":
         n_features = int(manifest_schema.get("n_features", n_features) or n_features)
     seq_len = int(ckpt_cfg.get("seq_len", args.seq_len))
@@ -625,6 +626,14 @@ def run_backtest():
 
     if args.model.lower() == "ensemble":
         model = _load_ensemble_model(ckpt, n_features, seq_len, device)
+    elif args.model.lower() == "xgboost":
+        from models.xgboost_model import XGBoostForecaster
+        model = XGBoostForecaster(num_classes=3 if ckpt_cfg.get("is_classifier", True) else 1, sequence_mode=ckpt_cfg.get("sequence_mode", "temporal"), seq_len=seq_len)
+        model.load_model(str(ckpt))
+    elif args.model.lower() == "catboost":
+        from models.catboost_model import CatBoostForecaster
+        model = CatBoostForecaster(num_classes=3 if ckpt_cfg.get("is_classifier", True) else 1, sequence_mode=ckpt_cfg.get("sequence_mode", "temporal"), seq_len=seq_len)
+        model.load_model(str(ckpt))
     else:
         model = build_model(args.model, n_features, Cfg()).to(device)
         state = torch.load(ckpt, map_location=device, weights_only=True)
@@ -651,14 +660,19 @@ def run_backtest():
 
     for p in pair_list:
         try:
-            ticks = load_or_generate(source=args.source, pair=p, start=args.start, end=args.end, n_rows=2000000)
+            ticks = load_or_generate(source=args.source, pair=p, start=args.start, end=args.end, n_rows=50_000_000)
             bars_raw = pipeline.run(ticks)
             if bars_raw is not None and len(bars_raw) > seq_len:
                 # FIX M2: convert to pandas BEFORE feature building - FeatureEngineer expects pandas
                 bars_pd = _to_pandas_bars(bars_raw)
                 cached_bars[p] = bars_pd
                 f_base = fe.build(bars_pd)
+                if hasattr(f_base, "to_pandas"):
+                    f_base = f_base.to_pandas().set_index("timestamp_utc") if "timestamp_utc" in f_base.columns else f_base.to_pandas()
                 f_adv = afb.build(bars_pd, base_features=f_base)
+                if hasattr(f_adv, "to_pandas"):
+                    f_adv = f_adv.to_pandas()
+                f_adv.index = f_base.index
                 f = pd.concat([f_base, f_adv], axis=1)
                 f = _fit_feature_width(f, f_per_pair)
                 f = f.reindex(bars_pd.index).ffill().fillna(0.0)
@@ -695,11 +709,16 @@ def run_backtest():
         if len(X) <= args.seq_len:
             log(f"[WF {idx}/{len(windows)}] not enough feature rows ({len(X)}) for seq_len={args.seq_len}; skipping")
             continue
-        x_t = torch.tensor(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
+        X_num = X.apply(pd.to_numeric, errors="coerce")
+        x_t = torch.tensor(np.nan_to_num(X_num.values, nan=0.0, posinf=0.0, neginf=0.0), dtype=torch.float32, device=device)
 
         with torch.no_grad():
             logits = _batched_logits(model, x_t, seq_len, args.inference_batch_size)
-            probs = torch.softmax(logits, dim=-1).numpy()
+            if args.model.lower() in ("xgboost", "catboost"):
+                # Models already return probabilities from predict_proba
+                probs = logits.numpy()
+            else:
+                probs = torch.softmax(logits, dim=-1).numpy()
         cls, conf = probs.argmax(axis=1), probs.max(axis=1)
         meta_ok = None
         if args.meta_labeling and len(cls) >= 30:
@@ -717,12 +736,17 @@ def run_backtest():
         last_signal_i = -(10**9)
 
         # Pre-extract arrays for speed
-        regime_vals = X["regime_label"].values if "regime_label" in X.columns else None
+        if "regime_label" in X.columns:
+            # If duplicated, take the first one
+            rv = X["regime_label"]
+            regime_vals = rv.iloc[:, 0].values if isinstance(rv, pd.DataFrame) else rv.values
+        else:
+            regime_vals = None
         close_vals = base_bars["close"].values
         ts_vals = base_bars.index
 
         for off, c in enumerate(cls):
-            i = seq_len + off
+            i = seq_len - 1 + off
             adj_min_conf = args.min_confidence
             if regime_vals is not None:
                 rl = float(regime_vals[i])
@@ -996,7 +1020,17 @@ def run_execution_backtest(
         if base_bars is None:
             base_bars = bars
         f_base = fe.build(bars)
-        f = pd.concat([f_base, afb.build(bars, base_features=f_base)], axis=1)
+        if hasattr(f_base, "to_pandas"):
+            f_base = f_base.to_pandas().set_index("timestamp_utc") if "timestamp_utc" in f_base.columns else f_base.to_pandas()
+        
+        f_adv = afb.build(bars, base_features=f_base)
+        if hasattr(f_adv, "to_pandas"):
+            f_adv = f_adv.to_pandas()
+            
+        if hasattr(f_adv, "index") and hasattr(f_base, "index") and len(f_adv) == len(f_base):
+            f_adv.index = f_base.index
+            
+        f = pd.concat([f_base, f_adv], axis=1)
         f_per_pair = max(1, int(n_features) // max(1, len(pair_list)))
         f = _fit_feature_width(f, f_per_pair)
         f = f.reindex(base_bars.index).ffill().fillna(0.0)
@@ -1048,7 +1082,7 @@ def run_execution_backtest(
     ts_vals = base_bars.index
 
     for off, c in enumerate(cls):
-        i = seq_len + off
+        i = seq_len - 1 + off
         if conf[off] < min_confidence:
             continue
         if i - last_signal_i < max(1, int(min_gap_bars)):

@@ -2417,13 +2417,13 @@ class FeatureEngineer:
             eco_act = eco_act.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
             if eco_fc is not None:
                 eco_fc = eco_fc.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
-                eco = eco_act.join(eco_fc, on="timestamp_utc", how="outer_coalesce").sort("timestamp_utc")
+                eco = eco_act.join(eco_fc, on="timestamp_utc", how="full", coalesce=True).sort("timestamp_utc")
             else:
                 eco = eco_act.sort("timestamp_utc")
             if eco_prior is not None:
                 eco_prior = eco_prior.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
                 drop_pr = [c for c in eco_prior.columns if c in eco.columns and c != "timestamp_utc"]
-                eco = eco.join(eco_prior.drop(drop_pr), on="timestamp_utc", how="outer_coalesce").sort("timestamp_utc")
+                eco = eco.join(eco_prior.drop(drop_pr), on="timestamp_utc", how="full", coalesce=True).sort("timestamp_utc")
             drop_cols = [c for c in eco.columns if c in F.columns and c != "timestamp_utc"]
             # Point-in-time: join on when the release became knowable, not raw
             # event time (avoids same-bar leakage at the release timestamp).

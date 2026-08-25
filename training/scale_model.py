@@ -385,6 +385,7 @@ def run_distillation():
         student.train()
         total_loss = 0.0
         batches = 0
+        opt.zero_grad(set_to_none=True)
 
         for batch_idx, (Xb, yb) in enumerate(loader_train):
             Xb, yb = Xb.to(dev, non_blocking=True), yb.to(dev, non_blocking=True)

@@ -432,19 +432,29 @@ class CurriculumManager:
             info["difficulty_level"] = self.difficulty_curriculum.current_level
             info["inclusion_rate"] = mask.mean()
 
-            # Miner feedback: freeze or accelerate difficulty
+            # Miner feedback: freeze or accelerate difficulty.
+            # NOTE: current_level is a FLOAT FRACTION in [start_level, max_level],
+            # not an integer step count -- adjust by pace-step increments.
             if forgetting_rate > self.config.forgetting_threshold:
                 info["curriculum_frozen"] = True
                 self._freeze_counter = getattr(self, "_freeze_counter", 0) + 1
-                if self._freeze_counter >= self.config.freeze_patience:  # noqa: SIM102
-                    # Hold at current level (don't advance)
-                    if self.difficulty_curriculum:
-                        self.difficulty_curriculum.current_level = max(1, self.difficulty_curriculum.current_level - 1)
+                if self._freeze_counter >= self.config.freeze_patience and self.difficulty_curriculum:
+                    # Ease back ONE pace step (not one full unit): persistent
+                    # forgetting means the model is over-challenged.
+                    _cfg = self.difficulty_curriculum.config
+                    _step = 1.0 / max(1, int(getattr(_cfg, "n_levels", 10)))
+                    self.difficulty_curriculum.current_level = max(
+                        float(getattr(_cfg, "start_level", 0.0)),
+                        float(self.difficulty_curriculum.current_level) - _step,
+                    )
             elif easy_ratio > self.config.easy_threshold:
                 info["curriculum_accelerated"] = True
                 if self.difficulty_curriculum:
+                    _cfg = self.difficulty_curriculum.config
+                    _step = 2.0 / max(1, int(getattr(_cfg, "n_levels", 10)))
                     self.difficulty_curriculum.current_level = min(
-                        self.difficulty_curriculum.max_level, self.difficulty_curriculum.current_level + 2
+                        float(getattr(_cfg, "max_level", 1.0)),
+                        float(self.difficulty_curriculum.current_level) + _step,
                     )
             else:
                 self._freeze_counter = 0
@@ -545,7 +555,7 @@ class CurriculumDataLoader:
         curriculum_manager: CurriculumManager,
         batch_size: int = 32,
         shuffle: bool = True,
-        num_workers: int = 4,
+        num_workers: int = 0,  # 0 = safe on Windows spawn (datasets may be unpicklable)
         pin_memory: bool = True,
     ):
         self.dataset = dataset

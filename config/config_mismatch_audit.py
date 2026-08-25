@@ -54,6 +54,10 @@ PROFILE_SCALE_KEYS: frozenset[str] = frozenset(
         "training.batch_size",
         "training.patience",
         "data.chunk_size",
+        "training.seq_len",
+        "training.loss",
+        "validation.embargo_bars",
+        "validation.purge_bars",
     }
 )
 

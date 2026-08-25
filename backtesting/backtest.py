@@ -172,6 +172,8 @@ class ForexScalingBacktest:
         min_spread_clamp: float = 0.00005,
         max_spread_clamp: float = 0.0050,
         bars_per_year: float | None = None,
+        risk_free_rate: float = 0.02,
+        volatility_adaptive_slippage: bool = False,
     ):
         """
         Parameters
@@ -237,7 +239,9 @@ class ForexScalingBacktest:
         self.min_spread_clamp = min_spread_clamp
         self.max_spread_clamp = max_spread_clamp
         self.bars_per_year = float(bars_per_year) if bars_per_year else (252.0 * 24.0 * 60.0)
-        self._rf_per_bar = 0.02 / self.bars_per_year
+        self._rf_per_bar = risk_free_rate / self.bars_per_year
+        self._risk_free_rate = risk_free_rate
+        self._volatility_adaptive_slippage = volatility_adaptive_slippage
         self.numba_min_bars = 50_000
 
         # State
@@ -389,6 +393,13 @@ class ForexScalingBacktest:
             base_price = self._arr_close[idx] + direction * spread_half
 
         slip_pips = self.slippage_pips
+        # Volatility-adaptive slippage: scale by ATR ratio (high vol = more slippage)
+        if self._volatility_adaptive_slippage and hasattr(self, '_arr_atr') and self._arr_atr is not None:
+            current_atr = float(self._arr_atr[idx]) if idx < len(self._arr_atr) else 0.0
+            median_atr = float(np.median(self._arr_atr)) if len(self._arr_atr) > 0 else 1.0
+            if median_atr > 0:
+                vol_ratio = current_atr / median_atr
+                slip_pips = slip_pips * max(0.5, min(3.0, vol_ratio))  # Clamp 0.5x-3x
         slippage = direction * slip_pips * self.pip_size
         price = base_price + slippage
 

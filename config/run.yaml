@@ -3,6 +3,7 @@ backtest:
   atr_stop_mult: 1.2
   atr_take_profit_mult: 1.8
   commission_per_lot: 3.5
+  data_source: dukascopy   # promotion-gate execution backtest source (see run_execution_backtest)
   execution_delay_bars: 1
   lots: 0.1
   max_spread_clamp: 0.0050
@@ -266,31 +267,31 @@ data:
   corr_window: 20
   corr_window_long: 60
   dataset_build_workers: 2
-  end: '2015-12-31'
+  end: '2025-12-30'
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
   n_ticks: 20000000
   min_pair_years: 2      # Minimum years of data per pair for multi-pair training
-  expected_pair_years: 17  # Data span 2008-01-01 → 2025-12-31 = ~17 years
+  expected_pair_years: 10  # Data span 2015-01-01 → 2025-12-30 = ~10 years
   chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number
   shuffle_buffer_size: 16384  # Cross-chunk shuffle reservoir size (0 to disable)
   use_feature_cache: false    # Load pre-built feature cache instead of running FE per window
   feature_cache_dir: "data/features"  # Directory for feature cache parquet files
   pair: EURUSD
-  pair_align: inner
+  pair_align: outer
   pair_embed_dim: 16
   pairs:
   - EURUSD
   - USDJPY
   - GBPUSD
-  - AUDUSD
+# - AUDUSD
   - USDCAD
-  - USDCHF
-  - EURGBP
-  - NZDUSD
-  - EURJPY
-  - GBPJPY
+# - USDCHF
+# - EURGBP
+# - NZDUSD
+# - EURJPY
+# - GBPJPY
   parallel_window_workers: 1
   real_data_window_days: 7
   source: dukascopy
@@ -300,6 +301,9 @@ data:
   # auto → Linux lz4@1 / else zstd@3 (see training.gpu_cache_io.default_zarr_compression)
   zarr_cname: auto
   zarr_clevel: null
+  # Feature scaling: "robust" (default, outlier-resistant) or "standard"
+  scaler_type: robust
+  scaler_quantile_range: [5, 95]
 # ── Feature indicator windows (overrides settings.FEATURE_SCALES) ───────────
 features:
   atr_windows: [6, 20, 60]
@@ -322,9 +326,9 @@ pip_sizes:
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
 direction_training:
   label_smoothing: 0.05
-  max_pred_class_share: 0.8
-  min_pred_class_share: 0.05
-  min_recall: 0.001
+  max_pred_class_share: 1.00
+  min_pred_class_share: 0.00
+  min_recall: 0.00
   min_true_class_share: 0.15
   probe: true
   probe_epochs: 2
@@ -377,9 +381,9 @@ drift_detection:
   schedule_hours: 24
 # ── Ensemble: multi-member diversity fine-tuning + deployment ───────────────
 ensemble:
-  deploy: true
+  deploy: false
   div_weight: 0.1
-  enabled: true
+  enabled: false
   epochs: 10
   explicit_diversity: true
   member_dropout_jitter: 0.15
@@ -425,7 +429,7 @@ feature_store:
   root: data/feature_store
 # ── DataLoader worker and memory config ─────────────────────────────────────
 hardware:
-  num_workers: 2
+  num_workers: 0
   persistent_workers: false
   pin_memory: true
   prefetch_factor: 2
@@ -480,7 +484,7 @@ optuna:
   metric: val_loss
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/forex_10pair_2008_2025_haelt
+  checkpoint_dir: checkpoints/forex_4pair_2015_2025_haelt
   data_cache: ./data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:
@@ -568,7 +572,7 @@ risk:
 rl:
   algo: dqn
   all_models: false
-  deploy: true
+  deploy: false
   dqn:
     batch: 64
     eps_decay: 0.995
@@ -613,6 +617,7 @@ tracking:
   auto_tune: true
   dry_tune: true
   no_wandb: true
+  no_tensorboard: true
   ollama_auto_tune: false
   run_name: high-impact
   wandb_project: forex-scaling-model
@@ -627,12 +632,22 @@ training:
   cross_asset_mode: auto
   cross_asset_provider: auto
   direction_weight: 0.75
+  # early_stop_metric: sharpe | val_loss | cost_sharpe
+  #   - sharpe       = directional Sharpe (sign(pred) × sign(label)), annualized ~25.6×.
+  #                    This is what produced val_sharpe=34.95 — inflated because it
+  #                    ignores transaction costs and annualizes a direction signal.
+  #   - val_loss     = supervised cross-entropy / huber loss (lower is better).
+  #   - cost_sharpe  = cost-aware Sharpe: same directional return stream with a per-trade
+  #                    transaction-cost deduction (tx_cost_bps, from LABELING.transaction_cost_pips × 4).
+  #                    This is the HONEST early-stop signal — a model whose directional
+  #                    edge vanishes after costs will not be promoted. Recommended for
+  #                    production training; use "sharpe" only for ablation comparisons.
   early_stop_metric: sharpe
   early_stop_min_delta: 0.01
   epochs: 40
   grad_accum_steps: 2
   grad_clip: 0.75
-  label_method: rl_reward
+  label_method: triple_barrier
   label_smoothing: 0.05
   loss: sharpe_huber
   lr: 1.95e-05
@@ -703,7 +718,7 @@ walk_forward:
 xgboost:
   colsample_bytree: 0.8
   early_stopping_rounds: 15
-  enabled: true
+  enabled: false
   eval_metric: ''
   feature_importance: true
   feature_importance_top_n: 50
@@ -726,7 +741,7 @@ xgboost:
 
 # ── CatBoost baseline model config ─────────────────────────────────────────
 catboost:
-  enabled: true
+  enabled: false
   task: classification
   sequence_mode: temporal
   iterations: 300
@@ -740,3 +755,68 @@ catboost:
   tune: false
   tune_trials: 20
   max_samples: 500000
+
+# ── Per-Model Optimized Dataset Configs (documentary) ────────────────────────
+# Documents the recommended per-model overrides for discoverability.
+# The live configs are in config/run_deep.yaml, run_tabular.yaml, run_rl.yaml
+# and are built/trained via the pipeline stages in config/pipeline.yaml.
+#
+#  Model Family | Config                    | seq_len | Label         | n_ticks | Features | Build
+#  Deep (HAELT, TFT, Transformer, Mamba, GNN) | config/run_deep.yaml    | 120 | rl_reward       | 20M | 584 (4 pairs) | ~35 GB / 9h
+#  RL agents    | config/run_rl.yaml      | 60      | rl_reward       | 10M | 584 (4 pairs) | ~15 GB / 4-5h
+#  Tabular (CatBoost/XGBoost)                 | config/run_tabular.yaml | 30  | triple_barrier  | 5M  | 584→temporal→~3504 | ~500 MB / 2-3h
+#
+# Tabular rationale: tree models reduce the 120-bar sequence to ~6-14 summary
+# stats/feature anyway — they pay disk/memory cost for sequences they discard,
+# and learn better from clean triple-barrier directional labels than from
+# deep RL reward shaping.
+#
+# Key benefits: tabular build ~2-3h vs 9+h; ~500MB vs 35GB; 1-2GB RAM vs 35GB
+# during CatBoost/XGBoost training; separation of concerns (independent rebuild).
+#
+# Usage:
+#   # Deep
+#   python -m training.train_gpu --config config/run_deep.yaml --build-only
+#   python -m training.train_gpu --config config/run_deep.yaml
+#   # RL intermediate
+#   python -m training.train_gpu --config config/run_rl.yaml --build-only
+#   python -m training.train_gpu --config config/run_rl.yaml --rl-train
+#   # Tabular (shared Zarr for both CB/XGB; also --tabular-build-only shorthand)
+#   python -m training.train_gpu --config config/run_tabular.yaml --build-only
+#   # or
+#   python -m training.train_gpu --tabular-build-only
+#   python -m training.train_catboost --config config/run_tabular.yaml
+#   python -m training.train_xgboost --config config/run_tabular.yaml
+tabular:
+  description: "Documentary — live tabular overrides are in config/run_tabular.yaml"
+  data:
+    start: '2018-01-01'        # 7 years (vs 10) — trees don't need deep history
+    n_ticks: 5000000           # 5M (vs 20M) — 500k-2M training samples after seq_len=30
+    chunk_size: 150000
+    pairs: [EURUSD, USDJPY, GBPUSD, USDCAD]
+  strategy:
+    lookahead_bars: 20         # shorter horizon — trees overfit less on short horizons
+    profit_target_atr: 1.5
+    stop_loss_atr: 1.0
+  training:
+    seq_len: 30                # vs 120 deep / 60 RL
+    label_method: triple_barrier  # vs rl_reward for deep/RL — cleaner S/H/B for trees
+  catboost:
+    max_samples: 2000000
+    sequence_mode: temporal    # last_bar also valid (fastest, single-bar); temporal retains 6-stat summaries
+  xgboost:
+    max_samples: 2000000
+    sequence_mode: temporal
+  # Label alternatives: triple_barrier (recommended), rl_reward (consistent), fixed_return
+  # Sequence alternatives: 1=last_bar (fastest), 30=temporal w/ stats, 60=same as RL
+  # Pairs alternative: 1 pair (EURUSD → 146 feats → ~876 tabular) trains 4x faster vs 4 pairs
+  paths:
+    checkpoint_dir: checkpoints/tabular
+    data_cache: ./data/processed   # Zarr tag includes seq_len/label/lh/tp/sl/start/end → no collision
+  build_cmd: "python -m training.train_gpu --config config/run_tabular.yaml --build-only"
+  train_cmds:
+    - "python -m training.train_catboost --config config/run_tabular.yaml"
+    - "python -m training.train_xgboost --config config/run_tabular.yaml"
+  estimated_build_time: "2-3 hours (vs 9+ hours deep)"
+  estimated_dataset_size: "~500 MB (vs 35 GB deep)"
+  shared_with: "CatBoost and XGBoost share the same tabular Zarr (config/run_tabular.yaml)"

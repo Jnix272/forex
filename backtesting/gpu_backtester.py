@@ -34,7 +34,16 @@ class GPUBacktester:
             if use_gpu:
                 self.logger.warning("CuPy not found or use_gpu=False. Falling back to NumPy (CPU).")
 
-    def run_vectorized_backtest(self, prices: np.ndarray, signals: np.ndarray, spread: float = 0.0001):
+    def run_vectorized_backtest(
+        self,
+        prices: np.ndarray,
+        signals: np.ndarray,
+        spread: float = 0.0001,
+        commission_per_lot: float = 3.5,
+        slippage_pips: float = 0.7,
+        pip_size: float = 0.0001,
+        lot_size: float = 0.1,
+    ):
         """
         Run a massive vectorized backtest.
         `prices` and `signals` should be 1D arrays of equal length.
@@ -57,10 +66,16 @@ class GPUBacktester:
 
         # Incorporate spread costs whenever position changes
         d_trades = self.xp.abs(self.xp.diff(d_positions, prepend=0))
-        d_costs = d_trades * ((spread * 0.5) / d_prices[1:-1])
+        d_spread_costs = d_trades * ((spread * 0.5) / d_prices[1:-1])
+
+        # Commission: per lot per trade
+        d_commission = d_trades * (commission_per_lot * lot_size / d_prices[1:-1])
+
+        # Slippage: fixed pips per trade
+        d_slippage = d_trades * (slippage_pips * pip_size / d_prices[1:-1])
 
         # Net returns
-        d_net_returns = d_strat_returns - d_costs
+        d_net_returns = d_strat_returns - d_spread_costs - d_commission - d_slippage
 
         # Calculate equity curve
         d_equity = self.xp.cumprod(1 + d_net_returns)

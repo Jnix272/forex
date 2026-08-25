@@ -1,3 +1,106 @@
+## 2026-08-25: Full-Stack Bug Audit — Pipeline, Models, Regime, RL, Curriculum, Promotion Gate, Trading
+
+### Summary
+End-to-end audit and bug-fix pass across pipeline, models, features, training (curriculum + RL), promotion gate, backtesting, YAML connectivity, and the live trading package. All work on `.venv311` (Python 3.11); `.venv` (3.14) remains broken (torch DLL) and was avoided. **16 source bugs fixed**, 3 broken test modules restored, 1 new regression suite added.
+
+### 1. Pipeline / lineage / feature_store (4 bugs)
+- `lineage/tracker.py`: circular import `store`↔`tracker` → moved `LineageStore` under TYPE_CHECKING.
+- `feature_store/materializer.py`: circular import via `pipeline.quality_gates` → deferred import into `__init__`.
+- `pipeline/quality_gates.py`: weekend filter `[6,7]` missed Saturday FX → `[5,6]`.
+- `pipeline/quality_gates.py`: `REMEDIATED` silently overwrote hard `FAIL` → error failures win precedence.
+- Verify: pipeline integration suites **133 passed, 3 skipped**.
+
+### 2. Models (3 bugs)
+- `models/architectures.py` GNNCrossAsset: degenerate adjacency (`q == k`, undirected despite "directed") → split into `adj_q`/`adj_k`; verified non-symmetric.
+- `models/architectures.py build_model`: default `num_classes=1` broke 3-class direction heads → default 3; all 7 architectures output `(B,3)`.
+- `tests/test_model_profile.py`, `tests/test_model_full_data_flow.py`: stale imports → repointed to `training.gpu_cli`/`training.dataset_builder`. Verify: **8 + 5 passed**.
+
+### 3. Regime divide-by-zero (Task A)
+- `features/regime_detection.py _causal_hmm_decode`: `np.log(startprob)` divide-by-zero when hmmlearn emits exact `0.0` → safe-log clip `np.clip(x, 1e-12, 1.0)` (removed ad-hoc `+1e-12`). Verify: forced zero-prob → finite normalized probs, 0 warnings; `test_regime_detection.py` **17 passed**.
+
+### 4. RL fuzz regression suite (Task B) + env fix
+- Added `tests/test_rl_agents_fuzz.py` (11 tests): `ForexTradingEnv` invariants across normal/flat/spike/naninf/tiny regimes, DQN/PPO (MLP+LSTM) short trainings, ReplayBuffer edges, action-mask coverage.
+- **Caught real bug**: a single NaN/inf bar emitted non-finite obs/reward/equity → sanitize inputs in `ForexTradingEnv.__init__` with `np.nan_to_num`, floor ATR/spread at `1e-8`. Verify: **11 passed**.
+
+### 5. Promotion Gate ↔ Backtesting ↔ YAML connectivity — no code bugs
+Chain verified end-to-end: `config/run.yaml backtest:` → `config.settings.BACKTEST` → `scripts/backtest_model.run_execution_backtest()` → `ForexScalingBacktest` → `training/post_train._evaluate_forward_gate()` → `validation.promotion_gate.PromotionGate.evaluate()`. Fail-closed logic confirmed; cost gate passes real `gross_pnl` + `total_commission`.
+
+### 6. Curriculum / SelfPaced / LossWeighting / MinerFeedback (3 bugs)
+- `training/curriculum.py CurriculumManager.update`: miner-feedback treated float level [0,1] as int steps — freeze branch `max(1, level-1)` *maxed* difficulty instead of easing; accelerate saturated instantly → step by pace increments (`±1–2/n_levels`) clamped to `[start_level, max_level]`.
+- `training/supervised_loop.py:3046`: callback `max_level` built from `curriculum_freeze_patience` (copy-paste) → `curriculum_start_level`.
+- `training/curriculum.py CurriculumDataLoader`: default `num_workers=4` crashed Windows spawn (unpicklable datasets) → default 0.
+- Verify: `test_curriculum.py` **22 passed** (was 21+1 fail).
+
+### 7. RL stack (rl_agents / rl_advanced / rl_runner / rl_adapter) (3 bugs)
+- `tests/test_rl_train_window.py`: collection crash — imported helpers from `train_gpu`; they live in `training/cache_integrity.py` / `training/rl_runner.py` → fixed imports.
+- `training/rl_runner.py _rl_reward_weights`: read `args.reward_weights` but gpu_cli maps YAML `rl.reward:` → `args.rl_reward_weights`; YAML weights were silently ignored → accept both spellings.
+- `training/rl_runner.py _rl_train_val_slices`: split covered full dataset, letting RL val extend past `_trainable_max_index()` into the promotion forward-holdout (**holdout leak**) → clamp total to holdout-safe trainable region.
+- Verified sound: MultiAgentCoordinator exposure gating, RL CurriculumScheduler, SharpeRewardWrapper, HERBuffer (RA2 self-match fix intact), market-array builders, encoder-obs path.
+- Verify: fuzz **11 passed** + window/report **5 passed**.
+
+### 8. Trading package audit + minor/cosmetic fixes
+- `features/feature_engineering_pl.py:2420,2426`: Polars `how="outer_coalesce"` deprecation → `how="full", coalesce=True` (verified identical semantics on Polars 1.44.0).
+- `config/run.yaml backtest:`: added explicit `data_source: dukascopy` (documentation-grade; loader defaults already matched).
+- `trading/` audited clean: LiveSafetyGate spread/daily-loss/rate-limit verified behaviorally (halt latches); fail-closed broker interface (no fake fills); non-paper brokers refuse start without promoted `promotion_gate.json`; SL/TP attached at order time; opposite-close-before-flip; fill-confirmed state updates; equity-staleness halt (5 failures); hot-reload flag atomic; drift→retrain has cooldown+lock.
+- Note (by-design): `_trigger_retrain` hardcodes `--model haelt`; parameterize if running other architectures live.
+- Verify: trading imports OK; `test_live_safety_promotion.py` + `test_finite_guard.py` **17 passed**.
+
+### Files Edited
+- lineage/tracker.py, feature_store/materializer.py, pipeline/quality_gates.py
+- models/architectures.py, models/rl_agents.py, features/regime_detection.py, features/feature_engineering_pl.py
+- training/curriculum.py, training/supervised_loop.py, training/rl_runner.py
+- config/run.yaml
+- tests/test_model_profile.py, tests/test_full_data_flow (import paths), tests/test_rl_train_window.py
+
+### Files Added
+- tests/test_rl_agents_fuzz.py (11-test RL/env regression suite)
+
+### Open Items
+- `.venv` (Python 3.14) torch DLL load failure — project primary venv unusable for torch; all runs use `.venv311`.
+- Optional: parameterize auto-retrain model name in `trading/live_engine.py::_trigger_retrain`.
+
+---
+
+## 2026-08-21: Per-Model Optimized Dataset Configs - Missing Items and Trailing-Space Fix
+
+### Summary
+Completed the three deferred items from the Per-Model Optimized Dataset Config audit and fixed a YAML trailing-space defect.
+
+1. **No tabular: documentary section in config/run.yaml** - added top-level tabular: block that documents recommended per-model overrides for discoverability (vs live configs in run_deep.yaml/run_rl.yaml/run_tabular.yaml). Table: Deep 120/rl_reward/20M/584 (~35 GB/9h), RL 60/rl_reward/10M/584 (~15 GB/4-5h), Tabular 30/triple_barrier/5M/584->temporal (~500 MB/2-3h). Includes rationale (trees collapse 120-bar to 6-14 stats), build/train commands, label/sequence/pairs alternatives, shared_with note. Documentary only (_YAML_MAP in training/gpu_cli.py:58 has no tabular.* entry so ignored by loader).
+
+2. **No --tabular-build-only flag** - added training/gpu_cli.py:1733 --tabular-build-only (dest tabular_build_only) as shorthand for --config config/run_tabular.yaml --build-only (5M-tick triple_barrier tabular Zarr via GPU pipeline). Pre-parse forces config/run_tabular.yaml when no explicit --config (p.set_defaults), post-parse forces args.build_only=True and prints [Config] --tabular-build-only: building tabular dataset... (or explicit-config precedence warning).
+
+3. **No config/run_rl.yaml** - created intermediate RL-agent config (seq_len 60, n_ticks 10000000, label_method rl_reward, data.start 2016-01-01, chunk_size 200k, expected_pair_years 8, paths.checkpoint_dir checkpoints/forex_4pair_rl_60_rl_reward). Mirrors run_deep.yaml but with medium state window for DQN/PPO.
+
+4. **Restored corrupted config/run_tabular.yaml / run_deep.yaml** - files were hyphen-interleaved (2d 54 pattern, yaml.safe_load returned str). Restored from .recovered (verified data.start/n_ticks/seq_len/label_method).
+
+5. **Trailing-space fix config/run.yaml:281** - pair_align: outer  -> outer (YAML loaded "outer " vs "outer", breaks pair_align equality in training/cache_integrity.py).
+
+6. **Pipeline orchestration config/pipeline.yaml:189** - expanded to 7 stages: build_deep_dataset (run_deep.yaml 35 GB), build_rl_dataset (run_rl.yaml 15 GB), build_tabular_dataset (run_tabular.yaml 500 MB, shorthand comment), train_deep, train_rl (--rl-train --rl-algo dqn), train_catboost/train_xgboost (shared tabular Zarr). Stages 1/3/5 parallelizable.
+
+### Files Added
+- config/run_rl.yaml (intermediate RL config, 60/10M/rl_reward)
+
+### Files Edited
+- config/run.yaml:743 - added tabular: documentary section
+- config/pipeline.yaml:189 - 7 stages with RL + tabular shorthand docs
+- training/gpu_cli.py:58 - added data.scaler_type to _YAML_MAP; 1733 --tabular-build-only arg; 2014/2028 pre/post-parse handling
+- config/run.yaml:281 - stripped trailing space outer  -> outer
+- config/run_tabular.yaml / config/run_deep.yaml - restored from corruption
+
+### Verification
+- config/run.yaml: YAML OK, tabular present True, data.start 2015-01-01 n_ticks 20000000 seq_len 120
+- config/run_deep.yaml: OK data.start 2015-01-01 n_ticks 20000000 seq_len 120
+- config/run_tabular.yaml: OK data.start 2018-01-01 n_ticks 5000000 seq_len 30
+- config/run_rl.yaml: OK data.start 2016-01-01 n_ticks 10000000 seq_len 60
+- config/pipeline.yaml: OK stages [build_deep_dataset, build_rl_dataset, build_tabular_dataset, train_deep, train_rl, train_catboost, train_xgboost]
+- python3 -m py_compile training/gpu_cli.py -> py_compile OK, import OK
+- python -m training.train_gpu --help -> --tabular-build-only present
+- parse_args --tabular-build-only -> build_only True, config run_tabular.yaml, seq_len 30, triple_barrier PASS
+- parse_args --tabular-build-only --config run_deep.yaml -> explicit precedence PASS
+- parse_args --config run_rl.yaml -> seq_len 60 PASS
+- pair_align repr outer (no trailing space) PASS
+
 ## 2026-08-19: DirectionWarmup Validation Crash Fix + Encoding Cleanup
 
 ### Summary

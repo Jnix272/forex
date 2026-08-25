@@ -25,7 +25,7 @@ from data.feature_materializers import (
     get_materializer,
     materialize_feature,
 )
-from data.feature_store import FeatureStore, compute_data_hash, compute_feature_hash
+from feature_store.polars_store import FeatureStore, compute_data_hash, compute_feature_hash
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fixtures

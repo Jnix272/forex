@@ -17,7 +17,6 @@ from feature_store.registry import get_registry
 from feature_store.store import FeatureStore, ParquetFeatureStore
 from features.feature_engineering_pl import FeatureEngineer
 from lineage.tracker import LineageEvent, LineageEventType, LineageTracker
-from pipeline.quality_gates import create_quality_gates
 
 
 @dataclass
@@ -77,7 +76,10 @@ class FeatureMaterializer:
         self.quality_gates_dir = quality_gates_dir
         self.lineage_dir = lineage_dir
 
-        # Initialize quality gates
+        # Initialize quality gates (deferred import to avoid a circular
+        # import: pipeline -> feature_store.materializer -> pipeline).
+        from pipeline.quality_gates import create_quality_gates
+
         self.quality_gates = {
             "ingestion": create_quality_gates("ingestion", remediation_log_dir=quality_gates_dir),
             "resampling": create_quality_gates("resampling", remediation_log_dir=quality_gates_dir),

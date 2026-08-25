@@ -105,5 +105,5 @@ class SharpeProxyLoss(nn.Module):
         # the mean returns to improve the score, rather than artificially shrinking risk.
         std = torch.sqrt(var + self.eps).detach()
 
-        sharpe_gradient = (mean / std) * self._ann_sqrt
+        sharpe_gradient = ((mean / std) * self._ann_sqrt).clamp(min=-20.0, max=20.0)
         return base - self.sharpe_weight * sharpe_gradient

@@ -83,10 +83,11 @@ def load_data_from_store(
 ):
     """
     Reads processed features and labels from the latest Zarr store.
-    Returns (X, y_dir, y_ret) where
-      X       : (N, T, F) float32  - full sequence
-      y_dir   : (N,)      int8     - direction class 0/1/2
-      y_ret   : (N,)      float32  - continuous return
+    Returns (z, y_dir, y_ret, n_samples) where
+      z        : zarr store handle (X is read lazily in chunks)
+      y_dir    : (N,)      int8     - direction class 0/1/2
+      y_ret    : (N,)      float32  - continuous return
+      n_samples: int       - number of samples
     """
     import zarr
 
@@ -94,7 +95,7 @@ def load_data_from_store(
         zarr_path = Path(cache_path)
         if not zarr_path.exists():
             print(f"Configured Zarr cache not found: {zarr_path}")
-            return None, None, None
+            return None, None, None, 0
     else:
         zarr_stores = list(data_dir.glob("*.zarr"))
         if expected_start and expected_end:
@@ -102,10 +103,10 @@ def load_data_from_store(
             zarr_stores = [p for p in zarr_stores if window_tag in p.name]
             if not zarr_stores:
                 print(f"No Zarr cache found in {data_dir} for window {window_tag}.")
-                return None, None, None
+                return None, None, None, 0
         if not zarr_stores:
             print(f"No Zarr data found in {data_dir}. Run data ingestion first.")
-            return None, None, None
+            return None, None, None, 0
         zarr_stores.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         zarr_path = zarr_stores[0]
 
@@ -115,17 +116,21 @@ def load_data_from_store(
     total_samples = int(z["X"].shape[0])
     n_samples = min(total_samples, max_samples)
 
-    X = np.array(z["X"][-n_samples:], dtype=np.float32)  # (N, T, F)
-    y_all = np.array(z["y"][-n_samples:], dtype=np.float32)  # (N,) or (N, K)
+    y_all = np.array(z["y"][-n_samples:], dtype=np.float32)  # (N,) continuous rewards
 
-    if y_all.ndim == 2 and y_all.shape[1] >= 2:
+    if "y_cls" in z:
+        # RL builder saves labels as -1 (Short), 0 (Hold), 1 (Long).
+        # Shift by +1 to match XGBoost's expected 0, 1, 2 encoding.
+        y_dir = (np.array(z["y_cls"][-n_samples:], dtype=np.int8) + 1).astype(np.int8)
+        y_ret = y_all.ravel().astype(np.float32)
+    elif y_all.ndim == 2 and y_all.shape[1] >= 2:
         y_dir = y_all[:, 0].astype(np.int8)  # direction class  (col 0)
         y_ret = y_all[:, 1].astype(np.float32)  # continuous return (col 1)
     else:
         y_dir = np.zeros(n_samples, dtype=np.int8)
         y_ret = y_all.ravel().astype(np.float32)
 
-    return X, y_dir, y_ret
+    return z, y_dir, y_ret, n_samples
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +250,8 @@ def tune_hyperparams(
                 use_label_encoder=False,
                 eval_metric="mlogloss",
                 verbosity=0,
+                tree_method="hist",
+                device="cuda",
                 **params,
             )
             m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
@@ -252,7 +259,13 @@ def tune_hyperparams(
             score = compute_dir_accuracy(preds, y_val)
         else:
             m = xgb.XGBRegressor(
-                objective="reg:squarederror", learning_rate=lr, eval_metric="rmse", verbosity=0, **params
+                objective="reg:squarederror", 
+                learning_rate=lr, 
+                eval_metric="rmse", 
+                verbosity=0, 
+                tree_method="hist",
+                device="cuda",
+                **params
             )
             m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
             preds = m.predict(X_val)
@@ -375,27 +388,46 @@ def main():
         y_dir = np.random.randint(0, 3, N).astype(np.int8)
         y_ret = np.random.randn(N).astype(np.float32) * 0.001
     else:
-        X, y_dir, y_ret = load_data_from_store(
+        z_store, y_dir, y_ret, n_samples = load_data_from_store(
             data_dir,
             args.samples,
             args.cache_path,
             expected_start=data_start if args.config else None,
             expected_end=data_end if args.config else None,
         )
-        if X is None:
+        if z_store is None:
             sys.exit(1)
 
-    N = len(X)
+    N = n_samples if not args.demo else 2000
     y_target = y_dir if args.task == "classification" else y_ret
 
     # ── build tabular features ────────────────────────────────────────────────
     _tmp = XGBoostForecaster(sequence_mode=args.sequence_mode)
-    X_tab = _tmp._prepare_inputs(X)
-    print(f"Data: N={N:,}  raw_features={X.shape[2]}  tabular_features={X_tab.shape[1]}  task={args.task}")
+    if args.demo:
+        X_tab = _tmp._prepare_inputs(X)
+        raw_features = X.shape[2]
+        seq_len = X.shape[1]
+    else:
+        print("[Memory] Processing Zarr array into tabular features in chunks...")
+        X_zarr = z_store["X"]
+        total_samples = int(X_zarr.shape[0])
+        start_idx = total_samples - n_samples
+        chunk_size = 10000
+        X_tab_list = []
+        for i in range(start_idx, total_samples, chunk_size):
+            end_idx = min(i + chunk_size, total_samples)
+            X_chunk = np.array(X_zarr[i:end_idx], dtype=np.float32)
+            X_tab_list.append(_tmp._prepare_inputs(X_chunk))
+        X_tab = np.concatenate(X_tab_list, axis=0)
+        raw_features = X_zarr.shape[2]
+        seq_len = X_zarr.shape[1]
+
+    print(f"Data: N={N:,}  raw_features={raw_features}  tabular_features={X_tab.shape[1]}  task={args.task}")
 
     # ── purged/embargoed split for tuning / final early-stop ──────────────────
     tr_idx, va_idx = _tune_train_val_split(N, cfg)
-    X_train_tab, X_val_tab = X_tab[tr_idx], X_tab[va_idx]
+    X_train_tab = np.where(np.isinf(X_tab[tr_idx]), np.nan, X_tab[tr_idx])
+    X_val_tab = np.where(np.isinf(X_tab[va_idx]), np.nan, X_tab[va_idx])
     y_train_target, y_val_target = y_target[tr_idx], y_target[va_idx]
     y_val_dir = y_dir[va_idx]
     y_val_ret = y_ret[va_idx]
@@ -443,12 +475,25 @@ def main():
 
             if args.task == "classification":
                 m = xgb.XGBClassifier(
-                    num_class=3, objective="multi:softmax", eval_metric="mlogloss", verbosity=0, **xgb_params
+                    num_class=3, 
+                    objective="multi:softmax", 
+                    eval_metric="mlogloss", 
+                    verbosity=0, 
+                    tree_method="hist",
+                    device="cuda",
+                    **xgb_params
                 )
                 m.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
                 preds = m.predict(Xva)
             else:
-                m = xgb.XGBRegressor(objective="reg:squarederror", eval_metric="rmse", verbosity=0, **xgb_params)
+                m = xgb.XGBRegressor(
+                    objective="reg:squarederror", 
+                    eval_metric="rmse", 
+                    verbosity=0, 
+                    tree_method="hist",
+                    device="cuda",
+                    **xgb_params
+                )
                 m.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
                 preds = m.predict(Xva)
 
@@ -460,10 +505,10 @@ def main():
 
         cv_sharpe = float(np.mean(fold_sharpes))
         cv_sharpe_std = float(np.std(fold_sharpes))
-        cv_diраcc = float(np.mean(fold_diraccs))
-        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f}  {cv_sharpe_std:.3f}  DirAcc={cv_dicc:.3f}")
+        cv_diracc = float(np.mean(fold_diraccs))
+        print(f"\n[WalkForward] CV Sharpe={cv_sharpe:+.3f}  {cv_sharpe_std:.3f}  DirAcc={cv_diracc:.3f}")
     else:
-        cv_sharpe = cv_sharpe_std = cv_diраcc = 0.0
+        cv_sharpe = cv_sharpe_std = cv_diracc = 0.0
 
     # ── final model on full 80% train ─────────────────────────────────────────
     if WANDB:
@@ -474,6 +519,8 @@ def main():
         sequence_mode=args.sequence_mode,
         objective="multi:softmax" if args.task == "classification" else "reg:squarederror",
         eval_metric="mlogloss" if args.task == "classification" else "rmse",
+        tree_method="hist",
+        device="cuda",
         **xgb_params,
     )
 
@@ -490,13 +537,13 @@ def main():
     # ── validation metrics ────────────────────────────────────────────────────
     val_preds_raw = model.model.predict(X_val_tab)
     val_sharpe = compute_sharpe(val_preds_raw, y_val_ret)
-    val_diраcc = compute_dir_accuracy(val_preds_raw, y_val_dir)
+    val_diracc = compute_dir_accuracy(val_preds_raw, y_val_dir)
     val_mse = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
     val_corr = float(np.corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) if len(y_val_target) > 1 else 0.0
     if not np.isfinite(val_corr):
         val_corr = 0.0
 
-    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_dicc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
+    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_diracc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
 
     # ── save model ────────────────────────────────────────────────────────────
     out_dir = Path("checkpoints")
@@ -512,9 +559,9 @@ def main():
                 "model": "xgboost",
                 "task": args.task,
                 "sequence_mode": args.sequence_mode,
-                "n_features_raw": int(X.shape[2]),
+                "n_features_raw": int(raw_features),
                 "n_features_tabular": int(X_tab.shape[1]),
-                "seq_len": int(X.shape[1]),
+                "seq_len": int(seq_len),
                 "is_classifier": args.task == "classification",
                 "data_dir": str(data_dir),
                 "cache_path": str(args.cache_path or ""),
@@ -524,13 +571,13 @@ def main():
                 "historical_news_file": news_file,
                 "train_time_s": train_time_s,
                 "validation_sharpe": val_sharpe,
-                "validation_dir_acc": val_diраcc,
+                "validation_dir_acc": val_diracc,
                 "validation_loss": val_mse,
                 "validation_corr": val_corr,
                 "cv_folds": args.folds,
                 "cv_sharpe_mean": cv_sharpe,
                 "cv_sharpe_std": cv_sharpe_std,
-                "cv_dir_acc_mean": cv_diраcc,
+                "cv_dir_acc_mean": cv_diracc,
                 "fold_sharpes": fold_sharpes,
                 "params": xgb_params,
                 "tuned": args.tune,
@@ -538,6 +585,7 @@ def main():
             indent=2,
         )
     )
+
 
     # ── feature importance extraction ─────────────────────────────────────────
     if _do_feature_importance:
@@ -561,7 +609,7 @@ def main():
             if hasattr(model.model, "feature_importances_"):
                 importances = model.model.feature_importances_
                 n_tab_feats = X_tab.shape[1]
-                n_raw_feats = X.shape[2]
+                n_raw_feats = raw_features
                 feature_labels = _build_feature_labels(n_raw_feats, args.sequence_mode, n_tab_feats)
                 labeled = sorted(
                     zip(feature_labels, importances.tolist(), strict=False),
