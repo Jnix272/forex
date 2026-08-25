@@ -197,7 +197,7 @@ def load_pytorch_model(
         return model, int(n_features), int(seq_len), sidecar_model, scaler
 
     if cfg:
-        from training.model_factory import build_model as build_training_model
+        from models.factory import build_model as build_training_model
 
         model_args = _make_training_args(sidecar_model, cfg, state_dict, int(n_features), seq_len)
         seq_len = int(model_args.seq_len)

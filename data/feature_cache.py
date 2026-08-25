@@ -85,13 +85,29 @@ def build_pair_feature_cache(
         return str(output)
 
     # Initialize data infrastructure
-    import training.dataset_builder as dsb
+    from data.data_ingestion import ForexDataPipeline
     from data.sources import ForexDataManager
-    from training.dataset_builder import _ensure_bound
+    from features.feature_engineering_pl import FeatureEngineer
 
-    _ensure_bound()
     mgr = data_mgr or ForexDataManager()
-    fe = dsb._make_feature_engineer()
+    if fe is None:
+        # Same construction as training/dataset_builder (canonical config).
+        from config.settings import FEATURES
+        from features.feature_engineering_pl import FeatureEngineer
+
+        fe = FeatureEngineer(
+            atr_window=FEATURES["atr_window"],
+            ofi_window=FEATURES["ofi_window"],
+            tar_window=FEATURES["trade_arrival_window"],
+            rsi_period=FEATURES["rsi_period"],
+            macd_fast=FEATURES["macd_fast"],
+            macd_slow=FEATURES["macd_slow"],
+            macd_signal=FEATURES["macd_signal"],
+            bb_window=FEATURES["bollinger_window"],
+            bb_std=FEATURES["bollinger_std"],
+            lag_windows=FEATURES["lag_windows"],
+            enable_no_trade_zones=True,
+        )
 
     # Process month by month
     start_dt = datetime.fromisoformat(start)
@@ -127,9 +143,8 @@ def build_pair_feature_cache(
             month = next_month
             continue
 
-        # Resample bars
-        from training.dataset_builder import ForexDataPipeline
-
+        # Resample bars (canonical impl lives in data/data_ingestion;
+        # training/dataset_builder re-exports it)
         pipeline = ForexDataPipeline(
             bar_freq=bar_freq or "5m",
             session_filter=False,
@@ -449,7 +464,7 @@ def build_single_pass_dataset(
 
     # Write Zarr
 
-    from training.gpu_cache_io import (
+    from common.cache_io import (
         ZARR_FEATURE_DTYPE,
         ZARR_LABEL_DTYPE,
         _zarr_create,

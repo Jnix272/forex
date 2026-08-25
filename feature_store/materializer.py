@@ -76,14 +76,17 @@ class FeatureMaterializer:
         self.quality_gates_dir = quality_gates_dir
         self.lineage_dir = lineage_dir
 
-        # Initialize quality gates (deferred import to avoid a circular
-        # import: pipeline -> feature_store.materializer -> pipeline).
-        from pipeline.quality_gates import create_quality_gates
+        # Resolve quality gates via the dependency-inversion seam
+        # (feature_store/gates.py); pipeline registers its concrete factory
+        # at import time, so no import from pipeline is needed here.
+        from feature_store.gates import create_quality_gates_default
 
         self.quality_gates = {
-            "ingestion": create_quality_gates("ingestion", remediation_log_dir=quality_gates_dir),
-            "resampling": create_quality_gates("resampling", remediation_log_dir=quality_gates_dir),
-            "feature_engineering": create_quality_gates("feature_engineering", remediation_log_dir=quality_gates_dir),
+            "ingestion": create_quality_gates_default("ingestion", remediation_log_dir=quality_gates_dir),
+            "resampling": create_quality_gates_default("resampling", remediation_log_dir=quality_gates_dir),
+            "feature_engineering": create_quality_gates_default(
+                "feature_engineering", remediation_log_dir=quality_gates_dir
+            ),
         }
 
         # Initialize lineage tracker

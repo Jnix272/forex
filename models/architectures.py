@@ -1819,3 +1819,10 @@ if __name__ == "__main__" and TORCH:
     gnn = GNNFromSequence(input_size=F_IN, hidden=64, num_layers=2, dropout=0.1)
     out = gnn(x_seq)
     print(f"  {'GNN-seq':16s}: in {tuple(x_seq.shape)} -> out {tuple(out.shape)}")
+
+
+# Register the model factory with config (dependency inversion: config never
+# imports models; models registers itself here at import time).
+from config.model_training_profile import register_build_model
+
+register_build_model(build_model)

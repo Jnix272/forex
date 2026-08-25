@@ -568,7 +568,7 @@ def export_to_onnx(
         )
 
     if cfg:
-        from training.model_factory import build_model as build_training_model
+        from models.factory import build_model as build_training_model
 
         model_args = _make_training_args(model_name, cfg, state_dict, int(n_features), seq_len)
         seq_len = int(model_args.seq_len)
@@ -784,7 +784,7 @@ def export_rl_to_onnx(
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent
-    from training.model_factory import _core_model
+    from models.factory import _core_model
 
     rl_path = Path(rl_checkpoint)
     if not rl_path.exists():
@@ -887,7 +887,7 @@ def export_rl_execution_to_onnx(
     from config.settings import RL
     from inference.pytorch_inference import load_pytorch_model
     from models.rl_agents import DQNAgent, PPOAgent
-    from training.model_factory import _core_model
+    from models.factory import _core_model
 
     rl_path = Path(rl_checkpoint)
     if not rl_path.exists():

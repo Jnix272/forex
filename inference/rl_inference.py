@@ -56,7 +56,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         import torch
 
         from inference.pytorch_inference import load_pytorch_model
-        from training.model_factory import _core_model
+        from models.factory import _core_model
 
         self.algo = str(algo).lower()
         self.seq_len = int(seq_len)

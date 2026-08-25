@@ -6,13 +6,18 @@ from typing import Literal
 
 import torch.nn as nn
 
-# Import at module level to avoid circular import risk
-try:
-    from models.architectures import build_model as _build_model
-except ImportError:
-    _build_model = None
+# Dependency inversion: config never imports models. Instead,
+# models/architectures registers its build_model factory here at import time
+# via register_build_model(). The registry below covers all known models
+# statically; this factory is only needed by the auto-detection fallback for
+# unknown model names.
+build_model: Callable[..., nn.Module | None] | None = None
 
-build_model: Callable[..., nn.Module | None] | None = _build_model
+
+def register_build_model(factory: "Callable[..., nn.Module]") -> None:
+    """Called by models.architectures at import time to provide its factory."""
+    global build_model
+    build_model = factory
 
 
 @dataclass
