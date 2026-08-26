@@ -1,3 +1,44 @@
+## 2026-08-25 (later): Architecture Cleanup — Consolidation, Cycle Breaks, God-Module Splits
+
+### Summary
+Second phase of the day: architecture-level cleanup driven by a read-only architect review. Consolidated duplicate subsystems, broke all four known inter-package import cycles, split the largest god module, purged dead code, and documented config ownership. Committed as four attributable commits: `1a8f5bc` (consolidation + earlier bug fixes), `f39b815` (R1-R4 cycle breaks), `3f9ce84` (R8/R9/R10), `4d0442d` (R5/R7/R9 finalization). All work on `.venv311`.
+
+### Consolidation (subagent batch 1)
+- **Feature stores unified**: canonical `feature_store/` (SQLite registry + Parquet); Polars impl absorbed as `feature_store/polars_store.py`; old path shimmed. Importers migrated in monitoring/, data/, retraining/, 4 test files.
+- **Lineage unified**: `audit/lineage.py` API ported verbatim into new `lineage/provenance.py`; `lineage/__init__.py` exports the unified surface; audit side shimmed.
+- **models→training coupling removed**: shared dataset helpers moved to neutral `common/model_utils.py`; direction now training → models → common.
+
+### Bug found during trading/training checks
+- `training/supervised_loop.py` had a **SyntaxError** from a corrupted partial merge inside `validate_epoch` (file unimportable — no training possible). Restored consistent version from git checkpoint f03af52; verified byte-identical outside the damaged function.
+- Follow-ups: missing re-exports in train_gpu facade (`train_epoch`, `validate_epoch`, `_sanitize_batch_tensors`, `_run_multi_task_pretrain`, direction/cache helpers); UTF-8 BOM stripped from `monitoring/train_logger.py`; created missing `config/models/patchtst.yaml`; fixed curriculum-audit test to use canonical yaml name; `torch.utils.checkpoint` import fix; restored lost `MultiPairWrapper` application in `build_model` (silent multi-pair feature loss since factory refactor).
+- New regression suite: `tests/test_rl_agents_fuzz.py` (11 tests).
+
+### R1–R4: cycle breaks (commit f39b815)
+- **data→training**: `training/gpu_cache_io.py` moved verbatim to neutral `common/cache_io.py` (shim kept, identity-checked); `data/feature_cache.py` imports `ForexDataPipeline` canonically; replaced two dead symbol refs with working local logic.
+- **training↔inference**: new `models/factory.py` holds `_core_model`/`_strict_load_report`/`_multitask_head_in` + `build_model`; `training/model_factory.py` is a shim; inference files import models directly.
+- **feature_store→pipeline**: new registration seam `feature_store/gates.py` (`set_quality_gate_factory`, `NullQualityGate` fallback); pipeline registers its real factory at import.
+- **config→models**: set-at-import hook `register_build_model()`; importing config alone no longer loads models (sys.modules-verified).
+
+### R5–R10 (commits 3f9ce84, 4d0442d)
+- **R5 god-module split**: `supervised_loop.py` 4,004 → 2,549 lines. New `loop_batches` / `loop_losses` / `loop_optim` / `loop_epochs` / `diversity_finetune` submodules; all code AST-diffed verbatim vs baseline; 26 facade re-export identities verified; `_SANITIZE_STATS` and `_OVERCONF_PENALTY` single-sourced with write-through semantics preserved. Two extraction bugs caught by tests and fixed pre-finish.
+- **R7 risk↔trading**: shared types (`GuardResult`, `HOLD`) → `contracts/execution_risk.py`; session classification SoT → `contracts/session_utils.py`; `risk/execution.py` re-pointed (zero `from trading` left under risk/); shims identity-checked.
+- **R8 dead code**: deleted 8 tracked scratch files (git rm) + 12 untracked scripts incl. all patch_*/fix_* (fix_imports.py explicitly confirmed unreferenced) + debug txts. Triage table for orphaned library modules in session notes: drift/ and model_diagnostics keep-as-CLI; retraining/pipeline and promotion_audit wire-up candidates; gpu_backtester and order_manager delete candidates.
+- **R9 shim retirement**: both deprecation shims deleted after migrating last importer (`tests/test_audit.py`, `audit/__init__.py`); failing-import proof captured.
+- **R10 config ownership**: `config/CONFIG_OWNERSHIP.md` — 18-YAML inventory, key-by-key profile diff matrix, override policy. No true duplicates found; zero stale pipeline.yaml references.
+- **R6 dataset_builder split did not run** (agent hit iteration cap before changes; file intact at 4,233 lines). Re-dispatch as two sequential phases if wanted.
+
+### Architect review findings worth remembering
+- Remaining upward edges (accepted for now): models→backtesting (rl_agents/rl_advanced import ScalingAction), infrastructure→models/inference, data→labeling.
+- Near-god modules remaining: gpu_cli (2,753), feature_engineering_pl (2,609), live_engine (2,297), data/sources (1,968).
+- Wire-up candidates: retraining/pipeline.py, validation/promotion_audit.py. Delete candidates: backtesting/gpu_backtester.py, execution/order_manager.py.
+
+### Verification
+- Per-task targeted suites all green during the batch (68/79/98/103/129-pass runs).
+- Final cross-suite over every refactored area (13 test files): **209 passed, 0 failed**.
+- Facade identity checks (`is`-identical objects) verified per refactor; failing-import proofs captured for retired shims.
+
+---
+
 ## 2026-08-25: Full-Stack Bug Audit — Pipeline, Models, Regime, RL, Curriculum, Promotion Gate, Trading
 
 ### Summary
