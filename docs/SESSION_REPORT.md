@@ -1,5 +1,28 @@
 ---
 
+## Commit `f0718a3` — 2026-08-26 05:27 UTC
+**Author:** Antigravity Bot  
+**Message:** fixes: pretrain_framework field in expert profile + context-managed SQLite _connect (WAL/FK enforced, auto-close)
+
+**Files changed:**
+```
+config/model_training_profile.py
+feature_store/polars_store.py
+```
+
+---
+
+## Commit `2c699ac` — 2026-08-26 04:29 UTC
+**Author:** Antigravity Bot  
+**Message:** docs: mirror architecture cleanup report in root SESSION_REPORT.md
+
+**Files changed:**
+```
+SESSION_REPORT.md
+```
+
+---
+
 ## Commit `3f9ce84` — 2026-08-26 01:42 UTC
 **Author:** Antigravity Bot  
 **Message:** R8+R9+R10: dead-code cleanup (scratch scripts, diff_yaml, out*.txt), retire deprecation shims (audit/lineage, data/feature_store), add CONFIG_OWNERSHIP.md
@@ -82,6 +105,24 @@ Second phase of the day: architecture-level cleanup driven by a read-only archit
 - Facade identity checks (`is`-identical objects) verified per refactor; failing-import proofs captured for retired shims.
 
 ---
+## 2026-08-26 - Baseline Bug Fixes (API, Dashboard, Main)
+
+### Summary
+Invoked the `bug_fixer` subagent to resolve the latent bugs identified in `SYSTEM_ANALYSIS.md` during the recent system analysis.
+
+### Changes Made
+- **dashboard.py:** Cleaned up unused dead code by removing the unassigned `data["atr"][i]` reference in the backtest loop.
+- **api/main.py:** Optimized the float validation logic for `payload.returns` in the API endpoints by replacing slow Python `for` loops with high-performance, vectorized `numpy.isfinite` checks.
+- **main.py:** Removed the overly broad `warnings.filterwarnings("ignore")` configuration to ensure critical runtime warnings (e.g., from Pandas or Scikit-learn) are no longer hidden.
+
+## 2026-08-26 - System State Baseline & Bug Hunt
+
+### Summary
+Invoked the `codebase_architect` subagent to generate a baseline document explaining how the entire system currently operates before any further changes are made. Simultaneously, the subagent scanned the codebase for remaining bugs and errors.
+
+### Changes Made
+- **SYSTEM_ANALYSIS.md** (Added): Generated a comprehensive baseline document detailing the current pipeline workflows (data, features, models, governance, and trading). Included a dedicated section highlighting discovered bugs, such as dead code indexing (`data["atr"][i]`) in `dashboard.py`, unoptimized loop-based float validation in `api/main.py`, and overly broad warning suppression in `main.py`.
+
 ## 2026-08-26 - Systems & Components Bug Fixes
 
 ### Summary

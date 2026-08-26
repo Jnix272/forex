@@ -265,8 +265,8 @@ class SidecarProcess:
                     self._handle_metric(data, buffer)
                 elif cmd == CMD_HEARTBEAT:
                     self._last_heartbeat = time.monotonic()
+                    self._flush_buffer(buffer)
                     self._write_jsonl(buffer, {"event": "heartbeat", **data})
-                    buffer.clear()
                 elif cmd == CMD_FLUSH:
                     self._flush_buffer(buffer)
                 elif cmd == CMD_STOP:

@@ -100,8 +100,13 @@ class DifficultyCurriculum:
 
     def update(self, epoch: int, val_metric: float = 0.0) -> float:
         """Update curriculum level based on epoch and validation metric."""
+        if epoch > self.current_epoch:
+            delta = self._pace(epoch) - self._pace(self.current_epoch)
+            self.current_level += delta
+        elif epoch == 0:
+            self.current_level = self._pace(epoch)
+            
         self.current_epoch = epoch
-        self.current_level = self._pace(epoch)
 
         # Optionally adjust based on validation performance
         if val_metric > 0 and self.config.min_competence > 0 and val_metric < self.config.min_competence:

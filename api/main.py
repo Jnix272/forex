@@ -86,9 +86,13 @@ def kelly_sizing(payload: KellySizingRequest):
             raise HTTPException(status_code=400, detail=f"Parameter {name} must be a finite float")
 
     # Validate all returns are finite floats
-    for i, r in enumerate(payload.returns):
-        if r is None or not math.isfinite(r):
-            raise HTTPException(status_code=400, detail=f"Item at index {i} in returns must be a finite float")
+    try:
+        returns_arr = np.array(payload.returns, dtype=float)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="returns must contain only finite floats")
+    if not np.all(np.isfinite(returns_arr)):
+        bad_idx = np.where(~np.isfinite(returns_arr))[0][0]
+        raise HTTPException(status_code=400, detail=f"Item at index {bad_idx} in returns must be a finite float")
 
     # In /kelly_sizing, if win_prob == 0 (since Pydantic ge=0.0 prevents < 0), ensure position size is lots = 0.0
     if payload.win_prob <= 0:
@@ -115,8 +119,7 @@ def kelly_sizing(payload: KellySizingRequest):
 
         sizer = PositionSizer(**sizer_args)
 
-        # Clean returns list to filter out non-finite float values (NaN, Inf, -Inf)
-        clean_returns = [r for r in payload.returns if r is not None and np.isfinite(r)]
+        clean_returns = payload.returns
 
         # Call position sizing logic
         result = sizer.size_position(
@@ -152,15 +155,16 @@ def volatility_bounds(payload: VolatilityBoundsRequest):
     if not math.isfinite(payload.target_vol):
         raise HTTPException(status_code=400, detail="Parameter target_vol must be a finite float")
 
-    # Validate returns list contains only finite floats
-    for i, r in enumerate(payload.returns):
-        if r is None or not math.isfinite(r):
-            raise HTTPException(status_code=400, detail=f"Item at index {i} in returns must be a finite float")
+    try:
+        returns_np = np.array(payload.returns, dtype=float)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="returns must contain only finite floats")
+    if not np.all(np.isfinite(returns_np)):
+        bad_idx = np.where(~np.isfinite(returns_np))[0][0]
+        raise HTTPException(status_code=400, detail=f"Item at index {bad_idx} in returns must be a finite float")
 
     try:
-        # Clean returns list to filter out non-finite float values (NaN, Inf, -Inf)
-        clean_returns = [r for r in payload.returns if r is not None and np.isfinite(r)]
-        returns_np = np.array(clean_returns)
+        # returns_np is already clean
 
         # Guard against empty or single-element arrays
         if len(returns_np) < 2:

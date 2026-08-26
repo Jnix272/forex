@@ -705,7 +705,7 @@ def validate_epoch(
         # Deduct cost only from traded (non-zero) returns
         r_cost = _per_trade_returns.clone()
         trade_mask = r_cost.abs() > 0.0
-        r_cost = torch.where(trade_mask, r_cost - (torch.sign(r_cost) * tx_cost), r_cost)
+        r_cost = torch.where(trade_mask, r_cost - tx_cost, r_cost)
         # De-overlap the cost-deducted returns
         if sharpe_non_overlapping and return_per_trade_sharpe:
             cost_per_trade = _non_overlapping_sharpe(r_cost, lookahead_bars=max(1, int(lookahead_bars)))

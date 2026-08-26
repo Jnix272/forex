@@ -178,7 +178,6 @@ def run_interactive_backtest(data, risk_mult, comm, slippage, lot_size):
 
     for i in range(n):
         cur_close = close[i]
-        data["atr"][i]
         cur_spread = data["spread"][i]
 
         # Check stops/TP if position exists

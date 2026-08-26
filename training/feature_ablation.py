@@ -158,6 +158,9 @@ def _build_feature_ablation_mask(
         if base in drop_features:
             reason_group = "__explicit_features__"
 
+        elif keep_groups and not any(base in group_feature_map.get(g, set()) for g in keep_groups):
+            reason_group = "__not_in_keep_groups__"
+
         else:
             for g_name in drop_groups:
                 if base in group_feature_map.get(g_name, set()):

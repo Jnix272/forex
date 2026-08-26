@@ -280,13 +280,14 @@ def _balanced_direction_indices(
     buckets = []
     for label in (-1, 0, 1):
         bucket = sorted_idx[y == label]
-        if len(bucket) == 0:
-            raise RuntimeError(f"[DirectionBalance] Missing class {label} in training fold.")
-        buckets.append(bucket)
+        if len(bucket) > 0:
+            buckets.append(bucket)
+    if not buckets:
+        return np.array([], dtype=np.int64)
     if total_samples is None:
         per_class = min(len(b) for b in buckets)
     else:
-        per_class = max(1, int(total_samples) // 3)
+        per_class = max(1, int(total_samples) // len(buckets))
     parts = [rng.choice(bucket, size=per_class, replace=(len(bucket) < per_class)) for bucket in buckets]
     out = np.concatenate(parts).astype(np.int64)
     rng.shuffle(out)

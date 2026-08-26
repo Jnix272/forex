@@ -179,6 +179,7 @@ class ModelRegistry:
         status: ModelStatus,
         metrics: dict | None = None,
         notes: str | None = None,
+        preserve_promoted_at: bool = False,
     ) -> None:
         """Update model status and optional metrics."""
         for r in self._records:
@@ -186,7 +187,7 @@ class ModelRegistry:
                 r.status = status
                 if metrics:
                     r.metrics.update(metrics)
-                if status == ModelStatus.PROMOTED:
+                if status == ModelStatus.PROMOTED and not preserve_promoted_at:
                     r.promoted_at = datetime.now(UTC).isoformat()
                 elif status == ModelStatus.ROLLED_BACK:
                     r.rollback_at = datetime.now(UTC).isoformat()
@@ -234,7 +235,7 @@ class ModelRegistry:
         current = promoted[0]
         target = promoted[1]
         self.update_status(family, current.version, ModelStatus.ROLLED_BACK)
-        self.update_status(family, target.version, ModelStatus.PROMOTED)
+        self.update_status(family, target.version, ModelStatus.PROMOTED, preserve_promoted_at=True)
         return target
 
     def cleanup_old_versions(self, keep: int = 10) -> int:
@@ -540,9 +541,9 @@ class RetrainOrchestrator:
         }
 
         for key, pattern in patterns.items():
-            match = re.search(pattern, output, re.IGNORECASE)
-            if match:
-                metrics[key] = float(match.group(1))
+            matches = list(re.finditer(pattern, output, re.IGNORECASE))
+            if matches:
+                metrics[key] = float(matches[-1].group(1))
 
         return metrics
 
