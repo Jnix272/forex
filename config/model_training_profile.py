@@ -278,6 +278,7 @@ MODEL_PROFILES = {
         # The previous "byol" value was a copy-paste from the deep profiles
         # and would either no-op (no encoder to project) or crash.
         pretrain_method="none",
+        pretrain_framework="none",
         swa_enabled=False,
         rl_finetune=False,
     ),
@@ -373,6 +374,7 @@ def _derive_training_config(profile: ModelTrainingProfile) -> None:
         profile.pretrain_method = "forecast"
     elif profile.inductive_bias == "transformer":
         profile.pretrain_method = "byol_or_tscl"
+        profile.pretrain_framework = "lightly"
     else:
         profile.pretrain_method = "masked"
 

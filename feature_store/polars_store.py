@@ -7,6 +7,7 @@ Supports eager batch, incremental, and on-demand materialization strategies.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -108,7 +109,8 @@ class FeatureStore:
     # CONNECTION HELPER
     # ──────────────────────────────────────────────────────────────────────
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         """Open a connection with WAL mode, normal sync, and FK enforcement.
 
         SQLite's PRAGMA foreign_keys is *per-connection* and defaults to OFF.
@@ -119,7 +121,11 @@ class FeatureStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
