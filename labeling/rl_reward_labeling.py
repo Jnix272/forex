@@ -17,7 +17,9 @@ Label values:
 
 import numpy as np
 import pandas as pd
+import warnings
 from typing import Any, cast
+from labeling.rl_reward_numba import _scan_barriers_simple, _scan_barriers_regime, _numba_available
 
 from infrastructure.numerics import sanitize_frame
 
@@ -263,57 +265,62 @@ def compute_rl_reward_labels(
     exit_long_path = np.nan_to_num(exit_long_path, nan=0.0, posinf=0.0, neginf=0.0)
     exit_short_path = np.nan_to_num(exit_short_path, nan=0.0, posinf=0.0, neginf=0.0)
     atr = np.nan_to_num(atr, nan=0.0005, posinf=0.0005, neginf=0.0005)
-    tx_cost_pips * pip_size
     n = len(close)
-
-    reward_long = np.zeros(n, dtype=np.float32)
-    reward_short = np.zeros(n, dtype=np.float32)
-
     delay = max(0, int(execution_delay_bars))
-    for i in range(n - lookahead_bars - delay):
-        entry_i = i + delay
-        if not valid_market[i] or not valid_market[entry_i]:
-            continue
-        el = entry_long[entry_i]
-        es = entry_short[entry_i]
-        tp_l = el + profit_atr_mult * atr[entry_i]
-        sl_l = el - stop_atr_mult * atr[entry_i]
-        tp_s = es - profit_atr_mult * atr[entry_i]
-        sl_s = es + stop_atr_mult * atr[entry_i]
-
-        # Simulate forward path
-        horizon = close[entry_i + 1 : entry_i + 1 + lookahead_bars]
-        horizon_l = exit_long_path[entry_i + 1 : entry_i + 1 + lookahead_bars]
-        horizon_s = exit_short_path[entry_i + 1 : entry_i + 1 + lookahead_bars]
-
-        if not np.isfinite(horizon).all() or not valid_market[entry_i + 1 : entry_i + 1 + len(horizon)].all():
-            continue
-
-        # Long
-        pnl_l = None
-        for p in horizon_l:
-            if p >= tp_l:
-                pnl_l = (tp_l - el) / pip_size
-                break
-            elif p <= sl_l:
-                pnl_l = (sl_l - el) / pip_size
-                break
-        if pnl_l is None:
-            pnl_l = (horizon_l[-1] - el) / pip_size
-        reward_long[i] = pnl_l - tx_cost_pips
-
-        # Short
-        pnl_s = None
-        for p in horizon_s:
-            if p <= tp_s:
-                pnl_s = (es - tp_s) / pip_size
-                break
-            elif p >= sl_s:
-                pnl_s = (es - sl_s) / pip_size
-                break
-        if pnl_s is None:
-            pnl_s = (es - horizon_s[-1]) / pip_size
-        reward_short[i] = pnl_s - tx_cost_pips
+    
+    if _numba_available():
+        reward_long, reward_short = _scan_barriers_simple(
+            close, entry_long, entry_short, exit_long_path, exit_short_path,
+            atr, valid_market, float(profit_atr_mult), float(stop_atr_mult),
+            float(tx_cost_pips), float(pip_size), int(lookahead_bars), delay
+        )
+    else:
+        reward_long = np.zeros(n, dtype=np.float32)
+        reward_short = np.zeros(n, dtype=np.float32)
+        for i in range(n - lookahead_bars - delay):
+            entry_i = i + delay
+            if not valid_market[i] or not valid_market[entry_i]:
+                continue
+            el = entry_long[entry_i]
+            es = entry_short[entry_i]
+            tp_l = el + profit_atr_mult * atr[entry_i]
+            sl_l = el - stop_atr_mult * atr[entry_i]
+            tp_s = es - profit_atr_mult * atr[entry_i]
+            sl_s = es + stop_atr_mult * atr[entry_i]
+    
+            # Simulate forward path
+            horizon = close[entry_i + 1 : entry_i + 1 + lookahead_bars]
+            horizon_l = exit_long_path[entry_i + 1 : entry_i + 1 + lookahead_bars]
+            horizon_s = exit_short_path[entry_i + 1 : entry_i + 1 + lookahead_bars]
+    
+            if not np.isfinite(horizon).all() or not valid_market[entry_i + 1 : entry_i + 1 + len(horizon)].all():
+                continue
+    
+            # Long
+            pnl_l = None
+            for p in horizon_l:
+                if p >= tp_l:
+                    pnl_l = (tp_l - el) / pip_size
+                    break
+                elif p <= sl_l:
+                    pnl_l = (sl_l - el) / pip_size
+                    break
+            if pnl_l is None:
+                pnl_l = (horizon_l[-1] - el) / pip_size
+            reward_long[i] = pnl_l - tx_cost_pips
+    
+            # Short
+            pnl_s = None
+            for p in horizon_s:
+                if p <= tp_s:
+                    pnl_s = (es - tp_s) / pip_size
+                    break
+                elif p >= sl_s:
+                    pnl_s = (es - sl_s) / pip_size
+                    break
+            if pnl_s is None:
+                pnl_s = (es - horizon_s[-1]) / pip_size
+            reward_short[i] = pnl_s - tx_cost_pips
 
     # Combined label - pick the best (most profitable) direction
     reward = np.maximum(reward_long, reward_short)
@@ -816,7 +823,7 @@ def compute_rl_reward_labels_regime(
         # High value = this trade had large intra-trade drawdown -> risky.
         # Used as target for confidence/risk head (model should be less confident here).
         max_adverse = max(mae_l, mae_s)
-        barrier_size = tp_mult * atr[i] / pip_size + 1e-6
+        barrier_size = tp_mult * atr[entry_i] / pip_size + 1e-6
         confidence_target[i] = float(np.clip(1.0 - max_adverse / barrier_size, 0.0, 1.0))
 
     # ── Combined label ─────────────────────────────────────────────────────

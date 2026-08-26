@@ -1,3 +1,114 @@
+---
+
+## Commit `3f9ce84` — 2026-08-26 01:42 UTC
+**Author:** Antigravity Bot  
+**Message:** R8+R9+R10: dead-code cleanup (scratch scripts, diff_yaml, out*.txt), retire deprecation shims (audit/lineage, data/feature_store), add CONFIG_OWNERSHIP.md
+
+**Files changed:**
+```
+_audit_probe.py
+_prep_session.py
+audit/lineage.py
+check_links.py
+config/CONFIG_OWNERSHIP.md
+data/feature_store.py
+diff_yaml.txt
+out.txt
+out2.txt
+test_warning.py
+test_warning2.py
+```
+
+---
+
+## Commit `14dd5dd` — 2026-08-26 01:39 UTC
+**Author:** Antigravity Bot  
+**Message:** R10: add CONFIG_OWNERSHIP.md - yaml inventory, profile diff matrix, override policy
+
+**Files changed:**
+```
+_audit_probe.py
+_prep_session.py
+audit/lineage.py
+check_links.py
+config/CONFIG_OWNERSHIP.md
+data/feature_store.py
+diff_yaml.txt
+out.txt
+out2.txt
+test_warning.py
+test_warning2.py
+```
+
+---
+## 2026-08-26 - Systems & Components Audit (Read-Only)
+
+### Summary
+Invoked the `systems_auditor` subagent to perform a read-only audit of specific framework configurations, early stopping logic, sidecar monitoring, feature store, retraining, classification heads, feature groups, and curriculum learning.
+
+### Findings (No fixes applied per user request)
+- **Framework Selection:** Identified missing default inheritance and auto-detect fallback issues resulting in unintended `"custom"` fallbacks.
+- **Early Stopping Metrics:** Found a severe mathematical bug in `cost_sharpe` where transaction costs were inadvertently *added* to losing trades (cushioning the loss), and a bug where PyTorch Lightning silences `cost_sharpe`.
+- **Sidecar:** Found a massive data loss bug where `CMD_HEARTBEAT` clears the buffer without flushing pending logs.
+- **Feature Store:** Identified a file descriptor exhaustion leak due to unclosed SQLite connections in `polars_store.py`.
+- **Retraining:** Found a regex bug that parses metrics from Epoch 1 instead of the final epoch, and an issue where rollbacks improperly reset the `promoted_at` schedule clock.
+- **Classification Head:** Identified a hard crash in `direction_control.py` caused by missing classes in small folds.
+- **Feature Groups:** Found a logic bug in `keep_groups` where ungrouped features are inadvertently kept instead of strictly dropped.
+- **Curriculum Learning:** Identified that miner feedback is instantly overwritten by deterministic pacing logic, nullifying reactive pacing.
+
+## 2026-08-26 - Quant Audit & Feature/Labeling Bug Fixes
+
+### Summary
+Invoked the `quant_auditor` subagent to rigorously audit the Polars feature engineering code and RL reward labeling logic. The auditor identified and resolved several mathematical, alignment, and performance issues across microstructure calculations, Hurst exponent estimation, and RL target assignment.
+
+### Changes Made
+- **features/feature_engineering_pl.py**: 
+  - Fixed mathematical error in `kyles_lambda`: Replaced incorrect point-in-time signed volume normalization with a proper rolling covariance/variance ratio calculation.
+  - Fixed `NaN` bug in Hurst exponent: Dynamically adjusted `.rolling(vw, min_periods=min(10, vw))` to prevent `min_periods` from exceeding small volatility windows, which previously forced the Hurst feature to default to `0.5` universally.
+- **features/advanced_features.py**: 
+  - Fixed logic bug in pure-Python R/S `hurst_exponent`: The chunk generator incorrectly sliced `arr[-lag * 2:]`, throwing away 80% of historical data. Corrected it to iterate over the entire array window.
+- **labeling/rl_reward_labeling.py**: 
+  - Integrated Numba optimization: Rewired `compute_rl_reward_labels` to utilize the compiled `_scan_barriers_simple` function from `rl_reward_numba.py`, resolving an $O(n \times \text{lookahead})$ inefficiency.
+  - Fixed alignment bug in `compute_rl_reward_labels_regime`: Addressed an execution delay discrepancy where `confidence_target` used `atr[i]` instead of `atr[entry_i]`.
+
+## 2026-08-26 - Detailed Workflow Architecture Expansion
+
+### Summary
+Invoked the `codebase_architect` subagent again to deeply analyze the intricate mechanical workflows of the system. Expanded the architecture document to include a "Detailed Workflow: Tick-to-Trade" section breaking down all 6 phases of the pipeline.
+
+### Changes Made
+- **ARCHITECTURE.md** (Modified): Added a highly detailed step-by-step breakdown covering Governance/Macro, Ingestion, Feature Engineering (Polars), Labeling (RL Reward Shaping), Multi-model Training, Backtesting (Lockbox/Shadow Mode), and Live Execution (Regime-conditional Kelly, Promotheus monitoring).
+
+## 2026-08-26 - Codebase Architecture Documentation
+
+### Summary
+Defined and invoked a `codebase_architect` subagent to perform a full codebase analysis and generate an `ARCHITECTURE.md` file. The subagent successfully mapped the 6-phase pipeline, data flows, and component responsibilities, providing a comprehensive high-level view of the repository.
+
+### Changes Made
+- **ARCHITECTURE.md** (Added): Generated a complete markdown document outlining the architecture of the Forex Scaling Model, complete with a Mermaid diagram of the data flow and detailed breakdowns of the key pipeline directories.
+
+
+## Commit `f39b815` — 2026-08-25 22:57 UTC
+**Author:** Antigravity Bot  
+**Message:** Architecture refactors R1-R4: break data->training, training<->inference, feature_store->pipeline, config->models cycles
+
+**Files changed:**
+```
+common/cache_io.py
+config/model_training_profile.py
+data/feature_cache.py
+feature_store/gates.py
+feature_store/materializer.py
+inference/onnx_inference.py
+inference/pytorch_inference.py
+inference/rl_inference.py
+models/architectures.py
+models/factory.py
+pipeline/__init__.py
+training/gpu_cache_io.py
+training/model_factory.py
+```
+
 ## 2026-08-25 - Wired PatchTST as RL Encoder
 
 ### Summary

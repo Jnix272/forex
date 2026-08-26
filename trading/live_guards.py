@@ -24,7 +24,9 @@ except ImportError:  # pragma: no cover - optional for legacy callers
 from config.settings import price_to_pips
 from data.historical_news import _filter_relevant, _load_events
 
-HOLD = 1
+# Shared guard value types now live in contracts (risk <-> trading decoupling).
+from contracts.execution_risk import GuardResult, HOLD  # noqa: F401  # re-export
+
 _SPECIAL_EVENTS = ("nfp", "nonfarm", "non-farm", "cpi", "fomc", "ecb", "boe", "boj", "rate")
 
 
@@ -56,26 +58,6 @@ def _tail_median(features: Any, col: str, lookback: int, default: float = 0.0) -
         return float(value)
     except Exception:
         return float(default)
-
-
-@dataclass
-class GuardResult:
-    blocked: bool
-    reason: str = ""
-    details: dict[str, Any] | None = None
-    action: int = HOLD
-    size_multiplier: float = 1.0
-    confidence_threshold: float = 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "blocked": bool(self.blocked),
-            "reason": self.reason,
-            "details": self.details or {},
-            "action": int(self.action),
-            "size_multiplier": float(self.size_multiplier),
-            "confidence_threshold": float(self.confidence_threshold),
-        }
 
 
 class EconomicCalendarGuard:

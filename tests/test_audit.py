@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from audit.lineage import (
+from lineage.provenance import (
     DataLineage,
     DecisionRecord,
     LineageStep,

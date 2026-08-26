@@ -145,17 +145,19 @@ def kyles_lambda(window: int = 20) -> pl.Expr:
     """Kyle's Lambda: price impact per unit *signed* volume, in basis points.
 
     Signed volume is approximated from bar direction (close vs open); the
-    regression slope Cov(ΔP, Q_z)/Var(Q_z) with Q_z = standardized signed volume
-    (Var=1) gives the scale-invariant price impact, scaled by 1e4 (bps).
-    Uses signed (not total) volume so it matches the canonical Kyle's lambda.
+    regression slope Cov(ΔP, Q)/Var(Q) gives the scale-invariant price impact, 
+    scaled by 1e4 (bps).
     """
     ret = (pl.col("close") / pl.col("close").shift(1)).log()
     signed_vol = pl.col("volume").cast(pl.Float64) * (pl.col("close") - pl.col("open")).sign()
-    # standardize signed volume -> mean 0, unit variance within window
-    sv_z = (signed_vol - signed_vol.rolling_mean(window)) / (signed_vol.rolling_std(window_size=window) + 1e-9)
-    # Cov(ret, sv_z) is the regression slope (Var(sv_z)=1 by construction)
-    cov = (ret * sv_z).rolling_mean(window) - ret.rolling_mean(window) * sv_z.rolling_mean(window)
-    return (cov * 1e4).alias("kyles_lambda")
+    
+    # Cov(ret, signed_vol) / Var(signed_vol)
+    ret_mean = ret.rolling_mean(window)
+    sv_mean = signed_vol.rolling_mean(window)
+    cov = (ret * signed_vol).rolling_mean(window) - (ret_mean * sv_mean)
+    sv_var = signed_vol.rolling_var(window) + 1e-9
+    
+    return ((cov / sv_var) * 1e4).alias("kyles_lambda")
 
 
 def amihud_illiquidity(window: int = 20) -> pl.Expr:
@@ -1713,7 +1715,7 @@ def add_market_regime_features(
 
     vw = int(max(10, volatility_window))
     ret = pd.Series(np.log(close / close.shift(1)), index=close.index, dtype="float64")
-    acorr = ret.rolling(vw, min_periods=30).corr(ret.shift(1)).clip(-1.0, 1.0)
+    acorr = ret.rolling(vw, min_periods=min(10, vw)).corr(ret.shift(1)).clip(-1.0, 1.0)
     hurst = (0.5 + 0.25 * acorr).clip(0.0, 1.0)
     noise_to_signal = ret.rolling(60, min_periods=10).std() / (ret.rolling(60, min_periods=10).mean().abs() + 1e-9)
     trailing_vol = ret.rolling(60, min_periods=10).std()

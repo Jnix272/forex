@@ -127,8 +127,7 @@ def hurst_exponent(arr):
     valid_lags = []
     tau = []
     for lag in lags:
-        sub = arr[-lag * 2 :]
-        chunks = [sub[i : i + lag] for i in range(0, len(sub) - lag + 1, lag)]
+        chunks = [arr[i : i + lag] for i in range(0, n - lag + 1, lag)]
         rs_vals = []
         for c in chunks:
             if len(c) < 2:

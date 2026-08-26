@@ -175,7 +175,7 @@ class SessionLimitsEnforcer:
     Enforces per-session exposure limits (lots + open trades) from LIVE_RISK.
     Used identically in paper, shadow, and live to prevent environment divergence.
 
-    Session identity comes from ``trading.session_utils.classify_session`` (DST-aware
+    Session identity comes from ``contracts.session_utils.classify_session`` (DST-aware
     SoT). Policy key prefers ``asia_london`` / ``london_ny`` over exclusive primary
     - never a private ``"overlap"`` string.
 
@@ -200,7 +200,7 @@ class SessionLimitsEnforcer:
         """Classify into production policy key (DST-aware when ``now`` given)."""
         from datetime import UTC, datetime
 
-        from trading.session_utils import classify_session, normalize_session_name
+        from contracts.session_utils import classify_session, normalize_session_name
 
         if now is not None:
             return classify_session(now).policy_key
@@ -213,7 +213,7 @@ class SessionLimitsEnforcer:
 
     def _limits_for(self, sess: str) -> dict:
         """Lookup session limits with overlap → primary fallback (no 999 bypass)."""
-        from trading.session_utils import normalize_session_name
+        from contracts.session_utils import normalize_session_name
 
         key = normalize_session_name(sess)
         lim = self.limits.get(key)
@@ -238,7 +238,7 @@ class SessionLimitsEnforcer:
         Returns {"allowed": bool, "session": str, "max_lots": float, "max_trades": int}.
         Call before every order; block if allowed=False.
         """
-        from trading.session_utils import normalize_session_name
+        from contracts.session_utils import normalize_session_name
 
         if session is not None:
             sess = normalize_session_name(session)

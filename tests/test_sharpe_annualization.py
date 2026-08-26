@@ -166,6 +166,11 @@ def _load_supervised_loop_helper(name: str):
     src = (_REPO_ROOT / "training" / "supervised_loop.py").read_text(encoding="utf-8", errors="replace")
     tree = ast.parse(src)
     extracted = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+    if not extracted:
+        # R5 split: helper may live in a submodule re-exported by supervised_loop.
+        src = (_REPO_ROOT / "training" / "loop_epochs.py").read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(src)
+        extracted = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
     assert extracted, f"{name} not found in supervised_loop.py"
     ns: dict = {"__builtins__": __builtins__, "torch": torch, "np": np}
     exec(compile(ast.Module(body=extracted, type_ignores=[]), "<x>", "exec"), ns)
