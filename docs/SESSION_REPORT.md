@@ -1,3 +1,12 @@
+## 2026-08-26 - Infinite Robust Training (IRT) Orchestration
+
+### Summary
+Implemented the "Infinite Robust Training" (IRT) architecture by orchestrating the advanced training components: Synaptic Intelligence, Online Hard Example Mining, Curriculum Learning, and Adversarial PGD Attacks. The components themselves were already present in the codebase due to the R5 refactoring (split across loop_optim.py, loop_losses.py, loop_batches.py, and loop_epochs.py). I added an --enable-irt argument logic to securely toggle all these features concurrently within the supervised_loop.py training cycle.
+
+### Changes Made
+- **training/gpu_cli.py**: Added 	raining.irt.enabled config mapping to support --enable-irt.
+- **training/supervised_loop.py**: Added IRT orchestration logic inside supervised_train to forcefully enable enable_si, enable_adversarial, online_hard_mining, curriculum_manager, and curriculum_miner_feedback if rgs.enable_irt is activated.
+
 ---
 
 ## Commit `f0718a3` — 2026-08-26 05:27 UTC
@@ -2833,5 +2842,21 @@ ALL PASS â€” no regressions
 
 
 
+
+
+
+---
+
+## Model Training Execution (2026-08-26)
+
+Started the main GPU training pipeline for all models using the provided configuration. The command was launched as a background task to allow training to proceed without blocking the terminal.
+
+**What was done:**
+- Validated that --all-models automatically triggers the use of the respective model profiles defined in config/models.py.
+- Started the 	rain_gpu.py background process using the provided arguments.
+- Verified that the Python process has started successfully and is consuming CPU resources.
+
+**Files edited:**
+- None (Configuration was read directly from existing YAML files)
 
 

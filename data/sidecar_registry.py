@@ -12,9 +12,10 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from common.time_utils import now_iso as _utc_now
 
 
 @dataclass(frozen=True)
@@ -32,10 +33,6 @@ def file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
         for chunk in iter(lambda: f.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _as_relative(path: Path, root: Path) -> str:

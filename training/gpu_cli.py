@@ -91,14 +91,11 @@ _YAML_MAP = {
     "training.batch_size": "batch_size",
     "training.lr": "lr",
     "training.seq_len": "seq_len",
-    "training.patience": "patience",
     "training.val_split": "val_split",
     "training.tune_split": "tune_split",
     "training.curriculum_gate_metric": "curriculum_gate_metric",
     "training.loss": "loss",
     "training.label_method": "label_method",
-    "training.early_stop_metric": "early_stop_metric",
-    "training.early_stop_min_delta": "early_stop_min_delta",
     "training.direction_weight": "direction_weight",
     "training.sharpe_weight": "sharpe_weight",
     "training.sharpe_annualization_factor": "sharpe_annualization_factor",
@@ -135,10 +132,6 @@ _YAML_MAP = {
     "features.vwap_window": "feat_vwap_window",
     "rl.use_sharpe_reward": "rl_use_sharpe_reward",
     "rl.use_her": "rl_use_her",
-    "news.historical_mode": "historical_news_mode",
-    "news.historical_news_file": "historical_news_file",
-    "news.economic_calendar_file": "economic_calendar_file",
-    # Backward-compat aliases for older run.yaml layouts
     "data.historical_news_mode": "historical_news_mode",
     "data.historical_news_file": "historical_news_file",
     "data.economic_calendar_file": "economic_calendar_file",
@@ -174,6 +167,8 @@ _YAML_MAP = {
     "training.adversarial.warmup_steps": "adversarial_warmup_steps",
     "training.adversarial.eps_curriculum_scale": "adversarial_eps_curriculum_scale",
     "training.adversarial.models": "adversarial_models",
+    # Infinite Robust Training (IRT) (new)
+    "training.irt.enabled": "enable_irt",
     # Continuous learning (EWC / Synaptic Intelligence)
     "training.enable_ewc": "enable_ewc",
     "training.ewc_lambda": "ewc_lambda",
@@ -305,7 +300,6 @@ _YAML_MAP = {
     "xgboost.reg_lambda": "xgb_reg_lambda",
     "xgboost.objective": "xgb_objective",
     "xgboost.eval_metric": "xgb_eval_metric",
-    "xgboost.early_stopping_rounds": "xgb_early_stopping_rounds",
     "xgboost.folds": "xgb_folds",
     "xgboost.tune": "xgb_tune",
     "xgboost.tune_trials": "xgb_tune_trials",
@@ -326,7 +320,6 @@ _YAML_MAP = {
     "catboost.colsample_bytree": "cb_colsample_bylevel",
     "catboost.l2_leaf_reg": "cb_l2_leaf_reg",
     "catboost.reg_lambda": "cb_l2_leaf_reg",
-    "catboost.early_stopping_rounds": "cb_early_stopping_rounds",
     "catboost.folds": "cb_folds",
     "catboost.tune": "cb_tune",
     "catboost.tune_trials": "cb_tune_trials",
@@ -808,7 +801,6 @@ def parse_args():
         help="OneCycleLR peak multiplier over base lr (legacy path).",
     )
     p.add_argument("--seq-len", type=str, default="120")
-    p.add_argument("--patience", type=int, default=10)
     p.add_argument(
         "--seed",
         type=int,
@@ -1055,10 +1047,9 @@ def parse_args():
         "--loss",
         type=str,
         default=None,
-        choices=["huber", "asymmetric", "cross_entropy", "directional_huber", "sharpe_huber"],
+        choices=["huber", "asymmetric", "directional_huber", "sharpe_huber"],
         help="huber/asymmetric/directional_huber/sharpe_huber on scalar targets; "
-        "cross_entropy=3-class {-1,0,1} with balanced weights",
-    )
+            )
     p.add_argument(
         "--direction-weight",
         type=float,
@@ -1082,12 +1073,7 @@ def parse_args():
         "Sharpe annualization factor. Without this flag the "
         "factor assumes a 6.5h session profile.",
     )
-    p.add_argument(
-        "--early-stop-min-delta",
-        type=float,
-        default=0.0,
-        help="Minimum validation improvement required to reset patience",
-    )
+
     p.add_argument(
         "--guard-min-confidence",
         type=float,
@@ -1245,9 +1231,9 @@ def parse_args():
     # Pre-training
     p.add_argument(
         "--pretrain-method",
-        choices=["byol", "tscl", "masked", "vae", "autoencoder", "cluster", "forecast", "drift"],
+        choices=["byol", "tscl", "masked", "vae", "autoencoder", "cluster", "forecast", "drift", "jepa", "patch_mask", "cross_asset"],
         default=str(PRETRAIN.get("method", "byol")).lower(),
-        help="Self-supervised pretrain: byol (default), tscl, masked, vae, cluster, forecast, drift",
+        help="Self-supervised pretrain: byol (default), tscl, masked, vae, cluster, forecast, drift, jepa, patch_mask, cross_asset",
     )
     p.add_argument(
         "--pretrain-framework",
@@ -1887,13 +1873,6 @@ def parse_args():
         "WalkForwardCV; comb = combinatorial purged CV; online = rolling window.",
     )
     p.add_argument(
-        "--early-stop-metric",
-        type=str,
-        default=None,
-        choices=["loss", "sharpe"],
-        help="Checkpoint early stopping on val loss or validation Sharpe proxy (default: TRAINING)",
-    )
-    p.add_argument(
         "--execution-delay-bars",
         type=int,
         default=1,
@@ -1955,6 +1934,11 @@ def parse_args():
         "--enable-adversarial",
         action="store_true",
         help="Enable adversarial training (PGD/FGSM/FreeLB) or legacy market shocks.",
+    )
+    p.add_argument(
+        "--enable-irt", 
+        action="store_true", 
+        help="Enable Infinite Robust Training (IRT) orchestration."
     )
     p.add_argument(
         "--adversarial-method",
@@ -2044,8 +2028,6 @@ def parse_args():
         args.loss = str(TRAINING.get("loss", "huber"))
     if args.walk_forward_folds is None:
         args.walk_forward_folds = int(TRAINING.get("walk_forward_folds", 6))
-    if args.early_stop_metric is None:
-        args.early_stop_metric = str(TRAINING.get("early_stop_metric", "sharpe"))
     if args.grad_accum_steps is None:
         args.grad_accum_steps = int(TRAINING.get("grad_accum_steps", 1))
     prof = strategy_profile(args.strategy_mode)
@@ -2290,7 +2272,6 @@ _PROFILE_CLI_FLAGS = {
     "--weight-decay": "weight_decay",
     "--batch-size": "batch_size",
     "--loss": "loss",
-    "--early-stop-metric": "early_stop_metric",
     "--pretrain-method": "pretrain_method",
     "--pretrain-epochs": "pretrain_epochs",
     "--pretrain-lr": "pretrain_lr",
@@ -2331,9 +2312,6 @@ def _normalize_architecture_profile(profile: dict, model_name: str) -> dict:
         out["batch_size"] = int(profile["batch_size"])
     if "loss" in profile:
         out["loss"] = str(profile["loss"]).lower()
-
-    if "early_stop_metric" in profile:
-        out["early_stop_metric"] = str(profile["early_stop_metric"]).lower()
 
     if "pretrain_epochs" in profile:
         out["pretrain_epochs"] = int(profile["pretrain_epochs"])
@@ -2691,7 +2669,6 @@ def _load_cv_fold_entry(
     model_name: str,
     checkpoint_dir: str | Path,
     fold_idx: int,
-    early_stop_metric: str = "sharpe",
 ) -> dict | None:
     """Rebuild one walk-forward fold summary from its checkpoint artifacts."""
     model = str(model_name).lower().strip()
@@ -2710,7 +2687,7 @@ def _load_cv_fold_entry(
     if not isinstance(history, dict) or not history:
         return None
     best_metric = None
-    if early_stop_metric == "sharpe" and history.get("val_sharpe"):
+    if history.get("val_sharpe"):
         best_metric = float(max(history["val_sharpe"]))
     elif history.get("val_loss"):
         best_metric = float(min(history["val_loss"]))
@@ -2728,7 +2705,6 @@ def _load_walk_forward_resume_history(
     run_name_slug: str,
     model_slug: str,
     start_fold: int,
-    early_stop_metric: str = "sharpe",
 ) -> list[dict]:
     """Load completed fold metrics for folds [0, start_fold) when resuming walk-forward CV."""
     if start_fold <= 0:
@@ -2746,7 +2722,7 @@ def _load_walk_forward_resume_history(
     for fi in range(int(start_fold)):
         if fi in loaded_folds:
             continue
-        entry = _load_cv_fold_entry(model_name, checkpoint_dir, fi, early_stop_metric)
+        entry = _load_cv_fold_entry(model_name, checkpoint_dir, fi)
         if entry is not None:
             entries.append(entry)
     entries.sort(key=lambda e: int(e.get("fold", 0)))

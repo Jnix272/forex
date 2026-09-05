@@ -1,3 +1,21 @@
+# Development debris — one-off fix/patch/scratch scripts and logs
+fix_*.py
+patch_*.py
+scratch_*.py
+test_adv*.py
+test_crit*.py
+update_report.py
+tests/_tmp_*/
+scratch_*.ps1
+scratch_*.txt
+*_log.txt
+*_log_err.txt
+git_diff_*.txt
+docs_diff.txt
+root_diff.txt
+diff_*.txt
+*.patch
+
 __pycache__/
 *.pyc
 *.pyo

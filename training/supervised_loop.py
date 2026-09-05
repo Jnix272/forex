@@ -551,6 +551,15 @@ def supervised_train(
     amp_dtype: torch.dtype = torch.float32,
 ):
     reset_sanitize_stats()
+    
+    # ── IRT Orchestration ──
+    if getattr(args, "enable_irt", False):
+        print("[IRT] Infinite Robust Training ENABLED. Forcing SI, Miner, Adversarial, and Curriculum ON.")
+        args.enable_si = True
+        args.enable_adversarial = True
+        args.online_hard_mining = True
+        args.curriculum_manager = True
+        args.curriculum_miner_feedback = True
 
 
     # ── Lightning training path (opt-in via --training-framework lightning) ──

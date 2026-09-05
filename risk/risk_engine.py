@@ -31,12 +31,18 @@ Usage
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
+
+from common.time_utils import now_iso as _now_iso
+from common.pair_utils import clip_currency as _clip_currency
+
+_AUDIT_LOG_PATH = Path("logs/risk_audit.jsonl")
 
 try:
     from config.settings import LIVE_RISK as _LR
@@ -48,18 +54,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _PAIRS = ("EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD")
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _clip_currency(currency: str) -> str:
-    """Normalise a pair to its base and quote currency codes."""
-    c = (currency or "").upper()
-    if len(c) != 6:
-        return c
-    return c
 
 
 @dataclass
@@ -527,6 +521,12 @@ class RiskEngine:
     def _log(self, decision: RiskDecision, ts: str | None = None) -> None:
         entry = decision.to_audit(ts)
         self.audit_log.append(entry)
+        try:
+            _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            logger.debug("risk audit JSONL write failed: %s", exc)
 
     def get_audit(self, rule: str | None = None) -> list[dict]:
         if rule is None:

@@ -24,6 +24,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+try:
+    import filelock as _filelock_mod
+    _HAS_FILELOCK = True
+except ImportError:
+    _HAS_FILELOCK = False
+
 from feature_store.polars_store import FeatureStore
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -38,10 +44,14 @@ XGB_TRAINING_SCRIPT = "training/train_xgboost.py"
 # Minimum number of days between retrains for the same model family
 MIN_RETRAIN_INTERVAL_DAYS = 1
 
-# Promotion gate thresholds
-MIN_SHARPE = 0.5
-MIN_PROFIT_FACTOR = 1.3
-MAX_DRAWDOWN = 0.15
+# Promotion gate thresholds — read from config if available, else fall back
+try:
+    from config.settings import MATURITY as _MATURITY
+except ImportError:
+    _MATURITY = {}
+MIN_SHARPE = float(_MATURITY.get("min_sharpe", 0.5))
+MIN_PROFIT_FACTOR = float(_MATURITY.get("min_profit_factor", 1.3))
+MAX_DRAWDOWN = float(_MATURITY.get("max_drawdown", 0.15))
 
 
 class ModelFamily(Enum):
@@ -130,10 +140,19 @@ class ModelRegistry:
         self._records: list[ModelRecord] = []
         self._load()
 
+    @property
+    def _lock_path(self) -> Path:
+        return self._path.with_suffix(".lock")
+
     def _load(self) -> None:
-        if self._path.exists():
+        if not self._path.exists():
+            return
+        if _HAS_FILELOCK:
+            with _filelock_mod.FileLock(str(self._lock_path), timeout=10):
+                data = json.loads(self._path.read_text())
+        else:
             data = json.loads(self._path.read_text())
-            self._records = [ModelRecord(**r) for r in data.get("models", [])]
+        self._records = [ModelRecord(**r) for r in data.get("models", [])]
 
     def _save(self) -> None:
         data = {
@@ -141,7 +160,12 @@ class ModelRegistry:
             "updated_at": datetime.now(UTC).isoformat(),
             "models": [asdict(r) for r in self._records],
         }
-        self._path.write_text(json.dumps(data, indent=2, default=str))
+        payload = json.dumps(data, indent=2, default=str)
+        if _HAS_FILELOCK:
+            with _filelock_mod.FileLock(str(self._lock_path), timeout=10):
+                self._path.write_text(payload)
+        else:
+            self._path.write_text(payload)
 
     def next_version(self, family: str) -> int:
         """Get next version number for a model family."""
@@ -537,7 +561,7 @@ class RetrainOrchestrator:
             "best_sharpe": r"best[_\s]sharpe[:\s]+([-]?\d+\.?\d*)",
             "profit_factor": r"profit[_\s]factor[:\s]+([-]?\d+\.?\d*)",
             "max_drawdown": r"max[_\s]drawdown[:\s]+([-]?\d+\.?\d*)",
-            "accuracy": r"acc[:\s]+([-]?\d+\.?\d*)",
+            "r2": r"r2[:\s]+([-]?\d+\.?\d*)",
         }
 
         for key, pattern in patterns.items():

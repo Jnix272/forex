@@ -40,7 +40,6 @@ from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -97,8 +96,8 @@ AlmgrenChrissExecutor = _LazySymbol("risk.execution", "AlmgrenChrissExecutor")
 SessionLimitsEnforcer = _LazySymbol("risk.execution", "SessionLimitsEnforcer")
 DrawdownAwareExitPolicy = _LazySymbol("risk.execution", "DrawdownAwareExitPolicy")
 PortfolioVaR = _LazySymbol("risk.execution", "PortfolioVaR")
-ShadowModeDeployer = _LazySymbol("monitoring.pipeline", "ShadowModeDeployer")
-SHAPFeatureTracker = _LazySymbol("monitoring.pipeline", "SHAPFeatureTracker")
+ShadowModeDeployer = _LazySymbol("monitoring.infra_tools", "ShadowModeDeployer")
+SHAPFeatureTracker = _LazySymbol("monitoring.infra_tools", "SHAPFeatureTracker")
 DemotionMonitor = _LazySymbol("monitoring.demotion_monitor", "DemotionMonitor")
 ForexPrometheusExporter = _LazySymbol("monitoring.prometheus_exporter", "ForexPrometheusExporter")
 LiveLogger = _LazySymbol("monitoring.live_logger", "LiveLogger")

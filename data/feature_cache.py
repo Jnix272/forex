@@ -13,6 +13,12 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+try:
+    import filelock as _filelock_mod
+    _HAS_FILELOCK = True
+except ImportError:
+    _HAS_FILELOCK = False
+
 DEFAULT_CACHE_DIR = "data/features"
 CACHE_VERSION = "v1"
 
@@ -188,8 +194,12 @@ def build_pair_feature_cache(
             month = next_month
             continue
 
-        # Save
-        F.write_parquet(output_file)
+        # Save (file-locked to prevent concurrent build corruption)
+        if _HAS_FILELOCK:
+            with _filelock_mod.FileLock(str(output_file) + ".lock", timeout=60):
+                F.write_parquet(output_file)
+        else:
+            F.write_parquet(output_file)
         n_cols = len(F.columns)
         n_rows = len(F)
         total_bars += n_rows

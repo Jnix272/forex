@@ -13,7 +13,7 @@ from config.settings import PATHS
 
 def synthetic_orderbook(bars, n_levels=10):
     n = len(bars)
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng()
     mid = bars["close"].values.astype(float)
     spd = bars["spread_avg"].values if "spread_avg" in bars.columns else np.full(n, 5e-5)
     sp = spd.reshape(-1, 1) * np.arange(1, n_levels + 1) / 2
@@ -257,12 +257,12 @@ class AdvancedFeatureEngineer:
         self.tw = tvi_window
         self.ow = options_window
 
-    def build(self, bars: pl.DataFrame, base_features: pl.DataFrame, cot_data=None) -> pl.DataFrame:
-        bars_pd = bars.to_pandas()
+    def build(self, bars, base_features, cot_data=None):
+        bars_pd = bars.to_pandas() if hasattr(bars, "to_pandas") else bars.copy()
         if "timestamp_utc" in bars_pd.columns:
             bars_pd.set_index("timestamp_utc", inplace=True)
 
-        base_pd = base_features.to_pandas()
+        base_pd = base_features.to_pandas() if hasattr(base_features, "to_pandas") else base_features.copy()
         if "timestamp_utc" in base_pd.columns:
             base_pd.set_index("timestamp_utc", inplace=True)
 

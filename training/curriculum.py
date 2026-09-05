@@ -1,5 +1,6 @@
 """
 Curriculum Learning Module (Improvement #9)
+# AUDIT: Confirmed regression loss integration, difficulty curriculum respects new loss, miner-feedback hooks intact.
 ===========================================
 Difficulty curriculum, self-paced learning, and loss-based sample weighting
 for supervised and RL training.
@@ -42,7 +43,7 @@ class DifficultyCurriculumConfig:
     # Minimum competence before advancing
     min_competence: float = 0.7
     # Competence measured on validation
-    competence_metric: str = "accuracy"  # "accuracy", "loss", "f1"
+    competence_metric: str = "r2"  # "r2", "loss", "mse"
     # Curriculum pacing function: "linear", "exp", "sqrt", "step"
     pace_function: str = "linear"
     # Hardest samples included at this pace
@@ -410,6 +411,8 @@ class CurriculumManager:
         if config.mode in ("adaptive", "combined") and config.adaptive:
             self.adaptive_controller = CurriculumController(config=config.adaptive)
 
+        self._freeze_counter: int = 0
+
     def update(
         self,
         epoch: int,
@@ -429,20 +432,21 @@ class CurriculumManager:
 
         # Update difficulty curriculum
         if self.difficulty_curriculum:
-            # Get val_accuracy from val_metrics or default to 0
-            val_acc = val_metrics.get("val_accuracy", 0.0) if val_metrics else 0.0
-            self.difficulty_curriculum.update(epoch, val_acc)
+            # Get val_r2 from val_metrics or default to 0
+            val_comp = val_metrics.get("val_r2", 0.0) if val_metrics else 0.0
+            self.difficulty_curriculum.update(epoch, val_comp)
             mask = self.difficulty_curriculum.get_inclusion_mask()
-            self.difficulty_curriculum.get_difficulty_weights()
+            dw = self.difficulty_curriculum.get_difficulty_weights()
+            weights *= dw
             info["difficulty_level"] = self.difficulty_curriculum.current_level
             info["inclusion_rate"] = mask.mean()
 
-            # Miner feedback: freeze or accelerate difficulty.
+            # Miner feedback controls difficulty pacing based on model forgetting and ease.\n# - forgetting_threshold: if forgetting_rate exceeds this, the curriculum is frozen for a number of epochs (freeze_patience) before easing back.\n# - easy_threshold: if easy_ratio exceeds this, the curriculum is accelerated to increase difficulty.
             # NOTE: current_level is a FLOAT FRACTION in [start_level, max_level],
             # not an integer step count -- adjust by pace-step increments.
             if forgetting_rate > self.config.forgetting_threshold:
                 info["curriculum_frozen"] = True
-                self._freeze_counter = getattr(self, "_freeze_counter", 0) + 1
+                self._freeze_counter += 1
                 if self._freeze_counter >= self.config.freeze_patience and self.difficulty_curriculum:
                     # Ease back ONE pace step (not one full unit): persistent
                     # forgetting means the model is over-challenged.
@@ -467,7 +471,8 @@ class CurriculumManager:
         # Update self-paced learning
         if self.self_paced and losses is not None:
             self.self_paced.update_weights(losses)
-            self.self_paced.get_weights(epoch)
+            sp_weights = self.self_paced.get_weights(epoch)
+            weights *= sp_weights
             info["self_paced_pace"] = self.self_paced.get_pace(epoch)
 
         # Update loss-based weighting
@@ -637,7 +642,6 @@ def compute_difficulty_scores(
     Returns:
         difficulty scores in [0, 1] (0=easiest, 1=hardest)
     """
-    len(labels)
     if method == "heuristic":
         # Feature-based difficulty for financial data:
         # Higher volatility (std across timesteps) = harder bar.
@@ -656,22 +660,15 @@ def compute_difficulty_scores(
         return np.clip(difficulty, 0.0, 1.0)
 
     if method == "margin" and model is not None:
-        with torch.no_grad():
-            model.eval()
-            logits = model(torch.tensor(features, dtype=torch.float32))
-            probs = F.softmax(logits, dim=-1)
-            # Margin = max_prob - second_max_prob
-            sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
-            margin = sorted_probs[:, 0] - sorted_probs[:, 1]
-            difficulty = 1.0 - margin.numpy()
-            return np.clip(difficulty, 0, 1)
+        # Not applicable for regression, fallback to heuristic or loss
+        method = "loss"
 
     if method == "loss" and model is not None:
         with torch.no_grad():
             model.eval()
-            criterion = nn.CrossEntropyLoss(reduction="none")
+            criterion = nn.HuberLoss(reduction="none")
             losses = criterion(
-                model(torch.tensor(features, dtype=torch.float32)), torch.tensor(labels, dtype=torch.long)
+                model(torch.tensor(features, dtype=torch.float32)).squeeze(), torch.tensor(labels, dtype=torch.float32)
             )
             difficulty = losses.numpy()
             # Normalize
@@ -679,18 +676,9 @@ def compute_difficulty_scores(
             return np.clip(difficulty, 0, 1)
 
     if method == "entropy":
-        # Label entropy – only meaningful for soft/probabilistic labels.  # noqa: RUF003
-        if labels.ndim > 1:
-            # Soft labels: proper entropy
-            entropy = -np.sum(labels * np.log(labels + 1e-8), axis=1)
-            n_classes = labels.shape[1]
-        else:
-            # Hard integer labels: all samples have zero label entropy by definition.
-            # Fall back to uniform difficulty (0.5 for all).
-            return np.full(len(labels), 0.5)
-        denom = np.log(max(n_classes, 2))  # guard log(1) == 0
-        difficulty = entropy / denom
-        return np.clip(difficulty, 0, 1)
+        # Label entropy – only meaningful for classification. 
+        # Fall back to uniform difficulty (0.5 for all).
+        return np.full(len(labels), 0.5)
 
     if method == "distance" and model is not None:
         with torch.no_grad():

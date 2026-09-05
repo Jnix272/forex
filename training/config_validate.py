@@ -19,9 +19,8 @@ from config.settings import LIVE_RISK, SIZING
 # Keep aligned with training.train_gpu loss choices + common eval aliases.
 SUPPORTED_LOSSES = frozenset(
     {
-        "cross_entropy",
-        "sharpe_huber",
         "huber",
+        "sharpe_huber",
         "mse",
         "focal",
         "directional_huber",
@@ -136,8 +135,7 @@ def estimate_run_minutes(args, models: list[str]) -> dict[str, float]:
     folds = int(getattr(args, "walk_forward_folds", 1) or 1) if getattr(args, "walk_forward_cv", False) else 1
     epochs = int(getattr(args, "epochs", 40) or 40)
     warmup = int(getattr(args, "lr_warmup_epochs", 3) or 3)
-    patience = int(getattr(args, "patience", 10) or 10)
-    avg_sup_epochs = float(min(epochs, max(warmup + patience + 3, int(epochs * 0.55))))
+    avg_sup_epochs = float(min(epochs, max(warmup + 3, int(epochs * 0.55))))
 
     min_pretrain_epoch = 4.5
     min_sup_epoch = 11.0
@@ -213,7 +211,6 @@ def collect_config_issues(
     epochs = _int_field("epochs", 40)
     batch_size = _int_field("batch_size", 256)
     lr = _float_field("lr", 1e-4)
-    patience = _int_field("patience", 10)
     warmup = _int_field("lr_warmup_epochs", 3)
     max_seq = _effective_max_seq_len(args)
     base_seq = _int_field("seq_len", 60)
@@ -227,8 +224,6 @@ def collect_config_issues(
         errors.append(f"training.batch_size={batch_size} must be > 0.")
     if lr <= 0 or lr >= 1.0:
         errors.append(f"training.lr={lr} out of sane range (0, 1.0).")
-    if patience <= 0:
-        errors.append(f"training.patience={patience} must be > 0.")
     if base_seq <= 0:
         errors.append(f"training.seq_len={base_seq} must be > 0.")
 
@@ -239,13 +234,6 @@ def collect_config_issues(
         warnings.append(
             f"lr_warmup_epochs={warmup} is >{50}% of epochs={epochs} - "
             "consider reducing warmup so the model has enough post-warmup epochs."
-        )
-
-    # Patience vs effective training epochs
-    effective_train_epochs = epochs - warmup
-    if patience >= effective_train_epochs and effective_train_epochs > 0:
-        warnings.append(
-            f"patience={patience} >= post-warmup epochs ({effective_train_epochs}) - early stopping will never trigger."
         )
 
     # Model name validation

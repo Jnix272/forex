@@ -46,26 +46,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
-from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
-from multiprocessing import Process, Queue
+from multiprocessing import Process
+from multiprocessing import Queue
 from pathlib import Path
 from typing import Any
+
+from common.time_utils import now_iso as _now_iso, utcnow_str as _utcnow
 
 __all__ = ["Sidecar", "SidecarProcess"]
 
 _SIDECAR_LOGGER = logging.getLogger("forex.sidecar")
-
-
-def _utcnow() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +123,7 @@ class SidecarProcess:
     def start(self) -> bool:
         """Start the sidecar process. Returns True on success."""
         self._queue = Queue(maxsize=self.max_queue_size)
+        self._queue.cancel_join_thread()
         self._stop_event = threading.Event()
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -411,6 +407,10 @@ class Sidecar:
         self.model_name = model_name
         self.enabled = enabled
         self.mode = mode
+        if os.name == "nt" and self.mode == "process":
+            self.mode = "thread"
+            import logging
+            logging.getLogger("forex.sidecar").warning("Forced Sidecar mode to 'thread' on Windows to avoid multiprocessing bugs.")
         self.max_queue_size = max_queue_size
         self.flush_interval_s = flush_interval_s
         self.retention_days = retention_days

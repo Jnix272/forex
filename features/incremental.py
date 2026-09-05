@@ -35,8 +35,8 @@ class FeatureState:
     last_bar_index: int = -1
     # Pair identifier
     pair: str = ""
-    # Version for compatibility
-    version: int = 1
+    # Version for compatibility — bump when schema changes
+    version: int = 2
 
 
 class IncrementalFeatureEngine:
@@ -78,6 +78,13 @@ class IncrementalFeatureEngine:
                         state = pickle.load(f)
                     if not isinstance(state, FeatureState):
                         state = FeatureState(pair=pair)
+                    elif getattr(state, "version", 1) != FeatureState.version:
+                        raise ValueError(
+                            f"Stale FeatureState v{getattr(state, 'version', 1)} for {pair}; "
+                            f"expected v{FeatureState.version}. Delete cache and recompute."
+                        )
+                except (ValueError, AttributeError):
+                    raise
                 except Exception:
                     state = FeatureState(pair=pair)
             else:
