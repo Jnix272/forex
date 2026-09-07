@@ -237,7 +237,7 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
 
     # P2: Curriculum health penalties/bonuses
     total_stalls = curr_diag["total_stalls"]
-    curr_diag["advance_count"]
+    advance_count = curr_diag["advance_count"]
     seq_advanced = curr_diag["seq_advanced"]
     diff_advanced = curr_diag["diff_advanced"]
 
@@ -254,6 +254,9 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
         score += 0.03
     if diff_advanced:
         score += 0.03
+    # Bonus: multiple advances → curriculum is actually progressing
+    if advance_count > 2:
+        score += min(0.05, 0.01 * (advance_count - 2))
 
     return -score, diagnostics
 
@@ -896,23 +899,9 @@ def _export_best_config(args, study: optuna.Study) -> None:
     # Auto-apply: back up the current run.yaml then overwrite it so the
     # next training run immediately uses Optuna's best settings.
     # ------------------------------------------------------------------
-    backup_path = ACTIVE_RUN_CONFIG.with_suffix(".yaml.bak")
-    try:
-        if ACTIVE_RUN_CONFIG.exists():
-            shutil.copy2(ACTIVE_RUN_CONFIG, backup_path)
-            print(f"[Optuna] Backed up existing run.yaml -> {backup_path}")
-        # Write best config atomically via a temp file
-        tmp_path = ACTIVE_RUN_CONFIG.with_suffix(".yaml.tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-        tmp_path.replace(ACTIVE_RUN_CONFIG)
-        scope = "curriculum" if curriculum_only else "full"
-        print(f"[Optuna] ✓ Best {scope} config auto-applied → {ACTIVE_RUN_CONFIG}")
-        print(f"[Optuna]   Original backed up      → {backup_path}")
-        print(f"[Optuna]   Archived copy saved     → {export_path}")
-    except Exception as exc:
-        print(f"[Optuna] WARNING: Could not auto-apply best config to {ACTIVE_RUN_CONFIG}: {exc}")
-        print(f"[Optuna]   You can apply it manually: copy {export_path} {ACTIVE_RUN_CONFIG}")
+    scope = "curriculum" if curriculum_only else "full"
+    print(f"[Optuna] ✓ Best {scope} config archived → {export_path}")
+    print(f"[Optuna]   To apply: copy {export_path} {ACTIVE_RUN_CONFIG}")
     # ------------------------------------------------------------------
 
     best_summary = {
