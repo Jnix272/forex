@@ -17,7 +17,7 @@ import numpy as np
 
 # Feature tensors (X) on disk: FP16 halves cache size vs FP32 with negligible
 # loss for StandardScaler-normalized inputs. Labels / market sidecars stay FP32.
-ZARR_FEATURE_DTYPE = np.dtype(np.float16)
+ZARR_FEATURE_DTYPE = np.dtype(np.float32)
 ZARR_LABEL_DTYPE = np.dtype(np.float32)
 
 try:
