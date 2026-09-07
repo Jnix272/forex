@@ -951,9 +951,11 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
             ):
                 trial_cfg_path = payload.get("trial_cfg_path")
                 checkpoint_dir = payload.get("checkpoint_dir")
-            checkpoint_dir = Path(
-                checkpoint_dir or f"checkpoints/optuna_{_safe_slug(args.model)}_confirm_{int(t.number)}"
-            )
+            # checkpoint_dir is a Path from the generator; fall back only if loop never ran
+            if checkpoint_dir is None:
+                checkpoint_dir = Path(f"checkpoints/optuna_{_safe_slug(args.model)}_confirm_{int(t.number)}")
+            else:
+                checkpoint_dir = Path(checkpoint_dir)
             confirm = _evaluate_trial_artifacts(checkpoint_dir, args.model, int(args.full_confirm_folds), args.metric)
             confirm_rows.append(
                 {
