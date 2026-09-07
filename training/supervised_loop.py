@@ -1339,7 +1339,14 @@ def supervised_train(
         _log_warn(f"[CurriculumAudit] skipped ({_audit_exc})")
 
     def _seq_len_for_epoch(ep: int) -> int:
-        return args.seq_len
+        _sched = _CURR.get("seq_schedule") if isinstance(_CURR, dict) else None
+        if not _sched:
+            return args.seq_len
+        active = args.seq_len
+        for entry in sorted(_sched, key=lambda e: int(e.get("epoch_start", 0))):
+            if ep >= int(entry.get("epoch_start", 0)):
+                active = int(entry["seq_len"])
+        return active
 
     def _unfreeze_features_for_epoch(model_ref, ep: int) -> None:
         """A4: Unfreeze parameter groups that correspond to slow feature layers."""
@@ -1614,7 +1621,8 @@ def supervised_train(
     # Overfitting controller - flags from evaluate_epoch are applied each epoch
     from training.training_controller import TrainingController
 
-    _train_ctrl = TrainingController(report_dir=str(ckpt_dir))
+    _adaptation_cfg = _CURR.get("adaptation") if isinstance(_CURR, dict) else None
+    _train_ctrl = TrainingController(report_dir=str(ckpt_dir), adaptation=_adaptation_cfg or {})
     _train_ctrl.set_recipe(str(model_name))
     _ctrl_stop_early = False
 
@@ -1733,6 +1741,13 @@ def supervised_train(
             _TRAIN_LOGGER.on_epoch_start(ep, total_epochs=args.epochs, seq_len=_seq_len_for_epoch(ep))
         curr_seq_len = _seq_len_for_epoch(ep)
         _active_seq_len = curr_seq_len
+
+        # Advance difficulty stage from schedule
+        _diff_sched = _CURR.get("difficulty_schedule") if isinstance(_CURR, dict) else None
+        if _diff_sched:
+            for _ds_entry in sorted(_diff_sched, key=lambda e: int(e.get("epoch_start", 0))):
+                if ep >= int(_ds_entry.get("epoch_start", 0)):
+                    _active_diff_stage = int(_ds_entry.get("max_difficulty", _active_diff_stage))
 
         if _last_logged_seq_len != curr_seq_len:
             _log_info(f"[Curriculum] Epoch {ep + 1}: active seq_len={curr_seq_len}")

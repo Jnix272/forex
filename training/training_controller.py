@@ -18,13 +18,23 @@ from typing import Any
 
 
 class TrainingController:
-    def __init__(self, report_dir: str = "logs"):
+    def __init__(self, report_dir: str = "logs", adaptation: dict | None = None):
         self.logger = logging.getLogger(__name__)
         self.report_path = Path(report_dir) / "training_control_report.json"
 
         self.train_loss_history: list[float] = []
         self.val_loss_history: list[float] = []
         self.val_sharpe_history: list[float] = []
+
+        _adap = adaptation or {}
+        self.collapse_drop: float = float(_adap.get("collapse_drop", 0.50))
+        self.collapse_min_peak: float = float(_adap.get("collapse_min_peak", 0.50))
+        self.collapse_lr_mult: float = float(_adap.get("collapse_lr_mult", 0.50))
+        self.stable_window: int = int(_adap.get("stable_window", 3))
+        self.recovery_window: int = int(_adap.get("recovery_window", 2))
+        self.min_epochs_per_stage: int = int(_adap.get("min_epochs_per_stage", 1))
+        self.advance_lr_mult: float = float(_adap.get("advance_lr_mult", 1.0))
+        self.collapse_reversal_threshold: float = float(_adap.get("collapse_reversal_threshold", -0.10))
 
         self.report_data: dict[str, Any] = {
             "model_recipe_used": "unknown",
@@ -85,9 +95,11 @@ class TrainingController:
         if len(self.val_sharpe_history) >= 4:
             peak_sharpe = max(self.val_sharpe_history)
             current_sharpe = self.val_sharpe_history[-1]
-            if peak_sharpe > 0.5 and current_sharpe < (peak_sharpe * 0.5):
+            collapse_threshold = peak_sharpe * (1.0 - self.collapse_drop)
+            if peak_sharpe > self.collapse_min_peak and current_sharpe < collapse_threshold:
                 msg = (
-                    f"Epoch {epoch}: Sharpe collapse detected (Peak {peak_sharpe:.2f} -> Current {current_sharpe:.2f})."
+                    f"Epoch {epoch}: Sharpe collapse detected (Peak {peak_sharpe:.2f} -> Current {current_sharpe:.2f}, "
+                    f"threshold {collapse_threshold:.2f})."
                 )
                 self.logger.warning(msg)
                 self.report_data["overfitting_signals_detected"].append(msg)
@@ -104,7 +116,7 @@ class TrainingController:
         optimizer=None,
         scheduler=None,
         curriculum_state: dict[str, Any] | None = None,
-        lr_mult: float = 0.5,
+        lr_mult: float | None = None,
         dropout_bump: float = 0.05,
         dropout_ceil: float = 0.50,
         epoch: int | None = None,
@@ -114,6 +126,8 @@ class TrainingController:
 
         Returns a summary of what changed (for logs / early-stop decisions).
         """
+        # Use adaptation-configured multiplier; fall back to legacy default only if unconfigured
+        _lr_mult = lr_mult if lr_mult is not None else self.collapse_lr_mult
         applied: dict[str, Any] = {
             "lower_lr": False,
             "increase_dropout": False,
@@ -127,15 +141,15 @@ class TrainingController:
         if responses.get("lower_lr") and optimizer is not None:
             for pg in optimizer.param_groups:
                 old = float(pg["lr"])
-                pg["lr"] = max(1e-7, old * lr_mult)
+                pg["lr"] = max(1e-7, old * _lr_mult)
                 applied["new_lr"] = float(pg["lr"])
             if scheduler is not None:
                 for attr in ("base_lrs", "_last_lr", "initial_lrs", "max_lrs", "min_lrs"):
                     vals = getattr(scheduler, attr, None)
                     if isinstance(vals, list):
-                        setattr(scheduler, attr, [v * lr_mult for v in vals])
+                        setattr(scheduler, attr, [v * _lr_mult for v in vals])
             applied["lower_lr"] = True
-            msg = f"Epoch {ep}: LR x{lr_mult} → {applied['new_lr']}"
+            msg = f"Epoch {ep}: LR x{_lr_mult} → {applied['new_lr']}"
             self.log_lr_change(msg)
             self.logger.info("[TrainingController] %s", msg)
 
