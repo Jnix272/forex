@@ -97,10 +97,9 @@ def _scan_outcomes_cpar_numba(
         cpar_short_out[i] = cpar_s
         
         # Continuous scalar label for regression
-        label_val = (cpar_l - cpar_s) / 2.0
-        label_out[i] = label_val
-        
-        reward_out[i] = label_val
+        reward_val = (cpar_l - cpar_s) / 2.0
+        reward_out[i] = reward_val
+        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -158,9 +157,91 @@ def _scan_outcomes_cpar_sequential(
         
         cpar_long_out[i] = cpar_l
         cpar_short_out[i] = cpar_s
-        label_val = (cpar_l - cpar_s) / 2.0
-        label_out[i] = label_val
-        reward_out[i] = label_val
+        reward_val = (cpar_l - cpar_s) / 2.0
+        reward_out[i] = reward_val
+        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
+
+    return cpar_long_out, cpar_short_out, reward_out, label_out
+
+
+# Regime -> lookahead mapping: 0=low_vol(trending), 1=normal, 2=high_vol(volatile)
+_REGIME_LOOKAHEAD: dict[int, int] = {0: 20, 1: 12, 2: 6}
+
+
+def _build_lookahead_array(
+    regime_class: np.ndarray | None,
+    n: int,
+    default: int,
+) -> np.ndarray:
+    """Return per-bar lookahead array based on regime_class integers."""
+    if regime_class is None or len(regime_class) == 0:
+        return np.full(n, default, dtype=np.int32)
+    arr = np.full(n, default, dtype=np.int32)
+    for regime_val, bars_val in _REGIME_LOOKAHEAD.items():
+        mask = regime_class == regime_val
+        arr[mask] = bars_val
+    return arr
+
+
+def _scan_outcomes_cpar_dynamic(
+    exit_long_path: np.ndarray,
+    exit_short_path: np.ndarray,
+    entry_long: np.ndarray,
+    entry_short: np.ndarray,
+    atr: np.ndarray,
+    penalty: float,
+    lookahead_arr: np.ndarray,
+    execution_delay_bars: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Sequential CPAR scan with per-bar dynamic lookahead."""
+    n = exit_long_path.shape[0]
+    delay = max(0, int(execution_delay_bars))
+    max_lookahead = int(lookahead_arr.max()) if len(lookahead_arr) > 0 else 1
+    n_valid = n - max_lookahead - delay
+
+    if n_valid <= 0:
+        z = np.zeros(0, dtype=np.float32)
+        return z, z, z, z
+
+    cpar_long_out = np.zeros(n_valid, dtype=np.float32)
+    cpar_short_out = np.zeros(n_valid, dtype=np.float32)
+    label_out = np.zeros(n_valid, dtype=np.float32)
+    reward_out = np.zeros(n_valid, dtype=np.float32)
+
+    for i in range(n_valid):
+        vb = int(lookahead_arr[i]) if i < len(lookahead_arr) else max_lookahead
+        ei = i + delay
+        if ei + vb >= n:
+            vb = n - ei - 1
+        if vb < 1:
+            continue
+        el = entry_long[ei]
+        es = entry_short[ei]
+        vol = atr[ei] if atr[ei] > 1e-8 else 1e-8
+
+        end_idx = ei + vb
+        fwd_ret_long = exit_long_path[end_idx] - el
+        min_p = el
+        for t in range(1, vb + 1):
+            if exit_long_path[ei + t] < min_p:
+                min_p = exit_long_path[ei + t]
+        mae_long = max(0.0, el - min_p)
+        cpar_l = (fwd_ret_long / vol) - (penalty * mae_long / vol)
+
+        fwd_ret_short = es - exit_short_path[end_idx]
+        max_p = es
+        for t in range(1, vb + 1):
+            if exit_short_path[ei + t] > max_p:
+                max_p = exit_short_path[ei + t]
+        mae_short = max(0.0, max_p - es)
+        cpar_s = (fwd_ret_short / vol) - (penalty * mae_short / vol)
+
+        cpar_long_out[i] = cpar_l
+        cpar_short_out[i] = cpar_s
+        reward_val = (cpar_l - cpar_s) / 2.0
+        reward_out[i] = reward_val
+        # The 'label' column must be discrete {-1, 0, 1} for row_quality checks
+        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -177,6 +258,7 @@ def compute_triple_barrier_labels(
     use_numba: bool | None = None,
     parallel: bool | None = None,
     pair: str | None = None,
+    dynamic_lookahead: bool = True,
 ) -> pd.DataFrame:
     """
     Computes Continuous Path-Adjusted Reward (CPAR) labels for regression.
@@ -237,7 +319,19 @@ def compute_triple_barrier_labels(
 
     n = len(close)
     delay = max(0, int(execution_delay_bars))
-    n_valid = n - vertical_bars - delay
+
+    # Dynamic regime-based lookahead
+    regime_arr: np.ndarray | None = None
+    if dynamic_lookahead and "regime_class" in features.columns:
+        regime_arr = np.asarray(features["regime_class"].reindex(features.index).ffill().fillna(1), dtype=np.int32)
+
+    if regime_arr is not None:
+        lookahead_arr = _build_lookahead_array(regime_arr, n, vertical_bars)
+        max_lookahead = int(lookahead_arr.max())
+        n_valid = n - max_lookahead - delay
+    else:
+        lookahead_arr = None
+        n_valid = n - vertical_bars - delay
 
     if n_valid <= 0:
         z = np.zeros(0, dtype=np.float32)
@@ -246,7 +340,12 @@ def compute_triple_barrier_labels(
             index=features.index,
         ).iloc[0:0]
 
-    if use_numba and _NUMBA_IMPORT_OK:
+    if lookahead_arr is not None:
+        cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_dynamic(
+            bid, ask, entry_long, entry_short, atr, penalty, lookahead_arr, delay
+        )
+        backend = "dynamic"
+    elif use_numba and _NUMBA_IMPORT_OK:
         cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_numba(
             bid, ask, entry_long, entry_short, atr, penalty, vertical_bars, n_valid, delay
         )

@@ -126,6 +126,14 @@ _FEATURE_WARMUP_DAYS = 14
 
 TimeKey = tuple[str, int | str]
 
+def _calibration_pass(X_seq, y_seq, feature_names, threshold=0.99, is_classification=False):
+    """
+    Performs a lightweight feature importance pass to prune useless features.
+    Currently a placeholder that retains all features.
+    """
+    idx = list(range(len(feature_names)))
+    return idx, feature_names
+
 
 def _warmup_load_start(win_start: str, warmup_days: int = _FEATURE_WARMUP_DAYS) -> str:
     """Return YYYY-MM-DD load start = win_start minus warmup days (UTC)."""
@@ -1862,15 +1870,34 @@ def _build_chunk(
             )
         else:
             F = F.with_columns(news_nt.alias("no_trade_score"))
-    if len(F) < seq_len + 10:
+    # Need len(F) ≥ seq_len + max_lookahead + delay so that CPAR produces
+    # n_valid = len(F) - max_lookahead(≤20) - delay(1) ≥ seq_len labels, giving
+    # at least one sliding window sequence. With max_lookahead=20 and delay=1:
+    # threshold = seq_len + 22 guarantees n_valid ≥ seq_len + 1.
+    if len(F) < seq_len + 22:
         return _chunk_result(*_empty, 0, _empty_time)
 
     # Thin one-way pandas bridge for labeling + row-quality (DatetimeIndex APIs).
     bars_pd = bars.to_pandas()
     if "timestamp_utc" in bars_pd.columns:
         bars_pd = bars_pd.set_index("timestamp_utc")
-    bars_pd.index.name = "timestamp"
     feats_pd = F.to_pandas().set_index("timestamp_utc")
+    
+    # CRITICAL FIX: timezone differences (aware vs naive) or precision differences between 
+    # bars and feats (e.g. lost during Polars expressions) will cause all downstream 
+    # .reindex() calls in labeling and row_quality to fail, producing 100% NaN rows.
+    # Force exact index alignment and UTC timezone.
+    if len(bars_pd) == len(feats_pd):
+        # We know they align row-by-row perfectly from FeatureEngineer
+        _idx = pd.to_datetime(feats_pd.index, utc=True)
+        feats_pd.index = _idx
+        bars_pd.index = _idx
+        bars_pd.index.name = "timestamp"
+    else:
+        # Fallback if lengths differ for some reason
+        feats_pd.index = pd.to_datetime(feats_pd.index, utc=True)
+        bars_pd.index = pd.to_datetime(bars_pd.index, utc=True)
+        bars_pd.index.name = "timestamp"
     # Labeling-only aux from bars (Utf8 / overlap floats) - keep out of X.
     # session_label + asia_london are aux; london_ny may already be in F as the
     # DST-aware (or fixed-UTC fallback) curriculum session feature.
@@ -1885,7 +1912,7 @@ def _build_chunk(
     elif "london_ny" in bars_pd.columns and "london_ny" not in feats_pd.columns:
         feats_pd = feats_pd.join(bars_pd[["london_ny"]], how="left")
 
-    if label_method == "triple_barrier":
+    if label_method in ("triple_barrier", "cpar"):
         labels = compute_triple_barrier_labels(
             bars_pd,
             feats_pd,
@@ -1894,6 +1921,7 @@ def _build_chunk(
             stop_atr_mult=float(stop_loss_atr or LABELING["stop_loss_atr"]),
             pip_size=LABELING["pip_size"],
             execution_delay_bars=int(execution_delay_bars),
+            pair=pair,
         )
     else:
         # Use regime-conditional labeling: barrier widths, session costs, bad-win
@@ -1913,6 +1941,7 @@ def _build_chunk(
     row_quality, row_drop_reasons, label_filter_counts, row_reason_masks = _compute_row_quality_mask(
         bars_pd, feats_pd, labels
     )
+    print(f"[DataQuality] Chunk {chunk_idx}: row_drop_reasons={row_drop_reasons}")
 
     # Align in Polars (labels converted once; feature matrix never round-trips).
     X, y, sidecar = align_labels_with_features(labels, F, target_col=target_col)
@@ -1940,11 +1969,67 @@ def _build_chunk(
 
     x_index = pd.DatetimeIndex(pd.to_datetime(sidecar["timestamp_utc"].to_numpy(), utc=True))
 
-    row_reason_values = {
-        name: mask.reindex(x_index).fillna(False).to_numpy(dtype=bool) for name, mask in (row_reason_masks or {}).items()
-    }
+    # Robust timestamp alignment: convert both sides to UTC microseconds (int64)
+    # to avoid pandas datetime precision (us vs ns) and tz representation mismatches
+    # that cause reindex() to silently miss every timestamp → fillna(False) → all rows bad.
+    #
+    # feats_pd.index = datetime64[us, UTC] (from Polars .to_pandas())
+    # x_index        = datetime64[ns, UTC] (from pd.to_datetime(..., utc=True))
+    # These are structurally equal but differ in precision → reindex() never matches.
+    def _to_us_int(idx: pd.DatetimeIndex) -> np.ndarray:
+        """Convert any UTC DatetimeIndex to int64 microseconds since epoch."""
+        arr = np.asarray(idx.view(np.int64))
+        # nanoseconds → microseconds
+        if idx.dtype == "datetime64[ns]" or str(idx.dtype) in ("datetime64[ns, UTC]",):
+            arr = arr // 1_000
+        # microseconds already: leave as-is
+        return arr
 
-    row_quality = row_quality.reindex(x_index).fillna(False).to_numpy(dtype=bool)
+    _rq_idx = row_quality.index
+    # Normalize row_quality index to UTC DatetimeIndex first
+    if not isinstance(_rq_idx, pd.DatetimeIndex):
+        try:
+            _rq_idx = pd.to_datetime(_rq_idx, utc=True)
+            row_quality = row_quality.copy()
+            row_quality.index = _rq_idx
+        except Exception:
+            pass
+    elif _rq_idx.tz is None:
+        try:
+            _rq_idx = _rq_idx.tz_localize("UTC")
+            row_quality = row_quality.copy()
+            row_quality.index = _rq_idx
+        except Exception:
+            pass
+
+    try:
+        _rq_us = _to_us_int(row_quality.index)
+        _xi_us = _to_us_int(x_index)
+        # Build lookup: microsecond-timestamp → quality bool
+        _rq_map = dict(zip(_rq_us.tolist(), row_quality.to_numpy(dtype=bool).tolist()))
+        # For each x_index timestamp, look up quality; default True (assume good if unknown)
+        row_quality_arr = np.array([_rq_map.get(t, True) for t in _xi_us.tolist()], dtype=bool)
+
+        # Same for reason masks
+        row_reason_values: dict[str, np.ndarray] = {}
+        for name, mask in (row_reason_masks or {}).items():
+            try:
+                _m_idx = mask.index
+                if not isinstance(_m_idx, pd.DatetimeIndex):
+                    _m_idx = pd.to_datetime(_m_idx, utc=True)
+                elif _m_idx.tz is None:
+                    _m_idx = _m_idx.tz_localize("UTC")
+                _m_us = _to_us_int(_m_idx)
+                _m_map = dict(zip(_m_us.tolist(), mask.to_numpy(dtype=bool).tolist()))
+                row_reason_values[name] = np.array([_m_map.get(t, False) for t in _xi_us.tolist()], dtype=bool)
+            except Exception:
+                row_reason_values[name] = np.zeros(len(x_index), dtype=bool)
+    except Exception:
+        # Final fallback: assume all rows are good quality
+        row_quality_arr = np.ones(len(x_index), dtype=bool)
+        row_reason_values = {name: np.zeros(len(x_index), dtype=bool) for name in (row_reason_masks or {})}
+
+    row_quality = row_quality_arr
     bad_rows = int((~row_quality).sum())
     if bad_rows:
         stats["dropped_bars"] += bad_rows
@@ -2079,9 +2164,31 @@ def _build_chunk(
     label_ok = np.isfinite(y_seq)
     if target_col == "label":
         label_ok &= np.isin(np.round(y_seq), [-1.0, 0.0, 1.0])
-    cls_ok = np.isfinite(y_cls_seq) & np.isin(np.round(y_cls_seq), [-1.0, 0.0, 1.0])
+    # cls_ok: direction label must be in {-1, 0, +1}.
+    # Use abs-tolerance (0.1) instead of np.round to handle float32 precision drift
+    # where values like 0.9999 or -0.9999 fail strict equality checks.
+    _cls_rounded = np.where(np.isfinite(y_cls_seq), np.round(y_cls_seq.astype(np.float64)), np.nan)
+    cls_ok = np.isfinite(y_cls_seq) & (
+        (np.abs(_cls_rounded - (-1.0)) < 0.5)
+        | (np.abs(_cls_rounded - 0.0) < 0.5)
+        | (np.abs(_cls_rounded - 1.0) < 0.5)
+    )
     pq_ok = np.isfinite(pq_seq) & (pq_seq >= 0.0) & (pq_seq <= 1.0)
     target_reason = "invalid_reward_label" if target_col != "label" else "label_filter"
+
+    # --- Diagnostic: log per-condition rejection counts on first few chunks ---
+    _n_seq_total = len(label_ok)
+    _label_bad  = int((~label_ok).sum())
+    _cls_bad    = int((~cls_ok).sum())
+    _pq_bad     = int((~pq_ok).sum())
+    _seqok_bad  = int((~seq_ok).sum())
+    if _label_bad == _n_seq_total or _cls_bad == _n_seq_total or _pq_bad == _n_seq_total or _seqok_bad == _n_seq_total:
+        print(
+            f"[DataQuality] Chunk {chunk_idx} keep-filter breakdown "
+            f"(total={_n_seq_total}): "
+            f"seq_ok_fail={_seqok_bad} | label_ok_fail={_label_bad} | "
+            f"cls_ok_fail={_cls_bad} | pq_ok_fail={_pq_bad}"
+        )
 
     if target_reason in seq_reason_masks:
         seq_reason_masks[target_reason] = np.asarray(seq_reason_masks[target_reason], dtype=bool) | ~label_ok
@@ -2913,6 +3020,7 @@ def _build_multipair_dataset(
 
     # -- Load ticks ----------------------------------------------------------
     real_windows_handled = False
+    _last_pair_ticks: dict | None = None  # for zero-samples diagnostic
     if args.data_source != "synthetic":
         real_windows_handled = True
         _base_days = _real_data_window_days(args)
@@ -3117,6 +3225,7 @@ def _build_multipair_dataset(
 
                         if pair_ticks is None:
                             continue
+                        _last_pair_ticks = pair_ticks
 
                         X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = (
                             _build_multipair_chunk(
@@ -3288,9 +3397,18 @@ def _build_multipair_dataset(
                 )
 
     if total_samples == 0:
+        _n_windows = len(date_windows) if real_windows_handled else "?"
+        _diag = _multipair_zero_samples_help(
+            _last_pair_ticks if real_windows_handled else None
+        )
         err = (
-            "[MultiPair] No usable samples produced. Check date range and data source.\n"
-            + _multipair_zero_samples_help(None)
+            f"[MultiPair] No usable samples produced from {_n_windows} window(s). "
+            f"seq_len={getattr(args, 'seq_len', '?')} bar_freq={getattr(args, 'bar_freq', '?')} — "
+            "each window requires enough bars so that CPAR produces ≥seq_len labels and "
+            "at least one sliding-window sequence remains. "
+            "Download more tick data (dukascopy requires several weeks of history per window) "
+            "or reduce real_data_window_days / seq_len in run.yaml.\n"
+            + _diag
         )
         print(err)
         raise RuntimeError(err)

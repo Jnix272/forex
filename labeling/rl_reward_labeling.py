@@ -520,6 +520,7 @@ def compute_rl_reward_labels_regime(
         exit_short_path = entry_long.copy()
 
     atr = np.asarray(features[atr_col], dtype=np.float64) if atr_col in features.columns else np.full(len(close), 0.0005)
+    
     valid_market = (
         np.isfinite(close)
         & np.isfinite(entry_long)
@@ -916,7 +917,7 @@ def align_labels_with_features(
         features_pl = features_pl.with_columns(pl.col("timestamp_utc").cast(ts_dtype))
         _sidecar_cols = [
             c
-            for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side")
+            for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side", "bet_size")
             if c in labels_pl.columns
         ]
         if target_col not in labels_pl.columns:
@@ -937,7 +938,7 @@ def align_labels_with_features(
         return X, y, sidecar
 
     _sidecar_cols = [
-        c for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side") if c in labels_df.columns
+        c for c in ("label", "path_quality", "confidence_target", "no_trade", "optimal_side", "bet_size") if c in labels_df.columns
     ]
     if target_col not in labels_df.columns:
         raise KeyError(f"target_col '{target_col}' not found in labels")
