@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 def _cfg_float(key: str, default: float) -> float:

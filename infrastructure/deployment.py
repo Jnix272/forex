@@ -20,7 +20,8 @@ import pandas as pd
 
 from config.settings import PATHS
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 try:
     import torch

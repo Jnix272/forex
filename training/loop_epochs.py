@@ -42,6 +42,7 @@ def _train_batch(
     yb,
     y_cls_b,
     y_conf_b,
+    bet_size_b,
     batch_idx_t,
     *,
     crit,
@@ -84,6 +85,7 @@ def _train_batch(
             yb,
             y_cls_b,
             y_conf_b,
+            bet_size_b,
             crit,
             classification,
             multitask,
@@ -209,7 +211,7 @@ def train_epoch(
                     pbar.update(1)
                     pbar.set_postfix(loss="bad-tgt-skip")
                 continue
-            xb, yb, y_cls_b, y_conf_b, batch_idx_t = prepared
+            xb, yb, y_cls_b, y_conf_b, bet_size_b, batch_idx_t = prepared
 
             status, loss_val, nan_skips = _train_batch(
                 model,
@@ -217,6 +219,7 @@ def train_epoch(
                 yb,
                 y_cls_b,
                 y_conf_b,
+                bet_size_b,
                 batch_idx_t,
                 crit=crit,
                 classification=classification,
@@ -436,12 +439,22 @@ def validate_epoch(
     def _accumulate_class_diag(logits: torch.Tensor, y_cls_idx: torch.Tensor) -> torch.Tensor:
         """Update class diagnostics; return pred_cls."""
         nonlocal correct, n_acc, pred_counts, true_counts, confusion, logits_sum, probs_sum, diag_true_counts
-        pred_cls = logits.argmax(-1)
-        correct += (pred_cls == y_cls_idx).sum()
+        
+        if logits.ndim == 1 or logits.shape[-1] == 1:
+            pred_cls = (torch.sign(logits).long() + 1).reshape(-1).clamp(0, 2)
+            probs = torch.zeros(logits.shape[0], 3, device=logits.device)
+            probs.scatter_(1, pred_cls.unsqueeze(-1).clamp(0, 2), 1.0)
+            logits_3d = probs.clone()
+        else:
+            pred_cls = logits.argmax(-1)
+            probs = torch.softmax(logits.float(), dim=-1)
+            logits_3d = logits.float()
+
+        correct += (pred_cls.reshape(-1) == y_cls_idx.reshape(-1)).sum()
         n_acc += int(y_cls_idx.numel())
         pred_counts += torch.bincount(pred_cls.reshape(-1).clamp(0, 2), minlength=3)[:3]
         true_counts += torch.bincount(y_cls_idx.reshape(-1).clamp(0, 2), minlength=3)[:3]
-        probs = torch.softmax(logits.float(), dim=-1)
+        
         t_flat = y_cls_idx.reshape(-1).clamp(0, 2)
         p_flat = pred_cls.reshape(-1).clamp(0, 2)
         for _t, _p in zip(t_flat, p_flat, strict=False):
@@ -450,21 +463,22 @@ def validate_epoch(
             _mask_cls = t_flat == _cls
             if bool(_mask_cls.any()):
                 diag_true_counts[_cls] += int(_mask_cls.sum())
-                logits_sum[_cls] += logits.float()[_mask_cls].sum(dim=0)
+                logits_sum[_cls] += logits_3d[_mask_cls].sum(dim=0)
                 probs_sum[_cls] += probs[_mask_cls].sum(dim=0)
         return pred_cls
 
     with torch.no_grad():
         for i, batch in enumerate(loader):
             try:
-                xb, yb, y_cls_b, y_conf_b, _ = _unpack_batch(batch, device)
+                xb, yb, y_cls_b, y_conf_b, bet_size, _ = _unpack_batch(batch, device)
                 if seq_len is not None and xb.shape[1] > seq_len:
                     xb = xb[:, -seq_len:, :]
-                xb, yb, y_cls_b, y_conf_b, keep = _sanitize_batch_tensors(
+                xb, yb, y_cls_b, y_conf_b, bet_size, keep = _sanitize_batch_tensors(
                     xb,
                     yb,
                     y_cls_b,
                     y_conf_b,
+                    bet_size,
                     skip_bad_targets=True,
                 )
                 if keep is not None and not bool(keep.all()):
@@ -479,6 +493,8 @@ def validate_epoch(
                         y_cls_b = y_cls_b[keep]
                     if y_conf_b is not None:
                         y_conf_b = y_conf_b[keep]
+                    if bet_size is not None:
+                        bet_size = bet_size[keep]
                 if _mask is not None:
                     xb = xb * _mask
 
@@ -514,6 +530,7 @@ def validate_epoch(
                             y_conf=y_conf_b,
                             multitask=multitask,
                             direction_only=direction_only,
+                            bet_size=bet_size,
                         )
                         if not (
                             torch.isfinite(loss) and torch.isfinite(logits).all() and torch.isfinite(ret_hat).all()
@@ -527,7 +544,14 @@ def validate_epoch(
                         pred_cls = _accumulate_class_diag(logits, y_cls_idx)
                         d = pred_cls.float() - 1.0
                     elif classification:
-                        loss = crit(pred, y_cls_idx)
+                        loss = _compute_loss(
+                            pred,
+                            crit,
+                            yb,
+                            classification=True,
+                            y_cls=y_cls_b,
+                            bet_size=bet_size,
+                        )
                         if not (torch.isfinite(loss) and torch.isfinite(pred).all()):
                             nan_skips += 1
                             if pbar is not None:
@@ -538,16 +562,17 @@ def validate_epoch(
                         pred_cls = _accumulate_class_diag(pred, y_cls_idx)
                         d = pred_cls.float() - 1.0
                     else:
-                        if multitask or isinstance(crit, MultiTaskLoss):
-                            y_cls_idx = _direction_class_index(yb, y_cls_b, classification=True)
-                            if isinstance(crit, MultiTaskLoss):
-                                loss = cast(Any, crit).ce(pred, y_cls_idx.reshape(-1).clamp(0, 2)).mean()
-                            else:
-                                loss = crit(pred, y_cls_idx)
-                            yb_reg = _match_target_shape(pred, yb)
-                        else:
-                            yb_reg = _match_target_shape(pred, yb)
-                            loss = crit(pred, yb_reg)
+                        loss = _compute_loss(
+                            pred,
+                            crit,
+                            yb,
+                            classification=False,
+                            y_cls=y_cls_b,
+                            y_conf=y_conf_b,
+                            multitask=multitask,
+                            bet_size=bet_size,
+                        )
+                        yb_reg = _match_target_shape(pred, yb)
                         if not (torch.isfinite(loss) and torch.isfinite(pred).all()):
                             nan_skips += 1
                             if pbar is not None:

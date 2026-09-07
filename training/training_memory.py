@@ -301,11 +301,7 @@ class TrainingMemory:
                 args.dropout = round(blended, 4)
                 applied.append(f"dropout {cur:.3f} -> {blended:.3f} (rec={rec_do:.3f})")
 
-        if rec_pat is not None and hasattr(args, "patience"):
-            cur = int(getattr(args, "patience", rec_pat))
-            if cur != rec_pat:
-                args.patience = rec_pat
-                applied.append(f"patience {cur} -> {rec_pat}")
+
 
         # Only lower max epochs if pattern is early_peak (cap at best+4)
         if rec_ep is not None and hasattr(args, "epochs") and pattern == "early_peak":

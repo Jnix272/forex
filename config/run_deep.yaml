@@ -75,25 +75,25 @@ strategy:
 
 training:
   amp: true
-  batch_size: 256
+  batch_size: 4096  # GPU: large batch for deep models
   epochs: 40
   grad_accum_steps: 2
   grad_clip: 0.75
-  label_method: rl_reward
+  num_classes: 1
+  label_method: cpar
   label_smoothing: 0.05
-  loss: sharpe_huber
+  huber_delta: 1.0  # Default Huber delta
   lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
   lr_warmup_epochs: 2
   max_bad_frac: 0.05
   max_zero_frac: 0.80
-  patience: 6
   resume: false
   save_every: 5
   seed: 1337
   seq_len: 120
-  sharpe_annualization_factor: null
+  sharpe_annualization_factor: 325.0
   fx_full_day: true
   sharpe_weight: 0.25
   swa_enabled: true
@@ -105,8 +105,6 @@ training:
   val_split: 0.2
   weight_decay: 0.001
   direction_weight: 0.75
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
   cross_asset_mode: auto
   cross_asset_provider: auto
 
@@ -199,4 +197,5 @@ quick:
   enabled: false
 
 maturity:
-  stage: paper
+  stage: paper
+

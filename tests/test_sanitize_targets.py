@@ -26,7 +26,7 @@ def test_sanitize_drops_bad_targets_with_counter_and_warning(capsys):
     y_cls = torch.tensor([0.0, 1.0])
     y_conf = torch.tensor([0.5, 0.5])
 
-    _xb_o, yb_o, _y_cls_o, _y_conf_o, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
+    _xb_o, yb_o, _y_cls_o, _y_conf_o, _bet_size, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf, None)
 
     assert keep is not None
     assert keep.tolist() == [False, True]
@@ -47,7 +47,7 @@ def test_sanitize_fail_closed_when_skip_disabled():
     xb = torch.ones(1, 2, 2)
     yb = torch.tensor([float("nan")])
     try:
-        _sanitize_batch_tensors(xb, yb, None, None, skip_bad_targets=False)
+        _sanitize_batch_tensors(xb, yb, None, None, None, skip_bad_targets=False)
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "not zeroed" in str(exc) or "non-finite" in str(exc)

@@ -73,17 +73,12 @@ training:
   lr_warmup_epochs: 2
   seq_len: "2h30m"
   val_split: 0.2
-  patience: 5
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
 
-  # Simple loss — no Sharpe-proxy complexity for a probe
-  loss: cross_entropy
-  label_method: rl_reward
+  loss: sharpe_huber
+  label_method: cpar
+  num_classes: 1
 
-  # Sharpe display-only (early-stop uses it but not the loss)
-  # bar_freq=5m → sqrt(252 × 78) = 140.2
-  sharpe_annualization_factor: 140.0
+  sharpe_annualization_factor: null  # auto-detect: sqrt(bars_per_year / lookahead_bars)
   sharpe_weight: 0.25
 
   # Resume — critical for Colab reconnects

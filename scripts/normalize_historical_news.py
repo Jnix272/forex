@@ -90,7 +90,10 @@ def normalize_news(input_path: Path, output_path: Path) -> None:
     out = (
         df.with_columns(
             [
-                pl.col("timestamp_utc").cast(pl.Utf8).str.strip_chars(),
+                pl.col("timestamp_utc")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .str.to_datetime(time_unit="us", time_zone="UTC", strict=False),
                 pl.col("event_type").fill_null("headline").cast(pl.Utf8),
                 pl.col("headline").fill_null("").cast(pl.Utf8),
                 pl.col("url").fill_null("").cast(pl.Utf8),
@@ -102,6 +105,7 @@ def normalize_news(input_path: Path, output_path: Path) -> None:
                 pl.lit("").alias("forecast"),
             ]
         )
+        .drop_nulls("timestamp_utc")
         .select(
             [
                 "timestamp_utc",

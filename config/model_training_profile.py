@@ -133,8 +133,8 @@ MODEL_PROFILES = {
         has_conv=False,
         capacity="high",
         inductive_bias="transformer",
-        primary_loss="cross_entropy",
-        secondary_loss="multitask",
+        primary_loss="sharpe_huber",
+        secondary_loss="directional_huber",
         adversarial_eps=0.3,
         adversarial_method="pgd",
         curriculum_mode="combined",
@@ -172,8 +172,12 @@ MODEL_PROFILES = {
         si_dynamic=True,
         si_lambda_min=0.05,
         si_lambda_max=1.5,
-        pretrain_method="byol_or_tscl",
-        pretrain_framework="lightly",
+        # byol via custom: lightly framework trains a separate encoder that
+        # never loads weights back into the supervised model, making it useless
+        # for representation transfer. BYOL via custom directly pretrains the
+        # iTransformer backbone and loads weights before supervised training.
+        pretrain_method="byol",
+        pretrain_framework="custom",
     ),
     "mamba": ModelTrainingProfile(
         model_name="mamba",
@@ -249,9 +253,41 @@ MODEL_PROFILES = {
         si_dynamic=False,
         si_lambda_min=0.0,
         si_lambda_max=0.3,
-        pretrain_method="tscl",
+        # byol: low-capacity model; TSCL needs batch >= 32 for useful negatives
+        # and the runner already falls back to BYOL at runtime when batch is too
+        # small. BYOL is stable without negative pairs and suits small encoders.
+        pretrain_method="byol",
         pretrain_framework="custom",
         swa_enabled=False,
+    ),
+    "patchtst": ModelTrainingProfile(
+        model_name="patchtst",
+        has_attention=True,
+        has_conv=True,  # patch embedding uses Conv1d
+        has_lstm=False,
+        capacity="medium",
+        inductive_bias="transformer",
+        primary_loss="sharpe_huber",
+        secondary_loss="directional_huber",
+        adversarial_eps=0.3,
+        adversarial_method="pgd",
+        curriculum_mode="combined",
+        use_self_paced=True,
+        miner_feedback=True,
+        forgetting_threshold=0.12,
+        # SI: patch attention is prone to representation drift across data windows;
+        # light static SI stabilises patch-token interactions.
+        enable_si=True,
+        si_lambda=0.5,
+        si_dynamic=False,
+        si_lambda_min=0.0,
+        si_lambda_max=0.5,
+        # patch_mask: masks whole patches rather than individual timesteps,
+        # matching PatchTST's patch-level tokenisation exactly. "masked"
+        # (timestep-level) misaligns with the model's input granularity.
+        pretrain_method="patch_mask",
+        pretrain_framework="custom",
+        swa_enabled=True,
     ),
     "glm": ModelTrainingProfile(
         model_name="glm",
@@ -261,7 +297,7 @@ MODEL_PROFILES = {
         has_conv=False,
         has_graph=False,
         has_positional_encoding=False,
-        primary_loss="cross_entropy",
+        primary_loss="sharpe_huber",
         use_multitask=False,
         adversarial_enabled=False,
         use_self_paced=False,
@@ -373,8 +409,8 @@ def _derive_training_config(profile: ModelTrainingProfile) -> None:
     elif profile.inductive_bias == "temporal":
         profile.pretrain_method = "forecast"
     elif profile.inductive_bias == "transformer":
-        profile.pretrain_method = "byol_or_tscl"
-        profile.pretrain_framework = "lightly"
+        profile.pretrain_method = "byol"
+        profile.pretrain_framework = "custom"
     else:
         profile.pretrain_method = "masked"
 

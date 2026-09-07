@@ -1,7 +1,8 @@
 """Optimizer-step machinery for the supervised loop.
 
 Extracted verbatim from ``training.supervised_loop`` (refactor R5);
-re-exported there for import-path stability."""
+re-exported there for import-path stability.
+"""
 from __future__ import annotations
 
 import torch.nn as nn
@@ -71,12 +72,13 @@ def _optimizer_step(
             pbar.update(1)
             pbar.set_postfix(loss="NaN-grad-skip")
         return False, nan_skips
-    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    _maybe_warn_grad_norm(model, batch_idx)
-    # Snapshot params AND raw gradients before GC mutates p.grad in place, so
-    # SI's path integral is computed from the true (unclipped/raw) gradients.
+    # Snapshot params + RAW gradients BEFORE any in-place modification of p.grad
+    # (clipping, centralization).  Must come first so the SI path integral
+    # accumulates the true backward() gradients, not the clipped/centred ones.
     if si_module is not None:
         si_module.pre_step()
+    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    _maybe_warn_grad_norm(model, batch_idx)
     # Shared GC for both AMP (after unscale) and non-AMP paths.
     _centralize_gradients(model)
     if use_fp16_scaler:

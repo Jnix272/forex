@@ -374,12 +374,12 @@ def _direction_probe(
     bs = min(max(32, int(getattr(args, "batch_size", 128))), 256)
     train_dl = DataLoader(train_ds, batch_size=bs, shuffle=False, num_workers=0, pin_memory=False)
     val_dl = DataLoader(val_ds, batch_size=bs, shuffle=False, num_workers=0, pin_memory=False)
-    crit = nn.CrossEntropyLoss()
+    crit = nn.HuberLoss()
     opt = torch.optim.AdamW(model.parameters(), lr=max(float(getattr(args, "lr", 1e-4)), 1e-4), weight_decay=0.0)
     print(f"[DirectionProbe] START | samples={len(probe_train_idx):,} val={len(probe_val_idx):,} epochs={epochs}")
     from training.supervised_loop import train_epoch, validate_epoch
     last = {}
-    classification = True
+    classification = False
     for ep in range(epochs):
         tl = train_epoch(
             model,

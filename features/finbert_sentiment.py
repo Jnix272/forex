@@ -407,6 +407,18 @@ class SentimentPipeline:
         self._new_entries = 0  # entries added since last save
         self._backend: str | None = None
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove the unpicklable lock
+        if '_cache_lock' in state:
+            del state['_cache_lock']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Restore the lock
+        self._cache_lock = threading.Lock()
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def active_backend(self) -> str:

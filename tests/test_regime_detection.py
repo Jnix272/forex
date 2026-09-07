@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import polars as pl
 import pytest
+pytest.importorskip("hmmlearn")
 
 from features.regime_detection import (
     RegimeHMM,

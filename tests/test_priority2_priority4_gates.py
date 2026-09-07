@@ -47,7 +47,7 @@ class TestPriority2PromotionAudit(unittest.TestCase):
                 "calibration": {
                     "ece": 0.03,
                     "nll": 0.72,
-                    "accuracy": 0.58,
+                    "r2": 0.58,
                     "avg_confidence": 0.61,
                 },
             },
@@ -89,7 +89,7 @@ class TestPriority2PromotionAudit(unittest.TestCase):
         )
         _write_json(
             self.temp_dir / "train_summary.json",
-            {"model": "haelt", "calibration": {"ece": 0.4, "nll": 2.5, "accuracy": 0.4, "avg_confidence": 0.9}},
+            {"model": "haelt", "calibration": {"ece": 0.4, "nll": 2.5, "r2": 0.4, "avg_confidence": 0.9}},
         )
 
         report = validate_priority2_promotion(
@@ -98,7 +98,7 @@ class TestPriority2PromotionAudit(unittest.TestCase):
                 calibration=CalibrationGateConfig(
                     max_ece=0.08,
                     max_nll=1.25,
-                    max_confidence_accuracy_gap=0.10,
+                    max_confidence_r2_gap=0.10,
                 )
             ),
         )

@@ -74,7 +74,7 @@ class TestConfigPreflightAndWindowLoading(unittest.TestCase):
         shutil.rmtree(self.temp_dir)
 
     def test_preflight_accepts_diverse_recipe_losses(self) -> None:
-        for loss in ("cross_entropy", "sharpe_huber", "directional_huber", "asymmetric", "rmse"):
+        for loss in ("huber", "sharpe_huber", "directional_huber", "asymmetric", "rmse"):
             report = build_config_preflight_report(_args(loss=loss, checkpoint_dir=str(self.temp_dir)))
             self.assertTrue(report["ok"], (loss, report["errors"]))
             self.assertIn(loss, report["supported_losses"])
@@ -138,3 +138,4 @@ class TestConfigPreflightAndWindowLoading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

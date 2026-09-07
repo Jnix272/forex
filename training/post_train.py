@@ -479,7 +479,9 @@ def _promote_best_fold(
     <checkpoint_dir>/<model_name>_best.pt.
     """
     ckpt_dir = Path(checkpoint_dir)
-    use_sharpe = early_stop_metric == "sharpe"
+    use_sharpe = early_stop_metric in ("sharpe", "cost_sharpe")
+    # Metric label stored in deployment.json — must match the actual metric used.
+    metric_label = early_stop_metric if use_sharpe else "val_loss"
     best_fold = None
     best_score = None
     best_tie_breaker = None
@@ -505,8 +507,12 @@ def _promote_best_fold(
         gen_gap = None
         if history and "train_loss" in history and "val_loss" in history:
             try:
-                # Calculate generalization gap at the last epoch
-                gen_gap = history["val_loss"][-1] - history["train_loss"][-1]
+                # Use gen gap at the best val_loss epoch, not the last epoch, since
+                # the promoted checkpoint IS the best epoch, not the final one.
+                tr_losses = history["train_loss"]
+                va_losses = history["val_loss"]
+                best_ep = int(np.argmin(va_losses)) if va_losses else len(va_losses) - 1
+                gen_gap = float(va_losses[best_ep]) - float(tr_losses[best_ep])
             except Exception:
                 pass
 
@@ -593,7 +599,6 @@ def _promote_best_fold(
         print(f"[BestFold] {model_name}: fold {best_fold} checkpoint not found at {src_flat} or {src_nested}")
         return
 
-    metric_label = "sharpe" if use_sharpe else "val_loss"
     metric_val = best_score if use_sharpe else -best_score
 
     # Challenger vs Production Gate
@@ -621,7 +626,7 @@ def _promote_best_fold(
                 else:
                     # loss direction: lower is better - challenger wins only if
                     # strictly lower than prod by at least min_delta
-                    if metric_val >= prod_metric - min_delta:
+                    if metric_val > prod_metric - min_delta:
                         reject_reason = f"Rejected: new loss {metric_val:.4f} is not significantly lower than deployed {prod_metric:.4f} (needs <{prod_metric - min_delta:.4f})"
                         accepted = False
 
@@ -749,7 +754,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         }
 
     ckpt_dir = Path(args.checkpoint_dir)
-    getattr(args, "loss", "") in ("cross_entropy", "multi_task", "asymmetric_directional")  # noqa: B015
+    getattr(args, "loss", "") in ("multi_task", "asymmetric_directional")  # noqa: B015
 
     if model_name == "ensemble":
         ckpt_path = ckpt_dir / "ensemble" / "ensemble_meta_best.pt"
@@ -933,7 +938,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
     # Extract metrics for PromotionGate
 
     pnls = (
-        bt_metrics.pop("signals_df", pd.DataFrame())["pnl_pips"].tolist()
+        bt_metrics.pop("signals_df", pd.DataFrame())["pnl_pips"].to_list()
         if "signals_df" in bt_metrics and "pnl_pips" in bt_metrics["signals_df"]
         else []
     )
@@ -1074,7 +1079,7 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         if len(conf_traded) > 0 and conf_traded.std() > 1e-6:
             sweep = gate.sweep_confidence_threshold(
                 trade_pnls=pnls,
-                confidence_scores=conf_traded.tolist(),
+                confidence_scores=conf_traded.to_list(),
                 annualization=252.0,
                 min_trades=max(30, len(pnls) // 20),
             )
@@ -1341,22 +1346,6 @@ def _auto_tune_next_run(
             )
             _set("training", "lr", float(f"{new_lr:.2e}"))
 
-            # Also nudge patience down so we stop before the collapse
-            old_pat = int(_get("training", "patience", 6))
-            new_pat = max(3, min(old_pat, peak_epoch + 2))
-            if new_pat != old_pat:
-                proposals.append(
-                    _proposal(
-                        issue="sharpe_collapse",
-                        section="training",
-                        key="patience",
-                        prev=old_pat,
-                        new=new_pat,
-                        reason=f"stop before collapse; peak at epoch {peak_epoch}",
-                        confidence="medium",
-                    )
-                )
-                _set("training", "patience", new_pat)
 
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     # HEURISTIC 4 -- Gate failure on drawdown
@@ -1753,3 +1742,5 @@ def _maybe_auto_tune_next_run(
         run_name=phase_run_name,
         dry_tune=bool(force_dry or getattr(args, "dry_tune", False) or getattr(args, "all_models", False)),
     )
+
+

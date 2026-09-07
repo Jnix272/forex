@@ -319,19 +319,19 @@ def test_curriculum_manager_state_dict():
 
 
 def test_compute_difficulty_scores_margin():
-    """Test margin-based difficulty scoring."""
+    """Test margin-based difficulty scoring (falls back to loss)."""
 
-    class SimpleClassifier(nn.Module):
+    class SimpleRegressor(nn.Module):
         def __init__(self):
             super().__init__()
-            self.fc = nn.Linear(10, 3)
+            self.fc = nn.Linear(10, 1)
 
         def forward(self, x):
             return self.fc(x)
 
-    model = SimpleClassifier()
+    model = SimpleRegressor()
     features = np.random.randn(100, 10).astype(np.float32)
-    labels = np.random.randint(0, 3, 100)
+    labels = np.random.randn(100).astype(np.float32)
 
     scores = compute_difficulty_scores(features, labels, method="margin", model=model)
     assert len(scores) == 100
@@ -341,17 +341,17 @@ def test_compute_difficulty_scores_margin():
 def test_compute_difficulty_scores_loss():
     """Test loss-based difficulty scoring."""
 
-    class SimpleClassifier(nn.Module):
+    class SimpleRegressor(nn.Module):
         def __init__(self):
             super().__init__()
-            self.fc = nn.Linear(10, 3)
+            self.fc = nn.Linear(10, 1)
 
         def forward(self, x):
             return self.fc(x)
 
-    model = SimpleClassifier()
+    model = SimpleRegressor()
     features = np.random.randn(100, 10).astype(np.float32)
-    labels = np.random.randint(0, 3, 100)
+    labels = np.random.randn(100).astype(np.float32)
 
     scores = compute_difficulty_scores(features, labels, method="loss", model=model)
     assert len(scores) == 100

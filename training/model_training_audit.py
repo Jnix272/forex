@@ -22,10 +22,10 @@ from config.models import BENCHMARK_BASELINES, MODELS, SUPPORTED_SUPERVISED
 _RECIPE_LOSS_OVERLAY: dict[str, tuple[str, ...]] = {
     "haelt": ("sharpe_huber", "directional_huber"),
     "mamba": ("directional_huber", "sharpe_huber"),
-    "tft": ("cross_entropy", "multitask", "directional_huber"),
+    "tft": ("multitask", "directional_huber"),
     "gnn": ("sharpe_huber", "directional_huber"),
-    "expert": ("directional_huber", "cross_entropy"),
-    "transformer": ("sharpe_huber", "cross_entropy"),
+    "expert": ("directional_huber", "huber"),
+    "transformer": ("sharpe_huber", "huber"),
     "xgboost": ("tabular",),
     "catboost": ("tabular",),
 }

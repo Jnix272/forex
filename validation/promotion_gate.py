@@ -45,7 +45,8 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ── configuration ────────────────────────────────────────────────────────────
@@ -708,8 +709,8 @@ if __name__ == "__main__":
     pnls = rng.normal(0.002, 0.01, 600)
     equity = np.cumprod(1 + pnls / 100) * 10_000
     r4 = gate.evaluate_from_history(
-        trade_pnls=pnls.tolist(),
-        equity_curve=equity.tolist(),
+        trade_pnls=pnls.to_list(),
+        equity_curve=equity.to_list(),
         n_bars=864_000,  # 600 days x 1440 bars
         avg_latency_ms=60.0,
     )
@@ -766,3 +767,4 @@ if __name__ == "__main__":
             f"{m['efficiency_score']:>7.3f}  {st}"
         )
     print("OK ✓")
+

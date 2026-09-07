@@ -61,6 +61,8 @@ class ModelFamily(Enum):
     MAMBA = "mamba"
     GNN = "gnn"
     EXPERT = "expert"
+    GLM = "glm"
+    PATCHTST = "patchtst"
     XGBOOST = "xgboost"
     ENSEMBLE = "ensemble"
 
@@ -359,6 +361,15 @@ class RetrainOrchestrator:
         if latest is None:
             return True, RetrainReason.INITIAL.value, {"initial": True}
 
+        # Minimum interval guard — prevent back-to-back retrains.
+        now = datetime.now(UTC)
+        last_any = self.registry.get_latest(family)
+        if last_any is not None and self.config.min_interval_days > 0:
+            last_time = datetime.fromisoformat(last_any.created_at)
+            elapsed = (now - last_time).total_seconds() / 86400
+            if elapsed < self.config.min_interval_days:
+                return False, "min_interval_not_elapsed", {"elapsed_days": round(elapsed, 2)}
+
         # Scheduled retrain
         if self.config.enable_scheduled_trigger:
             last_time = datetime.fromisoformat(latest.promoted_at or latest.created_at)
@@ -430,6 +441,23 @@ class RetrainOrchestrator:
             str(checkpoint_dir),
         ]
 
+        # Apply default YAML config so hyperparameters match original training.
+        _default_cfg = Path("config/run.yaml")
+        if _default_cfg.exists() and "--config" not in (extras or []):
+            cmd += ["--config", str(_default_cfg)]
+
+        # Enable pretraining on retrain unless caller explicitly disables it.
+        if "--no-pretrain" not in (extras or []) and family not in (ModelFamily.GLM.value,):
+            cmd.append("--pretrain")
+
+        # Warm-start from previous best checkpoint when one exists.
+        if "--no-warm-start" not in (extras or []):
+            prev = self.registry.get_latest(family, status=ModelStatus.PROMOTED)
+            if prev is not None:
+                prev_best = Path(prev.checkpoint_dir) / f"{family}_best.pt"
+                if prev_best.exists():
+                    cmd += ["--finetune-warm-start", "--warm-start-from", str(prev_best)]
+
         if extras:
             cmd.extend(extras)
 
@@ -442,6 +470,7 @@ class RetrainOrchestrator:
         extras: list[str] | None = None,
         timeout_seconds: int = 86400,  # 24h default
         dry_run: bool = False,
+        feedback_store=None,
     ) -> dict[str, Any]:
         """
         Execute a full retrain lifecycle:
@@ -481,8 +510,22 @@ class RetrainOrchestrator:
             result["status"] = "dry_run"
             return result
 
+        # Persist live-feedback hard-example data so the training subprocess can
+        # seed the online miner with real priority weights.
+        _feedback_extras: list[str] = []
+        if feedback_store is not None:
+            try:
+                _fb_path = ckpt_dir / "live_feedback_hard_examples.json"
+                hard_examples = getattr(feedback_store, "_hard_examples", [])
+                with _fb_path.open("w", encoding="utf-8") as _fp:
+                    json.dump(hard_examples[-2000:], _fp, default=str)
+                _feedback_extras = ["--live-feedback-path", str(_fb_path)]
+                print(f"[Retrain] Seeding {len(hard_examples)} live hard examples → {_fb_path.name}")
+            except Exception as _fb_exc:
+                print(f"[Retrain] Could not write live feedback file: {_fb_exc}")
+
         # Launch training
-        cmd = self._build_training_cmd(family, version, ckpt_dir, extras)
+        cmd = self._build_training_cmd(family, version, ckpt_dir, (extras or []) + _feedback_extras)
         print(f"[Retrain] Launching: {' '.join(cmd)}")
 
         try:
@@ -500,8 +543,9 @@ class RetrainOrchestrator:
         if returncode != 0:
             return self._fail_training(record, result, f"Non-zero exit: {returncode}")
 
-        # Extract metrics from training output (simplified)
-        metrics = self._extract_metrics(output)
+        # Prefer structured metrics.json written by the training script;
+        # fall back to regex parsing of stdout when the file is absent.
+        metrics = self._load_metrics_json(ckpt_dir) or self._extract_metrics(output)
         result["metrics"] = metrics
 
         # Promotion gate
@@ -543,6 +587,23 @@ class RetrainOrchestrator:
         result["status"] = ModelStatus.FAILED.value
         result["error"] = error
         return result
+
+    def _load_metrics_json(self, checkpoint_dir: Path) -> dict[str, Any] | None:
+        """Load structured metrics from the checkpoint directory.
+
+        Tries metrics.json first (written by the training script for the
+        orchestrator), then train_summary.json (written by supervised_loop).
+        Falls back to None so the caller can use regex parsing instead.
+        """
+        for name in ("metrics.json", "train_summary.json"):
+            candidate = checkpoint_dir / name
+            if not candidate.exists():
+                continue
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+        return None
 
     def _extract_metrics(self, output: str) -> dict[str, Any]:
         """
@@ -625,15 +686,27 @@ class RetrainOrchestrator:
 
 def auto_retrain_on_drift(
     store: FeatureStore,
-    family: str = "haelt",
+    family: str | None = None,
     config: RetrainConfig = None,
     dry_run: bool = False,
 ) -> dict:
     """
-    One-shot: check drift for all materialized features and trigger retrain if needed.
+    One-shot: check drift for all (or one) model families and trigger retrain if needed.
+    Pass family=None to check all neural model families.
     """
     orchestrator = RetrainOrchestrator(store, config)
-    return orchestrator.check_and_retrain(family=family, dry_run=dry_run)
+    if family is not None:
+        return orchestrator.check_and_retrain(family=family, dry_run=dry_run)
+
+    # Loop over all neural families (skip xgboost — separate script/trigger).
+    _neural = [
+        f.value for f in ModelFamily
+        if f not in (ModelFamily.XGBOOST, ModelFamily.ENSEMBLE)
+    ]
+    results = {}
+    for fam in _neural:
+        results[fam] = orchestrator.check_and_retrain(family=fam, dry_run=dry_run)
+    return results
 
 
 if __name__ == "__main__":

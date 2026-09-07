@@ -95,7 +95,7 @@ def test_consistent_num_layers_key():
 
 def test_pretrain_has_explicit_loss():
     assert "pretrain_loss" in PRETRAIN, "PRETRAIN should have explicit 'pretrain_loss' key"
-    assert PRETRAIN["pretrain_loss"] in ("huber", "mse", "cross_entropy")
+    assert PRETRAIN["pretrain_loss"] in ("huber", "mse", "huber")
 
 
 def test_pretrain_epochs_positive():
@@ -112,7 +112,7 @@ def test_pretrain_lr_sane():
 
 
 def test_training_loss_is_known():
-    valid = {"cross_entropy", "sharpe_huber", "huber", "mse", "focal"}
+    valid = {"huber", "sharpe_huber", "huber", "mse", "focal"}
     assert TRAINING["loss"] in valid, f"Unknown loss: {TRAINING['loss']}"
 
 
@@ -287,3 +287,4 @@ def test_curriculum_seq_schedule_epochs_ascending():
     schedule = CURRICULUM["seq_schedule"]
     epochs = [s.get("epoch_start", 0) for s in schedule if isinstance(s, dict)]
     assert epochs == sorted(epochs), f"seq_schedule epochs not ascending: {epochs}"
+

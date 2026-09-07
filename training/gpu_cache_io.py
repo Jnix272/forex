@@ -14,6 +14,7 @@ from common.cache_io import (  # noqa: F401
     ZARR_LABEL_DTYPE,
     _atr_path,
     _base_path,
+    _bet_size_path,
     _close_path,
     _diff_path,
     _pq_path,

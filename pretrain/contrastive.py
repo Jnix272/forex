@@ -1,15 +1,12 @@
 """
-pretrain/contrastive.py  - Self-supervised pre-training
-  BYOLTrainer, TSCLTrainer, RegimeAwareTSCLTrainer, MaskedReconstructionTrainer
-  Extended objectives: pretrain/extended_trainers.py (VAE, cluster, forecast, drift)
-sentiment/dual_stream.py - FinBERT offline + SLM online
-latency/tip_search.py    - TIP-Search latency manager
-monitoring/drift.py      - Model drift detection
-validation/purged_cv.py  - Purged K-Fold + Embargoing
-retraining/rolling.py    - Walk-forward rolling retraining
+pretrain/contrastive.py
+Self-supervised pre-training utilities for time-series data.
 
-Compatibility utilities remain here so existing imports keep working.
-Move them behind this public surface if this module is physically split later.
+Provides:
+- BYOLTrainer, TSCLTrainer, RegimeAwareTSCLTrainer, MaskedReconstructionTrainer
+- Extended objectives via `pretrain/extended_trainers.py` (VAE, clustering, forecasting, drift)
+
+Also re-exports legacy compatibility symbols so that existing import paths remain valid.
 """
 
 import time
@@ -62,6 +59,7 @@ __all__ = [
     "TimeSeriesAugmenter",
     "lalign",
     "lunif",
+    "CrossAssetTSCLTrainer",
 ]
 
 
@@ -261,1069 +259,1161 @@ if TORCH:
             # Add eps for numerical stability against zero-vector embeddings
             return F.normalize(x, dim=-1, eps=1e-8)
 
-    class TSCLTrainer:
+class TSCLTrainer:
+    """
+    Trains an encoder to produce similar representations for two augmented views of the same market segment, and dissimilar representations for different segments. Supports curriculum‑scaled augmentations.
+
+    After pre‑training, the encoder weights are frozen and used as a feature extractor for the supervised trading models.
+
+    NT‑Xent (Normalized Temperature‑scaled Cross Entropy) loss is used with a learnable temperature parameter.
+    """
+
+
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        d_model=128,
+        proj_dim=128,
+        temperature=0.5,
+        lr=1e-4,
+        device="cpu",
+        seed=None,
+        aug: Optional["TimeSeriesAugmenter"] = None,
+    ):
+        import copy
+        # A‑M5: deep‑copy so stripping the prediction head does not mutate the
+        # caller's shared backbone in place (it still carries the supervised
+        # head that the supervised stage reuses). The trained copy is what
+        # gets checkpointed and later reloaded into the supervised model.
+        encoder = copy.deepcopy(encoder)
+        if hasattr(encoder, "head"):
+            encoder.head = nn.Identity()
+        self.encoder = encoder.to(device)
+        self.proj = ProjectionHead(d_model, proj_dim).to(device)
+        # Learnable temperature - auto‑tunes during training
+        self.log_temp = nn.Parameter(torch.tensor(float(temperature)).log().to(device))
+        self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
+        self.device = torch.device(device)
+        self.opt = torch.optim.AdamW(
+            list(encoder.parameters()) + list(self.proj.parameters()) + [self.log_temp],
+            lr=lr,
+            weight_decay=1e-4,
+        )
+        # Force FP32: BF16 overflows with 2240‑feature inputs causing collapse
+        self._use_amp = False
+        self._amp_dtype = torch.float32
+        self._use_scaler = False
+        self._scaler = torch.amp.GradScaler(enabled=False)
+        self._total_epochs = 0  # track across multiple calls
+
+    @property
+    def temp(self):
+        """Current temperature, clamped to [0.05, 2.0]."""
+        return self.log_temp.exp().clamp(0.05, 2.0)
+
+    def nt_xent_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+        """NT‑Xent contrastive loss (SimCLR formulation)."""
+        if z1.shape[0] != z2.shape[0]:
+            raise ValueError(f"Batch sizes must match (z1: {z1.shape[0]}, z2: {z2.shape[0]})")
+        B = z1.shape[0]
+        # Similarity/logits in fp32 for stability under AMP.
+        z = torch.cat([z1, z2], dim=0).float()  # (2B, D)
+        z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+        sim = torch.mm(z, z.T) / self.temp.float()  # (2B, 2B)
+        mask = torch.eye(2 * B, device=self.device).bool()
+        neg_inf = torch.finfo(sim.dtype).min
+        sim.masked_fill_(mask, neg_inf)
+        labels = torch.cat([torch.arange(B, 2 * B), torch.arange(0, B)]).to(self.device)
+        return F.cross_entropy(sim, labels)
+
+    def _encode_project(self, t):
+        t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+        t = t.clamp(min=-1e4, max=1e4)
+        h = self.encoder(t)
+        if h.ndim == 3:
+            h = h[:, -1, :]
+        h = torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
+        return self.proj(h)
+
+    def _encode_project_ckpt(self, t):
+        """Gradient‑checkpointed encode+project.
+
+        Keeps the gradient graph alive (unlike torch.no_grad) so
+        contrastive loss can push/pull all branches, but avoids
+        storing LSTM intermediate activations in VRAM - they are
+        recomputed during backward.  Peak VRAM ≈ 1 forward pass
+        instead of 3.
         """
-        Time-Series Contrastive Learning pre-trainer.
+        # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
+        x = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+        x = x.clamp(min=-1e4, max=1e4)
+        h = self.encoder(x)
+        if h.ndim == 3:
+            h = h[:, -1, :]
+        return self.proj(h.float())
 
-        Trains the encoder to produce similar representations for two
-        augmented views of the same market segment, and dissimilar
-        representations for different segments.
-
-        After pre-training, the encoder weights are frozen and used as
-        a feature extractor for the supervised trading models.
-
-        NT-Xent (Normalized Temperature-scaled Cross Entropy) loss is used
-        with a learnable temperature parameter.
+    def _check_collapse(self, epoch: int, X_ref: np.ndarray | None = None) -> tuple[bool, float, float]:
+        """Detect representation collapse by checking embedding variance.
+        Also returns alignment and uniformity metrics.
         """
-
-        def __init__(
-            self,
-            encoder: nn.Module,
-            d_model=128,
-            proj_dim=128,
-            temperature=0.5,
-            lr=1e-4,
-            device="cpu",
-            seed=None,
-            aug: Optional["TimeSeriesAugmenter"] = None,
-        ):
-            import copy
-
-            # A-M5: deep-copy so stripping the prediction head does not mutate the
-            # caller's shared backbone in place (it still carries the supervised
-            # head that the supervised stage reuses). The trained copy is what
-            # gets checkpointed and later reloaded into the supervised model.
-            encoder = copy.deepcopy(encoder)
-            if hasattr(encoder, "head"):
-                encoder.head = nn.Identity()
-            self.encoder = encoder.to(device)
-            self.proj = ProjectionHead(d_model, proj_dim).to(device)
-            # Learnable temperature - auto-tunes during training
-            self.log_temp = nn.Parameter(torch.tensor(float(temperature)).log().to(device))
-            self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
-            self.device = torch.device(device)
-            self.opt = torch.optim.AdamW(
-                list(encoder.parameters()) + list(self.proj.parameters()) + [self.log_temp],
-                lr=lr,
-                weight_decay=1e-4,
-            )
-            # Force FP32: BF16 overflows with 2240-feature inputs causing collapse
-            self._use_amp = False
-            self._amp_dtype = torch.float32
-            self._use_scaler = False
-            self._scaler = torch.amp.GradScaler(enabled=False)
-            self._total_epochs = 0  # track across multiple calls
-
-        @property
-        def temp(self):
-            """Current temperature, clamped to [0.05, 2.0]."""
-            return self.log_temp.exp().clamp(0.05, 2.0)
-
-        def nt_xent_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
-            """NT-Xent contrastive loss (SimCLR formulation)."""
-            if z1.shape[0] != z2.shape[0]:
-                raise ValueError(f"Batch sizes must match (z1: {z1.shape[0]}, z2: {z2.shape[0]})")
-            B = z1.shape[0]
-            # Similarity/logits in fp32 for stability under AMP.
-            z = torch.cat([z1, z2], dim=0).float()  # (2B, D)
-            z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-            sim = torch.mm(z, z.T) / self.temp.float()  # (2B, 2B)
-            mask = torch.eye(2 * B, device=self.device).bool()
-            neg_inf = torch.finfo(sim.dtype).min
-            sim.masked_fill_(mask, neg_inf)
-            labels = torch.cat([torch.arange(B, 2 * B), torch.arange(0, B)]).to(self.device)
-            return F.cross_entropy(sim, labels)
-
-        def _encode_project(self, t):
-            t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
-            t = t.clamp(min=-1e4, max=1e4)
-            h = self.encoder(t)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            h = torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
-            return self.proj(h)
-
-        def _encode_project_ckpt(self, t):
-            """Gradient-checkpointed encode+project.
-
-            Keeps the gradient graph alive (unlike torch.no_grad) so
-            contrastive loss can push/pull all branches, but avoids
-            storing LSTM intermediate activations in VRAM - they are
-            recomputed during backward.  Peak VRAM ≈ 1 forward pass
-            instead of 3.
-            """
-            # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
-            x = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
-            x = x.clamp(min=-1e4, max=1e4)
-            h = self.encoder(x)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            return self.proj(h.float())
-
-        def _check_collapse(self, epoch: int, X_ref: np.ndarray | None = None) -> tuple[bool, float, float]:
-            """Detect representation collapse by checking embedding variance.
-            Also returns alignment and uniformity metrics.
-            """
-            self.encoder.eval()
-            align, unif = 0.0, 0.0
-            with torch.no_grad():
-                try:
-                    if X_ref is not None and len(X_ref) >= 8:
-                        sample = torch.as_tensor(X_ref[:32], dtype=torch.float32, device=self.device)
-                    else:
-                        # Fall back to encoder input width when no reference batch.
-                        feat_dim = None
-                        for p in self.encoder.parameters():
-                            if p.ndim >= 2:
-                                feat_dim = int(p.shape[-1])
-                                break
-                        if feat_dim is None or feat_dim < 8:
-                            return False, 0.0, 0.0
-                        sample = torch.randn(32, 60, feat_dim, device=self.device) * 0.1
-
-                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                        # Positive pairs for alignment (augmented views of same samples)
-                        z1 = self._encode_project(sample)
-
-                        # Apply augmentation again for positive pair
-                        v2 = self.aug.augment_batch(sample.cpu().numpy())
-                        z2 = self._encode_project(torch.as_tensor(v2, device=self.device))
-
-                    # Calculate metrics outside autocast and in float32 for stability
-                    align = lalign(z1, z2).item()
-                    unif = lunif(z1).item()
-
-                    # Collapse if variance across samples is near zero
-                    std = z1.std(dim=0).mean().item()
-
-                    if not np.isfinite(align) or not np.isfinite(unif):
-                        # Diagnostics for NaN metrics
-                        if torch.isnan(z1).any():
-                            print("[Monitor] ⚠ z1 contains NaNs")
-                        if torch.isnan(z2).any():
-                            print("[Monitor] ⚠ z2 contains NaNs")
-                        align, unif = 0.0, 0.0
-                except Exception as e:
-                    print(f"[Monitor] Metric error: {e}")
-                    std, align, unif = 1.0, 0.0, 0.0
-
-            self.encoder.train()
-            collapsed = std < 0.01
-            if collapsed:
-                print(
-                    f"\n[Pretrain] ⚠ COLLAPSE DETECTED (epoch {epoch + 1}): "
-                    f"embedding std={std:.6f} | align={align:.4f} | unif={unif:.4f}"
-                )
-            return collapsed, align, unif
-
-        def pretrain(
-            self,
-            X: np.ndarray,  # (N, seq_len, n_features)
-            epochs: int = 50,
-            batch_size: int = 256,
-            checkpoint_path: str | None = None,
-            patience: int = 5,
-        ) -> dict:
-            if checkpoint_path is None:
-                checkpoint_path = PATHS["file_contrastive_encoder"]
-            N = len(X)
-            X_ref_fixed = X[: min(128, N)]
-            history = {"loss": [], "align": [], "unif": []}
-            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
-            print(
-                f"[TSCL] Pre-training {epochs} epochs | {N:,} windows | "
-                f"batch={batch_size} | {amp_str} | temp={self.temp.item():.3f}"
-            )
-
-            warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]["lr"]
-
-            best_metric = float("inf")
-            patience_counter = 0
-
-            epoch_bar = _pbar(range(epochs), desc="TSCL Pretrain", unit="ep", leave=True)
-            for epoch in epoch_bar:
-                self._total_epochs += 1
-                cur_ep = self._total_epochs
-
-                # LR warmup + cosine decay
-                if epoch < warmup_epochs:
-                    lr_scale = (epoch + 1) / warmup_epochs
-                else:
-                    progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
-                    lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
-                for pg in self.opt.param_groups:
-                    pg["lr"] = base_lr * lr_scale
-
-                epoch_loss = 0.0
-                n_batches = 0
-                batches = list(range(0, N, batch_size))
-                np.random.shuffle(batches)
-
-                batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
-                for start in batch_bar:
-                    X_batch = X[start : start + batch_size]
-                    if len(X_batch) < 4:
-                        continue
-
-                    cur_progress = epoch / max(1, epochs)
-                    v1 = self.aug.augment_batch(X_batch, progress=cur_progress)
-                    v2 = self.aug.augment_batch(X_batch, progress=cur_progress)
-                    t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
-                    t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
-
-                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                        z1 = self._encode_project_ckpt(t1)
-                        z2 = self._encode_project_ckpt(t2)
-                        loss = self.nt_xent_loss(z1, z2)
-
-                    del t1, t2, z1, z2
-                    if not torch.isfinite(loss):
-                        continue
-
-                    self.opt.zero_grad(set_to_none=True)
-                    self._scaler.scale(loss).backward()
-                    self._scaler.unscale_(self.opt)
-                    gnorm = nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters()) + list(self.proj.parameters()), 1.0
-                    )
-                    if not torch.isfinite(gnorm):
-                        self.opt.zero_grad(set_to_none=True)
-                        continue
-                    self._scaler.step(self.opt)
-                    self._scaler.update()
-
-                    epoch_loss += loss.item()
-                    n_batches += 1
-                    if hasattr(batch_bar, "set_postfix"):
-                        batch_bar.set_postfix(loss=f"{loss.item():.3f}")
-
-                avg = epoch_loss / max(n_batches, 1)
-                history["loss"].append(avg)
-
-                # Metric monitoring
-                collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
-                history["align"].append(align)
-                history["unif"].append(unif)
-
-                self.temp.item()
-                if hasattr(epoch_bar, "set_postfix"):
-                    epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
-
-                if collapsed:
-                    raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
-
-                # Early stopping tracks alignment (positive-pair closeness)
-                # alone; mixing in uniformity (align + unif) let the metric be
-                # dominated by the much larger uniformity scale and stop training
-                # while pairs were still poorly aligned.
-                metric = align
-                if metric < best_metric - 1e-4:
-                    best_metric = metric
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
-                    break
-
-            print(f"[TSCL] Augment Stats: {self.aug.stats}")
-            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            torch.save(self.encoder.state_dict(), checkpoint_path)
-            return history
-
-    class RegimeAwareTSCLTrainer(TSCLTrainer):
-        """
-        Extends TSCLTrainer with regime-aware positive/negative pair selection.
-
-        Standard TSCL: positives = two augmented views of the SAME window.
-        Regime-aware:  positives = windows from the SAME market regime
-                       (trending / mean-reverting / neutral); hard negatives =
-                       windows from the OPPOSITE regime.
-
-        This gives the encoder a structured latent space:
-          Trending       windows cluster together  (Hurst > 0.55)
-          Mean-reverting windows cluster together  (Hurst < 0.45)
-          Neutral        windows fill the middle
-
-        The regime labels (1=trending, -1=mean-reverting, 0=neutral) are
-        typically derived from the Parkinson fast_trend_score in
-        features/advanced_features.py and passed in at construction time.
-        """
-
-        def __init__(
-            self,
-            encoder,
-            regime_labels: np.ndarray,  # (N,) int8: 1, 0, -1
-            d_model=128,
-            proj_dim=128,
-            temperature=0.5,
-            lr=1e-4,
-            device="cpu",
-            hard_negative_weight: float = 1.0,
-            seed=None,
-            aug: Optional["TimeSeriesAugmenter"] = None,
-        ):
-            super().__init__(encoder, d_model, proj_dim, temperature, lr, device, seed=seed, aug=aug)
-            self.regime_labels = np.asarray(regime_labels, dtype=np.int8)
-            self.hard_neg_weight = hard_negative_weight
-
-            # Pre-build per-regime index lists for O(1) sampling
-            self._regime_idx: dict = {}
-            for r in np.unique(self.regime_labels):
-                self._regime_idx[int(r)] = np.where(self.regime_labels == r)[0]
-
-        def _same_regime(self, anchor_i: int) -> int:
-            """Sample a single index sharing the same regime as anchor_i."""
-            r = int(self.regime_labels[anchor_i])
-            pool = self._regime_idx.get(r, np.array([anchor_i]))
-            return int(np.random.choice(pool))
-
-        def _diff_regime(self, anchor_i: int) -> int:
-            """Sample a single index from a DIFFERENT regime (hard negative)."""
-            r = int(self.regime_labels[anchor_i])
-            candidates = [idx for rk, idxs in self._regime_idx.items() if rk != r for idx in idxs]
-            if not candidates:
-                return anchor_i  # Fallback if only one regime present
-            return int(np.random.choice(candidates))
-
-        def _regime_loss(
-            self,
-            z_a: "torch.Tensor",  # (B, D) anchor
-            z_p: "torch.Tensor",  # (B, D) same-regime positive
-            z_n: "torch.Tensor",  # (B, D) diff-regime hard negative
-        ) -> "torch.Tensor":
-            """
-            Triplet-style NT-Xent loss that pushes same-regime embeddings
-            together and cross-regime embeddings apart.
-
-            Compared to standard SimCLR:
-              - Positives are semantically matched (same regime), not just augmented
-              - Hard negatives from opposite regime increase training signal quality
-            """
-            B = z_a.shape[0]
-            # Standard SimCLR loss on (anchor, positive) pairs
-            z_std = torch.cat([z_a, z_p], dim=0)  # (2B, D)
-            sim = torch.mm(z_std, z_std.T) / self.temp  # (2B, 2B)
-            eye = torch.eye(2 * B, device=self.device).bool()
-            neg_inf = torch.finfo(sim.dtype).min
-            sim.masked_fill_(eye, neg_inf)
-            labels = torch.cat(
-                [
-                    torch.arange(B, 2 * B, device=self.device),
-                    torch.arange(0, B, device=self.device),
-                ]
-            )
-            loss_std = F.cross_entropy(sim, labels)
-
-            # Hard-negative margin loss: operate on raw cosine similarities (NOT
-            # temperature-scaled), so the 0.2 margin has consistent geometric meaning
-            # regardless of the learnable temperature value.
-            sim_ap_raw = (z_a * z_p).sum(-1)  # (B,) - raw cosine similarity
-            sim_an_raw = (z_a * z_n).sum(-1)  # (B,)
-            # Hinge: push anchor-negative similarity 0.2 below anchor-positive
-            margin_loss = F.relu(sim_an_raw - sim_ap_raw + 0.2).mean()
-
-            return loss_std + self.hard_neg_weight * margin_loss
-
-        def pretrain(
-            self,
-            X: np.ndarray,  # (N, seq_len, n_features)
-            epochs: int = 50,
-            batch_size: int = 256,
-            checkpoint_path: str | None = None,
-            patience: int = 5,
-        ) -> dict:
-            """
-            Regime-aware pre-training loop.
-            Falls back to standard TSCL augmentation when all samples share
-            the same regime (e.g. pure trending dataset).
-            """
-            if checkpoint_path is None:
-                checkpoint_path = PATHS.get(
-                    "file_contrastive_encoder",
-                    "/workspace/checkpoints/contrastive_encoder_regime.pt",
-                )
-            N = len(X)
-            X_ref_fixed = X[: min(128, N)]
-
-            # Align regime labels to dataset length
-            reg = self.regime_labels
-            if len(reg) > N:
-                reg = reg[:N]
-            elif len(reg) < N:
-                reg = np.pad(reg, (0, N - len(reg)), constant_values=0)
-            self.regime_labels = reg
-
-            # Rebuild index after potential trimming
-            self._regime_idx = {}
-            for r in np.unique(reg):
-                self._regime_idx[int(r)] = np.where(reg == r)[0]
-
-            n_regimes = len(self._regime_idx)
-            print(
-                f"[RegimeTSCL] Pre-training {epochs} epochs | {N:,} windows | "
-                f"{n_regimes} regimes: "
-                f"{ {int(r): len(idx) for r, idx in self._regime_idx.items()} }"
-            )
-
-            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
-            print(f"  batch={batch_size} | {amp_str} | temp={self.temp.item():.3f} (learnable)")
-
-            # Pre-build vectorised regime pools for fast sampling
-            _regime_pool = dict(self._regime_idx.items())
-
-            # LR warmup: linear ramp over first 3 epochs
-            warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]["lr"]
-
-            best_metric = float("inf")
-            patience_counter = 0
-
-            history = {"loss": [], "align": [], "unif": []}
-            epoch_bar = _pbar(range(epochs), desc="Pretrain", unit="ep", leave=True)
-            for epoch in epoch_bar:
-                self._total_epochs += 1
-                cur_ep = self._total_epochs
-
-                # LR warmup + cosine decay
-                if epoch < warmup_epochs:
-                    lr_scale = (epoch + 1) / warmup_epochs
-                else:
-                    progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
-                    lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
-                for pg in self.opt.param_groups:
-                    pg["lr"] = base_lr * lr_scale
-
-                idx_perm = np.random.permutation(N)
-                ep_loss = 0.0
-                n_b = 0
-
-                batches = list(range(0, N, batch_size))
-                batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
-                for start in batch_bar:
-                    batch_idx = idx_perm[start : start + batch_size]
-                    if len(batch_idx) < 4:
-                        continue
-
-                    cur_progress = epoch / max(1, epochs)
-                    reg_batch = reg[batch_idx]
-                    v_a = self.aug.augment_batch(X[batch_idx], progress=cur_progress, regime=reg_batch)
-
-                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                        if n_regimes > 1:
-                            batch_reg = reg[batch_idx]
-                            pos_i = np.empty(len(batch_idx), dtype=np.int64)
-                            neg_i = np.empty(len(batch_idx), dtype=np.int64)
-                            for r, pool in _regime_pool.items():
-                                m = batch_reg == r
-                                cnt = int(m.sum())
-                                if cnt == 0:
-                                    continue
-                                pos_i[m] = np.random.choice(pool, cnt)
-                                others = np.concatenate([p for rk, p in _regime_pool.items() if rk != r])
-                                if len(others) > 0:
-                                    neg_i[m] = np.random.choice(others, cnt)
-                                else:
-                                    neg_i[m] = pos_i[m]
-
-                            cur_progress = epoch / max(1, epochs)
-                            v_p = self.aug.augment_batch(
-                                X[pos_i], progress=cur_progress, regime=self.regime_labels[pos_i]
-                            )
-                            v_n = self.aug.augment_batch(
-                                X[neg_i], progress=cur_progress, regime=self.regime_labels[neg_i]
-                            )
-
-                            t_p = torch.as_tensor(v_p, dtype=torch.float32, device=self.device)
-                            z_p = self._encode_project_ckpt(t_p)
-                            del t_p
-
-                            t_n = torch.as_tensor(v_n, dtype=torch.float32, device=self.device)
-                            z_n = self._encode_project_ckpt(t_n)
-                            del t_n
-
-                            t_a = torch.as_tensor(v_a, dtype=torch.float32, device=self.device)
-                            z_a = self._encode_project_ckpt(t_a)
-                            del t_a
-
-                            loss = self._regime_loss(z_a, z_p, z_n)
-                            del z_a, z_p, z_n
-                        else:
-                            cur_progress = epoch / max(1, epochs)
-                            v_b = self.aug.augment_batch(X[batch_idx], progress=cur_progress, regime=reg_batch)
-                            t2 = torch.as_tensor(v_b, dtype=torch.float32, device=self.device)
-                            z2 = self._encode_project_ckpt(t2)
-                            del t2
-                            t1 = torch.as_tensor(v_a, dtype=torch.float32, device=self.device)
-                            z1 = self._encode_project_ckpt(t1)
-                            del t1
-                            loss = self.nt_xent_loss(z1, z2)
-                            del z1, z2
-
-                    if not torch.isfinite(loss):
-                        continue
-
-                    self.opt.zero_grad(set_to_none=True)
-                    self._scaler.scale(loss).backward()
-                    self._scaler.unscale_(self.opt)
-                    gnorm = nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters()) + list(self.proj.parameters()), 1.0
-                    )
-                    if not torch.isfinite(gnorm):
-                        self.opt.zero_grad(set_to_none=True)
-                        continue
-                    self._scaler.step(self.opt)
-                    self._scaler.update()
-
-                    ep_loss += loss.item()
-                    n_b += 1
-                    if hasattr(batch_bar, "set_postfix"):
-                        batch_bar.set_postfix(loss=f"{loss.item():.3f}")
-
-                avg = ep_loss / max(n_b, 1)
-                history["loss"].append(avg)
-
-                # Metric monitoring
-                collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
-                history["align"].append(align)
-                history["unif"].append(unif)
-
-                self.temp.item()
-                if hasattr(epoch_bar, "set_postfix"):
-                    epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
-
-                if collapsed:
-                    raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
-
-                # Early stopping tracks alignment alone (see TSCLTrainer note).
-                metric = align
-                if metric < best_metric - 1e-4:
-                    best_metric = metric
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
-                    break
-
-            print(f"[RegimeTSCL] Augment Stats: {self.aug.stats}")
-            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            torch.save(self.encoder.state_dict(), checkpoint_path)
-            print(f"[RegimeTSCL] Encoder saved → {checkpoint_path}")
-            return history
-
-    class BYOLTrainer:
-        """
-        Bootstrap Your Own Latent (BYOL) pre-trainer.
-
-        Advantages over NT-Xent (SimCLR / TSCL) on 8 GB VRAM:
-          • No negative pairs  → small batches work well (batch >= 32 is fine)
-          • 1 gradient pass    → ~2x less VRAM than regime-TSCL's 3 passes
-          • Loss range 0-2     (1.0 = random init, <0.5 = learning, <0.2 = great)
-          • No temperature to tune
-
-        Architecture:
-          Online : encoder → projector (Linear→BN→ReLU→Linear) → predictor (same)
-          Target : EMA copy of (encoder + projector), always eval, no gradient
-
-        EMA update after every step:
-          target_θ ← decay x target_θ + (1 − decay) x online_θ
-        """  # noqa: RUF002
-
-        def __init__(
-            self,
-            encoder: nn.Module,
-            d_model: int = 128,
-            proj_dim: int = 256,
-            pred_dim: int = 128,
-            ema_decay: float = 0.996,
-            lr: float = 1e-4,
-            device: str = "cpu",
-            seed=None,
-            aug: Optional["TimeSeriesAugmenter"] = None,
-        ):
-            import copy
-
-            self.device = torch.device(device)
-            self.ema_decay = ema_decay
-
-            # Online network
-            # A-M5: deep-copy so the caller's shared backbone (with its supervised
-            # head) is never mutated in place when we strip the head here.
-            encoder = copy.deepcopy(encoder)
-            if hasattr(encoder, "head"):
-                encoder.head = nn.Identity()
-            self.encoder = encoder.to(self.device)
-            self.projector = self._make_mlp(d_model, proj_dim, proj_dim).to(self.device)
-            self.predictor = self._make_mlp(proj_dim, pred_dim, proj_dim).to(self.device)
-
-            # Target network - EMA copy, no gradient, always eval
-            self.target_encoder = copy.deepcopy(self.encoder)
-            self.target_projector = copy.deepcopy(self.projector)
-            for p in list(self.target_encoder.parameters()) + list(self.target_projector.parameters()):
-                p.requires_grad_(False)
-            self.target_encoder.eval()
-            self.target_projector.eval()
-
-            self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
-
-            # Optimiser - online params only
-            self.opt = torch.optim.AdamW(
-                list(self.encoder.parameters()) + list(self.projector.parameters()) + list(self.predictor.parameters()),
-                lr=lr,
-                weight_decay=1e-4,
-            )
-
-            # Force FP32: BF16 overflows with 2240-feature inputs causing collapse
-            self._use_amp = False
-            self._amp_dtype = torch.float32
-            self._use_scaler = False
-            self._scaler = torch.amp.GradScaler(enabled=False)
-            self._total_epochs = 0
-
-        @staticmethod
-        def _make_mlp(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Module:
-            """BYOL MLP: Linear → BatchNorm1d → ReLU → Linear."""
-            hidden_dim = min(hidden_dim, 2048)
-            return nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_dim, out_dim),
-            )
-
-        @torch.no_grad()
-        def _ema_update(self):
-            d = self.ema_decay
-            for o, t in zip(self.encoder.parameters(), self.target_encoder.parameters(), strict=False):
-                t.data.mul_(d).add_(o.data, alpha=1.0 - d)
-            for o, t in zip(self.projector.parameters(), self.target_projector.parameters(), strict=False):
-                t.data.mul_(d).add_(o.data, alpha=1.0 - d)
-
-        def _online_fwd(self, x: torch.Tensor) -> torch.Tensor:
-            """Online path - retains gradients. Returns predictor output."""
-            # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
-            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
-
-            h = self.encoder(x)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            # Clamp encoder output: BF16 activations can overflow with 2240 features,
-            # causing all embeddings to collapse to the same unit vector (loss=0).
-            h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
-
-            z = self.projector(h)
-            p = self.predictor(z)
-            return p
-
-        @torch.no_grad()
-        def _target_fwd(self, x: torch.Tensor) -> torch.Tensor:
-            """Target path - no gradient, fp32, L2-normalised output."""
-            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
-            h = self.target_encoder(x)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            # Same clamp as online path to prevent BF16 overflow collapse
-            h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
-            z = self.target_projector(h)
-            return F.normalize(z, dim=-1, eps=1e-8)
-
-        @staticmethod
-        def _byol_loss(p: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-            """BYOL regression loss = 2 - 2·cosine_sim(predict, target). Range [0,2]."""
-            p = F.normalize(p.float(), dim=-1, eps=1e-8)
-            return (2.0 - 2.0 * (p * z.float()).sum(dim=-1)).mean()
-
-        @torch.no_grad()
-        def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
-            """Return representation diagnostics for BYOL handoff quality gates."""
-            out = {"embed_std": 0.0, "align": 0.0, "unif": 0.0, "collapsed": True}
-            if X_ref is None or len(X_ref) < 4:
-                return out
-            self.encoder.eval()
-            self.projector.eval()
+        self.encoder.eval()
+        align, unif = 0.0, 0.0
+        with torch.no_grad():
             try:
-                sample = X_ref[: min(int(max_samples), len(X_ref))]
-                v1 = self.aug.augment_batch(sample)
-                v2 = self.aug.augment_batch(sample)
-                t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
-                t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
-                z1 = self._target_fwd(t1)
-                z2 = self._target_fwd(t2)
-                std = z1.std(dim=0).mean().item()
+                if X_ref is not None and len(X_ref) >= 8:
+                    sample = torch.as_tensor(X_ref[:32], dtype=torch.float32, device=self.device)
+                else:
+                    # Fall back to encoder input width when no reference batch.
+                    feat_dim = None
+                    for p in self.encoder.parameters():
+                        if p.ndim >= 2:
+                            feat_dim = int(p.shape[-1])
+                            break
+                    if feat_dim is None or feat_dim < 8:
+                        return False, 0.0, 0.0
+                    sample = torch.randn(32, 60, feat_dim, device=self.device) * 0.1
+
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
+                    # Positive pairs for alignment (augmented views of same samples)
+                    z1 = self._encode_project(sample)
+                    # Apply augmentation again for positive pair
+                    v2 = self.aug.augment_batch(sample.cpu().numpy())
+                    z2 = self._encode_project(torch.as_tensor(v2, device=self.device))
+
+                # Calculate metrics outside autocast and in float32 for stability
                 align = lalign(z1, z2).item()
                 unif = lunif(z1).item()
-                finite = np.isfinite(std) and np.isfinite(align) and np.isfinite(unif)
-                out = {
-                    "embed_std": float(std if np.isfinite(std) else 0.0),
-                    "align": float(align if np.isfinite(align) else 0.0),
-                    "unif": float(unif if np.isfinite(unif) else 0.0),
-                    "collapsed": (not finite) or std < 0.005,
-                }
-            except Exception as exc:
-                print(f"[BYOL] diagnostic error: {exc}")
-            finally:
-                self.encoder.train()
-                self.projector.train()
-            return out
-
-        def save_encoder(self, checkpoint_path: str) -> None:
-            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            torch.save(self.encoder.state_dict(), checkpoint_path)
-
-        def pretrain(
-            self,
-            X: np.ndarray,
-            epochs: int = 50,
-            batch_size: int = 256,
-            checkpoint_path: str | None = None,
-            silent: bool = False,  # suppress prints/bars (for multi-block calls)
-            patience: int = 5,
-        ) -> dict:
-            if checkpoint_path is None:
-                checkpoint_path = PATHS["file_contrastive_encoder"]
-            N = len(X)
-            X_ref_fixed = X[: min(128, N)]
-            history = {"loss": [], "embed_std": [], "align": [], "unif": []}
-            amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
-            if not silent:
-                print(
-                    f"[BYOL] Pre-training {epochs} ep | {N:,} windows | "
-                    f"batch={batch_size} | {amp_str} | ema_decay={self.ema_decay}"
-                )
-
-            warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]["lr"]
-
-            best_metric = float("inf")
-            patience_counter = 0
-
-            epoch_bar = (
-                _pbar(range(epochs), desc="BYOL Pretrain", unit="ep", leave=True) if not silent else range(epochs)
+                # Collapse if variance across samples is near zero
+                std = z1.std(dim=0).mean().item()
+                if not np.isfinite(align) or not np.isfinite(unif):
+                    if torch.isnan(z1).any():
+                        print("[Monitor] ⚠ z1 contains NaNs")
+                    if torch.isnan(z2).any():
+                        print("[Monitor] ⚠ z2 contains NaNs")
+                    align, unif = 0.0, 0.0
+            except Exception as e:
+                print(f"[Monitor] Metric error: {e}")
+                std, align, unif = 1.0, 0.0, 0.0
+        self.encoder.train()
+        collapsed = std < 0.01
+        if collapsed:
+            print(
+                f"\n[Pretrain] ⚠ COLLAPSE DETECTED (epoch {epoch + 1}): "
+                f"embedding std={std:.6f} | align={align:.4f} | unif={unif:.4f}"
             )
-            for epoch in epoch_bar:
-                self._total_epochs += 1
+        return collapsed, align, unif
 
-                # LR warmup + cosine decay
-                if epoch < warmup_epochs:
-                    lr_scale = (epoch + 1) / warmup_epochs
-                else:
-                    progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
-                    lr_scale = 0.5 * (1.0 + np.cos(np.pi * progress))
-                for pg in self.opt.param_groups:
-                    pg["lr"] = base_lr * lr_scale
+    def pretrain(
+        self,
+        X: np.ndarray,  # (N, seq_len, n_features)
+        epochs: int = 50,
+        batch_size: int = 256,
+        checkpoint_path: str | None = None,
+        patience: int = 5,
+    ) -> dict:
+        if checkpoint_path is None:
+            checkpoint_path = PATHS["file_contrastive_encoder"]
+        N = len(X)
+        X_ref_fixed = X[: min(128, N)]
+        history = {"loss": [], "align": [], "unif": []}
+        amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
+        print(
+            f"[TSCL] Pre-training {epochs} epochs | {N:,} windows | "
+            f"batch={batch_size} | {amp_str} | temp={self.temp.item():.3f}"
+        )
 
-                self.encoder.train()
-                self.projector.train()
-                self.predictor.train()
+        warmup_epochs = min(3, epochs)
+        base_lr = self.opt.param_groups[0]["lr"]
 
-                epoch_loss = 0.0
-                n_batches = 0
-                idx_perm = np.random.permutation(N)
+        best_metric = float("inf")
+        patience_counter = 0
 
-                batch_bar = (
-                    _pbar(
-                        range(0, N, batch_size),
-                        desc=f"  Ep {epoch + 1:3d}/{epochs}",
-                        unit="batch",
-                        leave=False,
-                    )
-                    if not silent
-                    else range(0, N, batch_size)
+        epoch_bar = _pbar(range(epochs), desc="TSCL Pretrain", unit="ep", leave=True)
+        for epoch in epoch_bar:
+            self._total_epochs += 1
+            cur_ep = self._total_epochs
+
+            # LR warmup + cosine decay
+            if epoch < warmup_epochs:
+                lr_scale = (epoch + 1) / warmup_epochs
+            else:
+                progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+                lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
+            for pg in self.opt.param_groups:
+                pg["lr"] = base_lr * lr_scale
+
+            epoch_loss = 0.0
+            n_batches = 0
+            batches = list(range(0, N, batch_size))
+            np.random.shuffle(batches)
+
+            batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
+            for start in batch_bar:
+                X_batch = X[start : start + batch_size]
+                if len(X_batch) < 4:
+                    continue
+
+                cur_progress = epoch / max(1, epochs)
+                v1 = self.aug.augment_batch(X_batch, progress=cur_progress)
+                v2 = self.aug.augment_batch(X_batch, progress=cur_progress)
+                t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
+                t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
+
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
+                    z1 = self._encode_project_ckpt(t1)
+                    z2 = self._encode_project_ckpt(t2)
+                    loss = self.nt_xent_loss(z1, z2)
+
+                del t1, t2, z1, z2
+                if not torch.isfinite(loss):
+                    continue
+
+                self.opt.zero_grad(set_to_none=True)
+                self._scaler.scale(loss).backward()
+                self._scaler.unscale_(self.opt)
+                gnorm = nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters()) + list(self.proj.parameters()), 1.0
                 )
-                for start in batch_bar:
-                    batch_idx = idx_perm[start : start + batch_size]
-                    if len(batch_idx) < 4:
-                        continue
-                    X_b = X[batch_idx]
-
-                    cur_progress = epoch / max(1, epochs)
-                    v1 = self.aug.augment_batch(X_b, progress=cur_progress)
-                    v2 = self.aug.augment_batch(X_b, progress=cur_progress)
-                    t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
-                    t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
-
-                    # Online forward (with gradient)
-                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                        p1 = self._online_fwd(t1)
-                        p2 = self._online_fwd(t2)
-
-                    # Target forward (no gradient, fp32)
-                    z2 = self._target_fwd(t2)
-                    z1 = self._target_fwd(t1)
-                    del t1, t2
-
-                    # Symmetric BYOL loss, averaged to keep range [0, 2]
-                    loss = (self._byol_loss(p1, z2) + self._byol_loss(p2, z1)) * 0.5
-                    del p1, p2, z1, z2
-
-                    if not torch.isfinite(loss):
-                        continue
-
+                if not torch.isfinite(gnorm):
                     self.opt.zero_grad(set_to_none=True)
-                    self._scaler.scale(loss).backward()
-                    self._scaler.unscale_(self.opt)
-                    gnorm = nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters())
-                        + list(self.projector.parameters())
-                        + list(self.predictor.parameters()),
-                        1.0,
-                    )
-                    if not torch.isfinite(gnorm):
-                        self.opt.zero_grad(set_to_none=True)
-                        continue
-                    self._scaler.step(self.opt)
-                    self._scaler.update()
-                    self._ema_update()
+                    continue
+                self._scaler.step(self.opt)
+                self._scaler.update()
 
-                    epoch_loss += loss.item()
-                    n_batches += 1
-                    if hasattr(batch_bar, "set_postfix"):
-                        batch_bar.set_postfix(loss=f"{loss.item():.3f}")
+                epoch_loss += loss.item()
+                n_batches += 1
+                if hasattr(batch_bar, "set_postfix"):
+                    batch_bar.set_postfix(loss=f"{loss.item():.3f}")
 
-                avg = epoch_loss / max(n_batches, 1)
-                history["loss"].append(avg)
-                diag = self.diagnostics(X_ref_fixed)
-                history["embed_std"].append(diag["embed_std"])
-                history["align"].append(diag["align"])
-                history["unif"].append(diag["unif"])
-                if not silent:
-                    if hasattr(epoch_bar, "set_postfix"):
-                        epoch_bar.set_postfix(loss=f"{avg:.3f}", std=f"{diag['embed_std']:.4f}")
-                    print(
-                        f"[BYOL] Ep {self._total_epochs:3d} | loss={avg:.4f}"
-                        f" | std={diag['embed_std']:.4f}"
-                        f" | align={diag['align']:.3f}"
-                        f" | unif={diag['unif']:.3f}"
-                        f"  (1.0=random  <0.5=learning  <0.2=great)"
-                    )
+            avg = epoch_loss / max(n_batches, 1)
+            history["loss"].append(avg)
 
-                # Early stopping tracks alignment alone; the uniformity scale
-                # dominates align + unif and masked poorly-aligned pairs.
-                metric = diag["align"]
-                if metric < best_metric - 1e-4:
-                    best_metric = metric
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+            # Metric monitoring
+            collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
+            history["align"].append(align)
+            history["unif"].append(unif)
 
-                if patience_counter >= patience:
-                    if not silent:
-                        print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
-                    break
+            if hasattr(epoch_bar, "set_postfix"):
+                epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
 
-            if not silent:
-                print(f"[BYOL] Augment Stats: {self.aug.stats}")
-                self.save_encoder(checkpoint_path)
-                print(f"[BYOL] Encoder saved → {checkpoint_path}")
-            return history
+            if collapsed:
+                raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
 
-    # ══════════════════════════════════════════════════════════════════════════════
-    # 2. DUAL-STREAM SENTIMENT  (FinBERT offline + SLM online)
-    # ══════════════════════════════════════════════════════════════════════════════
+            # Early stopping tracks alignment (positive‑pair closeness)
+            # alone; mixing in uniformity (align + unif) let the metric be
+            # dominated by the much larger uniformity scale and stop training
+            # while pairs were still poorly aligned.
+            metric = align
+            if metric < best_metric - 1e-4:
+                best_metric = metric
+                patience_counter = 0
+            else:
+                patience_counter += 1
 
-    class MaskedReconstructionTrainer:
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
+                break
+
+        print(f"[TSCL] Augment Stats: {self.aug.stats}")
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.encoder.state_dict(), checkpoint_path)
+        return history
+
+
+
+
+
+
+
+
+
+
+class RegimeAwareTSCLTrainer(TSCLTrainer):
+    """
+    Extends TSCLTrainer with regime-aware positive/negative pair selection.
+
+    Standard TSCL: positives = two augmented views of the SAME window.
+    Regime-aware:  positives = windows from the SAME market regime
+                   (trending / mean-reverting / neutral); hard negatives =
+                   windows from the OPPOSITE regime.
+
+    This gives the encoder a structured latent space:
+      Trending       windows cluster together  (Hurst > 0.55)
+      Mean-reverting windows cluster together  (Hurst < 0.45)
+      Neutral        windows fill the middle
+
+    The regime labels (1=trending, -1=mean-reverting, 0=neutral) are
+    typically derived from the Parkinson fast_trend_score in
+    features/advanced_features.py and passed in at construction time.
+    """
+
+    def __init__(
+        self,
+        encoder,
+        regime_labels: np.ndarray,  # (N,) int8: 1, 0, -1
+        d_model=128,
+        proj_dim=128,
+        temperature=0.5,
+        lr=1e-4,
+        device="cpu",
+        hard_negative_weight: float = 1.0,
+        seed=None,
+        aug: Optional["TimeSeriesAugmenter"] = None,
+    ):
+        super().__init__(encoder, d_model, proj_dim, temperature, lr, device, seed=seed, aug=aug)
+        self.regime_labels = np.asarray(regime_labels, dtype=np.int8)
+        self.hard_neg_weight = hard_negative_weight
+
+        # Pre-build per-regime index lists for O(1) sampling
+        self._regime_idx: dict = {}
+        for r in np.unique(self.regime_labels):
+            self._regime_idx[int(r)] = np.where(self.regime_labels == r)[0]
+
+    def _same_regime(self, anchor_i: int) -> int:
+        """Sample a single index sharing the same regime as anchor_i."""
+        r = int(self.regime_labels[anchor_i])
+        pool = self._regime_idx.get(r, np.array([anchor_i]))
+        return int(np.random.choice(pool))
+
+    def _diff_regime(self, anchor_i: int) -> int:
+        """Sample a single index from a DIFFERENT regime (hard negative)."""
+        r = int(self.regime_labels[anchor_i])
+        candidates = [idx for rk, idxs in self._regime_idx.items() if rk != r for idx in idxs]
+        if not candidates:
+            return anchor_i  # Fallback if only one regime present
+        return int(np.random.choice(candidates))
+
+    def _regime_loss(
+        self,
+        z_a: "torch.Tensor",  # (B, D) anchor
+        z_p: "torch.Tensor",  # (B, D) same-regime positive
+        z_n: "torch.Tensor",  # (B, D) diff-regime hard negative
+    ) -> "torch.Tensor":
         """
-        Masked time-series reconstruction pre-trainer.
+        Triplet-style NT-Xent loss that pushes same-regime embeddings
+        together and cross-regime embeddings apart.
 
-        Randomly hides values in scaled windows, reconstructs the original
-        window, and optimizes loss only over masked positions.
+        Compared to standard SimCLR:
+          - Positives are semantically matched (same regime), not just augmented
+          - Hard negatives from opposite regime increase training signal quality
         """
+        B = z_a.shape[0]
+        # Standard SimCLR loss on (anchor, positive) pairs
+        z_std = torch.cat([z_a, z_p], dim=0)  # (2B, D)
+        sim = torch.mm(z_std, z_std.T) / self.temp  # (2B, 2B)
+        eye = torch.eye(2 * B, device=self.device).bool()
+        neg_inf = torch.finfo(sim.dtype).min
+        sim.masked_fill_(eye, neg_inf)
+        labels = torch.cat(
+            [
+                torch.arange(B, 2 * B, device=self.device),
+                torch.arange(0, B, device=self.device),
+            ]
+        )
+        loss_std = F.cross_entropy(sim, labels)
 
-        def __init__(
-            self,
-            encoder: nn.Module,
-            d_model: int,
-            seq_len: int,
-            n_features: int,
-            hidden_dim: int = 512,
-            mask_prob: float = 0.20,
-            lr: float = 1e-4,
-            device: str = "cpu",
-            seed=None,
-        ):
-            import copy
+        # Hard-negative margin loss: operate on raw cosine similarities (NOT
+        # temperature-scaled), so the 0.2 margin has consistent geometric meaning
+        # regardless of the learnable temperature value.
+        sim_ap_raw = (z_a * z_p).sum(-1)  # (B,) - raw cosine similarity
+        sim_an_raw = (z_a * z_n).sum(-1)  # (B,)
+        # Hinge: push anchor-negative similarity 0.2 below anchor-positive
+        margin_loss = F.relu(sim_an_raw - sim_ap_raw + 0.2).mean()
 
-            self.device = torch.device(device)
-            self.seq_len = int(seq_len)
-            self.n_features = int(n_features)
-            self.mask_prob = float(mask_prob)
-            self._rng = np.random.default_rng(seed)
+        return loss_std + self.hard_neg_weight * margin_loss
 
-            encoder = copy.deepcopy(encoder)
-            if hasattr(encoder, "head"):
-                encoder.head = nn.Identity()
-            self.encoder = encoder.to(self.device)
-            hidden_dim = int(min(max(64, hidden_dim), 2048))
-            self.decoder = nn.Sequential(
-                nn.Linear(int(d_model), hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, self.seq_len * self.n_features),
-            ).to(self.device)
-            self.opt = torch.optim.AdamW(
-                list(self.encoder.parameters()) + list(self.decoder.parameters()),
-                lr=lr,
-                weight_decay=1e-4,
+    def pretrain(
+        self,
+        X: np.ndarray,  # (N, seq_len, n_features)
+        epochs: int = 50,
+        batch_size: int = 256,
+        checkpoint_path: str | None = None,
+        patience: int = 5,
+    ) -> dict:
+        """
+        Regime-aware pre-training loop.
+        Falls back to standard TSCL augmentation when all samples share
+        the same regime (e.g. pure trending dataset).
+        """
+        if checkpoint_path is None:
+            checkpoint_path = PATHS.get(
+                "file_contrastive_encoder",
+                "/workspace/checkpoints/contrastive_encoder_regime.pt",
             )
-            self._use_amp = False
-            self._amp_dtype = torch.float32
-            self._scaler = torch.amp.GradScaler(enabled=False)
-            self._total_epochs = 0
+        N = len(X)
+        X_ref_fixed = X[: min(128, N)]
 
-        def _mask(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            mask = torch.rand_like(x) < self.mask_prob
-            if not mask.any():
-                flat = mask.view(-1)
-                flat[int(self._rng.integers(0, flat.numel()))] = True
-            return x.masked_fill(mask, 0.0), mask
+        # Align regime labels to dataset length
+        reg = self.regime_labels
+        if len(reg) > N:
+            reg = reg[:N]
+        elif len(reg) < N:
+            reg = np.pad(reg, (0, N - len(reg)), constant_values=0)
+        self.regime_labels = reg
 
-        def _forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
-            h = self.encoder(x)
+        # Rebuild index after potential trimming
+        self._regime_idx = {}
+        for r in np.unique(reg):
+            self._regime_idx[int(r)] = np.where(reg == r)[0]
+
+        n_regimes = len(self._regime_idx)
+        print(
+            f"[RegimeTSCL] Pre-training {epochs} epochs | {N:,} windows | "
+            f"{n_regimes} regimes: "
+            f"{ {int(r): len(idx) for r, idx in self._regime_idx.items()} }"
+        )
+
+        amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
+        print(f"  batch={batch_size} | {amp_str} | temp={self.temp.item():.3f} (learnable)")
+
+        # Pre-build vectorised regime pools for fast sampling
+        _regime_pool = dict(self._regime_idx.items())
+
+        # LR warmup: linear ramp over first 3 epochs
+        warmup_epochs = min(3, epochs)
+        base_lr = self.opt.param_groups[0]["lr"]
+
+        best_metric = float("inf")
+        patience_counter = 0
+
+        history = {"loss": [], "align": [], "unif": []}
+        epoch_bar = _pbar(range(epochs), desc="Pretrain", unit="ep", leave=True)
+        for epoch in epoch_bar:
+            self._total_epochs += 1
+            cur_ep = self._total_epochs
+
+            # LR warmup + cosine decay
+            if epoch < warmup_epochs:
+                lr_scale = (epoch + 1) / warmup_epochs
+            else:
+                progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+                lr_scale = 0.5 * (1 + np.cos(np.pi * progress))
+            for pg in self.opt.param_groups:
+                pg["lr"] = base_lr * lr_scale
+
+            idx_perm = np.random.permutation(N)
+            ep_loss = 0.0
+            n_b = 0
+
+            batches = list(range(0, N, batch_size))
+            batch_bar = _pbar(batches, desc=f"  Ep {epoch + 1:3d}/{epochs}", unit="batch", leave=False)
+            for start in batch_bar:
+                batch_idx = idx_perm[start : start + batch_size]
+                if len(batch_idx) < 4:
+                    continue
+
+                cur_progress = epoch / max(1, epochs)
+                reg_batch = reg[batch_idx]
+                v_a = self.aug.augment_batch(X[batch_idx], progress=cur_progress, regime=reg_batch)
+
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
+                    if n_regimes > 1:
+                        batch_reg = reg[batch_idx]
+                        pos_i = np.empty(len(batch_idx), dtype=np.int64)
+                        neg_i = np.empty(len(batch_idx), dtype=np.int64)
+                        for r, pool in _regime_pool.items():
+                            m = batch_reg == r
+                            cnt = int(m.sum())
+                            if cnt == 0:
+                                continue
+                            pos_i[m] = np.random.choice(pool, cnt)
+                            others = np.concatenate([p for rk, p in _regime_pool.items() if rk != r])
+                            if len(others) > 0:
+                                neg_i[m] = np.random.choice(others, cnt)
+                            else:
+                                neg_i[m] = pos_i[m]
+
+                        cur_progress = epoch / max(1, epochs)
+                        v_p = self.aug.augment_batch(
+                            X[pos_i], progress=cur_progress, regime=self.regime_labels[pos_i]
+                        )
+                        v_n = self.aug.augment_batch(
+                            X[neg_i], progress=cur_progress, regime=self.regime_labels[neg_i]
+                        )
+
+                        t_p = torch.as_tensor(v_p, dtype=torch.float32, device=self.device)
+                        z_p = self._encode_project_ckpt(t_p)
+                        del t_p
+
+                        t_n = torch.as_tensor(v_n, dtype=torch.float32, device=self.device)
+                        z_n = self._encode_project_ckpt(t_n)
+                        del t_n
+
+                        t_a = torch.as_tensor(v_a, dtype=torch.float32, device=self.device)
+                        z_a = self._encode_project_ckpt(t_a)
+                        del t_a
+
+                        loss = self._regime_loss(z_a, z_p, z_n)
+                        del z_a, z_p, z_n
+                    else:
+                        cur_progress = epoch / max(1, epochs)
+                        v_b = self.aug.augment_batch(X[batch_idx], progress=cur_progress, regime=reg_batch)
+                        t2 = torch.as_tensor(v_b, dtype=torch.float32, device=self.device)
+                        z2 = self._encode_project_ckpt(t2)
+                        del t2
+                        t1 = torch.as_tensor(v_a, dtype=torch.float32, device=self.device)
+                        z1 = self._encode_project_ckpt(t1)
+                        del t1
+                        loss = self.nt_xent_loss(z1, z2)
+                        del z1, z2
+
+                if not torch.isfinite(loss):
+                    continue
+
+                self.opt.zero_grad(set_to_none=True)
+                self._scaler.scale(loss).backward()
+                self._scaler.unscale_(self.opt)
+                gnorm = nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters()) + list(self.proj.parameters()), 1.0
+                )
+                if not torch.isfinite(gnorm):
+                    self.opt.zero_grad(set_to_none=True)
+                    continue
+                self._scaler.step(self.opt)
+                self._scaler.update()
+
+                ep_loss += loss.item()
+                n_b += 1
+                if hasattr(batch_bar, "set_postfix"):
+                    batch_bar.set_postfix(loss=f"{loss.item():.3f}")
+
+            avg = ep_loss / max(n_b, 1)
+            history["loss"].append(avg)
+
+            # Metric monitoring
+            collapsed, align, unif = self._check_collapse(cur_ep, X_ref=X_ref_fixed)
+            history["align"].append(align)
+            history["unif"].append(unif)
+
+            if hasattr(epoch_bar, "set_postfix"):
+                epoch_bar.set_postfix(loss=f"{avg:.3f}", align=f"{align:.2f}", unif=f"{unif:.2f}")
+
+            if collapsed:
+                raise RepresentationCollapseError(f"Embedding collapse at epoch {cur_ep}")
+
+            # Early stopping tracks alignment (positive-pair closeness)
+            metric = align
+            if metric < best_metric - 1e-4:
+                best_metric = metric
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
+                break
+
+        print(f"[RegimeTSCL] Augment Stats: {self.aug.stats}")
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.encoder.state_dict(), checkpoint_path)
+        print(f"[RegimeTSCL] Encoder saved → {checkpoint_path}")
+        return history
+class CrossAssetTSCLTrainer(TSCLTrainer):
+    """
+    Cross-Asset Contrastive Learning.
+    Treats concurrent windows of two correlated assets (e.g. EUR/USD and GBP/USD)
+    as positive pairs in the NT-Xent loss, completely removing the need for 
+    synthetic jitter/noise augmentation.
+    """
+    def __init__(
+        self,
+        encoder,
+        d_model=128,
+        proj_dim=128,
+        temperature=0.5,
+        lr=1e-4,
+        device="cpu",
+    ):
+        # Pass aug=None or a dummy augmenter since we won't use it
+        super().__init__(encoder, d_model, proj_dim, temperature, lr, device, aug=None)
+
+    def pretrain(
+        self,
+        X_asset1: np.ndarray,
+        X_asset2: np.ndarray,
+        epochs: int = 50,
+        batch_size: int = 256,
+        checkpoint_path: str | None = None,
+        patience: int = 5,
+    ) -> dict:
+        if checkpoint_path is None:
+            from config.settings import PATHS
+            checkpoint_path = PATHS.get("file_contrastive_encoder", "encoder.pt")
+        
+        assert len(X_asset1) == len(X_asset2), "Asset arrays must be aligned and equal length"
+        N = len(X_asset1)
+        history = {"loss": []}
+        print(f"[CrossAssetTSCL] {epochs} ep | {N:,} aligned pairs | batch={batch_size}")
+        
+        best_loss = float("inf")
+        patience_counter = 0
+
+        for epoch in range(epochs):
+            self._total_epochs += 1
+            idx_perm = np.random.permutation(N)
+            epoch_loss = 0.0
+            n_batches = 0
+            
+            for start in range(0, N, batch_size):
+                batch_idx = idx_perm[start : start + batch_size]
+                if len(batch_idx) < 4:
+                    continue
+                
+                x1 = torch.as_tensor(X_asset1[batch_idx], dtype=torch.float32, device=self.device)
+                x2 = torch.as_tensor(X_asset2[batch_idx], dtype=torch.float32, device=self.device)
+                
+                z1 = self._encode_project_ckpt(x1)
+                z2 = self._encode_project_ckpt(x2)
+                
+                loss = self.nt_xent_loss(z1, z2)
+                
+                if not torch.isfinite(loss):
+                    continue
+
+                self.opt.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters()) + list(self.proj.parameters()), 1.0
+                )
+                self.opt.step()
+                
+                epoch_loss += loss.item()
+                n_batches += 1
+                
+            avg = epoch_loss / max(n_batches, 1)
+            history["loss"].append(avg)
+            print(f"[CrossAssetTSCL] Ep {self._total_epochs:3d} | loss={avg:.4f}")
+            
+            if avg < best_loss - 1e-4:
+                best_loss = avg
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
+        
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.encoder.state_dict(), checkpoint_path)
+        return history
+
+class BYOLTrainer:
+    """
+    Bootstrap Your Own Latent (BYOL) pre-trainer.
+
+    Advantages over NT-Xent (SimCLR / TSCL) on 8 GB VRAM:
+      • No negative pairs  → small batches work well (batch >= 32 is fine)
+      • 1 gradient pass    → ~2x less VRAM than regime-TSCL's 3 passes
+      • Loss range 0-2     (1.0 = random init, <0.5 = learning, <0.2 = great)
+      • No temperature to tune
+
+    Architecture:
+      Online : encoder → projector (Linear→BN→ReLU→Linear) → predictor (same)
+      Target : EMA copy of (encoder + projector), always eval, no gradient
+
+    EMA update after every step:
+      target_θ ← decay x target_θ + (1 − decay) x online_θ
+    """  # noqa: RUF002
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        d_model: int = 128,
+        proj_dim: int = 256,
+        pred_dim: int = 128,
+        ema_decay: float = 0.996,
+        lr: float = 1e-4,
+        device: str = "cpu",
+        seed=None,
+        aug: Optional["TimeSeriesAugmenter"] = None,
+    ):
+        import copy
+
+        self.device = torch.device(device)
+        self.ema_decay = ema_decay
+
+        # Online network
+        # A-M5: deep-copy so the caller's shared backbone (with its supervised
+        # head) is never mutated in place when we strip the head here.
+        encoder = copy.deepcopy(encoder)
+        if hasattr(encoder, "head"):
+            encoder.head = nn.Identity()
+        self.encoder = encoder.to(self.device)
+        self.projector = self._make_mlp(d_model, proj_dim, proj_dim).to(self.device)
+        self.predictor = self._make_mlp(proj_dim, pred_dim, proj_dim).to(self.device)
+
+        # Target network - EMA copy, no gradient, always eval
+        self.target_encoder = copy.deepcopy(self.encoder)
+        self.target_projector = copy.deepcopy(self.projector)
+        for p in list(self.target_encoder.parameters()) + list(self.target_projector.parameters()):
+            p.requires_grad_(False)
+        self.target_encoder.eval()
+        self.target_projector.eval()
+
+        self.aug = aug if aug is not None else TimeSeriesAugmenter(seed=seed)
+
+        # Optimiser updates the FULL ONLINE network: encoder + projector + predictor.
+        # The predictor is unique to BYOL's online branch (not in the target EMA),
+        # and the projector feeds it; excluding either freezes those MLPs at random
+        # init and prevents BYOL from converging.  (Also guards against encoders
+        # with zero parameters, e.g. ConstantEncoder in tests.)
+        self.optimizer = torch.optim.AdamW(
+            list(self.encoder.parameters())
+            + list(self.projector.parameters())
+            + list(self.predictor.parameters()),
+            lr=lr,
+            weight_decay=1e-4,
+        )
+        self.opt = self.optimizer
+
+        # Force FP32: BF16 overflows with 2240-feature inputs causing collapse
+        self._use_amp = False
+        self._amp_dtype = torch.float32
+        self._use_scaler = False
+        self._scaler = torch.amp.GradScaler(enabled=False)
+        self._total_epochs = 0
+
+    @staticmethod
+    def _make_mlp(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Module:
+        """BYOL MLP: Linear → BatchNorm1d → ReLU → Linear."""
+        hidden_dim = min(hidden_dim, 2048)
+        return nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    @torch.no_grad()
+    def _ema_update(self):
+        d = self.ema_decay
+        for o, t in zip(self.encoder.parameters(), self.target_encoder.parameters(), strict=False):
+            t.data.mul_(d).add_(o.data, alpha=1.0 - d)
+        for o, t in zip(self.projector.parameters(), self.target_projector.parameters(), strict=False):
+            t.data.mul_(d).add_(o.data, alpha=1.0 - d)
+
+    def _online_fwd(self, x: torch.Tensor) -> torch.Tensor:
+        """Online path - retains gradients. Returns predictor output."""
+        # Removed checkpointing because it silently drops gradients for custom CUDA kernels like Mamba
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
+
+        h = self.encoder(x)
+        if h.ndim == 3:
+            h = h[:, -1, :]
+        # Clamp encoder output: BF16 activations can overflow with 2240 features,
+        # causing all embeddings to collapse to the same unit vector (loss=0).
+        h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
+
+        z = self.projector(h)
+        p = self.predictor(z)
+        return p
+
+    @torch.no_grad()
+    def _target_fwd(self, x: torch.Tensor) -> torch.Tensor:
+        """Target path - no gradient, fp32, L2-normalised output."""
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
+        h = self.target_encoder(x)
+        if h.ndim == 3:
+            h = h[:, -1, :]
+        # Same clamp as online path to prevent BF16 overflow collapse
+        h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
+        z = self.target_projector(h)
+        return F.normalize(z, dim=-1, eps=1e-8)
+
+    @staticmethod
+    def _byol_loss(p: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """BYOL regression loss = 2 - 2·cosine_sim(predict, target). Range [0,2]."""
+        p = F.normalize(p.float(), dim=-1, eps=1e-8)
+        return (2.0 - 2.0 * (p * z.float()).sum(dim=-1)).mean()
+
+    @torch.no_grad()
+    def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
+        """Return representation diagnostics for BYOL handoff quality gates."""
+        out = {"embed_std": 0.0, "align": 0.0, "unif": 0.0, "collapsed": True}
+        if X_ref is None or len(X_ref) < 4:
+            return out
+        self.encoder.eval()
+        self.projector.eval()
+        try:
+            sample = X_ref[: min(int(max_samples), len(X_ref))]
+            v1 = self.aug.augment_batch(sample)
+            v2 = self.aug.augment_batch(sample)
+            t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
+            t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
+            z1 = self._target_fwd(t1)
+            z2 = self._target_fwd(t2)
+            std = z1.std(dim=0).mean().item()
+            align = lalign(z1, z2).item()
+            unif = lunif(z1).item()
+            finite = np.isfinite(std) and np.isfinite(align) and np.isfinite(unif)
+            out = {
+                "embed_std": float(std if np.isfinite(std) else 0.0),
+                "align": float(align if np.isfinite(align) else 0.0),
+                "unif": float(unif if np.isfinite(unif) else 0.0),
+                "collapsed": (not finite) or std < 0.005,
+            }
+        except Exception as exc:
+            print(f"[BYOL] diagnostic error: {exc}")
+        finally:
+            self.encoder.train()
+            self.projector.train()
+        return out
+
+    def save_encoder(self, checkpoint_path: str) -> None:
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.encoder.state_dict(), checkpoint_path)
+
+    def pretrain(
+        self,
+        X: np.ndarray,
+        epochs: int = 50,
+        batch_size: int = 256,
+        checkpoint_path: str | None = None,
+        silent: bool = False,  # suppress prints/bars (for multi-block calls)
+        patience: int = 5,
+    ) -> dict:
+        if checkpoint_path is None:
+            checkpoint_path = PATHS["file_contrastive_encoder"]
+        N = len(X)
+        X_ref_fixed = X[: min(128, N)]
+        history = {"loss": [], "embed_std": [], "align": [], "unif": []}
+        amp_str = "BF16" if self._amp_dtype == torch.bfloat16 else ("FP16" if self._use_amp else "FP32")
+        if not silent:
+            print(
+                f"[BYOL] Pre-training {epochs} ep | {N:,} windows | "
+                f"batch={batch_size} | {amp_str} | ema_decay={self.ema_decay}"
+            )
+
+        warmup_epochs = min(3, epochs)
+        base_lr = self.opt.param_groups[0]["lr"]
+
+        best_metric = float("inf")
+        patience_counter = 0
+
+        epoch_bar = (
+            _pbar(range(epochs), desc="BYOL Pretrain", unit="ep", leave=True) if not silent else range(epochs)
+        )
+        for epoch in epoch_bar:
+            self._total_epochs += 1
+
+            # LR warmup + cosine decay
+            if epoch < warmup_epochs:
+                lr_scale = (epoch + 1) / warmup_epochs
+            else:
+                progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+                lr_scale = 0.5 * (1.0 + np.cos(np.pi * progress))
+            for pg in self.opt.param_groups:
+                pg["lr"] = base_lr * lr_scale
+
+            self.encoder.train()
+            self.projector.train()
+            self.predictor.train()
+
+            epoch_loss = 0.0
+            n_batches = 0
+            idx_perm = np.random.permutation(N)
+
+            batch_bar = (
+                _pbar(
+                    range(0, N, batch_size),
+                    desc=f"  Ep {epoch + 1:3d}/{epochs}",
+                    unit="batch",
+                    leave=False,
+                )
+                if not silent
+                else range(0, N, batch_size)
+            )
+            for start in batch_bar:
+                batch_idx = idx_perm[start : start + batch_size]
+                if len(batch_idx) < 4:
+                    continue
+                X_b = X[batch_idx]
+
+                cur_progress = epoch / max(1, epochs)
+                v1 = self.aug.augment_batch(X_b, progress=cur_progress)
+                v2 = self.aug.augment_batch(X_b, progress=cur_progress)
+                t1 = torch.as_tensor(v1, dtype=torch.float32, device=self.device)
+                t2 = torch.as_tensor(v2, dtype=torch.float32, device=self.device)
+
+                # Online forward (with gradient)
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
+                    p1 = self._online_fwd(t1)
+                    p2 = self._online_fwd(t2)
+
+                # Target forward (no gradient, fp32)
+                z2 = self._target_fwd(t2)
+                z1 = self._target_fwd(t1)
+                del t1, t2
+
+                # Symmetric BYOL loss, averaged to keep range [0, 2]
+                loss = (self._byol_loss(p1, z2) + self._byol_loss(p2, z1)) * 0.5
+                del p1, p2, z1, z2
+
+                if not torch.isfinite(loss):
+                    continue
+
+                self.opt.zero_grad(set_to_none=True)
+                self._scaler.scale(loss).backward()
+                self._scaler.unscale_(self.opt)
+                gnorm = nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters())
+                    + list(self.projector.parameters())
+                    + list(self.predictor.parameters()),
+                    1.0,
+                )
+                if not torch.isfinite(gnorm):
+                    self.opt.zero_grad(set_to_none=True)
+                    continue
+                self._scaler.step(self.opt)
+                self._scaler.update()
+                self._ema_update()
+
+                epoch_loss += loss.item()
+                n_batches += 1
+                if hasattr(batch_bar, "set_postfix"):
+                    batch_bar.set_postfix(loss=f"{loss.item():.3f}")
+
+            avg = epoch_loss / max(n_batches, 1)
+            history["loss"].append(avg)
+            diag = self.diagnostics(X_ref_fixed)
+            history["embed_std"].append(diag["embed_std"])
+            history["align"].append(diag["align"])
+            history["unif"].append(diag["unif"])
+            if not silent:
+                if hasattr(epoch_bar, "set_postfix"):
+                    epoch_bar.set_postfix(loss=f"{avg:.3f}", std=f"{diag['embed_std']:.4f}")
+                print(
+                    f"[BYOL] Ep {self._total_epochs:3d} | loss={avg:.4f}"
+                    f" | std={diag['embed_std']:.4f}"
+                    f" | align={diag['align']:.3f}"
+                    f" | unif={diag['unif']:.3f}"
+                    f"  (1.0=random  <0.5=learning  <0.2=great)"
+                )
+
+            # Early stopping tracks alignment alone; the uniformity scale
+            # dominates align + unif and masked poorly-aligned pairs.
+            metric = diag["align"]
+            if metric < best_metric - 1e-4:
+                best_metric = metric
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1} (metric={metric:.4f})")
+                break
+
+        if not silent:
+            self.save_encoder(checkpoint_path)
+            print(f"[BYOL] Encoder saved -> {checkpoint_path}")
+        return history
+
+
+globals()["BYOLTrainer"] = BYOLTrainer
+# 2. DUAL-STREAM SENTIMENT  (FinBERT offline + SLM online)
+# ═════════════════════════════════════════════════════════════════════════════=
+
+class MaskedReconstructionTrainer:
+    """
+    Masked time-series reconstruction pre-trainer.
+
+    Randomly hides values in scaled windows, reconstructs the original
+    window, and optimizes loss only over masked positions.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        d_model: int,
+        seq_len: int,
+        n_features: int,
+        hidden_dim: int = 512,
+        mask_prob: float = 0.20,
+        lr: float = 1e-4,
+        device: str = "cpu",
+        seed=None,
+    ):
+        import copy
+
+        self.device = torch.device(device)
+        self.seq_len = int(seq_len)
+        self.n_features = int(n_features)
+        self.mask_prob = float(mask_prob)
+        self._rng = np.random.default_rng(seed)
+
+        encoder = copy.deepcopy(encoder)
+        if hasattr(encoder, "head"):
+            encoder.head = nn.Identity()
+        self.encoder = encoder.to(self.device)
+        hidden_dim = int(min(max(64, hidden_dim), 2048))
+        self.decoder = nn.Sequential(
+            nn.Linear(int(d_model), hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.seq_len * self.n_features),
+        ).to(self.device)
+        self.opt = torch.optim.AdamW(
+            list(self.encoder.parameters()) + list(self.decoder.parameters()),
+            lr=lr,
+            weight_decay=1e-4,
+        )
+        self._use_amp = False
+        self._amp_dtype = torch.float32
+        self._scaler = torch.amp.GradScaler(enabled=False)
+        self._total_epochs = 0
+
+    def _mask(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mask = torch.rand_like(x) < self.mask_prob
+        if not mask.any():
+            flat = mask.view(-1)
+            flat[int(self._rng.integers(0, flat.numel()))] = True
+        return x.masked_fill(mask, 0.0), mask
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
+        h = self.encoder(x)
+        if h.ndim == 3:
+            h = h[:, -1, :]
+        h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
+        return self.decoder(h).view(-1, self.seq_len, self.n_features)
+
+    @torch.no_grad()
+    def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
+        out = {"masked_mse": 0.0, "embed_std": 0.0, "collapsed": True}
+        if X_ref is None or len(X_ref) < 4:
+            return out
+        self.encoder.eval()
+        self.decoder.eval()
+        try:
+            sample = X_ref[: min(int(max_samples), len(X_ref))]
+            x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
+            corrupted, mask = self._mask(x)
+            recon = self._forward(corrupted)
+            mse = F.mse_loss(recon[mask], x[mask]).item()
+            h = self.encoder(corrupted)
             if h.ndim == 3:
                 h = h[:, -1, :]
-            h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
-            return self.decoder(h).view(-1, self.seq_len, self.n_features)
+            std = torch.nan_to_num(h.float()).std(dim=0).mean().item()
+            finite = np.isfinite(mse) and np.isfinite(std)
+            out = {
+                "masked_mse": float(mse if np.isfinite(mse) else 0.0),
+                "embed_std": float(std if np.isfinite(std) else 0.0),
+                "collapsed": (not finite) or std < 0.005,
+            }
+        except Exception as exc:
+            print(f"[MaskedRecon] diagnostic error: {exc}")
+        finally:
+            self.encoder.train()
+            self.decoder.train()
+        return out
 
-        @torch.no_grad()
-        def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
-            out = {"masked_mse": 0.0, "embed_std": 0.0, "collapsed": True}
-            if X_ref is None or len(X_ref) < 4:
-                return out
-            self.encoder.eval()
-            self.decoder.eval()
-            try:
-                sample = X_ref[: min(int(max_samples), len(X_ref))]
-                x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
-                corrupted, mask = self._mask(x)
-                recon = self._forward(corrupted)
-                mse = F.mse_loss(recon[mask], x[mask]).item()
-                h = self.encoder(corrupted)
-                if h.ndim == 3:
-                    h = h[:, -1, :]
-                std = torch.nan_to_num(h.float()).std(dim=0).mean().item()
-                finite = np.isfinite(mse) and np.isfinite(std)
-                out = {
-                    "masked_mse": float(mse if np.isfinite(mse) else 0.0),
-                    "embed_std": float(std if np.isfinite(std) else 0.0),
-                    "collapsed": (not finite) or std < 0.005,
-                }
-            except Exception as exc:
-                print(f"[MaskedRecon] diagnostic error: {exc}")
-            finally:
-                self.encoder.train()
-                self.decoder.train()
-            return out
+    def save_encoder(self, checkpoint_path: str) -> None:
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.encoder.state_dict(), checkpoint_path)
 
-        def save_encoder(self, checkpoint_path: str) -> None:
-            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            torch.save(self.encoder.state_dict(), checkpoint_path)
-
-        def pretrain(
-            self,
-            X: np.ndarray,
-            epochs: int = 50,
-            batch_size: int = 256,
-            checkpoint_path: str | None = None,
-            silent: bool = False,
-        ) -> dict:
-            if checkpoint_path is None:
-                checkpoint_path = PATHS["file_contrastive_encoder"]
-            N = len(X)
-            history = {"loss": [], "masked_mse": [], "embed_std": []}
-            if not silent:
-                print(
-                    f"[MaskedRecon] Pre-training {epochs} ep | {N:,} windows | "
-                    f"batch={batch_size} | mask_prob={self.mask_prob:.2f}"
-                )
-
-            warmup_epochs = min(3, epochs)
-            base_lr = self.opt.param_groups[0]["lr"]
-            epoch_bar = (
-                _pbar(range(epochs), desc="MaskedRecon Pretrain", unit="ep", leave=True)
-                if not silent
-                else range(epochs)
+    def pretrain(
+        self,
+        X: np.ndarray,
+        epochs: int = 50,
+        batch_size: int = 256,
+        checkpoint_path: str | None = None,
+        silent: bool = False,
+    ) -> dict:
+        if checkpoint_path is None:
+            checkpoint_path = PATHS["file_contrastive_encoder"]
+        N = len(X)
+        history = {"loss": [], "masked_mse": [], "embed_std": []}
+        if not silent:
+            print(
+                f"[MaskedRecon] Pre-training {epochs} ep | {N:,} windows | "
+                f"batch={batch_size} | mask_prob={self.mask_prob:.2f}"
             )
-            for epoch in epoch_bar:
-                self._total_epochs += 1
 
-                self.encoder.train()
-                self.decoder.train()
+        warmup_epochs = min(3, epochs)
+        base_lr = self.opt.param_groups[0]["lr"]
+        epoch_bar = (
+            _pbar(range(epochs), desc="MaskedRecon Pretrain", unit="ep", leave=True)
+            if not silent
+            else range(epochs)
+        )
+        for epoch in epoch_bar:
+            self._total_epochs += 1
 
-                if epoch < warmup_epochs:
-                    lr_scale = (epoch + 1) / warmup_epochs
-                else:
-                    progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
-                    lr_scale = 0.5 * (1.0 + np.cos(np.pi * progress))
-                for pg in self.opt.param_groups:
-                    pg["lr"] = base_lr * lr_scale
+            self.encoder.train()
+            self.decoder.train()
 
-                idx_perm = np.random.permutation(N)
-                epoch_loss = 0.0
-                n_batches = 0
-                batch_bar = (
-                    _pbar(
-                        range(0, N, batch_size),
-                        desc=f"  Ep {epoch + 1:3d}/{epochs}",
-                        unit="batch",
-                        leave=False,
-                    )
-                    if not silent
-                    else range(0, N, batch_size)
+            if epoch < warmup_epochs:
+                lr_scale = (epoch + 1) / warmup_epochs
+            else:
+                progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+                lr_scale = 0.5 * (1.0 + np.cos(np.pi * progress))
+            for pg in self.opt.param_groups:
+                pg["lr"] = base_lr * lr_scale
+
+            idx_perm = np.random.permutation(N)
+            epoch_loss = 0.0
+            n_batches = 0
+            batch_bar = (
+                _pbar(
+                    range(0, N, batch_size),
+                    desc=f"  Ep {epoch + 1:3d}/{epochs}",
+                    unit="batch",
+                    leave=False,
                 )
-                for start in batch_bar:
-                    batch_idx = idx_perm[start : start + batch_size]
-                    if len(batch_idx) < 4:
-                        continue
-                    x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
-                    corrupted, mask = self._mask(x)
-                    with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                        recon = self._forward(corrupted)
-                        loss = F.mse_loss(recon[mask], x[mask])
-                    del corrupted, recon
-                    if not torch.isfinite(loss):
-                        continue
+                if not silent
+                else range(0, N, batch_size)
+            )
+            for start in batch_bar:
+                batch_idx = idx_perm[start : start + batch_size]
+                if len(batch_idx) < 4:
+                    continue
+                x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
+                corrupted, mask = self._mask(x)
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
+                    recon = self._forward(corrupted)
+                    loss = F.mse_loss(recon[mask], x[mask])
+                del corrupted, recon
+                if not torch.isfinite(loss):
+                    continue
 
+                self.opt.zero_grad(set_to_none=True)
+                self._scaler.scale(loss).backward()
+                self._scaler.unscale_(self.opt)
+                gnorm = nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                    1.0,
+                )
+                if not torch.isfinite(gnorm):
                     self.opt.zero_grad(set_to_none=True)
-                    self._scaler.scale(loss).backward()
-                    self._scaler.unscale_(self.opt)
-                    gnorm = nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters()) + list(self.decoder.parameters()),
-                        1.0,
-                    )
-                    if not torch.isfinite(gnorm):
-                        self.opt.zero_grad(set_to_none=True)
-                        continue
-                    self._scaler.step(self.opt)
-                    self._scaler.update()
+                    continue
+                self._scaler.step(self.opt)
+                self._scaler.update()
 
-                    epoch_loss += loss.item()
-                    n_batches += 1
-                    if hasattr(batch_bar, "set_postfix"):
-                        batch_bar.set_postfix(loss=f"{loss.item():.4f}")
+                epoch_loss += loss.item()
+                n_batches += 1
+                if hasattr(batch_bar, "set_postfix"):
+                    batch_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-                avg = epoch_loss / max(n_batches, 1)
-                diag = self.diagnostics(X)
-                history["loss"].append(avg)
-                history["masked_mse"].append(diag["masked_mse"])
-                history["embed_std"].append(diag["embed_std"])
-                if not silent:
-                    if hasattr(epoch_bar, "set_postfix"):
-                        epoch_bar.set_postfix(loss=f"{avg:.4f}", std=f"{diag['embed_std']:.4f}")
-                    print(
-                        f"[MaskedRecon] Ep {self._total_epochs:3d} | loss={avg:.4f} "
-                        f"| masked_mse={diag['masked_mse']:.4f} "
-                        f"| std={diag['embed_std']:.4f}"
-                    )
-
+            avg = epoch_loss / max(n_batches, 1)
+            diag = self.diagnostics(X)
+            history["loss"].append(avg)
+            history["masked_mse"].append(diag["masked_mse"])
+            history["embed_std"].append(diag["embed_std"])
             if not silent:
-                self.save_encoder(checkpoint_path)
-                print(f"[MaskedRecon] Encoder saved -> {checkpoint_path}")
-            return history
+                if hasattr(epoch_bar, "set_postfix"):
+                    epoch_bar.set_postfix(loss=f"{avg:.4f}", std=f"{diag['embed_std']:.4f}")
+                print(
+                    f"[MaskedRecon] Ep {self._total_epochs:3d} | loss={avg:.4f} "
+                    f"| masked_mse={diag['masked_mse']:.4f} "
+                    f"| std={diag['embed_std']:.4f}"
+                )
+
+        if not silent:
+            self.save_encoder(checkpoint_path)
+            print(f"[MaskedRecon] Encoder saved -> {checkpoint_path}")
+        return history
 
 
 class DualStreamSentiment:

@@ -27,6 +27,8 @@ Outputs (one row per input bar, forward-filled):
 from __future__ import annotations
 
 import numpy as np
+
+from common.math_utils import safe_corrcoef as _safe_corrcoef
 import pandas as pd
 import polars as pl
 from scipy import stats
@@ -144,7 +146,7 @@ def _pca_fit(X: np.ndarray, n_comp: int) -> tuple[np.ndarray, np.ndarray]:
 
 def _shared_var(scores: np.ndarray, X: np.ndarray) -> float:
     """Variance explained: mean squared Pearson corr of factor with each asset."""
-    c = np.array([np.corrcoef(scores, X[:, j])[0, 1] for j in range(X.shape[1])])
+    c = np.array([_safe_corrcoef(scores, X[:, j])[0, 1] for j in range(X.shape[1])])
     c = np.nan_to_num(c)
     return float(np.mean(c**2))
 

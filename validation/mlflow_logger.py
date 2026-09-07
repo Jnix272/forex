@@ -26,7 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="mlflow")
+warnings.filterwarnings("ignore", category=FutureWarning, module="mlflow")
 
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 MLFLOW_EXP = os.getenv("MLFLOW_EXPERIMENT", "forex-scaling-model")

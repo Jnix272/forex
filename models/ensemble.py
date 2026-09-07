@@ -15,9 +15,9 @@ import warnings
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-warnings.filterwarnings("ignore")
+from common.math_utils import safe_corrcoef as _safe_corrcoef
+import pandas as pd
 
 try:
     import torch
@@ -43,13 +43,14 @@ if TORCH:
             first = raw[0]
             multitask = (
                 isinstance(first, torch.Tensor)
-                and first.dim() >= 2
-                and first.shape[-1] == 3
+                and (
+                    (first.dim() >= 2 and first.shape[-1] == 3)  # old 3-class CE head
+                    or first.dim() == 1  # CPAR: direction_logit is already (B,) scalar
+                )
                 and len(raw) >= 3
-                and len(raw) > 1
                 and isinstance(raw[1], torch.Tensor)
             )
-            t = raw[1] if multitask and len(raw) > 1 else first
+            t = raw[1] if multitask else first
 
             # Recursive unwrap for nested tuples (e.g. Ensemble inside Ensemble or custom wrappers)
             if isinstance(t, (tuple, list)):
@@ -332,18 +333,10 @@ if TORCH:
                 yb = yb.to(dev, non_blocking=True).float()
                 opt.zero_grad(set_to_none=True)
 
-                # Base predictions (no grad - bases are frozen)
-                with torch.no_grad():
-                    base_preds = torch.stack(
-                        [_base_pred_to_batch_vector(b(meta._base_input(xb, i))) for i, b in enumerate(meta.bases)],
-                        dim=1,
-                    )  # (B, n_models)
-
-                # Meta-network forward
-                context = meta.context_enc(xb[:, -1, :])
-                meta_in = torch.cat([context, base_preds], dim=1)
-                weights = torch.softmax(meta.meta(meta_in), dim=1)  # (B, n_models)
-                output = (weights * base_preds).sum(dim=1)  # (B,)
+                # Use meta.forward() so training and inference share one code path.
+                # Base models are frozen inside forward via no_grad; only
+                # context_enc and meta params receive gradients.
+                output, weights = meta(xb)
 
                 # Task loss
                 task_loss = criterion(output, yb)
@@ -602,7 +595,7 @@ if TORCH:
                 return float(1 - f_dist.cdf(F, df1, df2))
             except ImportError:
                 # Fallback: simple correlation-based p-value proxy
-                corr = float(np.corrcoef(x[:-lag], y[lag:])[0, 1])
+                corr = float(_safe_corrcoef(x[:-lag], y[lag:])[0, 1])
                 return float(1 - abs(corr))
             except Exception:
                 return 1.0
@@ -699,8 +692,6 @@ if TORCH:
                 out, _ = attn(h, h, h, attn_mask=attn_mask, need_weights=False)
                 h = norm(h + self.drop(out))
             o = self.head(h.reshape(h.shape[0], -1))
-            if isinstance(self.head, nn.Identity):
-                return o
             return o.squeeze(-1)
 
 else:

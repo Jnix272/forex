@@ -142,7 +142,7 @@ def classification_calibration_metrics(
     if not labels:
         return {
             "n": 0,
-            "accuracy": 0.0,
+            "r2": 0.0,
             "avg_confidence": 0.0,
             "ece": 0.0,
             "mce": 0.0,
@@ -181,18 +181,18 @@ def classification_calibration_metrics(
     total_n = len(labels)
     for b in bins:
         if b["n"] == 0:
-            bin_rows.append({**b, "accuracy": None, "confidence": None, "gap": None})
+            bin_rows.append({**b, "r2": None, "confidence": None, "gap": None})
             continue
         acc = b["correct"] / b["n"]
         avg_conf = b["conf_sum"] / b["n"]
         gap = abs(acc - avg_conf)
         ece += (b["n"] / total_n) * gap
         mce = max(mce, gap)
-        bin_rows.append({**b, "accuracy": acc, "confidence": avg_conf, "gap": gap})
+        bin_rows.append({**b, "r2": acc, "confidence": avg_conf, "gap": gap})
 
     return {
         "n": total_n,
-        "accuracy": correct / total_n,
+        "r2": correct / total_n,
         "avg_confidence": conf_sum / total_n,
         "ece": ece,
         "mce": mce,

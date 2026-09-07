@@ -79,11 +79,9 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
         if "lstm_hidden" in kwargs and "hidden_size" in kwargs:
             kwargs["lstm_hidden"] = kwargs["hidden_size"] // 2
 
-    # Direction-classification is the primary use-case (3-class sell/hold/buy
-    # logits). Default to 3 classes when the caller (e.g. the full-data-flow
-    # training test, or train_gpu) does not specify num_classes explicitly.
+    # Default to a single continuous scalar output (Linear head) for regression.
     if "num_classes" in params and "num_classes" not in kwargs:
-        kwargs["num_classes"] = 3
+        kwargs["num_classes"] = 1
 
     valid_kwargs = {k: v for k, v in kwargs.items() if k in params}
     try:
@@ -159,7 +157,7 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
 
 
 if TORCH:
-    # ── Shared building blocks ─────────────────────────────────────────────
+    # â”€â”€ Shared building blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _kaiming_init_module(mod: "nn.Module") -> None:
         """Xavier/Kaiming-stable init; moderate head gain keeps outputs ~O(1)."""
@@ -192,9 +190,9 @@ if TORCH:
         SDPA kernel when tensors are in FP16 or BF16 (autocast context).
 
         Requirements for Flash Attention kernel (PyTorch >= 2.0, CUDA):
-          • Tensors must be FP16 or BF16 - satisfied by AMP autocast.
-          • No custom attn_mask - self-attention only, no causal mask needed.
-          • Head dim should be 16, 32, 64, or 128 for best performance.
+          â€¢ Tensors must be FP16 or BF16 - satisfied by AMP autocast.
+          â€¢ No custom attn_mask - self-attention only, no causal mask needed.
+          â€¢ Head dim should be 16, 32, 64, or 128 for best performance.
         """
 
         def __init__(self, d_model: int, heads: int, dropout: float = 0.0):
@@ -224,10 +222,11 @@ if TORCH:
             return self.out_proj(out)
 
     class HuberLoss(nn.Module):
-        def __init__(self, delta=1.0, sign_weight=0.0):
+        def __init__(self, delta=1.0, sign_weight=0.0, reduction="mean"):
             super().__init__()
             self.delta = delta
             self.sign_weight = sign_weight
+            self.reduction = reduction
 
         def forward(self, p, t, weight=None):
             e = p - t
@@ -237,6 +236,8 @@ if TORCH:
             loss = base + dir_penalty
             if weight is not None:
                 loss = loss * weight
+            if self.reduction == "none":
+                return loss
             return loss.mean()
 
     class AsymmetricDirectionalLoss(nn.Module):
@@ -246,10 +247,11 @@ if TORCH:
         forecasting. Targets are typically {-1,0,+1} bar labels.
         """
 
-        def __init__(self, delta=1.0, sign_weight=2.0):
+        def __init__(self, delta=1.0, sign_weight=2.0, reduction="mean"):
             super().__init__()
             self.delta = delta
             self.sign_weight = sign_weight
+            self.reduction = reduction
 
         def forward(self, pred, target, weight=None):
             e = pred - target
@@ -265,16 +267,18 @@ if TORCH:
             loss = huber + self.sign_weight * extra
             if weight is not None:
                 loss = loss * weight
+            if self.reduction == "none":
+                return loss
             return loss.mean()
 
-    # ── Multi-task head, loss, and backbone wrapper ───────────────────────
+    # â”€â”€ Multi-task head, loss, and backbone wrapper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class MultiTaskHead(nn.Module):
         """
         Three-output prediction head for multi-task supervision:
-          direction  - 3-class logits {sell=0, hold=1, buy=2}   (cross-entropy)
-          return_hat - scalar magnitude regression               (Huber)
-          confidence - predicted |return|, clipped to [0,1]     (BCE)
+          direction  - scalar proxy for direction (Huber)
+          return_hat - scalar magnitude regression (Huber)
+          confidence - predicted |return|, clipped to [0,1] (BCE)
 
         Training on all three signals simultaneously prevents the backbone from
         learning 'correct direction / wrong magnitude' solutions and gives a
@@ -296,7 +300,7 @@ if TORCH:
                 nn.Linear(in_features, hidden),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden, 3),
+                nn.Linear(hidden, 1),
             )
             self.return_hat = nn.Sequential(
                 nn.Linear(in_features, h2),
@@ -328,10 +332,9 @@ if TORCH:
             """h: (B, in_features) - backbone hidden state BEFORE any prediction head."""
             ret = self.return_hat(h)  # (B, 1)
             conf = self.confidence(h)  # (B, 1)
-            # reshape(-1) instead of squeeze(-1): safe when B=1 (squeeze would
-            # collapse both dims -> scalar, breaking loss computation)
+            dir_pred = self.direction(h)  # (B, 3)
             outs = (
-                self.direction(h),  # (B, 3)
+                dir_pred,
                 ret.reshape(-1),  # (B,)
                 conf.reshape(-1),  # (B,)
             )
@@ -341,175 +344,60 @@ if TORCH:
 
     class MultiTaskLoss(nn.Module):
         """
-        Weighted combination of three supervised objectives:
-          L = w_dir  * CrossEntropy(direction, y_cls)
+        Weighted combination of supervised objectives for pure regression:
+          L = w_dir  * Huber(direction, y_cont)
             + w_ret  * Huber(return_hat, y_cont)
-            + w_conf * BCE(confidence, |y_cont|)
+            + w_conf * BCE(confidence, abs(y_cont) > 0.0001)
 
         Typical weights: w_dir=1.0, w_ret=0.5, w_conf=0.3
-        Class weights can be passed to CrossEntropyLoss to handle {-1,0,+1} imbalance.
         """
 
         def __init__(
             self,
-            class_weights: torch.Tensor | None = None,
             w_dir: float = 1.0,
             w_ret: float = 0.5,
             w_conf: float = 0.3,
             huber_delta: float = 1.0,
-            class_balance_weight: float = 0.0,
-            entropy_weight: float = 0.0,
-            direction_weight_floor: float = 0.0,
-            focal_gamma: float = 0.0,
-            class_prior: torch.Tensor | None = None,
-            w_sharpe: float = 0.0,
-            sharpe_ann: float = 1.0,
-            sharpe_eps: float = 1e-8,
-            label_smoothing: float = 0.05,
-            class_floor_frac: float = 0.35,
-            recall_margin: float = 0.35,
-            dist_penalty_w: float = 4.0,
-            balanced_ce_w: float = 0.15,
-            aux_bce_w: float = 0.15,
             recon_w: float = 0.1,
             vol_w: float = 0.05,
+            **kwargs,
         ):
             super().__init__()
-            self.ce = nn.CrossEntropyLoss(
-                weight=class_weights,
-                reduction="none",
-                label_smoothing=float(max(0.0, label_smoothing)),
-            )
-            self.hub = nn.HuberLoss(delta=huber_delta, reduction="none")
-            self.bce = nn.BCEWithLogitsLoss()  # AMP-safe; sigmoid is fused internally
             self.w_dir = w_dir
             self.w_ret = w_ret
             self.w_conf = w_conf
-            self.w_sharpe = w_sharpe
-            # sharpe_ann is already the sqrt-style annualization factor (e.g. 325).
-            self.sharpe_sqrt = float(max(1.0, sharpe_ann))
-            self.sharpe_eps = sharpe_eps
-            self.class_balance_weight = float(class_balance_weight)
-            self.entropy_weight = float(entropy_weight)
-            self.direction_weight_floor = float(direction_weight_floor)
-            self.focal_gamma = float(focal_gamma)
-            self.class_floor_frac = float(class_floor_frac)
-            self.recall_margin = float(recall_margin)
-            self.dist_penalty_w = float(dist_penalty_w)
-            self.balanced_ce_w = float(balanced_ce_w)
-            self.aux_bce_w = float(aux_bce_w)
-            self.recon_w = float(recon_w)
-            self.vol_w = float(vol_w)
-            prior = class_prior.float() if class_prior is not None else torch.ones(3) / 3.0
-            prior = prior.reshape(-1).clamp_min(1e-6)
-            prior = prior / prior.sum().clamp_min(1e-6)
-            self.register_buffer("class_prior", prior)
+            self.hub = nn.HuberLoss(delta=huber_delta, reduction="none")
+            self.bce = nn.BCEWithLogitsLoss(reduction="none")
+            self.recon_w = recon_w
+            self.vol_w = vol_w
 
         def forward(
             self,
-            logits: torch.Tensor,  # (B, 3)
-            ret_hat: torch.Tensor,  # (B,)
-            conf: torch.Tensor,  # (B,)
-            y_cls: torch.Tensor,  # (B,) long {0,1,2}
-            y_cont: torch.Tensor,  # (B,) float continuous reward
-            y_conf: torch.Tensor | None = None,  # path_quality / confidence target / trade weight
+            logits: torch.Tensor,
+            ret_hat: torch.Tensor,
+            conf: torch.Tensor,
+            y_cls: torch.Tensor,
+            y_cont: torch.Tensor,
+            y_conf: torch.Tensor | None = None,
             recon_hat: torch.Tensor | None = None,
             recon_tgt: torch.Tensor | None = None,
             vol_hat: torch.Tensor | None = None,
             vol_tgt: torch.Tensor | None = None,
+            bet_size: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            y_flat = y_cls.reshape(-1).clamp(0, 2)
-            l_dir = self.ce(logits, y_flat)
-            if self.focal_gamma > 0.0:
-                with torch.no_grad():
-                    p_t = torch.softmax(logits, dim=-1).gather(1, y_flat.view(-1, 1)).squeeze(1)
-                    focal = (1.0 - p_t.clamp(1e-6, 1.0)).pow(self.focal_gamma)
-                l_dir = l_dir * focal
+            l_dir = self.hub(logits.squeeze(-1), y_cont)
             l_ret = self.hub(ret_hat, y_cont)
-            l_dir_per_sample = l_dir
-
-            if y_conf is not None:
-                # y_conf is the confidence / path-quality *target* for BCE.
-                # It is also used as a soft sample weight for dir/ret when provided
-                # (path_quality convention). Callers that only want a BCE target
-                # without reweighting should pass y_conf=None and rely on |y_cont|.
-                weight = y_conf.clamp(0.0, 1.0)
-                dir_weight = weight.clamp_min(self.direction_weight_floor)
-                weighted_l_dir = l_dir_per_sample * dir_weight
-                l_dir = weighted_l_dir.mean()
-                l_ret = (l_ret * weight).mean()
-                conf_tgt = weight
-            else:
-                dir_weight = torch.ones_like(l_dir_per_sample)
-                weighted_l_dir = l_dir_per_sample
-                l_dir = weighted_l_dir.mean()
-                l_ret = l_ret.mean()
-                conf_tgt = y_cont.abs().clamp(0.0, 1.0)
-
-            l_conf = self.bce(conf, conf_tgt)
-            loss = self.w_dir * l_dir + self.w_ret * l_ret + self.w_conf * l_conf
-            if self.w_sharpe > 0.0:
-                # Softsign: avoids tanh vanishing grads on confident ret_hat.
-                direction = ret_hat / (1.0 + ret_hat.abs())
-                returns = (direction * y_cont).flatten()
-                mean = returns.mean()
-                var = returns.var(unbiased=False)
-                # DETACH std to prevent the network from artificially shrinking batch variance
-                std = torch.sqrt(var + self.sharpe_eps).detach()
-                sharpe = (mean / std * self.sharpe_sqrt).clamp(min=-20.0, max=20.0)
-                loss = loss - self.w_sharpe * sharpe
-            if self.class_balance_weight:
-                probs = torch.softmax(logits, dim=-1)
-                pred_dist = probs.mean(dim=0).clamp_min(1e-6)
-                true_dist = self.class_prior.to(dtype=probs.dtype, device=probs.device)
-                dist_mse = F.mse_loss(pred_dist, true_dist)
-                dist_kl = F.kl_div(pred_dist.log(), true_dist, reduction="sum")
-                class_floor = true_dist * self.class_floor_frac
-                missing_penalty = F.relu(class_floor - pred_dist).pow(2).sum()
-                recall_margin_t = logits.new_tensor(self.recall_margin)
-                recall_penalty = logits.new_tensor(0.0)
-                balanced_ce_parts = []
-                aux_bce_parts = []
-                target_oh = F.one_hot(y_flat, num_classes=logits.shape[-1]).to(
-                    dtype=logits.dtype,
-                    device=logits.device,
-                )
-                for cls_idx in range(logits.shape[-1]):
-                    mask = y_flat == cls_idx
-                    if not bool(mask.any()):
-                        continue
-                    balanced_ce_parts.append(weighted_l_dir[mask].mean())
-                    cls_logits = logits[mask]
-                    aux_bce_parts.append(
-                        F.binary_cross_entropy_with_logits(
-                            cls_logits,
-                            target_oh[mask],
-                            reduction="mean",
-                        )
-                    )
-                    target_logit = cls_logits[:, cls_idx]
-                    other_logits = torch.cat(
-                        [cls_logits[:, :cls_idx], cls_logits[:, cls_idx + 1 :]],
-                        dim=1,
-                    )
-                    other_best = other_logits.max(dim=1).values
-                    recall_penalty = recall_penalty + F.relu(recall_margin_t - (target_logit - other_best)).mean()
-                balanced_ce = torch.stack(balanced_ce_parts).mean() if balanced_ce_parts else logits.new_tensor(0.0)
-                aux_bce = torch.stack(aux_bce_parts).mean() if aux_bce_parts else logits.new_tensor(0.0)
-                loss = loss + self.class_balance_weight * (
-                    self.dist_penalty_w * (dist_mse + dist_kl + missing_penalty)
-                    + recall_penalty
-                    + self.balanced_ce_w * balanced_ce
-                    + self.aux_bce_w * aux_bce
-                )
-            if self.entropy_weight:
-                probs = torch.softmax(logits, dim=-1).clamp_min(1e-6)
-                entropy = -(probs * probs.log()).sum(dim=-1).mean()
-                loss = loss - self.entropy_weight * entropy
-            if recon_hat is not None and recon_tgt is not None and recon_hat.shape[-1] == recon_tgt.shape[-1]:
-                loss = loss + self.recon_w * F.mse_loss(recon_hat, recon_tgt)
-            if vol_hat is not None and vol_tgt is not None:
-                loss = loss + self.vol_w * F.mse_loss(vol_hat.reshape(-1), vol_tgt.reshape(-1))
+            
+            tgt_conf = (y_cont.abs() > 0.0001).float() if y_conf is None else y_conf
+            l_conf = self.bce(conf, tgt_conf)
+            
+            loss = self.w_dir * l_dir.mean() + self.w_ret * l_ret.mean() + self.w_conf * l_conf.mean()
+            
+            if recon_hat is not None and recon_tgt is not None and self.recon_w > 0:
+                loss += self.recon_w * self.hub(recon_hat, recon_tgt).mean()
+            if vol_hat is not None and vol_tgt is not None and self.vol_w > 0:
+                loss += self.vol_w * self.hub(vol_hat, vol_tgt).mean()
+                
             return loss
 
     class MultiTaskWrapper(nn.Module):
@@ -522,7 +410,7 @@ if TORCH:
         instead of the backbone's scalar/logit prediction.
 
         When the backbone's pre-head dimension exceeds proj_threshold (e.g.
-        iTransformer whose head_in = d_model x n_features ≈ 18k), an extra
+        iTransformer whose head_in = d_model x n_features â‰ˆ 18k), an extra
         Linear+GELU projection to proj_to=256 is inserted automatically.
 
         Usage:
@@ -574,8 +462,8 @@ if TORCH:
                 target = cast(Any, target).backbone
             cast(Any, target).head = nn.Identity()
 
-        def forward(self, x: torch.Tensor):
-            h = self.backbone(x)  # (B, head_in) - features from backbone
+        def forward(self, x: torch.Tensor, *args, **kwargs):
+            h = self.backbone(x, *args, **kwargs)  # (B, head_in) - features from backbone
             h = self.proj(h)
             return self.mt_head(h)
 
@@ -587,7 +475,7 @@ if TORCH:
           A. Cross-pair interaction channels:
              - Rolling Pearson correlation at two timescales (short + long window)
                for all i<j pairs - explicit co-movement signal the model need not infer.
-             - Windowed relative momentum r_i(W) − r_j(W) over momentum_window bars.
+             - Windowed relative momentum r_i(W) âˆ’ r_j(W) over momentum_window bars.
              - Volatility share per pair: ATR_i / basket_ATR.
              - Cross-pair return dispersion (std across pairs at each bar).
           B. Regime-conditioned pair weighting - a small attention network weights
@@ -703,7 +591,7 @@ if TORCH:
             Compute cross-pair interaction features from (B, T, P, F).
 
             Returns (B, T, n_interaction) containing:
-              - RelMom_{i,j}     : windowed r_i(W) − r_j(W) for all i<j pairs
+              - RelMom_{i,j}     : windowed r_i(W) âˆ’ r_j(W) for all i<j pairs
               - ShortCorr_{i,j}  : rolling Pearson corr (corr_window) for all i<j
               - LongCorr_{i,j}   : rolling Pearson corr (corr_window_long) for all i<j
               - VolShare_i       : ATR_i / sum(ATR_j) for each pair
@@ -784,7 +672,7 @@ if TORCH:
             )  # (B, T, 3*n_cross + P + 2)
             return torch.nan_to_num(cross, nan=0.0, posinf=0.0, neginf=0.0).clamp(-10.0, 10.0)
 
-        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+        def forward(self, x: "torch.Tensor", *args, **kwargs) -> "torch.Tensor":
             x = torch.nan_to_num(x.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp(-10.0, 10.0)
             B, T, _ = x.shape
 
@@ -829,9 +717,9 @@ if TORCH:
                 neginf=0.0,
             ).clamp(-10.0, 10.0)  # (B, T, pairs_flat + n_inter)
 
-            return self.backbone(full)
+            return self.backbone(full, *args, **kwargs)
 
-    # ── 1. Temporal Fusion Transformer (simplified) ────────────────────────
+    # ── 1. Temporal Fusion Transformer (simplified) ──────────────────────────────────────────
 
     class VariableSelectionNetwork(nn.Module):
         """Learns which features matter at each timestep."""
@@ -938,7 +826,7 @@ if TORCH:
                 return out
             return out.squeeze(-1) if self.num_classes == 1 else out
 
-    # ── 2. iTransformer (variate-dimension attention) ──────────────────────
+    # â”€â”€ 2. iTransformer (variate-dimension attention) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class iTransformerScalper(nn.Module):
         """
@@ -1003,7 +891,7 @@ if TORCH:
             o = self.head(self.norm_out(out))
             return o.squeeze(-1) if self.num_classes == 1 else o
 
-    # ── 3. HAELT Hybrid (LSTM + Transformer in parallel) ──────────────────
+    # â”€â”€ 3. HAELT Hybrid (LSTM + Transformer in parallel) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class HAELTHybrid(nn.Module):
         """
@@ -1060,7 +948,7 @@ if TORCH:
             _kaiming_init_module(self)
 
         def forward(self, x):
-            # PIPE-006: soft clipping via tanh scaling instead of hard clamp at ±10
+            # PIPE-006: soft clipping via tanh scaling instead of hard clamp at Â±10
             # Preserves signal magnitude for high-impact news events while bounding values
             x = torch.nan_to_num(x.float(), nan=0.0, posinf=0.0, neginf=0.0)
             x = torch.where(x.abs() > 10.0, 10.0 * torch.tanh(x / 10.0), x)
@@ -1100,7 +988,7 @@ if TORCH:
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o
 
-    # ── 4. Mamba State Space Model ─────────────────────────────────────────
+    # â”€â”€ 4. Mamba State Space Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class MambaBlock(nn.Module):
         """
@@ -1153,7 +1041,7 @@ if TORCH:
     class MambaScalper(nn.Module):
         """
         Stack of MambaBlocks for low-latency HFT inference.
-        Handles long sequences with O(L) cost vs transformer O(L²).
+        Handles long sequences with O(L) cost vs transformer O(LÂ²).
         Not a true Mamba SSM - see MambaBlock docstring.
         """
 
@@ -1188,7 +1076,7 @@ if TORCH:
                 return o
             return o.squeeze(-1) if self.num_classes == 1 else o
 
-    # ── 5. GNN Cross-Asset ────────────────────────────────────────────────
+    # â”€â”€ 5. GNN Cross-Asset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class GNNCrossAsset(nn.Module):
         """
@@ -1237,7 +1125,7 @@ if TORCH:
             if adj is not None:
                 A = adj
             else:
-                # Attention-style dot-product adjacency: A_ij = softmax_j(q_i·k_j)
+                # Attention-style dot-product adjacency: A_ij = softmax_j(q_iÂ·k_j)
                 # (separate q/k projections => directed edges A_ij != A_ji).
                 q = self.adj_q(h)  # (B, N, N)
                 k = self.adj_k(h)
@@ -1294,7 +1182,7 @@ if TORCH:
             h = self.proj(z).view(-1, self.n_nodes, self.chunk)
             return self.gnn(h, adj=adj)
 
-    # ── 6. EXPERT Encoder ─────────────────────────────────────────────────
+    # â”€â”€ 6. EXPERT Encoder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class ConvFFN(nn.Module):
         """1D conv feedforward - captures local temporal patterns better than MLP."""
@@ -1546,6 +1434,7 @@ if TORCH:
         def __init__(self, input_size: int, num_classes: int = 3, seq_len: int = 16):
             super().__init__()
             self.seq_len = seq_len
+            self.num_classes = num_classes
             self.d_model = input_size * seq_len
             self.input_norm = nn.LayerNorm(input_size)
             self.flatten = nn.Flatten(start_dim=1)
@@ -1556,9 +1445,10 @@ if TORCH:
             """x: (B, seq_len, input_size)"""
             x = self.input_norm(x)
             x_flat = self.flatten(x)
-            return self.head(x_flat)
+            o = self.head(x_flat)
+            return o.squeeze(-1) if self.num_classes == 1 else o
 
-    # ── C: Model role separation ───────────────────────────────────────────
+    # â”€â”€ C: Model role separation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Each architecture has an explicit role in the ensemble pipeline.
     # Used by DiversityLoss to compute role-conditioned diversity penalties
     # and by the ensemble router to weight predictions appropriately.
@@ -1632,7 +1522,7 @@ if TORCH:
                     n_pairs += 1
             return self.weight * penalty / max(n_pairs, 1)
 
-    # ── D: Model confidence calibration ───────────────────────────────────
+    # â”€â”€ D: Model confidence calibration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class TemperatureScaler(nn.Module):
         """
@@ -1748,7 +1638,7 @@ if TORCH:
             penalty = overconf_bad * pred.abs()
             return self.weight * penalty.mean()
 
-    # ── Model factory ──────────────────────────────────────────────────────
+    # â”€â”€ Model factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     MODEL_REGISTRY = {
         "tft": TFTScalper,
@@ -1760,6 +1650,38 @@ if TORCH:
         "glm": GLMBaseline,
         "patchtst": PatchTSTScalper,
     }
+
+    # ModelZoo provides a stable import for external code
+    class ModelZoo:
+        """Expose the model registry for external imports.
+        Allows attribute access like ModelZoo.TFTScalper.
+        """
+        _registry = MODEL_REGISTRY
+
+        @classmethod
+        def get(cls, name: str):
+            key = name.lower()
+            if key.startswith("baseline_"):
+                key = key.replace("baseline_", "", 1)
+            return cls._registry.get(key)
+
+        @classmethod
+        def list_models(cls):
+            return list(cls._registry.keys())
+
+        @classmethod
+        def __getattr__(cls, name: str):
+            """Dynamically expose models as class attributes.
+            Example: ModelZoo.TFTScalper returns the TFTScalper class.
+            """
+            key = name.lower()
+            if key.startswith("baseline_"):
+                key = key.replace("baseline_", "", 1)
+            if key in cls._registry:
+                return cls._registry[key]
+            raise AttributeError(f"ModelZoo has no attribute '{name}'")
+
+
 
 
 else:
@@ -1790,7 +1712,29 @@ else:
     OverconfidencePenalty = cast(Any, _TorchUnavailableStub)
     AsymmetricDirectionalLoss = cast(Any, _TorchUnavailableStub)
 
+    # Added ModelZoo placeholder for compatibility with tests
+    class ModelZoo:
+        """Placeholder class exposing model registry for external imports."""
+        _registry = {}
+
+        @classmethod
+        def get(cls, name: str):
+            """Retrieve model class by name (caseâ€‘insensitive)."""
+            key = name.lower()
+            if key.startswith("baseline_"):
+                key = key.replace("baseline_", "", 1)
+            return cls._registry.get(key)
+
+        @classmethod
+        def list_models(cls):
+            """Return a list of available model names."""
+            return list(cls._registry.keys())
+
+    # Export symbols for wildcard imports
+    __all__ = ["build_model", "ModelZoo", "MultiTaskWrapper", "MultiPairWrapper", "TFTScalper"]
+
     MODEL_REGISTRY = {}
+    ModelZoo._registry = MODEL_REGISTRY
     MODEL_ROLES: dict = {}
 
 
@@ -1826,3 +1770,5 @@ if __name__ == "__main__" and TORCH:
 from config.model_training_profile import register_build_model
 
 register_build_model(build_model)
+
+

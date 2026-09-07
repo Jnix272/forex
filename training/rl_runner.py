@@ -52,8 +52,13 @@ def _rl_train_val_slices(total, args):
 
 
 def _rl_algo_kwargs(args, algo):
+    # rl.algo_overrides dict (generic) + rl.<algo> per-algo sub-dict from YAML.
     overrides = getattr(args, "rl_algo_overrides", {}) or {}
-    return overrides.get(algo, {})
+    merged = dict(overrides.get(algo, {}))
+    per_algo = getattr(args, f"rl_{algo}_overrides", None)
+    if isinstance(per_algo, dict):
+        merged.update(per_algo)
+    return merged
 
 # -----------------------------------------------------------------------------
 # RL TRAINING
@@ -290,11 +295,15 @@ def _build_rl_env(
 def _save_rl_checkpoint(agent, ckpt_dir: Path, algo: str, tag: str) -> Path:
     path = ckpt_dir / f"rl_{algo}_{tag}.pt"
     if hasattr(agent, "policy_net"):
-        _safe_save(agent.policy_net.state_dict(), path)
+        sd = agent.policy_net.state_dict()
     elif hasattr(agent, "net"):
-        _safe_save(agent.net.state_dict(), path)
+        sd = agent.net.state_dict()
     else:
         raise RuntimeError("[RL] Agent has no saveable policy weights")
+    # Wrap in the same {"model_state": ...} envelope used by supervised checkpoints
+    # so the ONNX exporter and supervised loader utilities can load RL checkpoints
+    # with the same unwrapping idiom.
+    _safe_save({"model_state": sd}, path)
     return path
 
 
@@ -610,13 +619,21 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     train_env = _build_rl_env(cache_path, train_start, train_n, n_features, args, device)
     print(f"[RL] Train env | obs={train_env.obs_size} | market std={float(np.std(train_env.prices)):.6f}")
 
+    # Skip RL for models whose profile marks rl_finetune=False (e.g. GNN, GLM).
+    if not getattr(args, "rl_finetune", True):
+        print(f"[RL] Skipping RL fine-tune for {args.model} (rl_finetune=False in profile).")
+        return []
+
     dev = str(device)
     _algo = str(args.rl_algo).lower()
     _algo_kw = _rl_algo_kwargs(args, _algo)
+    _use_lstm = bool(getattr(args, "rl_use_lstm", False))
     if _algo == "dqn":
-        agent = DQNAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, **_algo_kw)
+        agent = DQNAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, use_lstm=_use_lstm, **_algo_kw)
     else:
-        agent = PPOAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, **_algo_kw)
+        agent = PPOAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, use_lstm=_use_lstm, **_algo_kw)
+    if _use_lstm:
+        print(f"[RL] LSTM backbone enabled for {args.model}")
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -624,6 +641,8 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     _min_val_sharpe = float(getattr(args, "rl_min_val_sharpe", -999.0))
     _best_val_sharpe = float("-inf")
     _best_saved = False
+    # Evaluate on val every this many training episodes
+    _val_every = max(10, int(args.rl_episodes) // 10)
 
     # ── RL curriculum scheduler (graduated volatility exposure) ──────────
     _rl_curriculum = None
@@ -656,6 +675,34 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         except Exception as _he:
             print(f"[RL] HER unavailable: {_he}")
 
+    # Build per-episode val callback when a val window exists
+    _ep_val_callback = None
+    if val_n > 0:
+        _ep_val_env_ref: list = []  # lazy-init so env is created once
+
+        def _ep_val_callback(ep: int, _agent) -> None:
+            nonlocal _best_val_sharpe, _best_saved
+            if (ep + 1) % _val_every != 0:
+                return
+            if not _ep_val_env_ref:
+                _ep_val_env_ref.append(
+                    _build_rl_env(cache_path, val_start, val_n, n_features, args, device)
+                )
+            _ep_venv = _ep_val_env_ref[0]
+            _, _ep_vs = evaluate_agent(_agent, _ep_venv, n_episodes=_val_episodes, agent_type=_algo, greedy=True)
+            _ep_sharpe = float(_ep_vs.get("sharpe", 0.0))
+            print(
+                f"[RL] Ep {ep + 1} val | Sharpe={_ep_sharpe:.3f} "
+                f"| Return={_ep_vs['total_return_pct']:+.2f}% | Trades={_ep_vs['n_trades']}"
+            )
+            # Save only when this episode is a genuine new best AND meets min bar.
+            # Update _best_val_sharpe AFTER the save guard so the condition is not
+            # a tautology (updating first makes _ep_sharpe >= _best_val_sharpe always True).
+            if _ep_sharpe >= _min_val_sharpe and _ep_sharpe > _best_val_sharpe:
+                _best_val_sharpe = _ep_sharpe
+                _save_rl_checkpoint(_agent, ckpt_dir, _algo, "best")
+                _best_saved = True
+
     returns = train_agent(
         agent,
         train_env,
@@ -665,6 +712,7 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         reward_sharpe=reward_sharpe,
         her_buffer=her_buffer,
         off_policy_rewards=bool(getattr(args, "off_policy_rewards", False)),
+        episode_callback=_ep_val_callback,
     )
 
     if bool(getattr(args, "off_policy_rewards", False)):
@@ -679,16 +727,17 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
             )
 
     if val_n > 0:
-        val_env = _build_rl_env(cache_path, train_start + val_start, val_n, n_features, args, device)
+        val_env = _build_rl_env(cache_path, val_start, val_n, n_features, args, device)
         _, val_summary = evaluate_agent(agent, val_env, n_episodes=_val_episodes, agent_type=_algo, greedy=True)
         _val_sharpe = float(val_summary.get("sharpe", 0.0))
         print(
             f"[RL] Val | Sharpe={_val_sharpe:.3f} | Return={val_summary['total_return_pct']:+.2f}% "
             f"| Trades={val_summary['n_trades']}"
         )
-        if _val_sharpe >= _best_val_sharpe:
+        # Only overwrite the best checkpoint when this final evaluation is strictly
+        # better than every per-episode checkpoint already saved mid-training.
+        if _val_sharpe >= _min_val_sharpe and _val_sharpe > _best_val_sharpe:
             _best_val_sharpe = _val_sharpe
-        if _val_sharpe >= _min_val_sharpe:
             _save_rl_checkpoint(agent, ckpt_dir, _algo, "best")
             meta = {
                 "model": args.model,

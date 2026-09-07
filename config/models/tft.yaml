@@ -8,3 +8,4 @@ model:
 training:
   lr: 1.0e-3
   seq_len: 60
+  early_stop_patience: 6   # TFT converges fast at 1e-3 lr; short patience avoids over-running

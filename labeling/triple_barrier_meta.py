@@ -208,6 +208,16 @@ class MetaLabeler:
         probs = self.predict_proba(primary_pred, features)
         return probs >= self.config.meta_prob_threshold
 
+    def bet_size(
+        self,
+        primary_pred: np.ndarray,
+        features: pd.DataFrame | None = None,
+    ) -> np.ndarray:
+        """Continuous bet size multiplier using pseudo-Kelly: max(0, 2*prob - 1)."""
+        probs = self.predict_proba(primary_pred, features)
+        size = 2.0 * probs - 1.0
+        return np.clip(size, 0.0, 1.0)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Bayesian Barrier Search
@@ -511,6 +521,10 @@ def run_meta_tbm_pipeline(
     trade_mask = meta.should_trade(primary_pred, features)
     filtered = tbm_result.copy()
     filtered.loc[~trade_mask, "label"] = 0  # suppress low-confidence trades
+    
+    # Continuous Bet Sizing (Meta-Labeling)
+    sizes = meta.bet_size(primary_pred, features)
+    filtered["bet_size"] = sizes
 
     return filtered, meta, bayesian_opt
 

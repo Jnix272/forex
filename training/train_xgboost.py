@@ -34,8 +34,6 @@ from config.settings import PATHS  # noqa: E402
 from models.xgboost_model import XGBoostForecaster  # noqa: E402
 
 try:
-    import os
-
     import wandb
 
     WANDB = bool(os.environ.get("WANDB_API_KEY"))
@@ -130,7 +128,21 @@ def load_data_from_store(
         y_dir = np.zeros(n_samples, dtype=np.int8)
         y_ret = y_all.ravel().astype(np.float32)
 
-    return z, y_dir, y_ret, n_samples
+    if "bet_size" in z:
+        sample_weight = np.array(z["bet_size"][-n_samples:], dtype=np.float32)
+    elif "bet_sizes" in z:
+        sample_weight = np.array(z["bet_sizes"][-n_samples:], dtype=np.float32)
+    else:
+        npy_w = Path(str(zarr_path) + "_bet_size.npy")
+        if not npy_w.exists() and str(zarr_path).endswith(".zarr"):
+            npy_w = Path(str(zarr_path)[:-5] + "_bet_size.npy")
+        if npy_w.exists():
+            sample_weight = np.load(str(npy_w), mmap_mode="r")[-n_samples:].astype(np.float32)
+        else:
+            sample_weight = np.ones(n_samples, dtype=np.float32)
+    np.nan_to_num(sample_weight, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
+
+    return z, y_dir, y_ret, sample_weight, n_samples
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +238,8 @@ def tune_hyperparams(
     task: str,
     lr: float,
     n_trials: int = 20,
+    sample_weight_train: np.ndarray | None = None,
+    sample_weight_val: np.ndarray | None = None,
 ) -> dict:
     """Cheap grid search; returns best XGBoost param dict."""
     keys = list(TUNE_GRID.keys())
@@ -254,7 +268,14 @@ def tune_hyperparams(
                 device="cuda",
                 **params,
             )
-            m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            m.fit(
+                X_train,
+                y_train,
+                sample_weight=sample_weight_train,
+                eval_set=[(X_val, y_val)],
+                sample_weight_eval_set=[sample_weight_val] if sample_weight_val is not None else None,
+                verbose=False,
+            )
             preds = m.predict(X_val)
             score = compute_dir_accuracy(preds, y_val)
         else:
@@ -267,7 +288,14 @@ def tune_hyperparams(
                 device="cuda",
                 **params
             )
-            m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            m.fit(
+                X_train,
+                y_train,
+                sample_weight=sample_weight_train,
+                eval_set=[(X_val, y_val)],
+                sample_weight_eval_set=[sample_weight_val] if sample_weight_val is not None else None,
+                verbose=False,
+            )
             preds = m.predict(X_val)
             mse = float(np.mean((preds - y_val) ** 2))
             score = -mse  # higher = better
@@ -387,8 +415,9 @@ def main():
         X = np.random.randn(N, T, F).astype(np.float32)
         y_dir = np.random.randint(0, 3, N).astype(np.int8)
         y_ret = np.random.randn(N).astype(np.float32) * 0.001
+        sample_weight = np.ones(N, dtype=np.float32)
     else:
-        z_store, y_dir, y_ret, n_samples = load_data_from_store(
+        z_store, y_dir, y_ret, sample_weight, n_samples = load_data_from_store(
             data_dir,
             args.samples,
             args.cache_path,
@@ -429,6 +458,7 @@ def main():
     X_train_tab = np.where(np.isinf(X_tab[tr_idx]), np.nan, X_tab[tr_idx])
     X_val_tab = np.where(np.isinf(X_tab[va_idx]), np.nan, X_tab[va_idx])
     y_train_target, y_val_target = y_target[tr_idx], y_target[va_idx]
+    w_train, w_val = sample_weight[tr_idx], sample_weight[va_idx]
     y_val_dir = y_dir[va_idx]
     y_val_ret = y_ret[va_idx]
     print(f"[Split] tune train={len(tr_idx):,} val={len(va_idx):,} (purged/embargoed)")
@@ -444,7 +474,10 @@ def main():
             task=args.task,
             lr=args.lr,
             n_trials=args.tune_trials,
+            sample_weight_train=w_train,
+            sample_weight_val=w_val,
         )
+
 
     xgb_params = {
         "n_estimators": best_params.get("n_estimators", args.estimators),
@@ -456,7 +489,6 @@ def main():
         "gamma": _env_gamma,
         "reg_alpha": _env_reg_alpha,
         "reg_lambda": _env_reg_lambda,
-        "early_stopping_rounds": int(xgb_cfg.get("early_stopping_rounds", 15)),
     }
 
     # ── walk-forward CV ───────────────────────────────────────────────────────
@@ -468,8 +500,10 @@ def main():
         for fold_i, (tr_idx, va_idx) in enumerate(walk_forward_splits(N, args.folds, cfg)):
             Xtr = np.where(np.isinf(X_tab[tr_idx]), np.nan, X_tab[tr_idx])
             ytr = y_target[tr_idx]
+            wtr = sample_weight[tr_idx]
             Xva = np.where(np.isinf(X_tab[va_idx]), np.nan, X_tab[va_idx])
             yva = y_target[va_idx]
+            wva = sample_weight[va_idx]
             yva_dir = y_dir[va_idx]
             yva_ret = y_ret[va_idx]
 
@@ -483,7 +517,14 @@ def main():
                     device="cuda",
                     **xgb_params
                 )
-                m.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
+                m.fit(
+                    Xtr,
+                    ytr,
+                    sample_weight=wtr,
+                    eval_set=[(Xva, yva)],
+                    sample_weight_eval_set=[wva],
+                    verbose=False,
+                )
                 preds = m.predict(Xva)
             else:
                 m = xgb.XGBRegressor(
@@ -494,7 +535,14 @@ def main():
                     device="cuda",
                     **xgb_params
                 )
-                m.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
+                m.fit(
+                    Xtr,
+                    ytr,
+                    sample_weight=wtr,
+                    eval_set=[(Xva, yva)],
+                    sample_weight_eval_set=[wva],
+                    verbose=False,
+                )
                 preds = m.predict(Xva)
 
             sh = compute_sharpe(preds, yva_ret)
@@ -529,7 +577,9 @@ def main():
     model.fit(
         X_train_tab,
         y_train_target,
+        sample_weight=w_train,
         eval_set=[(X_val_tab, y_val_target)],
+        sample_weight_eval_set=[w_val],
         verbose=True,
     )
     train_time_s = time.perf_counter() - train_t0
@@ -539,7 +589,8 @@ def main():
     val_sharpe = compute_sharpe(val_preds_raw, y_val_ret)
     val_diracc = compute_dir_accuracy(val_preds_raw, y_val_dir)
     val_mse = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
-    val_corr = float(np.corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) if len(y_val_target) > 1 else 0.0
+    from common.math_utils import safe_corrcoef as _safe_corrcoef
+    val_corr = float(_safe_corrcoef(val_preds_raw.ravel(), y_val_target.ravel())[0, 1]) if len(y_val_target) > 1 else 0.0
     if not np.isfinite(val_corr):
         val_corr = 0.0
 

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import gc
 import math
+import copy
 import os
 import time
 from contextlib import nullcontext
+from training.ema import ExponentialMovingAverage
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -209,10 +211,6 @@ from training.gpu_losses import (
     DirectionalHuberLoss,  # noqa: F811
     SharpeProxyLoss,  # noqa: F811
     _match_target_shape,  # noqa: F811
-)
-from training.synaptic_intelligence import (
-    SynapticIntelligence,  # noqa: F811
-    apply_si_loss,  # noqa: F811
 )
 
 
@@ -461,11 +459,15 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
 
     method = str(getattr(args, "pretrain_method", PRETRAIN.get("method", "byol"))).lower()
     use_regime = getattr(args, "pretrain_regime", False) and method == "tscl"
+    framework = str(getattr(args, "pretrain_framework", "custom") or "custom").lower()
     ckpt_dir = Path(args.checkpoint_dir)
     candidates = []
     if use_regime:
         candidates.append(ckpt_dir / "contrastive_encoder_regime.pt")
     candidates += [ckpt_dir / "contrastive_encoder.pt", ckpt_dir / "contrastive_encoder_regime.pt"]
+    # Adapter-based frameworks (tsai, etc.) save under a different name.
+    if framework != "custom":
+        candidates.append(ckpt_dir / f"pretrain_{framework}_encoder.pt")
     ckpt_path = next((p for p in candidates if p.exists()), None)
     if ckpt_path is None:
         print(
@@ -656,7 +658,6 @@ def supervised_train(
         print(f"[TensorBoard] Logging -> {_tb_dir}  (tensorboard --logdir {_tb_dir} --port 6006)")
 
     # -- Rich live display -----------------------------------------------------
-    _stop_on_sharpe_local = getattr(args, "early_stop_metric", "sharpe") == "sharpe"
     _rich_display = None
     try:
         from monitoring.rich_display import _RichDisplay
@@ -668,19 +669,15 @@ def supervised_train(
         _rich_display = _RichDisplay(
             model_name=model_name,
             total_epochs=args.epochs,
-            patience=args.patience,
-            metric_name=(
-                "cost_sharpe" if args.early_stop_metric == "cost_sharpe"
-                else "val_sharpe" if _stop_on_sharpe_local else "val_loss"
-            ),
-            higher_is_better=_stop_on_sharpe_local or args.early_stop_metric == "cost_sharpe",
+            metric_name="val_loss",
+            higher_is_better=False,
         )
 
     if getattr(args, "model_profile", True) and not getattr(args, "_profile_applied", False):
         args = _apply_model_profile(args, model_name, enabled=True)
 
     _t_start = time.time()
-    classification = args.loss in ("cross_entropy", "multi_task", "asymmetric_directional")
+    classification = args.loss in ("multi_task", "asymmetric_directional")
     multitask = bool(getattr(args, "multitask", False))
     fold_suffix = f"_fold{fold_id}" if fold_id is not None else ""
 
@@ -1031,7 +1028,7 @@ def supervised_train(
         cache_path=cache_path if (classification or multitask) else None,
         train_idx=train_idx if (classification or multitask) else None,
     )
-    direction_crit = nn.CrossEntropyLoss().to(device)  # type: ignore
+    direction_crit = nn.HuberLoss().to(device)  # type: ignore
     # D: OverconfidencePenalty -- active for regression modes only.
     # R5: state lives in training.loop_losses (read by _compute_loss there).
     if not classification and getattr(args, "overconf_penalty", True):
@@ -1116,6 +1113,29 @@ def supervised_train(
                 decay_factor=0.90,
             )
             print(f"[OnlineMiner] Created for {model_name} ({len(train_idx):,} samples)")
+            # -- Seed miner with live-feedback hard examples from orchestrator ---
+            _fb_path = getattr(args, "live_feedback_path", None)
+            if _fb_path and _online_miner is not None:
+                try:
+                    import json as _json
+                    from retraining.live_feedback import LiveFeedbackStore as _LFS
+                    _fb_store = _LFS.__new__(_LFS)
+                    _fb_store._hard_examples = _json.loads(
+                        open(_fb_path, encoding="utf-8").read()
+                    )
+                    _fb_store._metrics = []
+                    # Build priority weights aligned to train_idx timestamps
+                    # (timestamps are bar indices here; exact alignment happens via
+                    #  nearest-neighbor matching in get_priority_weights)
+                    _base_ts = train_idx.astype(np.int64)
+                    _fw = _fb_store.get_priority_weights(len(train_idx), _base_ts, hard_boost=3.0)
+                    # Inject into miner EMA so hard live examples are oversampled
+                    # from the very first epoch without waiting for loss accumulation.
+                    _online_miner._ema_score = (_fw - 1.0).clip(0.0).astype(np.float32)
+                    print(f"[OnlineMiner] Seeded with live-feedback weights from {_fb_path} "
+                          f"({int((_fw > 1.0).sum())} boosted samples)")
+                except Exception as _fb_exc:
+                    print(f"[OnlineMiner] Live-feedback seed failed (ignored): {_fb_exc}")
         except Exception as _om_e:
             print(f"[OnlineMiner] Init failed (disabled): {_om_e}")
             _online_miner = None
@@ -1168,25 +1188,6 @@ def supervised_train(
     best_path = ckpt_dir / f"{model_name}{fold_suffix}_best.pt"
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
 
-    stop_on_sharpe = args.early_stop_metric == "sharpe"
-    stop_on_cost_sharpe = args.early_stop_metric == "cost_sharpe"
-    # If cost_sharpe was requested but the validation pass won't compute it
-    # (e.g. tx_cost_bps ends up 0 because LABELING.transaction_cost_pips is
-    # missing), fall back to directional sharpe so we never deadlock early
-    # stopping on a metric that is always None.
-    if stop_on_cost_sharpe:
-        _tc_bps = float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0
-        if _tc_bps <= 0.0:
-            print(
-                "[Train] WARNING: early_stop_metric='cost_sharpe' but effective "
-                "tx_cost_bps=0 (LABELING.transaction_cost_pips missing/zero). "
-                "Falling back to 'sharpe' to avoid a dead metric."
-            )
-            stop_on_cost_sharpe = False
-            stop_on_sharpe = True
-    # Either Sharpe variant is "higher is better"; only val_loss is lower-is-better.
-    metric_higher_is_better = stop_on_sharpe or stop_on_cost_sharpe
-
     # Resume (single-split only; skip per-fold resume id)
     start_ep = 0
     last_path = ckpt_dir / f"{model_name}{fold_suffix}_last.pt"
@@ -1223,8 +1224,7 @@ def supervised_train(
         best_val_loss = float(ck.get("best_val_loss", float("inf")))
         best_sharpe = float(ck.get("best_sharpe", float("-inf")))
         best_cost_sharpe = float(ck.get("best_cost_sharpe", float("-inf")))
-        no_improve = int(ck.get("no_improve", 0))
-        improved = False  # Initialize to avoid UnboundLocalError
+        improved = False
         history = ck.get("history", {"train_loss": [], "val_loss": [], "dir_acc": [], "val_sharpe": [], "lr": []})
         for _hist_key in ("seq_len", "difficulty_stage", "curriculum_stalls"):
             history.setdefault(_hist_key, [])
@@ -1233,6 +1233,12 @@ def supervised_train(
         _resume_chunk_history = list(ck.get("chunk_sharpe_history", history.get("val_sharpe", [])))
         _resume_chunk_streak = int(ck.get("chunk_worse_streak", 0))
         _resume_feat_state = ck.get("feat_stability_state")
+        # Restore dynamic early-stop state
+        _des_no_improve = int(ck.get("no_improve", 0))
+        _des_ema = ck.get("des_ema", None)
+        _des_best_ema = float(ck.get("des_best_ema", float("inf")))
+        _des_lr_halved = bool(ck.get("des_lr_halved", False))
+        _des_prev_difficulty = int(ck.get("des_prev_difficulty", -1))
         print(f"[Resume] Loaded exact state from {last_path} (epoch {start_ep})")
     elif args.resume and best_path.exists() and fold_id is None:
         core = _core_model(model)
@@ -1249,12 +1255,20 @@ def supervised_train(
             else:
                 raise e
 
+    # SACS config (read once; defaults are safe no-ops when sacs_enabled=False)
+    _sacs_enabled = bool(getattr(args, "sacs_enabled", True))
+    _sacs_eps = float(getattr(args, "sacs_eps", 0.005))
+    _sacs_n = max(1, int(getattr(args, "sacs_n_samples", 5)))
+    _sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
+    _best_sacs_score: float = float("inf")  # lower = better (sharpness-penalized val loss)
+
     if start_ep == 0:
         best_val_loss = float("inf")
         best_sharpe = float("-inf")
         best_cost_sharpe = float("-inf")
-        no_improve = 0
-        improved = False  # Initialize to avoid UnboundLocalError
+        _best_sacs_score = float("inf")
+        improved = False
+
         history = {
             "train_loss": [],
             "val_loss": [],
@@ -1280,7 +1294,6 @@ def supervised_train(
     _CURR = getattr(args, "curriculum", None)
     if not isinstance(_CURR, dict):
         _CURR = SETTINGS_CURRICULUM
-    _chunk_patience = int(_CURR.get("chunk_early_stop_patience", 3))
     _chunk_min_batches = int(_CURR.get("chunk_early_stop_min_batches", 50))
     _feat_groups = _CURR.get("feature_groups", {})
 
@@ -1459,7 +1472,11 @@ def supervised_train(
                     "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
                     "best_val_loss": best_val_loss,
                     "best_sharpe": best_sharpe,
-                    "no_improve": no_improve,
+                    "no_improve": _des_no_improve,
+                    "des_ema": _des_ema,
+                    "des_best_ema": _des_best_ema,
+                    "des_lr_halved": _des_lr_halved,
+                    "des_prev_difficulty": _des_prev_difficulty,
                     "history": history,
                     "fold_id": fold_id,
                     "chunk_sharpe_history": _chunk_sharpe_history,
@@ -1507,7 +1524,7 @@ def supervised_train(
                     else:
                         y = labels.reshape(-1).long()
                     y = y.clamp(0, max(1, outputs.shape[-1] - 1))
-                    return nn.functional.cross_entropy(outputs, y)
+                    return nn.functional.huber_loss(outputs.squeeze(), y.float())
                 pred = outputs[0] if isinstance(outputs, tuple) else outputs
                 return nn.functional.mse_loss(pred.reshape(-1), labels.reshape(-1).float()[: pred.numel()])
 
@@ -1675,7 +1692,8 @@ def supervised_train(
         and _curriculum_mgr is not None
     )
 
-    # Self-paced / loss weighting model gating
+    # Self-paced / loss weighting model gating (computed after curriculum build;
+    # used only to guard the _cm_wl application at the sample-weight lookup site).
     _sp_models = str(getattr(args, "self_paced_models", "") or "").strip()
     _sp_allowed = True
     if _sp_models:
@@ -1685,6 +1703,30 @@ def supervised_train(
     _lw_allowed = True
     if _lw_models:
         _lw_allowed = model_name.lower() in [m.strip().lower() for m in _lw_models.split(",")]
+
+    _ema_model = copy.deepcopy(_core_model(model)).to(device)
+
+    # ── Dynamic early-stop state ──────────────────────────────────────────────
+    # Composite EMA score: lower is better (val_loss dominates, sharpe subtracts)
+    # These defaults are overwritten by resume-checkpoint restore when resuming.
+    _des_ema_alpha: float = 0.3            # EMA smoothing (higher = more reactive)
+    _des_base_patience: int = int(getattr(args, "early_stop_patience", 10))
+    _des_lr_min: float = float(getattr(args, "lr", 5e-5)) * 1e-3  # floor: 0.1% of initial LR
+    # Mutable state — overwritten by resume restore below if args.resume
+    _des_ema: float | None = None
+    _des_no_improve: int = 0
+    _des_lr_halved: bool = False
+    _des_best_ema: float = float("inf")
+    _des_prev_difficulty: int = -1         # curriculum stage tracker (reset counter on advance)
+    # Regularisation penalty corrections: both SI and EWC inflate val_loss over time.
+    # We subtract a linear approximation of their contribution from the composite score
+    # so the EMA tracks learning signal, not growing penalty.
+    _des_si_lambda: float = float(getattr(args, "si_lambda", 0.0))
+    _des_ewc_lambda: float = float(getattr(args, "ewc_lambda", 0.0)) if getattr(args, "enable_ewc", False) else 0.0
+
+    # Early-stop metric flags — defined here so they're in scope inside the epoch loop.
+    stop_on_sharpe = getattr(args, "early_stop_metric", "val_loss") == "sharpe"
+    stop_on_cost_sharpe = getattr(args, "early_stop_metric", "val_loss") == "cost_sharpe"
 
     for ep in epoch_bar:
         if _TRAIN_LOGGER is not None:
@@ -1864,7 +1906,7 @@ def supervised_train(
             except Exception as _cm_exc:
                 _log_warn(f"[CurriculumManager] Epoch {ep + 1} update failed: {_cm_exc}")
         _cm_wl = None
-        if _curriculum_mgr is not None:
+        if _curriculum_mgr is not None and (_sp_allowed or _lw_allowed):
             try:
                 _cm_wl = np.ones(n_samples, dtype=np.float64)
                 _cm_wl[train_idx] = np.asarray(
@@ -1932,7 +1974,7 @@ def supervised_train(
         # ── Online miner: begin epoch (roll buffer) ──────────────────────
         if _online_miner is not None:
             _online_miner.begin_epoch()
-        # ──────────────────────────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────
 
         try:
             tl = train_epoch(
@@ -1973,6 +2015,19 @@ def supervised_train(
             _save_crash_ckpt(ep, _epoch_exc)
             raise
         train_pbar.close()
+
+        # ── Online miner: end epoch (update EMA scores + forgetting tracker) ──
+        if _online_miner is not None:
+            _online_miner.end_epoch()
+            # Feed per-sample losses back into the curriculum so self-paced /
+            # loss-weighting difficulty updates use real training losses.
+            if _curriculum_mgr is not None:
+                try:
+                    _epoch_losses_for_curriculum = _online_miner._loss_buffer[-1].copy()
+                    _curriculum_mgr.set_losses(_epoch_losses_for_curriculum)
+                except Exception as _cl_exc:
+                    _log_warn(f"[Curriculum] set_losses failed: {_cl_exc}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # Finish async CUDA work and free cached blocks before validation. Val uses
         # pin_memory=False, but sync+gc still reduces fragmentation after train_epoch.
@@ -2063,6 +2118,9 @@ def supervised_train(
             if _swa_enabled:
                 _swa_model.update_parameters(model)
                 _swa_scheduler.step()
+
+        if _ema_model is not None:
+            ExponentialMovingAverage.update_module(_core_model(model), _ema_model, alpha=0.99)
 
         lr = opt.param_groups[0]["lr"]
         el = time.time() - t0
@@ -2186,34 +2244,128 @@ def supervised_train(
                 },
             )
 
-        # -- Early stopping / is best? (Moved up to fix UnboundLocalError) ------
-        min_delta = float(getattr(args, "early_stop_min_delta", 0.0))
-        if stop_on_cost_sharpe:
-            _cs = _cost_sharpe_val if _cost_sharpe_val is not None else float("-inf")
-            improved = _cs > (best_cost_sharpe + min_delta)
-        elif stop_on_sharpe:
-            improved = v_sh > (best_sharpe + min_delta)
-        else:
-            improved = vl < (best_val_loss - min_delta)
+        # -- Is best? (SACS-aware) ------------------------------------------------
+        # Compute sharpness = mean val-loss increase over N random ε-ball
+        # perturbations.  Robust score = val_loss + λ * sharpness.
+        # Lower robust score → flatter minimum → prefer this checkpoint.
+        # Falls back to plain val_loss when SACS is disabled or fails.
+        _sacs_score = vl  # default: no sharpness penalty
+        if _sacs_enabled:
+            try:
+                _core_now = _core_model(model)
+                _sharpness_acc = 0.0
+                for _ in range(_sacs_n):
+                    _perturbed = copy.deepcopy(_core_now)
+                    with torch.no_grad():
+                        for _p in _perturbed.parameters():
+                            if _p.requires_grad:
+                                _p.add_(torch.randn_like(_p) * _sacs_eps)
+                    _vl_p, _, _ = validate_epoch(
+                        _perturbed, val_dl, crit, device, classification,
+                        pbar=None, amp=False, amp_dtype=torch.float32,
+                        seq_len=curr_seq_len, multitask=multitask,
+                        feature_mask=_feat_mask,
+                    )
+                    del _perturbed
+                    _sharpness_acc += abs(_vl_p - vl)
+                _sharpness = _sharpness_acc / _sacs_n
+                _sacs_score = vl + _sacs_lam * _sharpness
+            except Exception as _sacs_ep_e:
+                _sacs_score = vl
+                print(f"[SACS] epoch {ep+1} sharpness eval failed (non-fatal): {_sacs_ep_e}")
+
+        improved = _sacs_score < _best_sacs_score
 
         if improved:
-            # Always record both metrics at the selected best epoch (TM-013).
             best_sharpe = v_sh
             best_val_loss = vl
+            _best_sacs_score = _sacs_score
             if _cost_sharpe_val is not None:
                 best_cost_sharpe = _cost_sharpe_val
-            no_improve = 0
-        else:
-            # Suppress patience counter during LR warmup: the LR is artificially
-            # suppressed so Sharpe cannot improve consistently. Only start counting
-            # after warmup_epochs have fully elapsed.
-            _warmup_done = ep >= int(getattr(args, "lr_warmup_epochs", 0))
-            if _warmup_done:
-                no_improve += 1
+
+        # Suppress patience counter during LR warmup: the LR is artificially
+        # suppressed so Sharpe cannot improve consistently. Only start counting
+        # after warmup_epochs have fully elapsed.
+        _warmup_done = ep >= int(getattr(args, "lr_warmup_epochs", 0))
+
+        # ── Dynamic Early Stop ────────────────────────────────────────────────
+        if _des_base_patience > 0 and _warmup_done:
+            # Fix-1: Curriculum stage advance resets counter — a difficulty jump
+            # causes a temporary val_loss spike that shouldn't trigger early stop.
+            _cur_difficulty = int(
+                history.get("difficulty_stage", [-1])[-1]
+                if history.get("difficulty_stage") else -1
+            )
+            if _cur_difficulty > _des_prev_difficulty and _des_prev_difficulty >= 0:
+                _des_no_improve = 0
+                _des_ema = None  # reset EMA so new difficulty baseline is clean
+                print(f"[DynStop] Curriculum advanced to level {_cur_difficulty} — resetting patience counter")
+            _des_prev_difficulty = _cur_difficulty
+
+            # Fix-2: SI and EWC penalties inflate val_loss over time; subtract their
+            # combined contribution so the composite reflects learning, not penalty growth.
+            _reg_progress = (ep + 1) / max(1, args.epochs)
+            _si_correction = _des_si_lambda * _reg_progress * 0.1
+            _ewc_correction = _des_ewc_lambda * _reg_progress * 1e-5  # EWC lambda is O(1000)
+            _si_correction = _si_correction + _ewc_correction
+            _sharpe_signal = v_sh if v_sh is not None and not (v_sh != v_sh) else 0.0
+            # Use SACS score as the base (already sharpness-penalised) so dynamic stop
+            # and SACS checkpoint selection agree on what "better" means. Fall back to
+            # vl when SACS is disabled.
+            _des_base_score = _sacs_score if _sacs_enabled else vl
+            _composite = (_des_base_score - _si_correction) - 0.1 * _sharpe_signal
+
+            # EMA-smooth the composite (reduces single-epoch noise)
+            if _des_ema is None:
+                _des_ema = _composite
+            else:
+                _des_ema = _des_ema_alpha * _composite + (1.0 - _des_ema_alpha) * _des_ema
+
+            # Adaptive patience: grows linearly with training progress
+            _progress = (ep + 1) / max(1, args.epochs)
+            _adaptive_patience = int(_des_base_patience * (0.5 + _progress))  # 50%→150% of base
+
+            # Check EMA improvement
+            if _des_ema < _des_best_ema - 1e-6:
+                _des_best_ema = _des_ema
+                _des_no_improve = 0
+            else:
+                _des_no_improve += 1
+
+            # Fix-3: SWA guard — don't stop before SWA has had a chance to run.
+            _swa_guard_ok = (not _swa_enabled) or (ep >= _swa_start_ep)
+
+            if _des_no_improve >= _adaptive_patience and _swa_guard_ok:
+                _cur_lr = opt.param_groups[0]["lr"]
+                if not _des_lr_halved and _cur_lr > _des_lr_min * 2:
+                    # First plateau: halve LR, reset counter, give another chance
+                    _new_lr = max(_cur_lr * 0.5, _des_lr_min)
+                    for _pg in opt.param_groups:
+                        _pg["lr"] = _new_lr
+                    _des_lr_halved = True
+                    _des_no_improve = 0
+                    print(
+                        f"\n[DynStop] Plateau at epoch {ep+1} | "
+                        f"LR {_cur_lr:.2e} → {_new_lr:.2e} | "
+                        f"patience={_adaptive_patience} | giving {_adaptive_patience} more epochs"
+                    )
+                else:
+                    # Second plateau (or LR already at floor): stop
+                    print(
+                        f"\n[DynStop] Stopping at epoch {ep+1}/{args.epochs} | "
+                        f"no EMA improvement for {_des_no_improve} epochs | "
+                        f"composite_ema={_des_ema:.6f} | best={_des_best_ema:.6f}"
+                    )
+                    break
+            elif _des_no_improve >= _adaptive_patience and not _swa_guard_ok:
+                print(
+                    f"[DynStop] Plateau at epoch {ep+1} but deferring stop — "
+                    f"waiting for SWA to start at epoch {_swa_start_ep}"
+                )
 
         # -- Rich display or plain print ---------------------------------------
         if _rich_display is not None:
-            _rich_display.end_epoch(ep, _ep_metrics, is_best=improved, no_improve=no_improve)
+            _rich_display.end_epoch(ep, _ep_metrics, is_best=improved)
         else:
             _cs_str = f"{_cost_sharpe_val:>9.4f}" if _cost_sharpe_val is not None else "  N/A     "
             print(f"{ep + 1:>5} {tl:>11.6f} {vl:>11.6f} {da:>8.4f} {v_sh:>9.4f} {_cs_str} {lr:>10.2e} {el:>6.1f}s {gm:>7.0f}M")
@@ -2243,11 +2395,10 @@ def supervised_train(
                         "best_val_loss": vl,
                         "best_val_sharpe_proxy": v_sh,
                         "best_cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
-                        "best_metric": float(best_cost_sharpe if stop_on_cost_sharpe else (v_sh if stop_on_sharpe else vl)),
+                        "best_metric": float(_cost_sharpe_val) if stop_on_cost_sharpe and _cost_sharpe_val is not None else (float(v_sh) if stop_on_sharpe else float(vl)),
                         "best_metric_name": "cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
                         "best_train_loss": tl,
                         "train_val_loss_gap": float(vl - tl),
-                        "early_stop_metric": args.early_stop_metric,
                         "epoch": ep,
                         "n_samples": n_samples,
                         "loss": args.loss,
@@ -2292,7 +2443,11 @@ def supervised_train(
                 "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
                 "best_val_loss": best_val_loss,
                 "best_sharpe": best_sharpe,
-                "no_improve": no_improve,
+                "no_improve": _des_no_improve,
+                "des_ema": _des_ema,
+                "des_best_ema": _des_best_ema,
+                "des_lr_halved": _des_lr_halved,
+                "des_prev_difficulty": _des_prev_difficulty,
                 "history": history,
                 "fold_id": fold_id,
                 "chunk_sharpe_history": _chunk_sharpe_history,
@@ -2311,31 +2466,7 @@ def supervised_train(
             },
         )
 
-        if no_improve >= args.patience:
-            print(f"\n[Train] Early stop (patience={args.patience}, metric={args.early_stop_metric})")
-            break
-        if _ctrl_stop_early:
-            print("\n[Train] Early stop (TrainingController Sharpe-collapse signal)")
-            break
 
-        # -- A2: Chunk-level early stopping ------------------------------------
-        # Track val Sharpe across epochs; abort if it has dropped for K consecutive epochs.
-        _chunk_sharpe_history.append(v_sh)
-        if len(_chunk_sharpe_history) >= _chunk_patience + 1:
-            recent = _chunk_sharpe_history[-_chunk_patience:]
-            prior = _chunk_sharpe_history[-(_chunk_patience + 1)]
-            if all(s < prior for s in recent):
-                _chunk_worse_streak += 1
-            else:
-                _chunk_worse_streak = 0
-            if _chunk_worse_streak >= _chunk_patience:
-                msg = (
-                    f"[ChunkEarlyStop] Val Sharpe dropped {_chunk_patience} consecutive "
-                    f"epochs (last={v_sh:.4f}). Aborting epoch loop."
-                )
-                print(f"\n{msg}")
-                _log_warn(msg)
-                break
 
     # -- SWA: fix batch-norm running stats and save final averaged model -------
     if _swa_enabled and _swa_started:
@@ -2357,7 +2488,7 @@ def supervised_train(
             core = _core_model(model)
             core.load_state_dict(torch.load(best_path, map_location=device))
             cal_model = TemperatureScaler(core).to(device)  # type: ignore
-            calibrate_as_classification = bool(classification or multitask)
+            calibrate_as_classification = bool(classification)
             # Use tune_idx to prevent calibration leakage if available
             if getattr(args, "_tune_eval_idx", None) is not None:
                 cal_ds = ZarrStreamDataset(
@@ -2453,7 +2584,7 @@ def supervised_train(
         if history.get("val_loss") and history.get("train_loss")
         else 0.0
     )
-    _early_stopped = (no_improve >= args.patience) or bool(_ctrl_stop_early)
+    _early_stopped = False
     _best_idx = int(_best_ep) if _best_ep is not None and _best_ep >= 0 else 0
 
     def _hist_at(key: str, default=None):
@@ -2523,6 +2654,109 @@ def supervised_train(
         )
     except Exception as _tc_fin:
         print(f"[TrainingController] finalize skipped: {_tc_fin}")
+
+    # -- SACS: Sharpness-Aware Checkpoint Selection -----------------------------
+    print("\n[SACS] Running Sharpness-Aware Checkpoint Selection...")
+    sacs_candidates = {"Active": model}
+    if _swa_enabled and _swa_started and _swa_model is not None:
+        sacs_candidates["SWA"] = _swa_model.module
+    if _ema_model is not None:
+        sacs_candidates["EMA"] = _ema_model
+
+    best_sacs_score = -float("inf") if (stop_on_sharpe or stop_on_cost_sharpe) else float("inf")
+    best_sacs_name = None
+    best_sacs_state = None
+
+    try:
+        from training.train_gpu import _sharpe_ann_factor
+        _sacs_ann = _sharpe_ann_factor(args)
+    except Exception:
+        _sacs_ann = 1.0
+
+    _pt_sacs_eps = float(getattr(args, "sacs_eps", 0.005))
+    _pt_sacs_n = max(1, int(getattr(args, "sacs_n_samples", 5)))
+    _pt_sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
+    _lookahead = int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30))
+    _tx_cost = float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0
+    _pip = float(LABELING.get("pip_size", 0.0001))
+
+    for cand_name, cand_model in sacs_candidates.items():
+        try:
+            cand_core = _core_model(cand_model)
+
+            vl_c, da_c, v_sh_c = validate_epoch(
+                cand_core, val_dl, crit, device, classification,
+                pbar=None, amp=False, amp_dtype=torch.float32, seq_len=curr_seq_len, multitask=multitask,
+                feature_mask=_feat_mask, sharpe_ann_factor=_sacs_ann,
+                lookahead_bars=_lookahead,
+                sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
+                return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
+                direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip,
+            )
+            c_cost = getattr(validate_epoch, "last_cost_sharpe", None)
+
+            # Sharpness = mean metric change over N ε-ball perturbations.
+            # For loss-based selection: sharpness is how much loss rises.
+            # For Sharpe-based selection: sharpness is how much Sharpe drops.
+            sharpness_acc = 0.0
+            for _ in range(_pt_sacs_n):
+                _perturbed = copy.deepcopy(cand_core).to(device)
+                with torch.no_grad():
+                    for _pm in _perturbed.parameters():
+                        if _pm.requires_grad:
+                            _pm.add_(torch.randn_like(_pm) * _pt_sacs_eps)
+                vl_p, _, v_sh_p = validate_epoch(
+                    _perturbed, val_dl, crit, device, classification,
+                    pbar=None, amp=False, amp_dtype=torch.float32, seq_len=curr_seq_len, multitask=multitask,
+                    feature_mask=_feat_mask, sharpe_ann_factor=_sacs_ann,
+                    lookahead_bars=_lookahead,
+                    sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
+                    return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
+                    direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip,
+                )
+                p_cost_i = getattr(validate_epoch, "last_cost_sharpe", None)
+                if stop_on_cost_sharpe and c_cost is not None and p_cost_i is not None:
+                    sharpness_acc += abs(float(p_cost_i) - float(c_cost))
+                elif stop_on_sharpe:
+                    sharpness_acc += abs(float(v_sh_p) - float(v_sh_c))
+                else:
+                    sharpness_acc += abs(float(vl_p) - float(vl_c))
+                del _perturbed
+            sharpness = sharpness_acc / _pt_sacs_n
+
+            # Robust score: lower = better for loss; higher = better for Sharpe.
+            # Sharpness penalty always reduces quality → subtract for Sharpe, add for loss.
+            if stop_on_cost_sharpe and c_cost is not None:
+                c_val = float(c_cost)
+                robust_score = c_val - _pt_sacs_lam * sharpness
+                is_better = robust_score > best_sacs_score
+            elif stop_on_sharpe:
+                c_val = float(v_sh_c)
+                robust_score = c_val - _pt_sacs_lam * sharpness
+                is_better = robust_score > best_sacs_score
+            else:
+                c_val = float(vl_c)
+                robust_score = c_val + _pt_sacs_lam * sharpness
+                is_better = robust_score < best_sacs_score
+
+            print(
+                f"[SACS] {cand_name}: clean={c_val:.4f}  sharpness={sharpness:.4f}"
+                f"  robust={robust_score:.4f}  (λ={_pt_sacs_lam}, n={_pt_sacs_n}, ε={_pt_sacs_eps})"
+            )
+
+            if is_better:
+                best_sacs_score = robust_score
+                best_sacs_name = cand_name
+                best_sacs_state = copy.deepcopy(cand_core.state_dict())
+
+        except Exception as _sacs_e:
+            print(f"[SACS] Evaluation failed for {cand_name}: {_sacs_e}")
+            
+    if best_sacs_state is not None:
+        print(f"[SACS] Best model: {best_sacs_name} with robust score {best_sacs_score:.4f}. Saving to {best_path}.")
+        _safe_save(best_sacs_state, best_path)
+        _core_model(model).load_state_dict(best_sacs_state)
+    # ---------------------------------------------------------------------------
 
     if stop_on_cost_sharpe:
         print(f"\n[Train] Best cost-aware Sharpe (after tx costs): {best_cost_sharpe:.4f}  ->  {best_path}")

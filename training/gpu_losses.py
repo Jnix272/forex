@@ -51,16 +51,19 @@ def soft_direction(pred: torch.Tensor) -> torch.Tensor:
 class DirectionalHuberLoss(nn.Module):
     """Huber magnitude loss + extra penalty when direction is wrong."""
 
-    def __init__(self, delta: float = 1.0, direction_weight: float = 0.5):
+    def __init__(self, delta: float = 1.0, direction_weight: float = 0.5, reduction: str = "mean"):
         super().__init__()
-        self.huber = HuberLoss(delta=delta)
+        self.huber = HuberLoss(delta=delta, reduction=reduction)
         self.direction_weight = float(direction_weight)
+        self.reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         target = match_target_shape(pred, target)
         base = self.huber(pred, target)
         wrong_sign = (pred * target) < 0
         dir_pen = wrong_sign.float() * (pred - target).abs()
+        if self.reduction == "none":
+            return base + self.direction_weight * dir_pen
         return base + self.direction_weight * dir_pen.mean()
 
 
@@ -78,13 +81,15 @@ class SharpeProxyLoss(nn.Module):
         sharpe_weight: float = 0.2,
         eps: float = 1e-8,
         ann: float = 1.0,
+        reduction: str = "mean",
     ):
         super().__init__()
-        self.huber = HuberLoss(delta=delta)
+        self.huber = HuberLoss(delta=delta, reduction=reduction)
         self.sharpe_weight = float(sharpe_weight)
         self.eps = float(eps)
         self.ann = float(ann)
         self._ann_sqrt = float(ann)
+        self.reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, weight=None) -> torch.Tensor:
         target = match_target_shape(pred, target)

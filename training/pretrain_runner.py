@@ -6,8 +6,8 @@ from __future__ import annotations
 
 _PRETRAIN_MULTI_BLOCK = ("vicreg", "simclr", "barlow")
 _PRETRAIN_STD_QUALITY = ("vicreg", "simclr", "barlow")
-_VALID_PRETRAIN_METHODS = ("byol", "simclr", "vicreg", "barlow", "tscl", "vae", "mae", "mask", "mask_reconstruct", "masked")
-_PRETRAIN_SINGLE_PASS = ("byol", "vae", "mae", "mask", "mask_reconstruct", "masked")
+_VALID_PRETRAIN_METHODS = ("byol", "simclr", "vicreg", "barlow", "tscl", "vae", "mae", "mask", "mask_reconstruct", "masked", "jepa", "patch_mask", "cross_asset", "cluster", "forecast", "drift")
+_PRETRAIN_SINGLE_PASS = ("byol", "vae", "mae", "mask", "mask_reconstruct", "masked", "patch_mask", "jepa")
 
 
 import json
@@ -23,6 +23,7 @@ import torch.nn as nn
 from config.settings import PRETRAIN
 from pretrain.contrastive import (
     BYOLTrainer,
+    CrossAssetTSCLTrainer,
     MaskedReconstructionTrainer,
     RegimeAwareTSCLTrainer,
     RepresentationCollapseError,
@@ -33,6 +34,8 @@ from pretrain.extended_trainers import (
     ClusterContrastiveTrainer,
     DriftContrastiveTrainer,
     ForecastPretextTrainer,
+    JEPATrainer,
+    PatchMaskedTrainer,
     VAESeqTrainer,
 )
 from pretrain.hard_example_mining import PretrainHardExampleMiner
@@ -214,6 +217,12 @@ def _select_pretrain_trainer_class(method: str, regime_aware: bool):
         return ClusterContrastiveTrainer
     if method == "forecast":
         return ForecastPretextTrainer
+    if method == "jepa":
+        return JEPATrainer
+    if method == "patch_mask":
+        return PatchMaskedTrainer
+    if method == "cross_asset":
+        return CrossAssetTSCLTrainer
     if method == "drift":
         return DriftContrastiveTrainer
     return BYOLTrainer
@@ -575,6 +584,9 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         "forecast": "ForecastPretext",
         "drift": "DriftContrastive",
         "tscl": "RegimeAware-TSCL" if use_regime else "TSCL",
+        "jepa": "JEPA",
+        "patch_mask": "PatchMask",
+        "cross_asset": "CrossAssetTSCL",
     }
     mode_str = _mode_labels.get(_method, "BYOL")
     target_epochs = max(1, int(getattr(args, "pretrain_epochs", 1)))
@@ -582,10 +594,10 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     if max_epochs > 0:
         target_epochs = min(target_epochs, max_epochs)
     min_epochs = max(0, int(getattr(args, "pretrain_min_epochs", 0)))
-    handoff_patience = max(0, int(getattr(args, "pretrain_handoff_patience", 0)))
+
     handoff_min_delta = float(getattr(args, "pretrain_handoff_min_delta", 0.0))
     handoff_loss = float(getattr(args, "pretrain_handoff_loss", float("-inf")))
-    handoff_enabled = handoff_patience > 0 or handoff_loss > float("-inf")
+    handoff_enabled = handoff_loss > float("-inf")
     print(f"\n[Pretrain] {mode_str} | target_epochs={target_epochs}{' (handoff enabled)' if handoff_enabled else ''}")
 
     # Reduce VRAM fragmentation (recommended by PyTorch OOM diagnostics)
@@ -830,6 +842,10 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
         _max_bs = 256 if _vram_gb <= 10 else (512 if _vram_gb <= 16 else 1024)
         pt_bs = max(4, min(_cfg_bs, _pt_bs_vram, _max_bs))
         ckpt = str(Path(args.checkpoint_dir) / "contrastive_encoder.pt")
+    if 'patchtst' in type(model).__name__.lower():
+        pt_bs = min(pt_bs, 4)
+        print(f"[Pretrain] Hotfix: reduced BYOL batch_size to {pt_bs} for PatchTST to prevent OOM")
+
     print(
         f"[Pretrain] method={_method} | VRAM {_vram_gb:.1f} GB | batch_size={pt_bs} "
         f"(configured={_cfg_bs}, budget={_pt_bs_vram}, cap={_max_bs})"
@@ -1156,36 +1172,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                     _stopped_early = True
                     break
 
-                if handoff_patience > 0 and _stale_epochs >= handoff_patience:
-                    # Resolve metrics for handoff logic
-                    cur_std = (
-                        _diag.get("embed_std", 0.0)
-                        if _method in _PRETRAIN_MULTI_BLOCK and _diag
-                        else (std if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
-                    )
-                    cur_unif = (
-                        _diag.get("unif", 0.0)
-                        if _method in _PRETRAIN_MULTI_BLOCK and _diag
-                        else (un if _method not in _PRETRAIN_MULTI_BLOCK else 0.0)
-                    )
 
-                    from pretrain.handoff_logic import PretrainHandoffGate
-
-                    # Match runner discard cutoffs (stricter than class defaults).
-                    _handoff_gate = PretrainHandoffGate(std_threshold=0.015, max_uniformity=-0.1)
-                    # uniformity here is negative for good TSCL; gate treats high as bad.
-                    # For plateau handoff we only require std diversity when available.
-                    quality_ok = (cur_std > 0.015 or cur_std == 0.0) and (cur_unif < -0.5 or cur_unif == 0.0)
-                    if quality_ok and (cur_std == 0.0 or _handoff_gate.evaluate_representation_quality(cur_std, None)):
-                        print(
-                            f"[Pretrain] Handoff: plateau ({_stale_epochs} stale epochs). Quality met (std={cur_std:.4f}, unif={cur_unif:.2f})."
-                        )
-                        _stopped_early = True
-                        break
-                    else:
-                        print(
-                            f"[Pretrain] Handoff skipped: plateau reached but quality not met (std={cur_std:.4f}, unif={cur_unif:.2f})."
-                        )
 
     except RepresentationCollapseError as e:
         print(f"\n[Pretrain] ABORTED: {e}")
@@ -1310,7 +1297,6 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             "stopped_early_for_handoff": bool(_stopped_early),
             "handoff": {
                 "enabled": bool(handoff_enabled),
-                "patience": int(handoff_patience),
                 "min_delta": float(handoff_min_delta),
                 "loss_threshold": None if handoff_loss == float("-inf") else float(handoff_loss),
             },

@@ -1,7 +1,8 @@
 """Joint diversity fine-tuning across trained models.
 
 Extracted verbatim from ``training.supervised_loop`` (refactor R5);
-re-exported there for import-path stability."""
+re-exported there for import-path stability.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -130,9 +131,11 @@ def run_diversity_finetune(
     if n_samples <= 0:
         print("  [DivFT] Could not determine dataset size -- skipping.")
         return
-    val_start = int(n_samples * 0.80)
-    val_idx = np.arange(val_start, n_samples)
-    ds = ZarrStreamDataset(cache_path, val_idx, shuffle_chunks=True)
+    # Use the TRAINING split (first 80%) — never fine-tune on val indices or
+    # validation metrics for the same fold become contaminated.
+    train_end = int(n_samples * 0.80)
+    train_idx = np.arange(0, train_end)
+    ds = ZarrStreamDataset(cache_path, train_idx, shuffle_chunks=True)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=True)
 
     model_list = list(loaded_models.values())
@@ -145,8 +148,10 @@ def run_diversity_finetune(
         for bi, batch in enumerate(loader):
             if bi >= max_batches:
                 break
-            xb, yb, y_cls_b, y_conf_b, _ = _unpack_batch(batch, device)
-            xb, yb, y_cls_b, y_conf_b, keep = _sanitize_batch_tensors(xb, yb, y_cls_b, y_conf_b)
+            xb, yb, y_cls_b, y_conf_b, bet_size, _ = _unpack_batch(batch, device)
+            xb, yb, y_cls_b, y_conf_b, bet_size, keep = _sanitize_batch_tensors(
+                xb, yb, y_cls_b, y_conf_b, bet_size
+            )
             if keep is not None and not bool(keep.all()):
                 if not bool(keep.any()):
                     continue
@@ -155,6 +160,8 @@ def run_diversity_finetune(
                     y_cls_b = y_cls_b[keep]
                 if y_conf_b is not None:
                     y_conf_b = y_conf_b[keep]
+                if bet_size is not None:
+                    bet_size = bet_size[keep]
             y_cls_idx = _direction_class_index(yb, y_cls_b, classification=classification)
 
             opt.zero_grad(set_to_none=True)

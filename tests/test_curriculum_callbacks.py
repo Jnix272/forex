@@ -3,6 +3,9 @@
 import numpy as np
 import pytest
 
+pytest.importorskip("pytorch_lightning")
+pytest.importorskip("composer")
+
 # Skip if torch not available (sandbox environment)
 try:
     import torch
@@ -177,7 +180,14 @@ class TestBaseCurriculum:
         assert curriculum2.current_epoch == 5
 
 
+try:
+    import pytorch_lightning as pl
+    LIGHTNING_AVAILABLE = True
+except ImportError:
+    LIGHTNING_AVAILABLE = False
+
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not available")
+@pytest.mark.skipif(not LIGHTNING_AVAILABLE, reason="pytorch_lightning not available")
 class TestPLCurriculumCallback:
     """Test PyTorch Lightning curriculum callback."""
 
@@ -211,7 +221,14 @@ class TestPLCurriculumCallback:
         assert callback2.curriculum.current_epoch == 3
 
 
+try:
+    import composer
+    COMPOSER_AVAILABLE = True
+except ImportError:
+    COMPOSER_AVAILABLE = False
+
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not available")
+@pytest.mark.skipif(not COMPOSER_AVAILABLE, reason="composer not available")
 class TestComposerCurriculumCallback:
     """Test MosaicML Composer curriculum callback."""
 
@@ -285,6 +302,7 @@ class TestCustomCurriculumAdapter:
 class TestFactoryFunction:
     """Test the create_curriculum_callback factory."""
 
+    @pytest.mark.skipif(not LIGHTNING_AVAILABLE, reason="pytorch_lightning not available")
     def test_create_pytorch_lightning(self):
         from training.curriculum_callbacks import create_curriculum_callback
 
@@ -297,6 +315,7 @@ class TestFactoryFunction:
 
         assert isinstance(callback, PLCurriculumCallback)
 
+    @pytest.mark.skipif(not COMPOSER_AVAILABLE, reason="composer not available")
     def test_create_composer(self):
         from training.curriculum_callbacks import create_curriculum_callback
 
@@ -356,6 +375,7 @@ class TestIntegrationHelpers:
         assert isinstance(new_loader.sampler, torch_data.WeightedRandomSampler)
 
     @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not available")
+    @pytest.mark.skipif(not LIGHTNING_AVAILABLE, reason="pytorch_lightning not available")
     def test_make_curriculum_datamodule(self):
         import torch.utils.data as torch_data
 

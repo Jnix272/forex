@@ -68,7 +68,6 @@ class LiveRiskSchema:
 class TrainingSchema:
     batch_size: int
     epochs: int
-    patience: int
     loss: str
     huber_delta: float
     asymmetric_sign_weight: float
@@ -79,7 +78,6 @@ class TrainingSchema:
     seq_len: int
     checkpoint_dir: Any
     walk_forward_folds: int
-    early_stop_metric: str
     sharpe_annualization_factor: float
     onecycle_pct_start: float
     onecycle_max_lr_mult: float

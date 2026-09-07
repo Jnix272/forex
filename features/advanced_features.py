@@ -307,10 +307,6 @@ class L2OrderBookFeatures:
         return order_book_features(ob, bars.index, k=min(5, self.n))
 
 
-def session_clock_features(index):
-    return session_features(index)
-
-
 class CorrelationRegimeDetector:
     def __init__(self, window=60, break_thresh=0.3):
         self.w = window
@@ -337,24 +333,6 @@ def rolling_hurst_fractal(bars, windows=None):
     df["trending"] = (df[f"hurst_{mid_w}"] > 0.55).astype(float)
     df["mean_reverting"] = (df[f"hurst_{mid_w}"] < 0.45).astype(float)
     return df
-
-
-class OptionsSkewFeatures:
-    def __init__(self, windows=None):
-        if windows is None:
-            windows = [5, 20, 60]
-        self.w = windows[-1] if windows else 20
-
-    def build_synthetic(self, bars):
-        return options_proxy_features(bars, window=self.w)
-
-
-class COTFeatures:
-    def __init__(self, data_dir=None):
-        self.data_dir = data_dir or PATHS["data_raw_cot"]
-
-    def build_synthetic(self, index):
-        return cot_features(index)
 
 
 class AdvancedFeatureBuilder:

@@ -20,7 +20,7 @@ def test_calibration_metrics_detect_overconfidence():
     metrics = classification_calibration_metrics(y_true, probs, n_bins=5)
 
     assert metrics["n"] == 4
-    assert metrics["accuracy"] == 0.5
+    assert metrics["r2"] == 0.5
     assert metrics["ece"] > 0.0
     assert metrics["brier"] > 0.0
     assert metrics["nll"] > 0.0
@@ -32,7 +32,7 @@ def test_logits_are_converted_to_probabilities_for_calibration():
 
     metrics = classification_calibration_metrics(y_true, logits, n_bins=2)
 
-    assert metrics["accuracy"] == 1.0
+    assert metrics["r2"] == 1.0
     assert 0.0 <= metrics["ece"] <= 1.0
 
 

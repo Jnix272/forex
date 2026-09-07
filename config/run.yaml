@@ -293,7 +293,7 @@ data:
 # - EURJPY
 # - GBPJPY
   parallel_window_workers: 1
-  real_data_window_days: 7
+  real_data_window_days: 5
   source: dukascopy
   start: '2008-01-01'
   use_cache: true
@@ -647,7 +647,7 @@ training:
   epochs: 40
   grad_accum_steps: 2
   grad_clip: 0.75
-  label_method: triple_barrier
+  label_method: cpar
   label_smoothing: 0.05
   loss: huber
   lr: 1.95e-05

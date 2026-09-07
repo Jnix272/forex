@@ -1,7 +1,8 @@
 """Batch preparation / sanitization for the supervised loop.
 
 Extracted verbatim from ``training.supervised_loop`` (refactor R5);
-re-exported there for import-path stability."""
+re-exported there for import-path stability.
+"""
 from __future__ import annotations
 
 import torch
@@ -9,41 +10,93 @@ import torch
 from training.core import _log_warn
 
 def _unpack_batch(batch, device):
-    """Return (xb, yb, y_cls, y_conf, sample_idx) from 2- to 5-tuple batches.
+    """Return (xb, yb, y_cls, y_conf, bet_size, sample_idx) from 2- to 6-tuple batches.
 
-    Always returns a 5-element tuple.  ``sample_idx`` is ``None`` when the
+    Always returns a 6-element tuple.  ``sample_idx`` is ``None`` when the
     loader does not carry index information.
     """
     n = len(batch) if isinstance(batch, (tuple, list)) else 1
-    if n >= 5:
-        xb, yb, y_cls, y_conf, sample_idx = batch[0], batch[1], batch[2], batch[3], batch[4]
+    if n >= 6:
+        xb, yb, y_cls, y_conf, bet_size, sample_idx = batch[0], batch[1], batch[2], batch[3], batch[4], batch[5]
         return (
             xb.to(device, non_blocking=True),
             yb.to(device, non_blocking=True),
             y_cls.to(device, non_blocking=True),
             y_conf.to(device, non_blocking=True),
+            bet_size.to(device, non_blocking=True),
             sample_idx.to(device, non_blocking=True),
         )
+    if n == 5:
+        # Check if the 5th element is sample_idx (long) or bet_size (float)
+        # We can just check the dtype of the last element or assume it's bet_size
+        # Wait, earlier n=5 was (X, y, yc, pq, idx). Let's check dtype of batch[4]
+        # If it's an integer type, it's sample_idx.
+        if batch[4].dtype in (torch.int32, torch.int64):
+            xb, yb, y_cls, y_conf, sample_idx = batch[0], batch[1], batch[2], batch[3], batch[4]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                y_cls.to(device, non_blocking=True),
+                y_conf.to(device, non_blocking=True),
+                None,
+                sample_idx.to(device, non_blocking=True),
+            )
+        else:
+            xb, yb, y_cls, y_conf, bet_size = batch[0], batch[1], batch[2], batch[3], batch[4]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                y_cls.to(device, non_blocking=True),
+                y_conf.to(device, non_blocking=True),
+                bet_size.to(device, non_blocking=True),
+                None,
+            )
     if n == 4:
-        xb, yb, y_cls, y_conf = batch[0], batch[1], batch[2], batch[3]
-        return (
-            xb.to(device, non_blocking=True),
-            yb.to(device, non_blocking=True),
-            y_cls.to(device, non_blocking=True),
-            y_conf.to(device, non_blocking=True),
-            None,
-        )
+        if batch[3].dtype in (torch.int32, torch.int64):
+            xb, yb, bet_size, sample_idx = batch[0], batch[1], batch[2], batch[3]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                None,
+                None,
+                bet_size.to(device, non_blocking=True),
+                sample_idx.to(device, non_blocking=True),
+            )
+        else:
+            xb, yb, y_cls, y_conf = batch[0], batch[1], batch[2], batch[3]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                y_cls.to(device, non_blocking=True),
+                y_conf.to(device, non_blocking=True),
+                None,
+                None,
+            )
     if n == 3:
-        xb, yb, sample_idx = batch[0], batch[1], batch[2]
-        return (
-            xb.to(device, non_blocking=True),
-            yb.to(device, non_blocking=True),
-            None,
-            None,
-            sample_idx.to(device, non_blocking=True),
-        )
-    xb, yb = batch[0], batch[1]
-    return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True), None, None, None)
+        if batch[2].dtype in (torch.int32, torch.int64):
+            xb, yb, sample_idx = batch[0], batch[1], batch[2]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                None,
+                None,
+                None,
+                sample_idx.to(device, non_blocking=True),
+            )
+        else:
+            xb, yb, bet_size = batch[0], batch[1], batch[2]
+            return (
+                xb.to(device, non_blocking=True),
+                yb.to(device, non_blocking=True),
+                None,
+                None,
+                bet_size.to(device, non_blocking=True),
+                None,
+            )
+    if n == 2:
+        xb, yb = batch[0], batch[1]
+        return (xb.to(device, non_blocking=True), yb.to(device, non_blocking=True), None, None, None, None)
+    return (batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True), None, None, None, None)
 
 
 _SANITIZE_STATS: dict[str, int] = {
@@ -59,12 +112,13 @@ def _sanitize_batch_tensors(
     yb: torch.Tensor,
     y_cls: torch.Tensor | None,
     y_conf: torch.Tensor | None,
+    bet_size: torch.Tensor | None = None,
     *,
     skip_bad_targets: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     """Sanitize features; surface non-finite targets instead of silently zeroing them.
 
-    Returns ``(xb, yb, y_cls, y_conf, keep_mask)``. ``keep_mask`` is a bool
+    Returns ``(xb, yb, y_cls, y_conf, bet_size, keep_mask)``. ``keep_mask`` is a bool
     vector over the batch dim. Features may be clamped (counted + WARN);
     targets are **never** replaced with 0 - bad rows are flagged for the
     caller to drop (or raise when ``skip_bad_targets=False``).
@@ -102,6 +156,10 @@ def _sanitize_batch_tensors(
         y_conf_f = y_conf.float()
         keep = keep & torch.isfinite(y_conf_f).reshape(bsz, -1).all(dim=-1)
         y_conf = y_conf_f.clamp(0.0, 1.0)
+    if bet_size is not None:
+        bet_size_f = bet_size.float()
+        keep = keep & torch.isfinite(bet_size_f).reshape(bsz, -1).all(dim=-1)
+        bet_size = bet_size_f.clamp(0.0, 1.0)
 
     if not bool(keep.all()):
         n_bad = int((~keep).sum().item())
@@ -124,7 +182,7 @@ def _sanitize_batch_tensors(
                 _log_warn(msg)
             except Exception:
                 pass
-    return xb, yb_f, y_cls, y_conf, keep
+    return xb, yb_f, y_cls, y_conf, bet_size, keep
 
 
 def sanitize_stats() -> dict[str, int]:
@@ -152,17 +210,18 @@ def _prepare_train_batch(
 ):
     """Unpack, sanitize, mask, and optionally adversarially perturb one batch.
 
-    Returns ``(xb, yb, y_cls, y_conf, sample_idx)`` or ``None`` when every
+    Returns ``(xb, yb, y_cls, y_conf, bet_size, sample_idx)`` or ``None`` when every
     row has non-finite targets and the batch must be skipped.
     """
-    xb, yb, y_cls_b, y_conf_b, batch_idx_t = _unpack_batch(batch, device)
+    xb, yb, y_cls_b, y_conf_b, bet_size_b, batch_idx_t = _unpack_batch(batch, device)
     if seq_len is not None and xb.shape[1] > seq_len:
         xb = xb[:, -seq_len:, :]
-    xb, yb, y_cls_b, y_conf_b, keep = _sanitize_batch_tensors(
+    xb, yb, y_cls_b, y_conf_b, bet_size_b, keep = _sanitize_batch_tensors(
         xb,
         yb,
         y_cls_b,
         y_conf_b,
+        bet_size_b,
         skip_bad_targets=True,
     )
     if keep is not None and not bool(keep.all()):
@@ -174,6 +233,8 @@ def _prepare_train_batch(
             y_cls_b = y_cls_b[keep]
         if y_conf_b is not None:
             y_conf_b = y_conf_b[keep]
+        if bet_size_b is not None:
+            bet_size_b = bet_size_b[keep]
         if batch_idx_t is not None:
             batch_idx_t = batch_idx_t[keep]
 
@@ -182,7 +243,7 @@ def _prepare_train_batch(
 
     if adversarial_gen is not None:
         try:
-            if classification or multitask:
+            if classification:
                 y_adv = y_cls_b if y_cls_b is not None else yb
                 # Class targets are cached as {-1,0,1} floats; CE needs long
                 # {0,1,2}. Match MultiTaskLoss.forward / lightning_trainer by
@@ -193,7 +254,7 @@ def _prepare_train_batch(
             else:
                 y_adv = yb
             proxy_crit = (
-                (lambda o, y: torch.nn.functional.cross_entropy(o, y))
+                (lambda o, y: torch.nn.functional.huber_loss(o.view(-1), y.view(-1)))
                 if multitask
                 else crit
             )
@@ -203,4 +264,4 @@ def _prepare_train_batch(
             with torch.no_grad():
                 xb = adversarial_gen(xb, adversarial_feature_names)
 
-    return xb, yb, y_cls_b, y_conf_b, batch_idx_t
+    return xb, yb, y_cls_b, y_conf_b, bet_size_b, batch_idx_t

@@ -62,19 +62,19 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-# ΓöÇΓöÇ Windows / PythonΓÇæ3.12+ asyncio handling ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-# Zarr v3 uses `asyncio.run_in_executor` for all storage reads. PythonΓÇ»3.12 on
+# Î“Ã¶Ã‡Î“Ã¶Ã‡ Windows / PythonÎ“Ã‡Ã¦3.12+ asyncio handling Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡Î“Ã¶Ã‡
+# Zarr v3 uses `asyncio.run_in_executor` for all storage reads. PythonÎ“Ã‡Â»3.12 on
 # Windows switched the default event loop to `WindowsProactorEventLoop`, which
-# does **not** support fileΓÇæI/O via `run_in_executor` and can raise
+# does **not** support fileÎ“Ã‡Ã¦I/O via `run_in_executor` and can raise
 # `OSError [Errno 22] Invalid argument`.  Historically we forced the older
 # selector loop to work around this.
 #
 # The selector policy (`WindowsSelectorEventLoopPolicy`) is now deprecated and
-# will be removed in PythonΓÇ»3.16, which triggers the warning you see.  To keep
-# the code futureΓÇæproof while preserving compatibility we:
+# will be removed in PythonÎ“Ã‡Â»3.16, which triggers the warning you see.  To keep
+# the code futureÎ“Ã‡Ã¦proof while preserving compatibility we:
 #   1. Suppress the deprecation warning when the selector policy is used.
 #   2. Apply the selector policy only on Python versions where it still
-#      exists (<ΓÇ»3.16).
+#      exists (<Î“Ã‡Â»3.16).
 #   3. On newer Python releases we fall back to the default policy, which
 #      works correctly for Zarr v3.
 import asyncio
@@ -138,7 +138,10 @@ except ImportError:
 
 import numpy as np
 
-warnings.filterwarnings("ignore")
+# Suppress noisy but harmless warnings from optional deps loaded below.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="matplotlib")
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
 
 import matplotlib
 
@@ -150,6 +153,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.architectures import (
     MODEL_REGISTRY,
 )
+# Re-export needed helpers for tests
+from training.model_factory import _multitask_head_in, build_model
 from monitoring.drift_gate import run_drift_gate
 
 # Advanced Training Mechanics
@@ -180,7 +185,7 @@ def _sharpe_ann_factor(args=None) -> float:
          inflate Sharpe when nothing is known).
 
     Replaces the old hard-coded fallback of 325.0 which inflated Sharpe
-    by 2.3x–12.7x depending on the user's session/full-day assumption.
+    by 2.3xâ€“12.7x depending on the user's session/full-day assumption.
     """  # noqa: RUF002
     override = None
     cache_path = None
@@ -217,6 +222,8 @@ def _sharpe_ann_factor(args=None) -> float:
 
 
 try:
+    import sys
+    sys.path.insert(0, r"D:\forex-main\.venv311\Scripts")
     import numcodecs  # noqa: F401
     import torch
     import torch.nn as nn  # noqa: F401
@@ -359,7 +366,11 @@ from training.gpu_cli import (
     _slug_part,
     _supervised_resume_status,
     apply_hardware_profile,
+    _normalize_architecture_profile,
     parse_args,
+)
+from training.dataset_builder import (
+    _build_multipair_chunk,
 )
 from training.gpu_datasets import (
     ZarrStreamDataset,
@@ -486,7 +497,7 @@ class _StageTimer:
                 timer.gpu_samples.extend(samples)
                 timer.gpu_by_stage.setdefault(name, []).extend(samples)
                 util = max(self.gpu0.get("gpu_util_pct", -1), gpu1.get("gpu_util_pct", -1))
-                util_s = f" gpu_util≤{util:.0f}%" if util >= 0 else ""
+                util_s = f" gpu_utilâ‰¤{util:.0f}%" if util >= 0 else ""
                 print(f"[Timing] {name}: {dt:.1f}s{util_s}")
                 return False
 
@@ -621,7 +632,7 @@ def main():
     print(f"  Pairs: {_pairs_str}{_embed_str}")
     print(f"  Strategy: {args.strategy_mode}  |  Bars: {args.bar_freq}  |  Lookahead: {args.lookahead_bars} bars")
     print(f"  Batch: {args.batch_size}  |  Epochs: {args.epochs}  |  AMP: {args.amp}")
-    print(f"  Labels: {args.label_method}  |  Loss: {args.loss}  |  Early-stop: {args.early_stop_metric}")
+    print(f"  Labels: {args.label_method}  |  Loss: {args.loss}  |  Early-stop: {getattr(args, 'early_stop_metric', 'val_loss')}")
     print(
         f"  Historical news: {getattr(args, 'historical_news_mode', 'calendar')}  |  "
         f"Cache format: {'NPY on Windows' if sys.platform == 'win32' else 'Zarr'}"
@@ -634,7 +645,7 @@ def main():
         print(f"  Ensemble meta-learner: ON  (epochs={args.ensemble_epochs}  div_weight={args.ensemble_div_weight})")
     print(f"{'=' * 62}")
 
-    # [!]∩╕C  Synthetic data warning -- always visible
+    # [!]âˆ©â••C  Synthetic data warning -- always visible
     if getattr(args, "data_source", "dukascopy") == "synthetic":
         print(f"\n{'!' * 62}")
         print("  [!]  WARNING: SYNTHETIC DATA")
@@ -751,7 +762,7 @@ def main():
     elif not os.getenv("WANDB_API_KEY"):
         print("[W&B] Skipped: WANDB_API_KEY not set in .env")
 
-    # ── Log build artifacts to W&B ──────────────────────────
+    # â”€â”€ Log build artifacts to W&B â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if wandb_run is not None:
         try:
             _manifest_p = Path(cache_path).parent / "dataset_manifest.json"
@@ -768,31 +779,18 @@ def main():
 
     from training.config_validate import resolve_models_to_train as _resolve_models_to_train
 
-    models_to_train, _ = _resolve_models_to_train(args, apply_resume_filter=False)
+    models_to_train, _skipped_models = _resolve_models_to_train(args, apply_resume_filter=True)
     _tabular = {"xgboost", "catboost"}
     _deep = [m for m in models_to_train if m not in _tabular]
-    _bad = [m for m in _deep if m not in MODEL_REGISTRY]
+    _bad = [m for m in _deep if m not in MODEL_REGISTRY and m != 'ensemble']
     if _bad:
         raise ValueError(f"Unknown deep model(s) {_bad}; expected one of {list(MODEL_REGISTRY)}")
-    models_to_train = _deep
 
-    if args.all_models and getattr(args, "resume", False) and not getattr(args, "retrain_completed_models", False):
-        pending_models = []
-        skipped_models = []
-        for _idx, _model_name in enumerate(models_to_train):
-            _probe_args = _member_training_args(args, _model_name, _idx, len(models_to_train))
-            _done, _reason = _model_completion_status(_model_name, _probe_args.checkpoint_dir)
-            if _done:
-                skipped_models.append((_model_name, _reason))
-            else:
-                pending_models.append(_model_name)
-                print(f"[AllModels] Will train {_model_name}: {_reason}")
-        for _model_name, _reason in skipped_models:
-            print(f"[AllModels] Skipping completed {_model_name}: {_reason}")
-        models_to_train = pending_models
-        if not models_to_train:
-            print("[AllModels] No unfinished models found. Use --retrain-completed-models to rerun all members.")
-            return
+    for _model_name, _reason in _skipped_models:
+        print(f"[AllModels] Skipping completed {_model_name}: {_reason}")
+    if not models_to_train and args.all_models and getattr(args, "resume", False):
+        print("[AllModels] No unfinished models found. Use --retrain-completed-models to rerun all members.")
+        return
 
     for _mi, model_name in enumerate(models_to_train):
         model_args = _member_training_args(args, model_name, _mi, len(models_to_train))
@@ -801,10 +799,12 @@ def main():
                 _train_memory.apply_to_model_args(model_args, model_name, base_args=args)
             except Exception as _tm_apply_e:
                 print(f"[TrainingMemory] Per-model apply skipped for {model_name}: {_tm_apply_e}")
+        if 'patchtst' in model_name.lower():
+            model_args.batch_size = min(model_args.batch_size, 8)
+            print(f"[Auto-Tune] Force-reduced batch_size to {model_args.batch_size} for {model_name} to prevent OOM")
         _set_global_seed(getattr(model_args, "seed", None))
         model_artifact_dir = Path(model_args.checkpoint_dir)
         model_artifact_dir.mkdir(parents=True, exist_ok=True)
-        model_args.seq_len = args.seq_len
         model = build_model(model_name, n_features, model_args).to(device)
 
 
@@ -837,7 +837,7 @@ def main():
                 ta.dropout = trial.suggest_float("dropout", 0.05, 0.3)
                 ta.batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
                 ta.epochs = 5
-                ta.patience = 3
+
                 ta.resume = False
                 ta.all_models = False
                 # Architecture search changes hidden/d_model -- existing contrastive
@@ -850,7 +850,7 @@ def main():
                 h, bv = supervised_train(model_name, cache_path, n_samples, n_features, ta, device, n_gpus, run=None)  # noqa: B023, RUF059
                 return bv
 
-            direction = "maximize" if model_args.early_stop_metric == "sharpe" else "minimize"
+            direction = "maximize" if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe" else "minimize"
             import optuna
 
             study = optuna.create_study(direction=direction, pruner=optuna.pruners.MedianPruner())
@@ -901,10 +901,7 @@ def main():
             _cv_n = max(0, n_samples - _holdout_n)
 
             if base_args.walk_forward_cv:
-                _embargo = _embargo_bars(base_args)
-                _purge = _purge_bars(base_args)
-                _method = _validation_method(base_args)
-                splits = walk_forward_splits(_cv_n, base_args.walk_forward_folds, _embargo, _purge, _method)
+                splits, _ = _build_cv_splits(base_args, _cv_n)
                 _baseline_cv_hist = []
                 for fi, (tr_i, va_i) in enumerate(splits):
                     _h, _bv = supervised_train(
@@ -954,17 +951,17 @@ def main():
                 f"skipping pretrain on resume ({_supervised_reason})."
             )
         elif model_args.pretrain:
-            if model_args.loss == "cross_entropy":
-                pt_ns = argparse.Namespace(**vars(model_args))
-                pt_ns.loss = "huber"
-                model = build_model(model_name, n_features, pt_ns).to(device)
             with _timer.stage(f"pretrain_{model_name}"):
-                model = run_pretrain(model, cache_path, n_features, model_args, device, run=wandb_run)
+                _pretrained = run_pretrain(model, cache_path, n_features, model_args, device, run=wandb_run)
+                if _pretrained is not None:
+                    model = _pretrained
 
         # Supervised training (single split or walk-forward CV)
         log_dir = Path(model_args.checkpoint_dir).resolve().parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         _fold_metrics = None  # populated by walk-forward for the promotion gate
+        history: dict = {}   # populated by either the WF loop or the single-split branch
+        best_val: float | None = None
         _holdout_n = _promotion_holdout_n(n_samples, model_args)
         _cv_n = max(0, n_samples - _holdout_n)
         if _holdout_n > 0:
@@ -990,7 +987,6 @@ def main():
                         _artifact_run_name,
                         _artifact_model_name,
                         _start_fold,
-                        str(model_args.early_stop_metric),
                     )
                     print(
                         f"[WalkForward] Resume: restored {len(cv_hist)} completed fold(s); "
@@ -1022,7 +1018,7 @@ def main():
             with open(log_dir / f"{_artifact_run_name}_{_artifact_model_name}_cv.json", "w", encoding="utf-8") as fp:
                 json.dump(cv_hist, fp)
             _promote_best_fold(
-                model_name, model_args.checkpoint_dir, cv_hist, model_args.early_stop_metric, alerter=alerter
+                model_name, model_args.checkpoint_dir, cv_hist, getattr(model_args, 'early_stop_metric', 'val_loss'), alerter=alerter
             )
             _generate_model_card(model_name, model_args, cv_hist, model_args.checkpoint_dir, n_features)
             _fold_metrics = [e.get("best_metric") for e in cv_hist if e.get("best_metric") is not None]
@@ -1105,7 +1101,7 @@ def main():
             "gen_gap_final": round(_ts_vloss_curve[-1] - _ts_tloss_curve[-1], 6)
             if _ts_vloss_curve and _ts_tloss_curve
             else None,
-            "early_stop_metric": model_args.early_stop_metric,
+            "early_stop_metric": getattr(model_args, 'early_stop_metric', 'val_loss'),
             "completed_at": datetime.now(UTC).isoformat(),
         }
         try:
@@ -1119,7 +1115,7 @@ def main():
         _pt_folds = (
             cv_hist if model_args.walk_forward_cv else [{"fold": 0, "best_metric": best_val, "history": history}]
         )
-        _pt_summary = _fold_history_summary(_pt_folds, model_args.early_stop_metric)
+        _pt_summary = _fold_history_summary(_pt_folds, getattr(model_args, 'early_stop_metric', 'val_loss'))
         _pt_report = _read_json_dict(_pt_report_path)
         _pt_report.update(
             {
@@ -1136,12 +1132,12 @@ def main():
 
         if _run_ablation and _baseline_cv_hist is not None:
             _abl_path = model_artifact_dir / "pretrain_ablation.json"
-            _baseline_summary = _fold_history_summary(_baseline_cv_hist, model_args.early_stop_metric)
-            _pretrained_summary = _fold_history_summary(_pt_folds, model_args.early_stop_metric)
+            _baseline_summary = _fold_history_summary(_baseline_cv_hist, getattr(model_args, 'early_stop_metric', 'val_loss'))
+            _pretrained_summary = _fold_history_summary(_pt_folds, getattr(model_args, 'early_stop_metric', 'val_loss'))
             _verdict, _deltas = _pretrain_ablation_verdict(_baseline_summary, _pretrained_summary)
             _abl_summary = {
                 "model_name": model_name,
-                "early_stop_metric": model_args.early_stop_metric,
+                "early_stop_metric": getattr(model_args, 'early_stop_metric', 'val_loss'),
                 "comparison": {
                     "verdict": _verdict,
                     "deltas_pretrain_minus_baseline": _deltas,
@@ -1173,7 +1169,7 @@ def main():
                 _m_key = "best_metric"
                 valid_folds = [f for f in cv_hist if f.get(_m_key) is not None]
                 if valid_folds:
-                    if model_args.early_stop_metric == "sharpe":
+                    if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe":
                         best_entry = max(valid_folds, key=lambda x: x[_m_key])
                     else:
                         best_entry = min(valid_folds, key=lambda x: x[_m_key])
@@ -1184,7 +1180,7 @@ def main():
 
             try:
                 alerter.send_training_completed(
-                    model=model_name, fold=_best_f, metric=model_args.early_stop_metric, score=float(_best_v)
+                    model=model_name, fold=_best_f, metric=getattr(model_args, 'early_stop_metric', 'val_loss'), score=float(_best_v)
                 )
             except Exception as e:
                 print(f"[Discord] Failed to send training_completed: {e}")
@@ -1470,7 +1466,7 @@ def main():
             "run_name": getattr(args, "run_name", "unknown"),
             "checkpoint_dir": str(_model_dir.resolve()),
             "run_checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
-            "fold_id": getattr(model_args, "walk_forward_folds", "single"),
+            "fold_id": "single" if not model_args.walk_forward_cv else gate_result.get("details", {}).get("selected_fold", "wf"),
             "start_time": run_start_time,
             "end_time": datetime.now(UTC).isoformat(),
             "best_epoch": int(best_epoch) if "best_epoch" in locals() and best_epoch is not None else None,
@@ -1547,7 +1543,7 @@ def main():
                     float(v) for v in (_fold_metrics or []) if v is not None and np.isfinite(float(v))
                 ]
 
-                if model_args.early_stop_metric == "sharpe":
+                if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe":
                     if _mem_metric_values:
                         _tm_sharpe = max(_mem_metric_values)
 
@@ -1583,7 +1579,7 @@ def main():
                         "args_snapshot": {
                             "lr": float(getattr(model_args, "lr", 5e-5)),
                             "dropout": float(getattr(model_args, "dropout", 0.25)),
-                            "patience": int(getattr(model_args, "patience", 6)),
+
                             "epochs": int(getattr(model_args, "epochs", 24)),
                         },
                     }
@@ -1833,7 +1829,7 @@ def main():
         print(
             f"  GPU util: mean={_gpu_summary['gpu_util_pct_mean']}% "
             f"max={_gpu_summary['gpu_util_pct_max']}% "
-            f"| temp_max={_gpu_summary.get('gpu_temp_c_max')}°C "
+            f"| temp_max={_gpu_summary.get('gpu_temp_c_max')}Â°C "
             f"| mem_max={_gpu_summary.get('gpu_mem_mb_max')}MB"
         )
     print(f"{'=' * 62}")
@@ -1879,3 +1875,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

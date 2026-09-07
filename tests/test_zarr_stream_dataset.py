@@ -92,7 +92,7 @@ def test_basic_iteration_yields_all_rows(tmp_path: Path):
     samples = list(ds)
     assert len(samples) == len(y)
     # First element is X (float32 tensor of shape (seq, n_feat))
-    x0, y0 = samples[0]
+    x0, y0, bet0 = samples[0]
     assert x0.dtype == torch.float32
     assert x0.shape == X.shape[1:]
     assert y0.dtype == torch.float32
@@ -118,7 +118,7 @@ def test_block_compression_alignment_uses_chunk_size(tmp_path: Path):
 def test_multitask_uses_published_pq(tmp_path: Path):
     cache, _X, y, _y_cls, _pq = _build_cache(tmp_path, with_pq=True, with_y_cls=True)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False, multitask_targets=True, return_indices=False)
-    _x_t, _y_t, _yc_t, pq_t = next(iter(ds))
+    _x_t, _y_t, _yc_t, pq_t, _bet_t = next(iter(ds))
     assert isinstance(pq_t, torch.Tensor)
     assert 0.0 <= float(pq_t) <= 1.0
 
@@ -129,7 +129,7 @@ def test_multitask_pq_fallback_is_unity_when_pq_missing(tmp_path: Path):
     ``np.ones``) instead of the legacy ``min(1, |y|)`` (fix #6)."""
     cache, _X, y, _y_cls, _pq = _build_cache(tmp_path, with_pq=False, with_y_cls=True)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False, multitask_targets=True)
-    _x_t, _y_t, _yc_t, pq_t = next(iter(ds))
+    _x_t, _y_t, _yc_t, pq_t, _bet_t = next(iter(ds))
     assert float(pq_t) == 1.0  # not min(1, |y|)
 
 
@@ -171,7 +171,7 @@ def test_shuffle_buffer_zero_is_within_block_only(tmp_path: Path):
     pattern."""
     cache, _X, _y, _, _ = _build_cache(tmp_path, n_rows=128, chunk_rows=8)
     ds = ZarrStreamDataset(cache, np.arange(128), shuffle_chunks=True, shuffle_buffer_size=0, shuffle_seed=7)
-    order = [float(y_t.item()) for _, y_t in ds]
+    order = [float(y_t.item()) for _, y_t, _bet_t in ds]
     assert len(order) == 128
 
 
@@ -255,8 +255,8 @@ def test_return_indices_3tuple_when_multitask_off(tmp_path: Path):
     cache, _X, y, _, _ = _build_cache(tmp_path, with_pq=False, with_y_cls=False)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False, return_indices=True, multitask_targets=False)
     sample = next(iter(ds))
-    assert len(sample) == 3
-    x_t, y_t, idx_t = sample
+    assert len(sample) == 4
+    x_t, y_t, bet_size_t, idx_t = sample
     assert x_t.dtype == torch.float32
     assert y_t.dtype == torch.float32
     assert idx_t.dtype == torch.long
@@ -266,8 +266,8 @@ def test_return_indices_5tuple_when_multitask_on(tmp_path: Path):
     cache, _X, y, _y_cls, _pq = _build_cache(tmp_path, with_pq=True, with_y_cls=True)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False, return_indices=True, multitask_targets=True)
     sample = next(iter(ds))
-    assert len(sample) == 5
-    x_t, y_t, yc_t, pq_t, idx_t = sample
+    assert len(sample) == 6
+    x_t, y_t, yc_t, pq_t, bet_size_t, idx_t = sample
     assert x_t.dtype == torch.float32
     assert y_t.dtype == torch.float32
     assert yc_t.dtype == torch.float32
@@ -279,14 +279,14 @@ def test_multitask_4tuple_without_indices(tmp_path: Path):
     cache, _X, y, _y_cls, _pq = _build_cache(tmp_path, with_pq=True, with_y_cls=True)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False, return_indices=False, multitask_targets=True)
     sample = next(iter(ds))
-    assert len(sample) == 4
+    assert len(sample) == 5
 
 
 def test_two_tuple_returns_when_multitask_off(tmp_path: Path):
     cache, _X, y, _, _ = _build_cache(tmp_path, with_pq=False, with_y_cls=False)
     ds = ZarrStreamDataset(cache, np.arange(len(y)), shuffle_chunks=False)
     sample = next(iter(ds))
-    assert len(sample) == 2
+    assert len(sample) == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,11 +308,12 @@ def test_dataloader_iteration_single_process(tmp_path: Path):
     dl = DataLoader(ds, batch_size=8, shuffle=False, num_workers=0)
     batches = list(dl)
     assert len(batches) == 4
-    # Each batch: (X, y, y_cls, pq, idx) - all same batch dim
+    # Each batch: (X, y, y_cls, pq, bet_size, idx) - all same batch dim
     for b in batches:
-        assert len(b) == 5
+        assert len(b) == 6
         assert b[0].shape == (8, X.shape[1], X.shape[2])
         assert b[1].shape == (8,)
         assert b[2].shape == (8,)
         assert b[3].shape == (8,)
         assert b[4].shape == (8,)
+        assert b[5].shape == (8,)

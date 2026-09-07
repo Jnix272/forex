@@ -32,7 +32,8 @@ except ImportError:  # pragma: no cover
 
 from config.settings import PATHS
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

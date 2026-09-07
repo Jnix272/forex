@@ -850,7 +850,8 @@ class GymEnvWrapper:
     def reset(self, seed=None, options=None):
         """Reset environment."""
         if seed is not None:
-            np.random.seed(seed)
+            # Use per-call Generator so global numpy state is not polluted.
+            np.random.default_rng(seed)
 
         valid_starts = options.get("valid_starts") if options else None
         obs = self.env.reset(valid_starts=valid_starts)
@@ -925,6 +926,14 @@ def create_rl_adapter(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+_FOREX_ENV_PARAMS = frozenset({
+    "initial_equity", "lot_size", "max_lots", "commission_per_lot",
+    "slippage_pips", "pip_size", "reward_weights", "atr_sl_mult",
+    "trail_activation_r", "breakeven_at_r", "pyramid_pct", "martingale_pct",
+    "random_reset", "episode_len", "bars_per_year",
+})
+
+
 def run_rl_with_adapter(
     adapter: BaseRLAdapter,
     cache_path: str,
@@ -942,17 +951,21 @@ def run_rl_with_adapter(
     """
     from models.rl_agents import ForexTradingEnv
 
+    # Split kwargs: ForexTradingEnv only accepts its own __init__ params.
+    env_kwargs = {k: v for k, v in kwargs.items() if k in _FOREX_ENV_PARAMS}
+    train_kwargs = {k: v for k, v in kwargs.items() if k not in _FOREX_ENV_PARAMS}
+
     # Create environment
     env = ForexTradingEnv(
         features=features[train_indices],
         prices=prices[train_indices],
         atr=atr[train_indices],
         spreads=spreads[train_indices],
-        **kwargs,
+        **env_kwargs,
     )
 
     # Train adapter
-    return adapter.train(env, **kwargs)
+    return adapter.train(env, **train_kwargs)
 
 
 if __name__ == "__main__":

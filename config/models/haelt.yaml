@@ -16,3 +16,4 @@ training:
   # 120 bars at 5-min = 10h — must match run.yaml training.seq_len
   # and config/models.py haelt entry to avoid silent profile override.
   seq_len: 120
+  early_stop_patience: 8   # faster convergence at 3e-4 lr than default 1e-4 models

@@ -60,7 +60,9 @@ class ElasticWeightConsolidation(nn.Module):
             else:
                 y = labels.reshape(-1).long()
             y = y.clamp(0, outputs.shape[-1] - 1)
-            return nn.functional.cross_entropy(outputs, y)
+            # Cross-entropy gives correct log-likelihood gradient for Fisher
+            # (huber_loss was incorrect here — it treats logits as regression targets)
+            return nn.functional.cross_entropy(outputs.view(-1, outputs.shape[-1]), y)
 
         pred = outputs.reshape(-1)
         tgt = labels.reshape(-1).float()

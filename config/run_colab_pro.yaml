@@ -79,16 +79,13 @@ training:
 
   seq_len: "6h40m"            # 80 bars at 5m — full production seq_len
   val_split: 0.2
-  patience: 6
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
 
-  loss: sharpe_huber          # production loss
-  label_method: rl_reward
+  loss: sharpe_huber
+  num_classes: 1
+  label_method: cpar
   direction_weight: 0.75
 
-  # Corrected Sharpe math: bar_freq=5m → sqrt(252 × 78) = 140.2
-  sharpe_annualization_factor: 140.0
+  sharpe_annualization_factor: null  # auto-detect: sqrt(bars_per_year / lookahead_bars)
   sharpe_weight: 0.25
 
   # Resume — critical for Pro session reconnects
@@ -147,7 +144,6 @@ pretrain:
   read_windows: 32
   min_epochs: 1
   handoff_loss: 0.18
-  handoff_patience: 2
 
 # ── Ensemble (disabled — too much VRAM even on A100 with 5 pairs) ────────────
 ensemble:

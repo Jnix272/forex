@@ -1,3 +1,26 @@
+---
+
+## Commit `0406177` — 2026-09-07 04:53 UTC
+**Author:** Antigravity Bot  
+**Message:** Update regime dynamic lookaheads, fix TP/SL, increase patience, fix unicode
+
+**Files changed:**
+```
+config/run.yaml
+config/settings.py
+```
+
+---
+
+## Commit `3baaa5a` — 2026-09-07 04:19 UTC
+**Author:** Antigravity Bot  
+**Message:** Update run.yaml to match settings.py
+
+**Files changed:**
+```
+config/run.yaml
+```
+
 ## 2026-09-07: Fixed 100% Sequence Drop Bug in Dataset Builder
 
 ### Summary

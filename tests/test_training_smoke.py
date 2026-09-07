@@ -25,7 +25,7 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
         nhead=2,
         num_layers=1,
         dropout=0.0,
-        loss="cross_entropy",
+        loss="huber",
         grad_clip=1.0,
         early_stop_metric="val_loss",
         early_stop_patience=2,
@@ -92,11 +92,13 @@ def _mock_args(tmp_path: Path) -> argparse.Namespace:
 
 
 @patch("training.train_gpu.parse_args")
+@patch("training.dataset_builder._write_pair_readiness_report")
 @patch("training.train_gpu.supervised_train")
-def test_mini_supervised_smoke_test(mock_supervised, mock_parse_args, tmp_path):
+def test_mini_supervised_smoke_test(mock_supervised, mock_readiness, mock_parse_args, tmp_path):
     """Test that main() correctly routes to supervised_train when mode='supervised'."""
     args = _mock_args(tmp_path)
     mock_parse_args.return_value = args
+    mock_readiness.return_value = {"status": "pass"}
 
     mock_supervised.return_value = ({}, 1.0)
     # Run main
@@ -111,13 +113,15 @@ def test_mini_supervised_smoke_test(mock_supervised, mock_parse_args, tmp_path):
 
 
 @patch("training.train_gpu.parse_args")
+@patch("training.dataset_builder._write_pair_readiness_report")
 @patch("training.train_gpu._promote_best_fold")
 @patch("training.train_gpu.supervised_train")
-def test_mock_reject_promotion_test(mock_supervised, mock_promote, mock_parse_args, tmp_path):
+def test_mock_reject_promotion_test(mock_supervised, mock_promote, mock_readiness, mock_parse_args, tmp_path):
     """Test that promotion rejection logic happens if early stop metric is bad."""
     args = _mock_args(tmp_path)
     args.walk_forward_cv = True
     mock_parse_args.return_value = args
+    mock_readiness.return_value = {"status": "pass"}
 
     # Let's mock supervised_train to return a bad metric
     # supervised_train returns the metric value, e.g. val_loss = 100.0
@@ -139,13 +143,15 @@ def test_mock_reject_promotion_test(mock_supervised, mock_promote, mock_parse_ar
 
 
 @patch("training.train_gpu.parse_args")
+@patch("training.dataset_builder._write_pair_readiness_report")
 @patch("training.train_gpu._promote_best_fold")
 @patch("training.train_gpu.supervised_train")
-def test_mock_pass_promotion_test(mock_supervised, mock_promote, mock_parse_args, tmp_path):
+def test_mock_pass_promotion_test(mock_supervised, mock_promote, mock_readiness, mock_parse_args, tmp_path):
     """Test that promotion pass logic works when metric is good."""
     args = _mock_args(tmp_path)
     args.walk_forward_cv = True
     mock_parse_args.return_value = args
+    mock_readiness.return_value = {"status": "pass"}
 
     # Good val_loss
     mock_supervised.return_value = ({}, 0.5)
@@ -156,3 +162,4 @@ def test_mock_pass_promotion_test(mock_supervised, mock_promote, mock_parse_args
     called_args, _called_kwargs = mock_promote.call_args
     cv_hist = called_args[2]
     assert cv_hist[0]["best_metric"] == 0.5
+

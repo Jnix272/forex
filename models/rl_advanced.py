@@ -17,7 +17,8 @@ import numpy as np
 
 from backtesting.backtest import ScalingAction
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 try:
     import torch

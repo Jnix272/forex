@@ -37,6 +37,7 @@ model:
   hidden_size: 256
   d_model: 256
   nhead: 8
+  num_classes: 1
   num_layers: 3
   dropout: 0.25
 
@@ -54,14 +55,11 @@ training:
   seed: 1337
   resume: false
   seq_len: "8h"
-  patience: 10
   val_split: 0.2
   loss: sharpe_huber
   direction_weight: 0.75
   sharpe_weight: 0.35
-  label_method: rl_reward
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
+  label_method: cpar
   cross_asset_mode: auto
   cross_asset_provider: auto
 

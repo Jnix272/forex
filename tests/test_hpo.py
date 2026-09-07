@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+optuna = pytest.importorskip("optuna")
 import torch
 import torch.nn.functional as F
 

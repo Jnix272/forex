@@ -28,20 +28,24 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import PATHS, TRAINING
-from training.gpu_losses import _match_target_shape
-from training.train_gpu import (
-    ZarrStreamDataset,
-    _apply_yaml_config,
-    _class_weights_tensor,
-    _gradients_are_finite,
-    _log_nan,
-    _recover_nonfinite_training_state,
-    build_dataset_chunked,
-    build_model,
-    labels_to_class_index,
-    setup_device,
+from models.architectures import build_model
+from training.core import _log_nan
+from training.cv_splits import (
+    _embargo_bars,
+    _purge_bars,
+    _validation_method,
     walk_forward_splits,
 )
+from training.dataset_builder import build_dataset_chunked
+from training.direction_control import (
+    _class_weights_tensor,
+    _gradients_are_finite,
+    _recover_nonfinite_training_state,
+    labels_to_class_index,
+)
+from training.gpu_cli import _apply_yaml_config
+from training.gpu_datasets import ZarrStreamDataset
+from training.gpu_device import setup_device
 
 
 def parse_args():
@@ -82,7 +86,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--seq-len", type=int, default=60)
-    p.add_argument("--patience", type=int, default=10)
+
     p.add_argument("--val-split", type=float, default=None)
     p.add_argument("--loss", type=str, default="huber")
     p.add_argument("--label-method", type=str, default="rl_reward")
@@ -132,7 +136,7 @@ def parse_args():
         args.val_split = float(TRAINING["val_split"])
     if args.quick_mode:
         args.epochs = min(args.epochs, 5)
-        args.patience = 2
+
     return args
 
 
@@ -292,7 +296,7 @@ def run_distillation():
         print("[Distill] No data. Exiting.")
         return
 
-    from training.train_gpu import _embargo_bars, _purge_bars, _validation_method
+    from training.cv_splits import _embargo_bars, _purge_bars, _validation_method
 
     splits = walk_forward_splits(n_samples, 1, _embargo_bars(args), _purge_bars(args), _validation_method(args))
     train_idx, val_idx = splits[-1]
@@ -379,7 +383,7 @@ def run_distillation():
     # 5. Training Loop
     print("\n[Distill] Starting Knowledge Distillation...")
     best_loss = float("inf")
-    patience_ctr = 0
+
 
     for epoch in range(1, args.epochs + 1):
         student.train()
@@ -461,7 +465,7 @@ def run_distillation():
         # Early Stopping logic based on Val Loss
         if epoch_val_loss < best_loss - 1e-4:
             best_loss = epoch_val_loss
-            patience_ctr = 0
+
             # Save student
             out_path = (
                 _model_checkpoint_dir(args.checkpoint_dir, args.student_model) / f"{args.student_model}_student_best.pt"
@@ -478,10 +482,7 @@ def run_distillation():
             )
             print(f"   -> Saved new best student checkpoint to {out_path}")
         else:
-            patience_ctr += 1
-            if patience_ctr >= args.patience:
-                print(f"[Distill] Early stopping at epoch {epoch} (Val Loss: {epoch_val_loss:.5f})")
-                break
+            pass
 
 
 if __name__ == "__main__":

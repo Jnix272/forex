@@ -91,7 +91,7 @@ def _load_ticks_real_or_synthetic() -> tuple[pd.DataFrame, str, str]:
 
 def _args(seq_len: int, n_features: int) -> argparse.Namespace:
     return argparse.Namespace(
-        loss="cross_entropy",
+        loss="huber",
         multitask=False,
         seq_len=seq_len,
         hidden_size=32,
@@ -224,11 +224,11 @@ def test_models_run_full_training_cycle_on_real_or_fake_data(model_name, prepare
         for xb, yb in train_loader:
             optimizer.zero_grad(set_to_none=True)
             out = model(xb)
-            assert out.shape == (xb.shape[0], 3), f"{model_name} returned {out.shape}, expected ({xb.shape[0]}, 3)"
+            assert out.shape == (xb.shape[0],), f"{model_name} returned {out.shape}, expected ({xb.shape[0]},)"
             assert torch.isfinite(out).all(), (
                 f"{model_name} produced non-finite logits on {prepared_sequences['source']} data"
             )
-            loss = F.cross_entropy(out, yb)
+            loss = F.huber_loss(out, yb.float())
             assert torch.isfinite(loss), (
                 f"{model_name} produced non-finite train loss on {prepared_sequences['source']} data"
             )
@@ -241,11 +241,11 @@ def test_models_run_full_training_cycle_on_real_or_fake_data(model_name, prepare
         with torch.no_grad():
             for xb, yb in val_loader:
                 out = model(xb)
-                assert out.shape == (xb.shape[0], 3)
+                assert out.shape == (xb.shape[0],)
                 assert torch.isfinite(out).all(), (
                     f"{model_name} produced non-finite validation logits on {prepared_sequences['source']} data"
                 )
-                loss = F.cross_entropy(out, yb)
+                loss = F.huber_loss(out, yb.float())
                 assert torch.isfinite(loss), (
                     f"{model_name} produced non-finite validation loss on {prepared_sequences['source']} data"
                 )
@@ -279,3 +279,4 @@ def test_models_run_full_training_cycle_on_real_or_fake_data(model_name, prepare
         val_losses[-1],
         prepared_sequences["source"],
     )
+

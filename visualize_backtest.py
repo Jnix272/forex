@@ -625,6 +625,12 @@ def main():
             print("No Zarr cache or logs found. Generating fully synthetic price and trade records.")
             bars, equity_df, trades_df, predictions = generate_fully_synthetic_data()
 
+        # Convert to pandas if polars
+        if hasattr(equity_df, "to_pandas"):
+            equity_df = equity_df.to_pandas()
+        if hasattr(trades_df, "to_pandas"):
+            trades_df = trades_df.to_pandas()
+
         # Calculate performance statistics from simulation
         total_pnl = equity_df["total_value"].iloc[-1] - equity_df["total_value"].iloc[0]
         total_ret = (equity_df["total_value"].iloc[-1] / equity_df["total_value"].iloc[0] - 1) * 100
@@ -643,6 +649,8 @@ def main():
         }
 
     # Build components
+    if hasattr(bars, "to_pandas"):
+        bars = bars.to_pandas()
     chart_div = build_plotly_chart(bars, equity_df, trades_df, predictions, min_confidence=0.45, model=model)
     dashboard_html = build_dashboard_html(model, chart_div, metrics)
 

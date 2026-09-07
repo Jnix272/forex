@@ -1777,7 +1777,7 @@ class ForexDataManager:
                     # in-memory format, so DuckDB hands the buffer to Polars
                     # without an extra NumPy materialisation. This is what
                     # keeps a 50M-row query at ~1-2 GB peak instead of 7+.
-                    table = conn.execute(query, [pair, start_ts, end_ts]).fetch_arrow_table()
+                    table = conn.execute(query, [pair, start_ts, end_ts]).to_arrow_table()
                     if table.num_rows > 0:
                         df_pl = pl.from_arrow(table)
                         # Normalise the timestamp column name and timezone.

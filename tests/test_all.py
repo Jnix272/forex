@@ -21,12 +21,12 @@ from data.data_ingestion import (
 )
 from data.economic_calendar import EcoCalendarFeatureBuilder
 from data.sources import _enforce_schema
-from features.advanced_features import AdvancedFeatureBuilder, hurst_exponent, session_clock_features
+from features.advanced_features import AdvancedFeatureBuilder, hurst_exponent, session_features
 from features.feature_engineering import FeatureEngineer
 from features.finbert_sentiment import SentimentPipeline
 from features.macro_features import MacroYieldFeatureBuilder
 from labeling.rl_reward_labeling import align_labels_with_features, compute_rl_reward_labels
-from labeling.triple_barrier_labeling import _NUMBA_IMPORT_OK, _run_barrier_scan, _scan_outcomes_sequential
+from labeling.triple_barrier_labeling import _NUMBA_IMPORT_OK
 
 
 def null_count(df) -> int:
@@ -138,7 +138,7 @@ class TestFeatureEngineeringSmoke:
 
     def test_session_clock_flags(self):
         idx = pd.date_range("2024-01-01 08:00", periods=60, freq="1min", tz="UTC")
-        flags = session_clock_features(idx)
+        flags = session_features(idx)
         assert flags["sess_london"].iloc[0] == 1.0
         assert flags["sess_ny"].iloc[0] == 0.0
 
@@ -173,6 +173,7 @@ class TestLabelingSmoke:
         assert null_count(x_aligned) == 0
 
     def test_triple_barrier_numba_matches_reference(self):
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential, _scan_outcomes_cpar_numba
         rng = np.random.default_rng(42)
         n = 1_500
         vertical_barrier = 12
@@ -180,28 +181,21 @@ class TestLabelingSmoke:
         entry_long = close + 0.00002
         entry_short = close - 0.00002
         atr = np.full(n, 0.00045, dtype=np.float64)
-        profit_mult, stop_mult = 1.5, 1.0
+        
+        delay = 0
+        n_valid = n - vertical_barrier - delay
 
-        lo_seq, tl_seq, so_seq, ts_seq = _scan_outcomes_sequential(
-            close, close, entry_long, entry_short, atr, profit_mult, stop_mult, vertical_barrier
+        lo_seq, tl_seq, so_seq, ts_seq = _scan_outcomes_cpar_sequential(
+            close, close, entry_long, entry_short, atr, 1.0, vertical_barrier, delay
         )
-        lo_numba, tl_numba, so_numba, ts_numba, tag = _run_barrier_scan(
-            close,
-            entry_long,
-            entry_short,
-            atr,
-            profit_mult,
-            stop_mult,
-            vertical_barrier,
-            use_numba=True,
-            parallel=True,
-        )
-        np.testing.assert_array_equal(lo_seq, lo_numba)
-        np.testing.assert_array_equal(tl_seq, tl_numba)
-        np.testing.assert_array_equal(so_seq, so_numba)
-        np.testing.assert_array_equal(ts_seq, ts_numba)
         if _NUMBA_IMPORT_OK:
-            assert tag == "numba_parallel"
+            lo_numba, tl_numba, so_numba, ts_numba = _scan_outcomes_cpar_numba(
+                close, close, entry_long, entry_short, atr, 1.0, vertical_barrier, n_valid, delay
+            )
+            np.testing.assert_array_equal(lo_seq, lo_numba)
+            np.testing.assert_array_equal(tl_seq, tl_numba)
+            np.testing.assert_array_equal(so_seq, so_numba)
+            np.testing.assert_array_equal(ts_seq, ts_numba)
 
 
 if __name__ == "__main__":

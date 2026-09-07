@@ -21,6 +21,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 def _candidates() -> list[Path]:
     if platform.system() == "Windows":
         return [
+            _ROOT / ".venv311" / "Scripts" / "python.exe",
             _ROOT / ".venv-gpu" / "Scripts" / "python.exe",
             _ROOT / ".venv" / "Scripts" / "python.exe",
         ]

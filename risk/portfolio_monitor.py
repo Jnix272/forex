@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from common.math_utils import safe_corrcoef as _safe_corrcoef
+
 try:
     from config.settings import LIVE_RISK as _LR
 except ImportError:
@@ -132,7 +134,7 @@ class PortfolioMonitor:
         if not valid or min_len is None:
             return {"high_corr_clusters": [], "correlation_avg": 0.0, "max_pair_corr": 0.0}
         rows = np.array([row[-min_len:] for row in rows])
-        corr = np.corrcoef(rows) if len(valid) > 1 else np.array([[1.0]])
+        corr = _safe_corrcoef(rows) if len(valid) > 1 else np.array([[1.0]])
 
         edges = []
         for i in range(len(valid)):

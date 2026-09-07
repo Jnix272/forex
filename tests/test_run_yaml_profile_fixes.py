@@ -131,14 +131,14 @@ def _seq_len_to_bars(seq_len, minutes_per_bar: int = 5) -> int:
 
 
 def test_models_py_haelt_seq_len_is_80():
-    """models.py HAELT entry must use seq_len=80 to match the
+    """models.py HAELT entry must use seq_len=120 to match the
     curriculum schedule and run.yaml."""
     src = (_REPO_ROOT / "config" / "models.py").read_text(encoding="utf-8", errors="replace")
     # The HAELT entry is the only one with 'lstm_hidden' - use it
     # as a marker to scope the check.
     haelt_start = src.find('"haelt":')
     haelt_block = src[haelt_start : haelt_start + 1200]
-    assert '"seq_len": 80' in haelt_block, "models.py haelt entry must have seq_len=80 (was 60)."
+    assert '"seq_len": 120' in haelt_block, "models.py haelt entry must have seq_len=120 (was 60)."
 
 
 # ── 6. GLM pretrain_method is "none" ───────────────────────────────────────

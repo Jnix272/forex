@@ -22,6 +22,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
+
+from common.math_utils import safe_corrcoef as _safe_corrcoef
 import polars as pl
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -214,7 +216,7 @@ def _is_target_shift(feature: np.ndarray, target: np.ndarray) -> bool:
     if np.sum(ok) < 50:
         return False
     f, t = f[ok], t[ok]
-    return bool(np.corrcoef(f, t)[0, 1] > 0.999)
+    return bool(_safe_corrcoef(f, t)[0, 1] > 0.999)
 
 
 def leakage_scan(

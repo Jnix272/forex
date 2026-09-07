@@ -30,12 +30,13 @@ model:
   hidden_size: 64
   d_model: 64
   nhead: 4
+  num_classes: 1
   num_layers: 2
   dropout: 0.15
 
 training:
   epochs: 10
-  batch_size: 128
+  batch_size: 4096  # GPU: large batch for high‑VRAM, improves throughput
   enable_ewc: false
   ewc_lambda: 1000.0
   enable_si: false
@@ -44,12 +45,10 @@ training:
   lr_warmup_epochs: 2
   resume: false
   seq_len: "2h30m"
-  patience: 5
   val_split: 0.2
-  loss: cross_entropy
-  label_method: rl_reward
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
+  loss: huber
+  huber_delta: 1.0  # Default Huber delta
+  label_method: cpar
   save_every: 2
   grad_clip: 1.0
   grad_accum_steps: 1

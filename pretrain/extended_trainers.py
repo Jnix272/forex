@@ -665,6 +665,252 @@ if TORCH:
                 self.save_encoder(checkpoint_path)
             return history
 
+
+    class JEPATrainer:
+        """Time-Series Joint Embedding Predictive Architecture (JEPA)."""
+        def __init__(
+            self,
+            encoder,
+            d_model: int,
+            seq_len: int,
+            n_features: int,
+            horizon: int = 5,
+            proj_dim: int = 256,
+            pred_dim: int = 128,
+            ema_decay: float = 0.996,
+            lr: float = 1e-4,
+            device: str = "cpu",
+            seed=None,
+        ):
+            import copy
+            self.device = torch.device(device)
+            self.seq_len = int(seq_len)
+            self.n_features = int(n_features)
+            self.horizon = max(1, min(int(horizon), self.seq_len - 1))
+            self.prefix_len = self.seq_len - self.horizon
+            self.ema_decay = ema_decay
+
+            encoder = copy.deepcopy(encoder)
+            if hasattr(encoder, "head"):
+                encoder.head = nn.Identity()
+            self.encoder = encoder.to(self.device)
+            self.projector = nn.Sequential(
+                nn.Linear(int(d_model), proj_dim),
+                nn.BatchNorm1d(proj_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(proj_dim, proj_dim)
+            ).to(self.device)
+            self.predictor = nn.Sequential(
+                nn.Linear(proj_dim, pred_dim),
+                nn.BatchNorm1d(pred_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(pred_dim, proj_dim)
+            ).to(self.device)
+
+            self.target_encoder = copy.deepcopy(self.encoder)
+            self.target_projector = copy.deepcopy(self.projector)
+            for p in list(self.target_encoder.parameters()) + list(self.target_projector.parameters()):
+                p.requires_grad_(False)
+            self.target_encoder.eval()
+            self.target_projector.eval()
+
+            self.opt = torch.optim.AdamW(
+                list(self.encoder.parameters()) + list(self.projector.parameters()) + list(self.predictor.parameters()),
+                lr=lr,
+                weight_decay=1e-4,
+            )
+            self._total_epochs = 0
+
+        @torch.no_grad()
+        def _ema_update(self):
+            d = self.ema_decay
+            for o, t in zip(self.encoder.parameters(), self.target_encoder.parameters()):
+                t.data.mul_(d).add_(o.data, alpha=1.0 - d)
+            for o, t in zip(self.projector.parameters(), self.target_projector.parameters()):
+                t.data.mul_(d).add_(o.data, alpha=1.0 - d)
+
+        def _split(self, x: torch.Tensor):
+            return x[:, : self.prefix_len, :], x[:, self.prefix_len :, :]
+
+        def save_encoder(self, checkpoint_path: str) -> None:
+            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(self.encoder.state_dict(), checkpoint_path)
+
+        def pretrain(
+            self,
+            X: np.ndarray,
+            epochs: int = 50,
+            batch_size: int = 256,
+            checkpoint_path: str | None = None,
+            silent: bool = False,
+        ) -> dict:
+            if checkpoint_path is None:
+                from config.settings import PATHS
+                checkpoint_path = PATHS.get("file_contrastive_encoder", "encoder.pt")
+            N = len(X)
+            history = {"loss": []}
+            if not silent:
+                print(f"[JEPA] {epochs} ep | {N:,} windows | horizon={self.horizon}")
+            for _epoch in range(epochs):
+                self._total_epochs += 1
+                idx_perm = np.random.permutation(N)
+                epoch_loss = 0.0
+                n_batches = 0
+                for start in range(0, N, batch_size):
+                    batch_idx = idx_perm[start : start + batch_size]
+                    if len(batch_idx) < 4:
+                        continue
+                    x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
+                    prefix, target = self._split(x)
+                    
+                    # Online path
+                    h_on = _encode_last(self.encoder, prefix)
+                    z_on = self.projector(h_on)
+                    p_on = self.predictor(z_on)
+                    
+                    # Target path
+                    with torch.no_grad():
+                        h_tgt = _encode_last(self.target_encoder, target)
+                        z_tgt = self.target_projector(h_tgt)
+                        z_tgt = F.normalize(z_tgt, dim=-1)
+
+                    p_on = F.normalize(p_on, dim=-1)
+                    # Cosine loss
+                    loss = (2.0 - 2.0 * (p_on * z_tgt).sum(dim=-1)).mean()
+
+                    if not torch.isfinite(loss):
+                        continue
+                    self.opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        list(self.encoder.parameters()) + list(self.projector.parameters()) + list(self.predictor.parameters()),
+                        1.0,
+                    )
+                    self.opt.step()
+                    self._ema_update()
+                    epoch_loss += loss.item()
+                    n_batches += 1
+                avg = epoch_loss / max(n_batches, 1)
+                history["loss"].append(avg)
+                if not silent:
+                    print(f"[JEPA] Ep {self._total_epochs:3d} | loss={avg:.4f}")
+            if not silent:
+                self.save_encoder(checkpoint_path)
+            return history
+
+    class PatchMaskedTrainer:
+        """Patch-Based Masking reconstruction pretext task."""
+        def __init__(
+            self,
+            encoder,
+            d_model: int,
+            seq_len: int,
+            n_features: int,
+            patch_size: int = 5,
+            mask_prob: float = 0.40,
+            hidden_dim: int = 512,
+            lr: float = 1e-4,
+            device: str = "cpu",
+        ):
+            import copy
+            self.device = torch.device(device)
+            self.seq_len = int(seq_len)
+            self.n_features = int(n_features)
+            self.patch_size = int(patch_size)
+            self.mask_prob = float(mask_prob)
+            self.n_patches = self.seq_len // self.patch_size
+            self.effective_seq_len = self.n_patches * self.patch_size
+
+            encoder = copy.deepcopy(encoder)
+            if hasattr(encoder, "head"):
+                encoder.head = nn.Identity()
+            self.encoder = encoder.to(self.device)
+            self.decoder = nn.Sequential(
+                nn.Linear(int(d_model), hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, self.effective_seq_len * self.n_features),
+            ).to(self.device)
+            self.opt = torch.optim.AdamW(
+                list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                lr=lr,
+                weight_decay=1e-4,
+            )
+            self._total_epochs = 0
+
+        def save_encoder(self, checkpoint_path: str) -> None:
+            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(self.encoder.state_dict(), checkpoint_path)
+
+        def pretrain(
+            self,
+            X: np.ndarray,
+            epochs: int = 50,
+            batch_size: int = 256,
+            checkpoint_path: str | None = None,
+            silent: bool = False,
+        ) -> dict:
+            if checkpoint_path is None:
+                from config.settings import PATHS
+                checkpoint_path = PATHS.get("file_contrastive_encoder", "encoder.pt")
+            N = len(X)
+            history = {"loss": []}
+            if not silent:
+                print(f"[PatchMasked] {epochs} ep | {N:,} windows | patch_size={self.patch_size} | mask={self.mask_prob}")
+            for _epoch in range(epochs):
+                self._total_epochs += 1
+                idx_perm = np.random.permutation(N)
+                epoch_loss = 0.0
+                n_batches = 0
+                for start in range(0, N, batch_size):
+                    batch_idx = idx_perm[start : start + batch_size]
+                    if len(batch_idx) < 4:
+                        continue
+                    x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
+                    # Truncate to effective length
+                    x = x[:, :self.effective_seq_len, :]
+                    
+                    B = x.shape[0]
+                    # Reshape to patches: (B, n_patches, patch_size, F)
+                    x_patched = x.view(B, self.n_patches, self.patch_size, self.n_features)
+                    
+                    # Random masking at patch level
+                    mask_prob_tensor = torch.full((B, self.n_patches), self.mask_prob, device=self.device)
+                    mask = torch.bernoulli(mask_prob_tensor).bool() # True means masked
+                    
+                    # Broadcast mask to (B, n_patches, patch_size, F)
+                    mask_expanded = mask.unsqueeze(-1).unsqueeze(-1).expand_as(x_patched)
+                    
+                    x_corrupted = x_patched.masked_fill(mask_expanded, 0.0).view(B, self.effective_seq_len, self.n_features)
+                    
+                    h = _encode_last(self.encoder, x_corrupted)
+                    recon = self.decoder(h).view(B, self.n_patches, self.patch_size, self.n_features)
+                    
+                    if not mask.any():
+                        continue
+                        
+                    # Calculate MSE only on masked patches
+                    loss = F.mse_loss(recon[mask_expanded], x_patched[mask_expanded])
+                    
+                    if not torch.isfinite(loss):
+                        continue
+                    self.opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                        1.0,
+                    )
+                    self.opt.step()
+                    epoch_loss += loss.item()
+                    n_batches += 1
+                avg = epoch_loss / max(n_batches, 1)
+                history["loss"].append(avg)
+                if not silent:
+                    print(f"[PatchMasked] Ep {self._total_epochs:3d} | loss={avg:.4f}")
+            if not silent:
+                self.save_encoder(checkpoint_path)
+            return history
+
 else:
 
     class VAESeqTrainer:
@@ -683,3 +929,6 @@ else:
     ClusterContrastiveTrainer = VAESeqTrainer
     ForecastPretextTrainer = VAESeqTrainer
     DriftContrastiveTrainer = VAESeqTrainer
+
+    JEPATrainer = VAESeqTrainer
+    PatchMaskedTrainer = VAESeqTrainer

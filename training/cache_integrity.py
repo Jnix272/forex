@@ -112,7 +112,7 @@ def _cache_target_col(args) -> str:
 
     gates need continuous reward/PnL in y. Do not switch cache y to the class
 
-    label just because the supervised loss is cross_entropy.
+    label just because the supervised loss is huber.
 
     """
 

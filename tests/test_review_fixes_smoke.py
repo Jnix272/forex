@@ -314,7 +314,7 @@ def test_nonfinite_training_targets_are_sanitized():
     y_cls = torch.tensor([float("inf")])
     y_conf = torch.tensor([-float("inf")])
 
-    xb, yb, y_cls, y_conf, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf)
+    xb, yb, y_cls, y_conf, _bet_size, keep = _sanitize_batch_tensors(xb, yb, y_cls, y_conf, None)
 
     assert torch.isfinite(xb).all()
     # Targets are NOT silently zeroed - keep mask surfaces bad rows for the caller to drop.
@@ -326,7 +326,7 @@ def test_nonfinite_training_targets_are_sanitized():
     y_cls2 = torch.tensor([0.0])
     y_conf2 = torch.tensor([0.7])
     xb2 = torch.ones(1, 1, 4)
-    xb2, yb2, y_cls2, y_conf2, keep2 = _sanitize_batch_tensors(xb2, yb2, y_cls2, y_conf2)
+    xb2, yb2, y_cls2, y_conf2, _bet_size2, keep2 = _sanitize_batch_tensors(xb2, yb2, y_cls2, y_conf2)
     assert bool(keep2.all())
     assert labels_to_class_index(y_cls2).tolist() == [1]
     assert y_conf2.tolist() == pytest.approx([0.7])
@@ -398,140 +398,7 @@ def test_triple_barrier_accepts_execution_delay():
     assert "execution_delay_bars" in sig.parameters
 
 
-def test_multitask_loss_confidence_target():
-    from models.architectures import MultiTaskLoss
 
-    crit = MultiTaskLoss()
-    logits = torch.zeros(4, 3)
-    ret = torch.randn(4)
-    conf = torch.randn(4)
-    y_cls = torch.tensor([0, 1, 2, 1])
-    y_cont = torch.randn(4)
-    y_pq = torch.tensor([0.2, 0.8, 0.5, 0.9])
-    loss = crit(logits, ret, conf, y_cls, y_cont, y_pq)
-    assert torch.isfinite(loss)
-
-
-def test_multitask_class_balance_penalizes_prediction_collapse():
-    from models.architectures import MultiTaskLoss
-
-    y_cls = torch.tensor([0, 1, 2, 1, 2, 0])
-    y_cont = torch.zeros(6)
-    ret = torch.zeros(6)
-    conf = torch.zeros(6)
-    collapsed_logits = torch.tensor([[8.0, -4.0, -4.0]] * 6)
-    balanced_logits = torch.zeros(6, 3)
-
-    crit = MultiTaskLoss(class_balance_weight=1.0, entropy_weight=0.0, focal_gamma=0.0)
-
-    collapsed = crit(collapsed_logits, ret, conf, y_cls, y_cont)
-    balanced = crit(balanced_logits, ret, conf, y_cls, y_cont)
-
-    assert collapsed > balanced
-
-
-def test_multitask_class_balance_penalizes_missing_buy_class():
-    from models.architectures import MultiTaskLoss
-
-    y_cls = torch.tensor([0, 1, 2, 2, 2, 0])
-    y_cont = torch.zeros(6)
-    ret = torch.zeros(6)
-    conf = torch.zeros(6)
-    no_buy_logits = torch.tensor([[3.0, 3.0, -6.0]] * 6)
-    label_dist_logits = torch.log(torch.tensor([[2 / 6, 1 / 6, 3 / 6]] * 6))
-
-    crit = MultiTaskLoss(class_balance_weight=1.0, entropy_weight=0.0, focal_gamma=0.0)
-
-    no_buy = crit(no_buy_logits, ret, conf, y_cls, y_cont)
-    label_dist = crit(label_dist_logits, ret, conf, y_cls, y_cont)
-
-    assert no_buy > label_dist
-
-
-def test_multitask_class_balance_uses_fold_prior_target():
-    from models.architectures import MultiTaskLoss
-
-    y_cls = torch.tensor([1, 1, 1, 1])
-    y_cont = torch.zeros(4)
-    ret = torch.zeros(4)
-    conf = torch.zeros(4)
-    fold_prior = torch.tensor([0.37, 0.26, 0.37])
-    hold_only_logits = torch.tensor([[-3.0, 4.0, -3.0]] * 4)
-    prior_like_logits = torch.log(fold_prior).repeat(4, 1)
-
-    crit = MultiTaskLoss(
-        class_balance_weight=1.0,
-        entropy_weight=0.0,
-        focal_gamma=0.0,
-        class_prior=fold_prior,
-    )
-
-    hold_only = crit(hold_only_logits, ret, conf, y_cls, y_cont)
-    prior_like = crit(prior_like_logits, ret, conf, y_cls, y_cont)
-
-    assert hold_only > prior_like
-
-
-def test_multitask_balance_pushes_true_buy_logits_above_others():
-    from models.architectures import MultiTaskLoss
-
-    y_cls = torch.tensor([2, 2, 2, 0, 1, 1])
-    y_cont = torch.zeros(6)
-    ret = torch.zeros(6)
-    conf = torch.zeros(6)
-    buy_loses_logits = torch.tensor(
-        [
-            [2.0, 1.5, -1.0],
-            [1.0, 2.0, -1.0],
-            [2.0, 0.0, -0.5],
-            [2.0, 0.0, -1.0],
-            [0.0, 2.0, -1.0],
-            [0.0, 2.0, -1.0],
-        ]
-    )
-    buy_wins_logits = buy_loses_logits.clone()
-    buy_wins_logits[:3] = torch.tensor(
-        [
-            [0.0, 0.0, 2.0],
-            [0.0, 0.0, 2.0],
-            [0.0, 0.0, 2.0],
-        ]
-    )
-
-    crit = MultiTaskLoss(class_balance_weight=1.0, entropy_weight=0.0, focal_gamma=0.0)
-
-    buy_loses = crit(buy_loses_logits, ret, conf, y_cls, y_cont)
-    buy_wins = crit(buy_wins_logits, ret, conf, y_cls, y_cont)
-
-    assert buy_loses > buy_wins
-
-
-def test_multitask_balance_keeps_rare_buy_from_being_ignored():
-    from models.architectures import MultiTaskLoss
-
-    y_cls = torch.tensor([0] * 12 + [1] * 12 + [2])
-    y_cont = torch.zeros(25)
-    ret = torch.zeros(25)
-    conf = torch.zeros(25)
-    logits_buy_loses = torch.zeros(25, 3)
-    logits_buy_loses[:12, 0] = 2.0
-    logits_buy_loses[12:24, 1] = 2.0
-    logits_buy_loses[24] = torch.tensor([2.0, 1.0, -1.0])
-
-    logits_buy_wins = logits_buy_loses.clone()
-    logits_buy_wins[24] = torch.tensor([0.0, 0.0, 2.0])
-
-    crit = MultiTaskLoss(
-        class_balance_weight=1.0,
-        entropy_weight=0.0,
-        focal_gamma=0.0,
-        class_prior=torch.tensor([0.37, 0.26, 0.37]),
-    )
-
-    buy_loses = crit(logits_buy_loses, ret, conf, y_cls, y_cont)
-    buy_wins = crit(logits_buy_wins, ret, conf, y_cls, y_cont)
-
-    assert buy_loses > buy_wins
 
 
 def test_balanced_direction_indices_uses_all_classes(monkeypatch):

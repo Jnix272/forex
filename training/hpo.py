@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -276,6 +277,21 @@ class HyperBandScheduler:
         return _sample_search_space(self._rng, self.config.search_space)
 
     def on_trial_result(self, trial_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        metric = self.config.metric
+        score = result.get(metric, result.get("objective", None))
+        if score is None:
+            return {"action": "continue"}
+        maximize = self.config.mode == "maximize"
+        for bracket in self.brackets:
+            rung_scores = [t["score"] for t in bracket.get("trials", [])]
+            bracket.setdefault("trials", []).append({"trial_id": trial_id, "score": score})
+            if len(rung_scores) < self.config.reduction_factor:
+                return {"action": "continue"}
+            top_k = max(1, len(rung_scores) // self.config.reduction_factor)
+            top_scores = sorted(rung_scores, reverse=maximize)[:top_k]
+            cutoff = top_scores[-1]
+            promoted = score >= cutoff if maximize else score <= cutoff
+            return {"action": "continue" if promoted else "stop"}
         return {"action": "continue"}
 
     def on_trial_complete(self, trial_id: str, result: dict[str, Any]) -> None:
@@ -555,19 +571,33 @@ class HPOManager:
         self.study = study
         return study
 
-    def run_trial(self, params: dict[str, Any], trial_id: str | None = None) -> dict[str, Any]:
-        """Dry-run trial hook (real training is wired via optuna_tune / train_gpu)."""
+    def run_trial(
+        self,
+        params: dict[str, Any],
+        train_fn: Callable[[dict[str, Any]], float] | None = None,
+        trial_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute one trial.
+
+        If *train_fn* is supplied it is called with *params* and must return the
+        scalar objective score.  When omitted the method falls back to a dry-run
+        stub that returns random noise (useful for unit-testing the HPO loop
+        itself without real training).
+        """
         self._trial_counter += 1
         tid = trial_id or f"trial_{self._trial_counter}"
-        score = float(self._rng.random() * 2 - 1)
         self._total_epochs += 1
+        if train_fn is not None:
+            score = float(train_fn(params))
+        else:
+            score = float(self._rng.random() * 2 - 1)
         result = {
             "trial_id": tid,
             "params": params,
             "objective": score,
             "metrics": {
                 self.config.metric: score,
-                "val_loss": float(self._rng.random()),
+                "val_loss": abs(score - 1.0) if train_fn is None else float("nan"),
             },
         }
         self.completed_trials.append(result)
@@ -577,6 +607,7 @@ class HPOManager:
         self,
         n_trials: int | None = None,
         algorithm: str = "asha",
+        train_fn: Callable[[dict[str, Any]], float] | None = None,
         **_kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -605,7 +636,7 @@ class HPOManager:
             elif algorithm == "bohb":
                 self.bohb.observe(trial_id, 0, params, 0.0)
 
-            result = self.run_trial(params, trial_id=trial_id)
+            result = self.run_trial(params, train_fn=train_fn, trial_id=trial_id)
             score = float(result["metrics"].get(self.config.metric, result["objective"]))
 
             if algorithm == "pbt":

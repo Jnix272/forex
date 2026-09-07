@@ -22,7 +22,7 @@ import torch
 try:
     import pytorch_lightning as pl
     from pytorch_lightning import Trainer
-    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+    from pytorch_lightning.callbacks import ModelCheckpoint
 
     LIGHTNING_AVAILABLE = True
 except ImportError:
@@ -63,7 +63,7 @@ class ForexLightningModule(pl.LightningModule):
             self.model = _build_arch_model(model_name, input_size=n_features, seq_len=args.seq_len)
 
         # Build criterion using the supervised loop's build_criterion
-        classification = args.loss in ("cross_entropy", "multi_task", "asymmetric_directional")
+        classification = args.loss in ("multi_task", "asymmetric_directional")
         multitask = bool(getattr(args, "multitask", False))
         self.classification = classification
         self.multitask = multitask
@@ -377,21 +377,14 @@ def run_lightning_training(
     ckpt_callback = ModelCheckpoint(
         dirpath=str(ckpt_dir),
         filename=f"{model_name}{fold_suffix}_best",
-        monitor="val_sharpe" if args.early_stop_metric == "sharpe" else "val_loss",
-        mode="max" if args.early_stop_metric == "sharpe" else "min",
+        monitor="val_loss",
+        mode="min",
         save_top_k=1,
         save_last=False,
     )
     callbacks.append(ckpt_callback)
 
-    # 3. Early stopping
-    early_stop = EarlyStopping(
-        monitor="val_sharpe" if args.early_stop_metric == "sharpe" else "val_loss",
-        mode="max" if args.early_stop_metric == "sharpe" else "min",
-        patience=int(getattr(args, "patience", 6)),
-        min_delta=float(getattr(args, "early_stop_min_delta", 0.0)),
-    )
-    callbacks.append(early_stop)
+
 
     # 4. SWA (if enabled)
     if getattr(args, "swa_enabled", False):

@@ -14,6 +14,12 @@ from training.core import _GPU_CFG, _log_info, _log_warn
 # THERMAL THROTTLE  (laptop-safe GPU temperature guard)
 # -----------------------------------------------------------------------------
 
+def _ensure_bound(device: torch.device) -> torch.device:
+    """Return a safe device; fallback to CPU if CUDA unavailable."""
+    if device.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return device
+
 
 def _gpu_temp_celsius() -> int:
     """Return current GPU 0 temperature in ┬░C, or -1 if pynvml unavailable."""

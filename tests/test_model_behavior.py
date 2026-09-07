@@ -697,7 +697,7 @@ class TestBuildModelIntegration:
 
         # These mirror the args that train_gpu.build_model reads
         a = argparse.Namespace(
-            loss="cross_entropy",
+            loss="huber",
             multitask=False,
             seq_len=T,
             hidden_size=32,
@@ -767,3 +767,4 @@ class TestBuildModelIntegration:
         assert out.shape[0] == 4, f"Batch dim wrong: {out.shape}"
         assert out.ndim in (1, 2), f"Expected 1-D or 2-D output, got {out.shape}"
         assert _all_finite(out)
+

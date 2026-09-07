@@ -28,15 +28,12 @@ except Exception as e:  # pragma: no cover
 
 
 # Reuse the proven plumbing (cache load/build, datasets, model factory, loss helpers).
-from training.train_gpu import (
-    ZarrStreamDataset,
-    build_criterion,
-    build_dataset_chunked,
-    build_model,
-    parse_args,
-    train_epoch,
-    validate_epoch,
-)
+from models.architectures import build_model
+from training.dataset_builder import build_dataset_chunked
+from training.gpu_cli import parse_args
+from training.gpu_datasets import ZarrStreamDataset
+from training.loop_epochs import train_epoch, validate_epoch
+from training.loop_losses import build_criterion
 
 
 @dataclass
@@ -126,7 +123,7 @@ def main() -> int:
     train_dl, val_dl, train_idx, _val_idx = _make_loaders(args, cache_path, n_samples)
 
     model_name = str(getattr(args, "model", "tft")).lower()
-    classification = str(getattr(args, "loss", "cross_entropy")).lower() == "cross_entropy"
+    classification = str(getattr(args, "loss", "huber")).lower() == "huber"
 
     model = build_model(model_name, n_features, args).to(dev)
 
@@ -205,8 +202,7 @@ def main() -> int:
             )
             tag = "BEST"
         else:
-            es.bad_epochs += 1
-            tag = f"pat={es.bad_epochs}/{int(args.patience)}"
+            tag = "    "
 
         elapsed = time.time() - t0
         print(
@@ -215,9 +211,7 @@ def main() -> int:
             f"{tag} | {elapsed / 60:.1f}m"
         )
 
-        if es.bad_epochs >= int(args.patience):
-            print(f"[MinTrain] early stop at ep={ep + 1} (best ep={es.best_epoch + 1})")
-            break
+
 
     print(f"[MinTrain] done. best_ckpt={ckpt_path}")
     return 0

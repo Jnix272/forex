@@ -67,16 +67,33 @@ class AdversarialAttack(nn.Module):
             self.feature_eps_multipliers = None
 
     def _get_effective_eps(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute effective epsilon with per-dimension multipliers if available."""
-        base_eps = self.eps
+        """Compute effective epsilon with per-dimension multipliers and structural masks."""
+        if not isinstance(self.eps, torch.Tensor):
+            base_eps = torch.full((x.shape[-1],), float(self.eps), device=x.device, dtype=x.dtype)
+        else:
+            base_eps = torch.full((x.shape[-1],), float(self.eps.item()), device=x.device, dtype=x.dtype)
+            
+        if self.feature_names and len(self.feature_names) == x.shape[-1]:
+            for i, name in enumerate(self.feature_names):
+                name_lower = name.lower()
+                if (
+                    name_lower.startswith("cat_") or 
+                    name_lower.startswith("time_") or 
+                    name_lower.startswith("day_") or 
+                    name_lower.startswith("month_") or 
+                    "hour" in name_lower or 
+                    "minute" in name_lower or
+                    "regime_class" in name_lower or
+                    "onehot" in name_lower
+                ):
+                    base_eps[i] = 0.0
+
         if self.feature_eps_multipliers is not None:
-            # Broadcast multipliers to match input shape
             mult = self.feature_eps_multipliers.to(x.device)
-            # Handle different shapes: (T, F) or (B, T, F) or (B, N, F)
-            if mult.dim() == 1:
-                mult = mult.view(*([1] * (x.dim() - 1)), -1)
-            base_eps = base_eps * mult
-        return base_eps
+            if mult.dim() == 1 and mult.size(0) == x.shape[-1]:
+                base_eps = base_eps * mult
+
+        return base_eps.view(*([1] * (x.dim() - 1)), -1)
 
     def forward(
         self,
@@ -192,7 +209,8 @@ class PGDAttack(AdversarialAttack):
 
         if self.random_start:
             # Random initialization within eps-ball
-            x_adv = x_adv + torch.empty_like(x_adv).uniform_(-effective_eps, effective_eps)
+            noise = torch.rand_like(x_adv) * 2 * effective_eps - effective_eps
+            x_adv = x_adv + noise
             x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
 
         effective_steps = self._effective_steps()
@@ -461,7 +479,8 @@ class GraphAdversarialAttack(AdversarialAttack):
 
         if self.random_start and "node_features" in self.attack_mode:
             # Random initialization within eps-ball
-            x_adv = x_adv + torch.empty_like(x_adv).uniform_(-effective_eps, effective_eps)
+            noise = torch.rand_like(x_adv) * 2 * effective_eps - effective_eps
+            x_adv = x_adv + noise
             x_adv = torch.clamp(x_adv, x - effective_eps, x + effective_eps)
 
         # Initialize perturbed adjacency

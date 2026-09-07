@@ -63,15 +63,9 @@ class _ThreadPrefetchLoader:
                     if stop_evt.is_set():
                         break
             except Exception as exc:
-                try:
-                    q.put(exc, timeout=0.5)
-                except _queue.Full:
-                    pass
+                q.put(exc)
             finally:
-                try:
-                    q.put(_sentinel, timeout=0.5)
-                except _queue.Full:
-                    pass
+                q.put(_sentinel)
 
         t = threading.Thread(target=_producer, daemon=True, name="ThreadPrefetchLoader")
         t.start()

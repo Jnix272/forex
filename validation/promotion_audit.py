@@ -25,7 +25,7 @@ REQUIRED_ARTIFACTS = (
 class CalibrationGateConfig:
     max_ece: float = 0.08
     max_nll: float = 1.25
-    max_confidence_accuracy_gap: float = 0.10
+    max_confidence_r2_gap: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -177,7 +177,7 @@ def validate_priority2_promotion(
     calibration = _calibration_from(train_summary, diagnostics)
     ece = float(calibration.get("ece", 999.0) or 999.0)
     nll = float(calibration.get("nll", 999.0) or 999.0)
-    accuracy = calibration.get("accuracy")
+    accuracy = calibration.get("r2")
     confidence = calibration.get("avg_confidence", calibration.get("confidence"))
     gap = 999.0
     if accuracy is not None and confidence is not None:
@@ -185,14 +185,14 @@ def validate_priority2_promotion(
 
     gates["calibration_ece_ok"] = ece <= cfg.calibration.max_ece
     gates["calibration_nll_ok"] = nll <= cfg.calibration.max_nll
-    gates["calibration_gap_ok"] = gap <= cfg.calibration.max_confidence_accuracy_gap
+    gates["calibration_gap_ok"] = gap <= cfg.calibration.max_confidence_r2_gap
     if not gates["calibration_ece_ok"]:
         reasons.append(f"calibration: ece {ece:.6g} > {cfg.calibration.max_ece:.6g}")
     if not gates["calibration_nll_ok"]:
         reasons.append(f"calibration: nll {nll:.6g} > {cfg.calibration.max_nll:.6g}")
     if not gates["calibration_gap_ok"]:
         reasons.append(
-            f"calibration: confidence/accuracy gap {gap:.6g} > {cfg.calibration.max_confidence_accuracy_gap:.6g}"
+            f"calibration: confidence/r2 gap {gap:.6g} > {cfg.calibration.max_confidence_r2_gap:.6g}"
         )
 
     rank = _leaderboard_rank(diagnostics, model)
@@ -217,7 +217,7 @@ def validate_priority2_promotion(
             "thresholds": {
                 "max_ece": cfg.calibration.max_ece,
                 "max_nll": cfg.calibration.max_nll,
-                "max_confidence_accuracy_gap": cfg.calibration.max_confidence_accuracy_gap,
+                "max_confidence_r2_gap": cfg.calibration.max_confidence_r2_gap,
             },
         },
         "leaderboard_rank": rank,

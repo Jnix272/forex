@@ -19,7 +19,7 @@ Usage
     display = RichTrainingDisplay(
         model_name   = "haelt",
         total_epochs = 100,
-        patience     = 10,
+
         metric_name  = "val_sharpe",
         higher_is_better = True,
     )
@@ -152,10 +152,9 @@ class _BatchBar:
 class _PlainDisplay:
     """No-op display used when rich is not installed."""
 
-    def __init__(self, model_name: str, total_epochs: int, patience: int, metric_name: str, higher_is_better: bool):
+    def __init__(self, model_name: str, total_epochs: int, metric_name: str, higher_is_better: bool):
         self.model_name = model_name
         self.total_epochs = total_epochs
-        self.patience = patience
         self.metric_name = metric_name
 
     def __enter__(self):
@@ -176,7 +175,7 @@ class _PlainDisplay:
     def batch_progress(self, phase: str, n_batches: int) -> _BatchBar:
         return _BatchBar(None, None, phase)
 
-    def end_epoch(self, epoch: int, metrics: dict[str, Any], is_best: bool = False, no_improve: int = 0) -> None:
+    def end_epoch(self, epoch: int, metrics: dict[str, Any], is_best: bool = False) -> None:
         tl = metrics.get("train_loss", float("nan"))
         vl = metrics.get("val_loss", float("nan"))
         da = metrics.get("dir_acc", float("nan"))
@@ -208,10 +207,9 @@ class _PlainDisplay:
 class _RichDisplay:
     """Live rich terminal dashboard."""
 
-    def __init__(self, model_name: str, total_epochs: int, patience: int, metric_name: str, higher_is_better: bool):
+    def __init__(self, model_name: str, total_epochs: int, metric_name: str, higher_is_better: bool):
         self.model_name = model_name
         self.total_epochs = total_epochs
-        self.patience = patience
         self.metric_name = metric_name
         self.higher_is_better = higher_is_better
 
@@ -284,8 +282,7 @@ class _RichDisplay:
 
     # ── epoch end ────────────────────────────────────────────────────────────
 
-    def end_epoch(self, epoch: int, metrics: dict[str, Any], is_best: bool = False, no_improve: int = 0) -> None:
-        self._no_improve = no_improve
+    def end_epoch(self, epoch: int, metrics: dict[str, Any], is_best: bool = False) -> None:
         if is_best:
             self._best_ep = epoch
             self._best_val = metrics.get(
@@ -408,20 +405,6 @@ class _RichDisplay:
 
         lines.append(Text(""))
 
-        # Early-stop countdown
-        remain = self.patience - self._no_improve
-        if self._no_improve > 0:
-            colour = "red" if remain <= 2 else "yellow" if remain <= 5 else "green"
-            lines.append(
-                Text.assemble(
-                    "Early Stop: ",
-                    (f"{remain} left", colour),
-                    f" / {self.patience}",
-                )
-            )
-        else:
-            lines.append(Text(f"Early Stop: {self.patience} left / {self.patience}", style="green"))
-
         lines.append(Text(""))
 
         # Best so far
@@ -455,7 +438,7 @@ class RichTrainingDisplay:
     ----------
     model_name       : Architecture name shown in the header.
     total_epochs     : Total number of training epochs.
-    patience         : Early-stop patience (used for countdown display).
+
     metric_name      : Name of the primary tracked metric.
     higher_is_better : True for Sharpe/accuracy, False for loss.
     """
@@ -464,14 +447,12 @@ class RichTrainingDisplay:
         cls,
         model_name: str = "model",
         total_epochs: int = 100,
-        patience: int = 10,
         metric_name: str = "val_sharpe",
         higher_is_better: bool = True,
     ):
         kwargs = {
             "model_name": model_name,
             "total_epochs": total_epochs,
-            "patience": patience,
             "metric_name": metric_name,
             "higher_is_better": higher_is_better,
         }
@@ -489,12 +470,12 @@ if __name__ == "__main__":
 
     print(f"rich available: {_RICH}")
     N_EPOCHS = 12
-    PATIENCE = 5
+
 
     display = RichTrainingDisplay(
         model_name="haelt",
         total_epochs=N_EPOCHS,
-        patience=PATIENCE,
+
         metric_name="val_sharpe",
         higher_is_better=True,
     )

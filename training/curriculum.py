@@ -470,8 +470,11 @@ class CurriculumManager:
 
         # Update self-paced learning
         if self.self_paced and losses is not None:
-            self.self_paced.update_weights(losses)
-            sp_weights = self.self_paced.get_weights(epoch)
+            # update_weights returns self.v; do NOT call get_weights(epoch) without
+            # losses here — that branch replaces self.v with uniform pace weights,
+            # discarding the loss-based computation we just did.
+            sp_weights = self.self_paced.update_weights(losses)
+            self.self_paced.current_epoch = epoch
             weights *= sp_weights
             info["self_paced_pace"] = self.self_paced.get_pace(epoch)
 
@@ -485,6 +488,7 @@ class CurriculumManager:
                 "weight_mean": float(lw_weights.mean()),
                 "weight_std": float(lw_weights.std()),
             }
+            weights *= lw_weights
 
         # Update adaptive controller
         if self.adaptive_controller and val_metrics:
@@ -493,11 +497,13 @@ class CurriculumManager:
             actions = self.adaptive_controller.evaluate_epoch(epoch, val_sharpe, val_loss)
             info["adaptive_actions"] = actions
 
-        # Combine weights
+        # Combine weights — use self.self_paced.v directly (already updated above)
+        # rather than calling get_weights(epoch) without losses, which would overwrite
+        # self.v with uniform pace and discard the loss-based computation.
         if self.config.mode == "difficulty" and self.difficulty_curriculum:
             weights = self.difficulty_curriculum.get_difficulty_weights()
         elif self.config.mode == "self_paced" and self.self_paced:
-            weights = self.self_paced.get_weights(epoch)
+            weights = self.self_paced.v.copy()
         elif self.config.mode == "loss_weighting" and self.loss_weighting and losses is not None:
             weights = self.loss_weighting.compute_weights(losses, epoch)
         elif self.config.mode == "adaptive" and self.adaptive_controller:
@@ -509,7 +515,7 @@ class CurriculumManager:
             if self.difficulty_curriculum:
                 w *= self.difficulty_curriculum.get_difficulty_weights() ** self.config.difficulty_weight
             if self.self_paced:
-                w *= self.self_paced.get_weights(epoch) ** self.config.self_paced_weight
+                w *= self.self_paced.v ** self.config.self_paced_weight
             if self.loss_weighting and losses is not None:
                 w *= self.loss_weighting.compute_weights(losses, epoch) ** self.config.loss_weight
             # Normalize
@@ -520,9 +526,9 @@ class CurriculumManager:
         info["epoch"] = epoch
         return info
 
-    def get_sample_weights(self) -> np.ndarray:
-        """Get current combined sample weights."""
-        return self.update(self.current_epoch).get("weights", np.ones(self.n_samples))
+    def get_sample_weights(self, losses: np.ndarray | None = None) -> np.ndarray:
+        """Get current combined sample weights, optionally updated from per-sample losses."""
+        return self.update(self.current_epoch, losses=losses).get("weights", np.ones(self.n_samples))
 
     def get_inclusion_mask(self) -> np.ndarray:
         """Get current sample inclusion mask (for data filtering)."""
@@ -580,8 +586,16 @@ class CurriculumDataLoader:
         """Set current epoch (call at start of each epoch)."""
         self.current_epoch = epoch
 
+    def set_losses(self, losses: np.ndarray) -> None:
+        """Feed per-sample train losses back into the curriculum for the next epoch.
+
+        Call this after each training pass with the loss vector computed over
+        the full training set so loss-based weighting and SPL use real signal.
+        """
+        self.curriculum.get_sample_weights(losses=losses)
+
     def __iter__(self):
-        # Get current sample weights and inclusion mask
+        # Get current sample weights and inclusion mask (uses losses cached from set_losses)
         weights = self.curriculum.get_sample_weights()
         mask = self.curriculum.get_inclusion_mask()
 
@@ -733,14 +747,14 @@ def create_curriculum_manager(
             pace_function=kwargs.get("pace_function", "linear"),
         )
 
-    if mode in ("self_paced", "combined"):
+    if mode in ("self_paced", "combined") and kwargs.get("use_self_paced", True):
         self_paced_cfg = SelfPacedConfig(
             pace=kwargs.get("sp_pace", "linear"),
             lambda_pace=kwargs.get("sp_lambda", 1.0),
             total_epochs=kwargs.get("total_epochs", 100),
         )
 
-    if mode in ("loss_weighting", "combined"):
+    if mode in ("loss_weighting", "combined") and kwargs.get("use_loss_weighting", True):
         loss_weighting_cfg = LossWeightingConfig(
             scheme=kwargs.get("lw_scheme", "focal"),
             focal_gamma=kwargs.get("focal_gamma", 2.0),

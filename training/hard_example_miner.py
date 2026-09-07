@@ -1,19 +1,7 @@
 """
-training/hard_example_miner.py
-================================
-Identifies and persists "hard examples" from validation - samples where the
-model was confident but wrong, or missed large reward opportunities.
+Online Hard Example Miner module.
 
-On the next training run these indices are lightly oversampled so the model
-gets more exposure to its blind spots.
-
-Enhancements
-------------
-- Loss-weighted mining: ranks failures by per-sample loss magnitude
-- Boundary/uncertainty mining: captures samples near decision boundary
-- Regime-aware tracking: stores distribution of hard examples per market regime
-- Online in-batch mining: tracks per-sample loss rolling history during training
-- Forgetting/decay tracking: detects samples that were learned then forgotten
+Provides the ForgettingTracker and OnlineHardExampleMiner classes for tracking per-sample loss trajectories, identifying hard, forgotten, and easy samples, and performing oversampling during training.
 
 Usage
 -----
@@ -29,9 +17,12 @@ aug_idx  = miner.get_oversampled_indices(base_idx)
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_LOG_DIR = Path("logs/hard_examples")
 _MAX_OVERSAMPLE_RATIO = 2.0  # hard examples can at most double their share
@@ -205,21 +196,29 @@ class OnlineHardExampleMiner:
         self._loss_buffer[-1, indices[valid]] = losses[valid]
 
     def end_epoch(self) -> None:
-        """Finalise the current epoch: update forgetting tracker with this epoch's losses."""
-        # Use only the current epoch's loss row, not a smoothed window average,
-        # so ForgettingTracker sees the correct per-epoch loss trajectory.
+        """Finalise the current epoch: update EMA scores and forgetting tracker."""
         epoch_losses = self._loss_buffer[-1].copy()
         self._forgetting_tracker.update(epoch_losses)
+        # Update EMA score: high = consistently hard.  NaN positions are treated
+        # as 0 contribution so the EMA decays toward observed losses over time.
+        observed = np.where(np.isnan(epoch_losses), 0.0, epoch_losses).astype(np.float32)
+        self._ema_score = self.decay_factor * self._ema_score + (1.0 - self.decay_factor) * observed
 
     def get_hard_mask(self) -> np.ndarray:
-        """Return boolean mask of consistently hard samples."""
+        """Return boolean mask of consistently hard samples.
+
+        Combines the rolling-window mean loss with the EMA score so that
+        samples that were recently hard *and* consistently hard are ranked highest.
+        """
         if self._epoch < 2:
             return np.zeros(self.n_samples, dtype=bool)
 
         recent = self._loss_buffer[-min(self._epoch, self.window_size) :, :]
         mean_recent = np.nanmean(recent, axis=0)
-        threshold = np.nanquantile(mean_recent, self.hard_quantile)
-        return (mean_recent >= threshold) & ~np.isnan(mean_recent)
+        # Blend: equal weight between rolling mean and EMA for stability
+        blended = 0.5 * np.where(np.isnan(mean_recent), 0.0, mean_recent) + 0.5 * self._ema_score
+        threshold = np.nanquantile(blended, self.hard_quantile)
+        return (blended >= threshold) & ~np.isnan(mean_recent)
 
     def get_forgotten_mask(self) -> np.ndarray:
         """Return boolean mask of samples that were learned then forgotten."""
@@ -277,12 +276,14 @@ class OnlineHardExampleMiner:
 
         result = np.array(augmented, dtype=np.int64)
         rng.shuffle(result)
-        print(
-            f"[OnlineMiner] Epoch {self._epoch}: "
-            f"hard={int(hard_mask.sum())} forgotten={int(forgotten_mask.sum())} "
-            f"easy={int(easy_mask.sum())} "
-            f"-> {len(result)} indices "
-            f"(base={len(base)})"
+        _log.debug(
+            "[OnlineMiner] epoch=%d hard=%d forgotten=%d easy=%d -> %d indices (base=%d)",
+            self._epoch,
+            int(hard_mask.sum()),
+            int(forgotten_mask.sum()),
+            int(easy_mask.sum()),
+            len(result),
+            len(base),
         )
         return result
 

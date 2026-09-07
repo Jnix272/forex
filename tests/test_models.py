@@ -217,7 +217,7 @@ class TestMultiTaskHead:
         h = torch.randn(B, in_features)
         head = MultiTaskHead(in_features=in_features, hidden=32)
         logits, ret_hat, conf = head(h)
-        assert logits.shape == (B, 3), f"direction logits: {logits.shape}"
+        assert logits.shape == (B,), f"direction logits: {logits.shape}"
         assert ret_hat.shape == (B,), f"return_hat: {ret_hat.shape}"
         assert conf.shape == (B,), f"confidence: {conf.shape}"
 
@@ -233,7 +233,7 @@ class TestMultiTaskHead:
 
 class TestMultiTaskLoss:
     def _make_inputs(self, B: int = 8):
-        logits = torch.randn(B, 3)
+        logits = torch.randn(B)
         ret_hat = torch.randn(B)
         conf = torch.randn(B)  # logits - BCEWithLogitsLoss in MultiTaskLoss
         y_cls = torch.randint(0, 3, (B,))
@@ -257,7 +257,7 @@ class TestMultiTaskLoss:
 
     def test_loss_backward(self):
         """Gradients should flow back through all three outputs."""
-        logits = torch.randn(8, 3, requires_grad=True)
+        logits = torch.randn(8, requires_grad=True)
         ret_hat = torch.randn(8, requires_grad=True)
         conf = torch.randn(8, requires_grad=True)
         y_cls = torch.zeros(8, dtype=torch.long)
@@ -267,15 +267,6 @@ class TestMultiTaskLoss:
         assert logits.grad is not None
         assert ret_hat.grad is not None
         assert conf.grad is not None
-
-    def test_class_weights_applied(self):
-        """Passing class weights should change the loss value."""
-        torch.manual_seed(42)
-        logits, ret_hat, conf, y_cls, y_cont = self._make_inputs(B=16)
-        w = torch.tensor([5.0, 1.0, 0.1])
-        l_uniform = MultiTaskLoss()(logits, ret_hat, conf, y_cls, y_cont)
-        l_weighted = MultiTaskLoss(class_weights=w)(logits, ret_hat, conf, y_cls, y_cont)
-        assert l_uniform.item() != pytest.approx(l_weighted.item(), rel=1e-2)
 
 
 class TestMultiTaskWrapper:
@@ -315,7 +306,7 @@ class TestMultiTaskWrapper:
         wrapped = MultiTaskWrapper(base, head_in=head_in, hidden=32)
         wrapped.eval()
         logits, ret_hat, conf = wrapped(seq_batch)
-        assert logits.shape == (B, 3)
+        assert logits.shape == (B,)
         assert ret_hat.shape == (B,)
         assert conf.shape == (B,)
         p = torch.sigmoid(conf)
@@ -336,7 +327,7 @@ class TestMultiTaskWrapper:
         )
         wrapped.eval()
         logits, _ret_hat, _conf = wrapped(seq_batch)
-        assert logits.shape == (B, 3)
+        assert logits.shape == (B,)
 
     def test_wrapper_gradients_flow(self, seq_batch):
         """Loss.backward() should update backbone parameters through the wrapper."""

@@ -63,8 +63,6 @@ curriculum:
   calibration:
     max_class_prior_delta: 0.05
     min_class_share: 0.05
-  chunk_early_stop_min_batches: 50
-  chunk_early_stop_patience: 3
   # ── Difficulty stages: 0=easiest → filters training samples by difficulty ─
   difficulty_schedule:
   - epoch_start: 0
@@ -455,7 +453,7 @@ monitoring:
   drift_ks_pvalue_threshold: 0.05
   drift_live_samples: 5000
   drift_psi_threshold: 0.2
-# ── Multi-task loss: direction (CE) + return (Huber) + confidence (BCE) + Sharpe ─
+# ── Multi-task loss: direction (Regression) + return (Huber) + confidence (BCE) + Sharpe ─
 multitask:
   class_balance_weight: 1.0
   direction_weight_floor: 0.5
@@ -498,7 +496,6 @@ pretrain:
   epochs: 18
   handoff_loss: 0.18
   handoff_min_delta: 0.002
-  handoff_patience: 2
   lr: 0.0001
   mask_prob: 0.2
   method: byol
@@ -615,12 +612,11 @@ training:
   cross_asset_mode: auto
   cross_asset_provider: auto
   direction_weight: 0.75
-  early_stop_metric: sharpe
-  early_stop_min_delta: 0.01
   epochs: 1
   grad_accum_steps: 2
   grad_clip: 0.75
-  label_method: rl_reward
+  num_classes: 1
+  label_method: cpar
   label_smoothing: 0.05
   loss: sharpe_huber
   lr: 1.95e-05
@@ -629,18 +625,11 @@ training:
   lr_warmup_epochs: 2
   onecycle_max_lr_mult: 10.0
   onecycle_pct_start: 0.1
-  patience: 6
   resume: false
   save_every: 5
   seed: 1337
   seq_len: "6h40m"
-  # Annualisation: sqrt(trading_days * bars_per_day)
-  # bar_freq=5m → 78 bars/day (390 min/day ÷ 5) → sqrt(252 × 78) = 140.2
-  # Was 325.0 (daily-bar factor) — wrong for 5m bars, inflated Sharpe ~2.3×
-  sharpe_annualization_factor: 140.0
-  # Weight vs Huber: designed default in gpu_losses.py is 0.2.
-  # Was 1.0 (5× too high) — Sharpe gradient dominated loss, causing early_peak
-  # pattern and best_sharpe=0.0 across 27 runs. Back to 0.25 (near default).
+  sharpe_annualization_factor: null  # auto-detect: sqrt(bars_per_year / lookahead_bars)
   sharpe_weight: 0.25
   # ── Adversarial training (new) ─
   adversarial:
@@ -682,7 +671,6 @@ walk_forward:
 # ── XGBoost baseline model config ──────────────────────────────────────────
 xgboost:
   colsample_bytree: 0.8
-  early_stopping_rounds: 15
   enabled: true
   eval_metric: ''
   feature_importance: true
@@ -715,7 +703,6 @@ catboost:
   subsample: 0.8
   colsample_bylevel: 0.8
   l2_leaf_reg: 1.0
-  early_stopping_rounds: 15
   folds: 5
   tune: false
   tune_trials: 20

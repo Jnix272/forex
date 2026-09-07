@@ -127,7 +127,7 @@ class MultiTaskPretrainConfig:
     batch_size: int = 256
     epochs: int = 50
     warmup_epochs: int = 3
-    device: str = "cuda"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 0
     checkpoint_path: str | None = None
 
@@ -583,9 +583,9 @@ class MultiTaskPretrainer(nn.Module):
 
         self._total_epochs = 0
         self._rng = np.random.default_rng(config.seed)
-        self._use_amp = config.device.startswith("cuda")
+        self._use_amp = config.device.startswith("cuda") and torch.cuda.is_available()
         self._amp_dtype = torch.float16
-        self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+        self._scaler = torch.amp.GradScaler(device="cuda", enabled=self._use_amp) if self._use_amp else None
 
         # History
         self.history = {k: [] for k in ["loss", "total", *list(self.task_weights.keys())]}
@@ -631,7 +631,6 @@ class MultiTaskPretrainer(nn.Module):
 
     def _compute_forecast_loss(self, x: torch.Tensor) -> torch.Tensor:
         """Compute forecast pretext loss."""
-        self.config.seq_len - self.config.forecast_horizon
         prefix = x[:, : self.config.prefix_len, :]
         target = x[:, self.config.prefix_len :, :]
 
@@ -717,7 +716,6 @@ class MultiTaskPretrainer(nn.Module):
         mean_loss = loss_vals.mean()
         relative = (loss_vals / mean_loss) ** self.config.gradnorm_alpha
         target_grad = mean_grad * relative
-        (grad_norms - target_grad).abs().sum()
 
         # Update task weights
         self.gradnorm_params.data = (self.gradnorm_params * (target_grad / grad_norms).detach()).clamp(0.1, 10.0)
@@ -936,7 +934,6 @@ def create_multi_task_pretrainer(
         # Pop training-specific kwargs that are not config parameters
         kwargs.pop("epochs", 50)
         kwargs.pop("batch_size", 256)
-        kwargs.pop("device", "cuda")
         kwargs.pop("silent", False)
         kwargs.pop("checkpoint_path", None)
         kwargs.pop("domain_labels", None)

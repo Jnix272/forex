@@ -834,7 +834,7 @@ def run_backtest():
         if exec_meta:
             log(f"[Exec] {exec_meta}")
         bt = ForexScalingBacktest(
-            bars=base_bars.iloc[seq_len:],
+            bars=base_bars.iloc[seq_len - 1:],
             signals=sig_df,
             initial_equity=args.equity,
             commission_per_lot=args.commission_per_lot,

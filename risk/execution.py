@@ -11,6 +11,8 @@ constructor defaults that mirror it.
 
 import numpy as np
 
+from common.math_utils import safe_corrcoef as _safe_corrcoef
+
 try:
     from config.settings import LIVE_RISK as _LR
 except ImportError:
@@ -428,7 +430,7 @@ class PortfolioVaR:
             return {"var_pct": 0.0, "var_usd": 0.0, "cvar_usd": 0.0, "correlation_avg": 0.0}
         ml = min(len(self._returns.get(p, [])) for p in pairs)
         rm = np.array([list(self._returns[p])[-ml:] for p in pairs]).T
-        corr = np.corrcoef(rm.T) if len(pairs) > 1 else np.array([[1.0]])
+        corr = _safe_corrcoef(rm.T) if len(pairs) > 1 else np.array([[1.0]])
         stds = rm.std(0)
         cov = np.outer(stds, stds) * corr  # units: (price-fraction)²
         # FIX: dollar notional weights (units: $/lot x lots = $).
@@ -502,7 +504,7 @@ class PortfolioVaR:
         rs = [list(self._returns[p])[-ml:] for p in exist_pairs]
         rs.append(cand_hist[-ml:])
         rm = np.array(rs).T  # (ml, k+1)
-        corr = np.corrcoef(rm.T)  # (k+1, k+1)
+        corr = _safe_corrcoef(rm.T)  # (k+1, k+1)
         stds = rm.std(0)  # (k+1,)
         cov = np.outer(stds, stds) * corr  # price-fraction², (k+1, k+1)
 

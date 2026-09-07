@@ -10,6 +10,7 @@ PPO and Deep Q-Learning agents with:
 
 import collections
 import random
+from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
@@ -473,8 +474,30 @@ if TORCH:
         """
 
         def __init__(
-            self, obs_size, n_actions=10, hidden=256, use_lstm=False, lstm_hidden=128, num_layers=1, dropout=0.0
+            self,
+            obs_size: int = None,
+            obs_dim: int = None,
+            n_actions=10,
+            hidden=256,
+            use_lstm=False,
+            lstm_hidden=128,
+            num_layers=1,
+            dropout=0.0,
         ):
+            """Initialize ActorCritic.
+
+            Parameters
+            ----------
+            obs_size : int, optional
+                Size of observation vector. Preferred name.
+            obs_dim : int, optional
+                Alias for ``obs_size`` kept for backward compatibility with tests.
+            """
+            # Resolve observation dimension
+            if obs_dim is not None:
+                obs_size = obs_dim
+            if obs_size is None:
+                raise ValueError("obs_size must be provided (obs_dim alias accepted)")
             super().__init__()
             self.use_lstm = use_lstm
             if use_lstm:
@@ -489,6 +512,8 @@ if TORCH:
                 )
             self.actor = nn.Linear(hidden, n_actions)
             self.critic = nn.Linear(hidden, 1)
+
+
 
         def forward(self, x):
             if self.use_lstm:
@@ -575,9 +600,13 @@ if TORCH:
             self.device = torch.device(device)
             self.use_lstm = bool(use_lstm)
             self.hist_len = int(hist_len)
-            self.net = ActorCritic(obs_size, n_actions, hidden, use_lstm=self.use_lstm, lstm_hidden=lstm_hidden).to(
-                self.device
-            )
+            self.net = ActorCritic(
+                obs_size=obs_size,
+                n_actions=n_actions,
+                hidden=hidden,
+                use_lstm=self.use_lstm,
+                lstm_hidden=lstm_hidden,
+            ).to(self.device)
             self.opt = optim.Adam(self.net.parameters(), lr=lr)
             self.buffer = []
             self._hist = collections.deque(maxlen=self.hist_len)
@@ -1053,6 +1082,7 @@ def train_agent(
     reward_sharpe: Any | None = None,
     her_buffer: Any | None = None,
     off_policy_rewards: bool = False,
+    episode_callback: Callable[[int, Any], None] | None = None,
 ) -> list:
     """Generic training loop for PPO or DQN.
 
@@ -1165,6 +1195,8 @@ def train_agent(
 
         summary = env.summary()
         returns.append(summary["total_return_pct"])
+        if episode_callback is not None:
+            episode_callback(ep, agent)
         if (ep + 1) % 10 == 0:
             avg = np.mean(returns[-10:])
             print(

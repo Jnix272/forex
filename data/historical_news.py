@@ -136,10 +136,27 @@ def _read_table(path: Path, start: str | None = None, end: str | None = None) ->
     if path.suffix.lower() == ".parquet":
         # PIPE-004: lazy scan with predicate pushdown instead of eager read
         lf = pl.scan_parquet(path)
-        if start and "timestamp_utc" in lf.collect_schema().names():
-            lf = lf.filter(pl.col("timestamp_utc") >= start)
-        if end and "timestamp_utc" in lf.collect_schema().names():
-            lf = lf.filter(pl.col("timestamp_utc") <= end)
+        schema = lf.collect_schema()
+        if "timestamp_utc" in schema.names():
+            ts_dtype = schema["timestamp_utc"]
+            is_temporal = ts_dtype in (pl.Date, pl.Datetime) or str(ts_dtype).startswith("Datetime")
+            has_tz = "UTC" in str(ts_dtype)
+            if start:
+                if is_temporal:
+                    lit = pl.lit(start).str.to_datetime(strict=False)
+                    if has_tz:
+                        lit = lit.dt.replace_time_zone("UTC")
+                    lf = lf.filter(pl.col("timestamp_utc") >= lit)
+                else:
+                    lf = lf.filter(pl.col("timestamp_utc") >= start)
+            if end:
+                if is_temporal:
+                    lit = pl.lit(end).str.to_datetime(strict=False)
+                    if has_tz:
+                        lit = lit.dt.replace_time_zone("UTC")
+                    lf = lf.filter(pl.col("timestamp_utc") <= lit)
+                else:
+                    lf = lf.filter(pl.col("timestamp_utc") <= end)
         df = lf.collect()
         log_data_load(
             "historical_news_read",
@@ -288,13 +305,26 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
     if not frames:
         log_data_load("historical_news_load", "<combined>", n_rows=0, status="skip_empty")
         return pl.DataFrame()
+    # Normalise timestamp_utc to UTC in every frame before concat to avoid timezone supertype conflicts
+    def _to_utc(frame: pl.DataFrame) -> pl.DataFrame:
+        if "timestamp_utc" not in frame.columns:
+            return frame
+        ts_t = frame.schema["timestamp_utc"]
+        ts_str = str(ts_t)
+        if ts_str in ("String", "Utf8") or ts_t in (pl.Utf8, pl.String):
+            return frame.with_columns(
+                pl.col("timestamp_utc").str.to_datetime(time_unit="us", time_zone="UTC", strict=False)
+            )
+        if ts_str.startswith("Datetime"):
+            if "UTC" not in ts_str:
+                return frame.with_columns(
+                    pl.col("timestamp_utc").dt.convert_time_zone("UTC")
+                )
+        return frame
+    frames = [_to_utc(f) for f in frames]
     df = pl.concat(frames, how="diagonal_relaxed")
     if "timestamp_utc" in df.columns:
-        df = df.with_columns(
-            pl.col("timestamp_utc")
-            .cast(pl.Utf8, strict=False)
-            .str.to_datetime(time_unit="us", time_zone="UTC", strict=False)
-        ).drop_nulls("timestamp_utc")
+        df = df.drop_nulls("timestamp_utc")
     log_data_load(
         "historical_news_load",
         "<combined>",

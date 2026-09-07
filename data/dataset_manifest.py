@@ -263,7 +263,8 @@ class DatasetManifest:
                 vals = np.asarray(feature_df[col], dtype=np.float32)
                 if np.std(vals) < 1e-12:
                     continue
-                corr = np.corrcoef(vals, fwd)[0, 1]
+                from common.math_utils import safe_corrcoef as _safe_corrcoef
+                corr = _safe_corrcoef(vals, fwd)[0, 1]
                 if abs(corr) > max_abs_corr:
                     flagged.append({"feature": col, "corr": round(float(corr), 4)})
             except Exception:

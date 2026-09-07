@@ -403,6 +403,47 @@ class MacroMaterializer(BaseMaterializer):
                 raise RuntimeError("MacroMaterializer: vix_close panel empty after align")
             return out
 
+        if spec.name in ("granger_lead_score", "leadlag_indegree", "leadlag_outdegree"):
+            import pandas as pd
+            import numpy as np
+            
+            if bars is None or bars.is_empty():
+                raise RuntimeError(f"MacroMaterializer: {spec.name} requires bars to establish TARGET asset.")
+
+            df_panel = pd.DataFrame(panel)
+            target_series = bars.select(["timestamp_utc", "close"]).to_pandas().set_index("timestamp_utc")["close"]
+            target_series.index = pd.to_datetime(target_series.index)
+            target_daily = target_series.resample("D").last().dropna()
+            target_daily.name = "TARGET"
+
+            # Align panel to target daily freq
+            if not df_panel.empty:
+                df_panel.index = pd.to_datetime(df_panel.index)
+                if df_panel.index.tz is None:
+                    df_panel.index = df_panel.index.tz_localize("UTC")
+                else:
+                    df_panel.index = df_panel.index.tz_convert("UTC")
+
+            df_panel["TARGET"] = target_daily
+            df_panel = df_panel.ffill().dropna(how="all")
+            
+            returns = np.log(df_panel).diff().fillna(0.0)
+            
+            if spec.name == "granger_lead_score":
+                from features.cross_asset_factors import granger_lead_scores
+                res = granger_lead_scores(returns)
+                daily = self._series_to_frame(res["granger_score_TARGET"], spec.name)
+            else:
+                from features.cross_asset_factors import lead_lag_network
+                res = lead_lag_network(returns)
+                col_name = f"{spec.name}_TARGET"
+                daily = self._series_to_frame(res[col_name], spec.name)
+
+            out = self._align_to_bars(bars, daily, spec.name)
+            if out is None or out.is_empty():
+                raise RuntimeError(f"MacroMaterializer: {spec.name} empty after align")
+            return out
+
         return None
 
     @property

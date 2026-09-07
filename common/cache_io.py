@@ -178,3 +178,9 @@ def _atr_path(cache_path) -> str:
 def _spread_path(cache_path) -> str:
     """Per-sequence bid-ask spread at the label bar (float32, price units)."""
     return _base_path(str(cache_path)) + "_spread.npy"
+
+
+def _bet_size_path(cache_path) -> str:
+    """NPY sidecar for per-sample bet sizes / sample weights (float32)."""
+    return _base_path(str(cache_path)) + "_bet_size.npy"
+

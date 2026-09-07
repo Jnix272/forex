@@ -67,7 +67,7 @@ class PretrainConfig:
     max_train_length: int | None = None
 
     # Device
-    device: str | int = "cuda"
+    device: str | int = "cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu"
 
     # Checkpointing
     save_path: str | None = None

@@ -30,7 +30,8 @@ from typing import Any
 
 import numpy as np
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

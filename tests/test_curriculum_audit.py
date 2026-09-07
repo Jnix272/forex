@@ -195,7 +195,7 @@ def test_enforce_dataset_feature_schema_raises_when_gated(tmp_path):
         # Keep args aligned with YAML for the args_yaml part so only schema fails.
         batch_size=128,
         epochs=2,
-        seq_len=80,
+        seq_len=120,
         loss="sharpe_huber",
         grad_clip=0.75,
         patience=6,

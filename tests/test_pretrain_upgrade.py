@@ -21,8 +21,8 @@ from pretrain.extended_trainers import (
     ForecastPretextTrainer,
     VAESeqTrainer,
 )
-from training.train_gpu import (
-    _apply_yaml_config,
+from training.gpu_cli import _apply_yaml_config
+from training.pretrain_runner import (
     _make_pretrain_span_plan,
     _normalize_pretrain_method,
     _select_pretrain_trainer_class,

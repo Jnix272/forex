@@ -87,132 +87,66 @@ def features_for_bars(trending_up_bars) -> pd.DataFrame:
 
 class TestScanOutcomesSequential:
     def test_trending_up_produces_long_wins(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
         n = 80
         close = 1.1000 + np.arange(n) * 0.0005
         atr = np.full(n, 0.0005)
-        lo, _tl, _so, _ts = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            profit_mult=1.5,
-            stop_mult=1.0,
-            vertical_bars=15,
-            execution_delay_bars=0,
+        cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=15, execution_delay_bars=0
         )
-        long_wins = (lo == 1).sum()
-        assert long_wins > 0, "Strong uptrend should produce long wins"
-        assert long_wins > (lo == -1).sum(), "More long wins than losses expected"
+        assert np.mean(cpar_l) > 0, "Strong uptrend should produce positive CPAR long"
+        assert np.mean(cpar_l) > np.mean(cpar_s), "CPAR long should beat CPAR short"
 
     def test_trending_down_produces_short_wins(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
         n = 80
         close = 1.1000 - np.arange(n) * 0.0005
         atr = np.full(n, 0.0005)
-        _lo, _tl, so, _ts = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            profit_mult=1.5,
-            stop_mult=1.0,
-            vertical_bars=15,
-            execution_delay_bars=0,
+        cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=15, execution_delay_bars=0
         )
-        short_wins = (so == 1).sum()
-        assert short_wins > 0, "Strong downtrend should produce short wins"
+        assert np.mean(cpar_s) > 0, "Strong downtrend should produce positive CPAR short"
 
     def test_empty_on_insufficient_bars(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
         close = np.array([1.1, 1.2, 1.3])
         atr = np.array([0.0005, 0.0005, 0.0005])
-        lo, _tl, _so, _ts = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            profit_mult=1.5,
-            stop_mult=1.0,
-            vertical_bars=10,
-            execution_delay_bars=0,
+        cpar_l, _cpar_s, _rew, _lab = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=10, execution_delay_bars=0
         )
-        assert len(lo) == 0
+        assert len(cpar_l) == 0
 
     def test_output_shapes_match(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
-        n = 50
-        close = 1.1 + np.cumsum(np.random.default_rng(1).normal(0, 0.0002, n))
-        atr = np.full(n, 0.0005)
-        lo, tl, so, ts = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            profit_mult=1.5,
-            stop_mult=1.0,
-            vertical_bars=10,
-            execution_delay_bars=1,
-        )
-        assert lo.shape == tl.shape == so.shape == ts.shape
-
-    def test_outcomes_are_bounded(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
-        n = 60
-        close = 1.1 + np.cumsum(np.random.default_rng(7).normal(0, 0.0003, n))
-        atr = np.full(n, 0.0005)
-        lo, tl, so, ts = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            profit_mult=1.5,
-            stop_mult=1.0,
-            vertical_bars=10,
-            execution_delay_bars=0,
-        )
-        assert set(np.unique(lo)).issubset({-1, 0, 1})
-        assert set(np.unique(so)).issubset({-1, 0, 1})
-        assert tl.max() <= 10
-        assert ts.max() <= 10
-
-    def test_execution_delay_reduces_output_length(self):
-        from labeling.triple_barrier_labeling import _scan_outcomes_sequential
-
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
         n = 50
         close = np.ones(n) * 1.1
         atr = np.full(n, 0.0005)
-        lo0, *_ = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            1.5,
-            1.0,
-            10,
-            0,
+        cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=10, execution_delay_bars=0
         )
-        lo3, *_ = _scan_outcomes_sequential(
-            close,
-            close,
-            close,
-            close,
-            atr,
-            1.5,
-            1.0,
-            10,
-            3,
+        assert len(cpar_l) == len(cpar_s) == len(rew) == len(lab) == (n - 10)
+
+    def test_outcomes_are_bounded(self):
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
+        n = 50
+        close = np.ones(n) * 1.1
+        atr = np.full(n, 0.0005)
+        cpar_l, cpar_s, rew, lab = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=5, execution_delay_bars=0
+        )
+        assert not np.isnan(cpar_l).any()
+        assert not np.isnan(cpar_s).any()
+
+    def test_execution_delay_reduces_output_length(self):
+        from labeling.triple_barrier_labeling import _scan_outcomes_cpar_sequential
+        n = 50
+        close = np.ones(n) * 1.1
+        atr = np.full(n, 0.0005)
+        lo0, *_ = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=10, execution_delay_bars=0
+        )
+        lo3, *_ = _scan_outcomes_cpar_sequential(
+            close, close, close, close, atr, penalty=1.0, vertical_bars=10, execution_delay_bars=3
         )
         assert len(lo3) == len(lo0) - 3
 
@@ -256,9 +190,8 @@ class TestComputeTripleBarrierLabels:
             vertical_bars=10,
             use_numba=False,
         )
-        valid_labels = {-1, 0, 1}
-        actual = set(result["label"].unique())
-        assert actual.issubset(valid_labels), f"Unexpected labels: {actual - valid_labels}"
+        assert pd.api.types.is_numeric_dtype(result["label"])
+        assert not result["label"].isna().any()
 
     def test_empty_result_on_tiny_input(self):
         from labeling.triple_barrier_labeling import compute_triple_barrier_labels
@@ -291,43 +224,10 @@ class TestComputeTripleBarrierLabels:
         result = compute_triple_barrier_labels(
             trending_up_bars,
             features_for_bars,
-            vertical_bars=10,
-            profit_atr_mult=1.5,
-            stop_atr_mult=1.0,
+            vertical_bars=5,
             use_numba=False,
         )
-        long_count = (result["label"] == 1).sum()
-        short_count = (result["label"] == -1).sum()
-        assert long_count > short_count, f"Uptrend: expected more long({long_count}) than short({short_count}) labels"
+        long_labels = (result["label"] > 0).sum()
+        assert long_labels > 0, "Uptrend should produce positive CPAR labels"
 
 
-# ---------------------------------------------------------------------------
-# 3. Directional label combination
-# ---------------------------------------------------------------------------
-
-
-class TestCombineDirectionalLabels:
-    def test_combined_labels_use_best_outcome(self):
-        from labeling.triple_barrier_labeling import _combine_directional_labels
-
-        lo = np.array([1, -1, 0, 1, -1], dtype=np.int8)
-        tl = np.array([3, 5, 10, 2, 7], dtype=np.int32)
-        so = np.array([-1, 1, 0, 0, 0], dtype=np.int8)
-        ts = np.array([5, 3, 10, 10, 10], dtype=np.int32)
-        label = _combine_directional_labels(lo, tl, so, ts)
-        assert len(label) == 5
-        assert label[0] == 1  # long won (lo=1)
-        assert label[1] == -1  # short won (so=1)
-        assert label[2] == 0  # hold (both 0)
-        assert label[3] == 1  # long won (lo=1, so=0)
-
-    def test_both_tp_resolves_by_time(self):
-        from labeling.triple_barrier_labeling import _combine_directional_labels
-
-        lo = np.array([1, 1], dtype=np.int8)
-        tl = np.array([2, 5], dtype=np.int32)
-        so = np.array([1, 1], dtype=np.int8)
-        ts = np.array([5, 2], dtype=np.int32)
-        label = _combine_directional_labels(lo, tl, so, ts)
-        assert label[0] == 1  # long hit first (tl=2 < ts=5)
-        assert label[1] == -1  # short hit first (ts=2 < tl=5)

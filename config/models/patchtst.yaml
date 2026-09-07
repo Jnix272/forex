@@ -7,3 +7,4 @@ model:
 training:
   lr: 1.0e-4
   seq_len: 60
+  early_stop_patience: 10  # medium-cap transformer; standard patience at 1e-4 lr

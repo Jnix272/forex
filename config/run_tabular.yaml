@@ -65,25 +65,24 @@ strategy:
 
 training:
   seq_len: 30
-  label_method: triple_barrier
+  label_method: cpar
+  num_classes: 1
   seed: 1337
   val_split: 0.2
   max_bad_frac: 0.05
   max_zero_frac: 0.80
   amp: false
-  batch_size: 256
+  batch_size: 512  # CPU: conservative batch to avoid OOM
   epochs: 1
   grad_clip: 1.0
-  loss: cross_entropy
+  loss: huber
   lr: 0.0001
-  early_stop_metric: sharpe
-  patience: 5
   cross_asset_mode: auto
   cross_asset_provider: auto
 
 catboost:
   enabled: true
-  task: classification
+  task: regression
   sequence_mode: temporal
   iterations: 500
   depth: 7
@@ -91,7 +90,6 @@ catboost:
   subsample: 0.8
   colsample_bylevel: 0.8
   l2_leaf_reg: 2.0
-  early_stopping_rounds: 20
   folds: 5
   tune: false
   tune_trials: 20
@@ -99,7 +97,7 @@ catboost:
 
 xgboost:
   enabled: true
-  task: classification
+  task: regression
   sequence_mode: temporal
   n_estimators: 500
   max_depth: 7
@@ -110,7 +108,6 @@ xgboost:
   gamma: 0.2
   reg_alpha: 0.1
   reg_lambda: 2.0
-  early_stopping_rounds: 20
   folds: 5
   tune: false
   tune_trials: 20
@@ -150,4 +147,5 @@ tracking:
   run_name: tabular_triple_barrier
 
 maturity:
-  stage: paper
+  stage: paper
+

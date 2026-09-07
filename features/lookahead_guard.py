@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from common.math_utils import safe_corrcoef as _safe_corrcoef
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +57,7 @@ def _adaptive_corr_threshold(feature_col: np.ndarray, forward_returns: np.ndarra
     col = feature_col[valid]
     # Lag-1 autocorrelation of the feature
     if len(col) > 1:
-        autocorr = np.corrcoef(col[:-1], col[1:])[0, 1]
+        autocorr = _safe_corrcoef(col[:-1], col[1:])[0, 1]
         autocorr = 0.0 if np.isnan(autocorr) else abs(autocorr)
     else:
         autocorr = 0.0
@@ -92,7 +94,7 @@ def _rolling_correlation_check(
         f_v, r_v = f_win[valid], r_win[valid]
         if np.std(f_v) < 1e-12 or np.std(r_v) < 1e-12:
             continue
-        corr = np.corrcoef(f_v, r_v)[0, 1]
+        corr = _safe_corrcoef(f_v, r_v)[0, 1]
         if abs(corr) > 0.98:
             anomalies.append({"window_start": start, "window_end": end, "corr": float(corr)})
 
@@ -120,13 +122,13 @@ def _information_ratio_check(
     if np.std(f_v) < 1e-12 or np.std(r_v) < 1e-12:
         return 0.0
 
-    real_corr = abs(np.corrcoef(f_v, r_v)[0, 1])
+    real_corr = abs(_safe_corrcoef(f_v, r_v)[0, 1])
 
     shuffle_corrs = []
     rng = np.random.default_rng(42)
     for _ in range(n_shuffles):
         shuffled = rng.permutation(f_v)
-        sc = abs(np.corrcoef(shuffled, r_v)[0, 1])
+        sc = abs(_safe_corrcoef(shuffled, r_v)[0, 1])
         shuffle_corrs.append(sc)
 
     shuffle_mean = np.mean(shuffle_corrs)
@@ -239,7 +241,7 @@ def assert_no_lookahead(
                 threshold = corr_threshold
             report.dynamic_thresholds[name] = threshold
 
-            corr = np.corrcoef(c, f)[0, 1]
+            corr = _safe_corrcoef(c, f)[0, 1]
 
             if abs(corr) > threshold:
                 violation = {
@@ -429,7 +431,7 @@ class ContinuousLookaheadMonitor:
             if np.std(c) < 1e-12:
                 continue
 
-            corr = np.corrcoef(c, r)[0, 1]
+            corr = _safe_corrcoef(c, r)[0, 1]
             self._running_corrs[name].append(corr)
 
             # Dynamic alerting: compare current correlation to historical distribution
