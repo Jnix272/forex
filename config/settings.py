@@ -37,7 +37,7 @@ def project_path(*parts: str) -> str:
 def active_checkpoint_dir(config_path: Path | None = None) -> Path:
     """Resolve the active run checkpoint directory.
 
-    Priority: CHECKPOINT_RUN_DIR env → config paths.checkpoint_dir → checkpoints/.
+    Priority: CHECKPOINT_RUN_DIR env â†’ config paths.checkpoint_dir â†’ checkpoints/.
     Used by demotion_monitor, continuous_finetune, and live deploy hooks so flags
     and production_best.pt align with training/train_gpu.py.
     """
@@ -125,9 +125,9 @@ def resolve_checkpoint_paths(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ARTIFACT PATHS  -  separate top-level folders under the repo
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # checkpoints/   model weights, ONNX, lockbox markers
 # exports/       ONNX and other export artifacts (monitoring ONNXExporter)
 # logs/          training history, shadow mode, SHAP, reports, live engine
@@ -167,9 +167,9 @@ PATHS.update(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # DATA LAYER
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 DATA = {
     "resolution": "tick",
     "storage_engine": "timescaledb",
@@ -196,9 +196,9 @@ DATA = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # FEATURE ENGINEERING
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 FEATURES = {
     "atr_window": 6,  # 6-period ATR (spec)
     "ofi_window": 20,
@@ -214,9 +214,9 @@ FEATURES = {
     "buzz_window_minutes": 5,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # FEATURE SCALING
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SCALING = {
     "scaler_type": "robust",  # "robust" (default) or "standard"
     # RobustScaler: uses median + IQR, resistant to flash crashes & spread spikes
@@ -224,9 +224,9 @@ SCALING = {
     "quantile_range": (5, 95),  # RobustScaler: 5th-95th percentile range
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CROSS-ASSET INPUTS
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 CROSS_ASSET = {
     "enabled": True,
     "assets": {
@@ -240,9 +240,9 @@ CROSS_ASSET = {
     "gnn_update_freq": 5,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # SENTIMENT / NEWS  - DUAL STREAM
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SENTIMENT = {
     "enabled": True,
     "offline_model": "ProsusAI/finbert",
@@ -259,16 +259,15 @@ SENTIMENT = {
     "news_api": "alpha_vantage",
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # MODEL ARCHITECTURES  (defined in config/models.py, re-exported here)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 TRAINING = {
     # Defaults mirrored from config/run.yaml (YAML wins when --config is used).
     "batch_size": 512,
     "epochs": 40,
-    "patience": 3,  # must be < post-warmup epochs so early-stop can fire
-    "loss": "sharpe_huber",  # matches config/run.yaml
+    "loss": "huber",  # matches config/run.yaml
     "huber_delta": 1.0,
     "asymmetric_sign_weight": 2.0,
     "grad_clip": 0.75,
@@ -280,16 +279,15 @@ TRAINING = {
     "lr_schedule": "warmup_cosine",
     "checkpoint_dir": PATHS["checkpoints"],
     "walk_forward_folds": 7,
-    "early_stop_metric": "sharpe",
     # Annualisation: AUTO-DETECTED from bar_freq x lookahead_bars.
     # The previous hard-coded value of 325.0 silently inflated Sharpe
-    # by 2.3x–12.7x depending on session assumptions. The training  # noqa: RUF003
+    # by 2.3xâ€“12.7x depending on session assumptions. The training  # noqa: RUF003
     # code now derives the factor at runtime (see
     # training/sharpe_annualization.py); this entry is only used as
     # a last-resort override when neither the CLI flag, the YAML
     # config, nor auto-detection produce a usable value. Setting it to
     # ``None`` is intentional - never pin a magic number here.
-    "sharpe_annualization_factor": None,
+    "sharpe_annualization_factor": 325.0,
     "onecycle_pct_start": 0.1,
     "onecycle_max_lr_mult": 10.0,
     # Gradient accumulation: effective_batch = batch_size x grad_accum_steps
@@ -301,7 +299,7 @@ TRAINING = {
 }
 
 # Presets for local machines (use: python training/train_gpu.py --hardware-profile <name>)
-# RTX 4060 = 8GB VRAM; pair with 16GB system RAM → keep workers/prefetch low to avoid host OOM.
+# RTX 4060 = 8GB VRAM; pair with 16GB system RAM â†’ keep workers/prefetch low to avoid host OOM.
 HARDWARE_PROFILES = {
     "rtx_4060_16gb_ram": {
         "batch_size": 212,
@@ -335,11 +333,11 @@ HARDWARE_PROFILES = {
         "prefetch_factor": 4,
         "local_project_paths": False,
     },
-    # ── Ubuntu laptop profiles ────────────────────────────────────────────────
+    # â”€â”€ Ubuntu laptop profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     "ubuntu_rtx_laptop": {
-        # Generic Ubuntu laptop: RTX 30/40-series, 8–16 GB VRAM.  # noqa: RUF003
+        # Generic Ubuntu laptop: RTX 30/40-series, 8â€“16 GB VRAM.  # noqa: RUF003
         # Workers capped at 4 to avoid RAM pressure from multiprocessing.spawn.
-        # chunk_size kept small for thermal safety; raise to 400k if temps stay < 80 °C.
+        # chunk_size kept small for thermal safety; raise to 400k if temps stay < 80 Â°C.
         # local_project_paths=False: honours paths.* from run_ubuntu.yaml so data
         # stored outside the repo (e.g. ~/forex_data/) is found correctly.
         "batch_size": 212,
@@ -374,9 +372,9 @@ HARDWARE_PROFILES = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CONTRASTIVE PRE-TRAINING
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PRETRAIN = {
     "enabled": True,
     "method": "byol",  # BYOL: no negatives, 1 grad pass, works on 8 GB VRAM
@@ -410,9 +408,9 @@ PRETRAIN = {
     "checkpoint": PATHS["file_contrastive_encoder"],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # FEATURE CACHE - slow-changing columns (sentiment, COT, macro, hurst)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 FEATURE_CACHE = {
     "enabled": True,
     "ofi_z_threshold": 2.0,
@@ -425,16 +423,16 @@ FEATURE_CACHE = {
     ],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MODEL MATURITY - gates live promotion (dev → paper → production)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# MODEL MATURITY - gates live promotion (dev â†’ paper â†’ production)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 MATURITY = {
     "stage": "paper",  # config/run.yaml maturity.stage
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # KNOWLEDGE DISTILLATION (SCALE MODEL)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 DISTILLATION = {
     "teacher_model": "mamba",
     "teacher_ckpt": BEST_CHECKPOINTS["mamba"],
@@ -472,9 +470,9 @@ BACKTEST = {
     "volatility_adaptive_slippage": False,  # Scale slippage by ATR ratio
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # RL AGENT  - PPO + DQN, 3-ACTION
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 RL = {
     "algorithms": ["PPO", "DQN"],
     "action_space": 3,  # 0=Buy, 1=Hold, 2=Sell
@@ -512,12 +510,12 @@ RL = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # LABELING - RL REWARD SIGNAL
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LABELING = {
     "method": "rl_reward",
-    "lookahead_bars": 30,  # synced with strategy.lookahead_bars in config/run.yaml
+    "lookahead_bars": 12,  # fallback when regime_class unavailable; dynamic: trending=20, ranging=12, volatile=6
     # Defaults match config/run.yaml strategy.profit_target_atr / stop_loss_atr
     "profit_target_atr": 1.2,
     "stop_loss_atr": 0.8,
@@ -531,9 +529,9 @@ LABELING = {
     "consensus_threshold": 0.33,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # PIP SIZES - per-asset pip resolution lookup
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PIP_SIZES = {
     "default": 0.0001,
     "JPY": 0.01,  # All JPY pairs (USDJPY, EURJPY, GBPJPY, etc.)
@@ -564,9 +562,9 @@ def price_to_pips(price_diff: float, pair: str) -> float:
     return float(price_diff) / pip if pip > 0 else 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # SIZING + SCALING STRATEGY (BOTH COMBINED)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SIZING = {
     "method": "fractional_kelly",
     "kelly_fraction": 0.25,
@@ -580,9 +578,9 @@ SIZING = {
     "scale_out_targets": [0.25, 0.50, 0.75],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # RISK MANAGEMENT - DYNAMIC STOP LOSS
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 RISK = {
     "stop_type": "dynamic",
     "atr_multiplier": 1.5,
@@ -590,7 +588,7 @@ RISK = {
     "breakeven_at_r": 0.5,
     "max_drawdown_halt": 0.10,
     "daily_loss_limit": 0.03,
-    # ── RiskEngine (risk/risk_engine.py) pre-trade / post-trade limits ─────
+    # â”€â”€ RiskEngine (risk/risk_engine.py) pre-trade / post-trade limits â”€â”€â”€â”€â”€
     "max_notional_usd": 250_000.0,
     "max_order_freq_per_min": 10,
     "max_instrument_concentration": 0.50,
@@ -601,9 +599,9 @@ RISK = {
     "require_approval_on_flatten": False,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # TRADE FILTERS - BOTH ENABLED
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 FILTERS = {
     "vol_filter_enabled": True,
     "vol_multiplier": 3.0,
@@ -614,9 +612,9 @@ FILTERS = {
     "dust_settle_bars": 3,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # LATENCY - TIP-SEARCH
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LATENCY = {
     "strategy": "tip_search",
     "fast_model": "dqn",  # ~2ms
@@ -627,11 +625,11 @@ LATENCY = {
     "max_acceptable_ms": 10.0,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # VALIDATION - EMBARGOING + PURGED K-FOLD
 # GPU path maps validation.* from YAML via gpu_cli (_YAML_MAP) onto
 # args.validation_* ; settings stubs are the no-YAML fallback. Keep synced to run.yaml.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 VALIDATION = {
     "method": "purged_embargo",
     "n_splits": 7,
@@ -642,9 +640,9 @@ VALIDATION = {
     "test_window_bars": 10_000,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # MONITORING + DRIFT DETECTION
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 MONITORING = {
     "enabled": True,
     "drift_window": 1000,
@@ -657,9 +655,9 @@ MONITORING = {
     "wandb_project": "forex-scaling-model",
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # RETRAINING - WALK-FORWARD ROLLING
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 RETRAINING = {
     "strategy": "walk_forward_rolling",
     "retrain_every_bars": 10_000,
@@ -669,9 +667,9 @@ RETRAINING = {
     "min_improvement": 0.05,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # INFRASTRUCTURE - KAFKA + TIMESCALEDB
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 INFRA = {
     "kafka_enabled": True,
     "timescale_enabled": True,
@@ -680,22 +678,22 @@ INFRA = {
     "data_dir": PATHS["data"],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # GPU / AMP / PRECISION
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # amp_dtype: "auto" | "bf16" | "fp16" | "fp32"
-#   auto  → force BF16 on all Ampere+ (CC ≥ 8.0); FP16 on older GPUs; FP32 on CPU.
+#   auto  â†’ force BF16 on all Ampere+ (CC â‰¥ 8.0); FP16 on older GPUs; FP32 on CPU.
 #           BF16 has full FP32 dynamic range and needs no GradScaler.
-#   bf16  → BF16 Tensor Cores (falls back to FP16 if unsupported)
-#   fp16  → FP16 Tensor Cores, GradScaler required to prevent underflow
-#   fp32  → full precision (baseline / debugging)
+#   bf16  â†’ BF16 Tensor Cores (falls back to FP16 if unsupported)
+#   fp16  â†’ FP16 Tensor Cores, GradScaler required to prevent underflow
+#   fp32  â†’ full precision (baseline / debugging)
 #
 # thermal_limit_celsius: pause training when GPU exceeds this temperature.
-#   83 °C  is a safe ceiling for laptop GPUs (throttles start ~87 °C on most).
+#   83 Â°C  is a safe ceiling for laptop GPUs (throttles start ~87 Â°C on most).
 #   Set to 0 to disable thermal throttle (e.g. desktops with good cooling).
 #
-# torch_compile: enable torch.compile() by default for ~20–30 % extra  # noqa: RUF003
-#   throughput on PyTorch ≥ 2.0 + CUDA + Triton. Adds ~60 s compile time on
+# torch_compile: enable torch.compile() by default for ~20â€“30 % extra  # noqa: RUF003
+#   throughput on PyTorch â‰¥ 2.0 + CUDA + Triton. Adds ~60 s compile time on
 #   first run. LSTM/GRU/RNN cells are left eager (torch.compiler.disable) so
 #   the rest of the model can still use inductor / reduce-overhead.
 #   Set to false to force eager mode.
@@ -769,10 +767,10 @@ MACRO_DATA = {
     "gap_max_minutes": 5,  # only consider gaps up to this size for ffill/interpolate
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MATURITY LADDER  -  Paper → Shadow → Live (small) → Scale
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# MATURITY LADDER  -  Paper â†’ Shadow â†’ Live (small) â†’ Scale
 # Single source of truth for promotion / demotion thresholds per stage.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 MATURITY_LADDER = {
     # Stage definitions - each stage has its own risk envelope and promotion gate.
     "stages": ["paper", "shadow", "live_small", "scale"],
@@ -847,18 +845,18 @@ MATURITY_LADDER = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # LIVE_RISK  -  one source of truth shared by paper / backtest / shadow / live
 # All environments import from here. Never hardcode risk parameters elsewhere.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LIVE_RISK = {
-    # ── Position sizing (mirrors SIZING for backward compat) ──────────────────
+    # â”€â”€ Position sizing (mirrors SIZING for backward compat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     "kelly_fraction": 0.25,  # fractional Kelly multiplier
     "max_position_pct": 0.05,  # max single-position size as fraction of equity
     "max_total_lots": 3.0,
     "target_annual_vol": 0.10,
     "pip_risk_default": 20.0,  # default pip stop (used when ATR unavailable)
-    # ── Hard risk limits ──────────────────────────────────────────────────────
+    # â”€â”€ Hard risk limits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     "max_drawdown_halt": 0.10,  # halt trading at 10 % drawdown
     "soft_drawdown_reduce": 0.05,  # reduce size 50 % at 5 % drawdown
     "daily_loss_limit": 0.03,  # close all at 3 % daily loss
@@ -894,11 +892,11 @@ LIVE_RISK = {
         "london_ny": {"max_lots": 3.0, "max_open_trades": 5},
         "off": {"max_lots": 0.5, "max_open_trades": 1, "hours_local": (time(18, 0), time(8, 0)), "tz": None},
     },
-    # ── ATR stop parameters (mirrors RISK) ────────────────────────────────────
+    # â”€â”€ ATR stop parameters (mirrors RISK) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     "atr_multiplier": 1.5,
     "trail_activation_r": 1.0,
     "breakeven_at_r": 0.5,
-    # ── Regime scaling limits ─────────────────────────────────────────────────
+    # â”€â”€ Regime scaling limits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     "regime_scale": {
         "crisis": 0.50,  # 50 % of normal size in correlation crisis
         "trending": 1.20,  # 20 % bonus in trending regime
@@ -910,10 +908,10 @@ LIVE_RISK = {
     "hurst_mean_rev": 0.40,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # MULTI-SCALE FEATURES  -  windows used across feature engineering
 # Short / medium / long triples; differences between scales carry the signal.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 FEATURE_SCALES = {
     "atr_windows": [6, 20, 60],  # short / medium / long ATR
     "vol_windows": [6, 20, 60],  # rolling volatility scales
@@ -932,28 +930,28 @@ FEATURE_SCALES = {
     "trend_stability_window": 20,  # Hurst / R/S window for trend stability
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NO-TRADE ZONE  -  thresholds for explicitly labeling abstain regions
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 NO_TRADE = {
-    "vol_regime_low_pct": 0.25,  # bottom 25th percentile of rolling vol → low-vol abstain
-    "ofi_z_neutral_band": 0.5,  # |OFI_Z| < 0.5 → no directional pressure
-    "trend_stability_min": 0.45,  # Hurst < 0.45 → choppy, no trend
-    "liquidity_vacuum_max": 2.0,  # spread > 2x median → thin liquidity, no trade
+    "vol_regime_low_pct": 0.25,  # bottom 25th percentile of rolling vol â†’ low-vol abstain
+    "ofi_z_neutral_band": 0.5,  # |OFI_Z| < 0.5 â†’ no directional pressure
+    "trend_stability_min": 0.45,  # Hurst < 0.45 â†’ choppy, no trend
+    "liquidity_vacuum_max": 2.0,  # spread > 2x median â†’ thin liquidity, no trade
     "news_buffer_bars": 15,  # bars around high-impact events
     "min_atr_pips": 3.0,  # min ATR in pips; below = dead market
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # LABEL REGIME SCALING  -  wider barriers in high-vol, shorter horizons in MR
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LABEL_REGIME = {
     # Triple-barrier multipliers per regime
     "barrier_scale": {
         "high_vol": {
-            "tp_atr_mult": LABELING["profit_target_atr"] * 1.33,
-            "sl_atr_mult": LABELING["stop_loss_atr"] * 1.66,
-            "horizon_mult": 0.7,
+            "tp_atr_mult": LABELING["profit_target_atr"],
+            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "horizon_mult": 0.2,
         },
         "normal": {
             "tp_atr_mult": LABELING["profit_target_atr"],
@@ -961,19 +959,19 @@ LABEL_REGIME = {
             "horizon_mult": 1.0,
         },
         "low_vol": {
-            "tp_atr_mult": LABELING["profit_target_atr"] * 0.66,
-            "sl_atr_mult": LABELING["stop_loss_atr"] * 0.88,
-            "horizon_mult": 1.3,
+            "tp_atr_mult": LABELING["profit_target_atr"],
+            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "horizon_mult": 1.0,
         },
         "mean_rev": {
-            "tp_atr_mult": LABELING["profit_target_atr"] * 0.66,
-            "sl_atr_mult": LABELING["stop_loss_atr"] * 0.88,
-            "horizon_mult": 0.5,
+            "tp_atr_mult": LABELING["profit_target_atr"],
+            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "horizon_mult": 0.4,
         },
         "trending": {
-            "tp_atr_mult": LABELING["profit_target_atr"] * 1.33,
-            "sl_atr_mult": LABELING["stop_loss_atr"] * 1.33,
-            "horizon_mult": 1.5,
+            "tp_atr_mult": LABELING["profit_target_atr"],
+            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "horizon_mult": 0.667,
         },
     },
     # Vol regime boundaries (rolling vol percentiles)
@@ -989,7 +987,7 @@ LABEL_REGIME = {
         "london_ny": 0.85,  # most liquid overlap
         "off": 1.5,  # very wide off-hours
     },
-    # Optional session → label-horizon gate (overlaps/liquid slightly shorter;
+    # Optional session â†’ label-horizon gate (overlaps/liquid slightly shorter;
     # asia/off slightly longer). Multiplied with barrier_scale horizon_mult.
     "session_horizon_mult": {
         "asia": 1.15,
@@ -999,29 +997,29 @@ LABEL_REGIME = {
         "london_ny": 0.90,
         "off": 1.20,
     },
-    # Wide spreads → shorter horizon (liquidity risk). Applied after session.
+    # Wide spreads â†’ shorter horizon (liquidity risk). Applied after session.
     "spread_horizon": {
-        "z_wide": 1.5,  # spread_z above this → shorten
+        "z_wide": 1.5,  # spread_z above this â†’ shorten
         "wide_mult": 0.75,
-        "z_extreme": 2.5,  # very wide → much shorter
+        "z_extreme": 2.5,  # very wide â†’ much shorter
         "extreme_mult": 0.50,
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CURRICULUM TRAINING  -  variable sequence length + feature freeze schedule
 #
 # Schedule stubs must stay in sync with config/run.yaml (active). Feature name
 # lists live only in YAML - settings carries epoch_unfreeze / always_on only.
 # audit_settings_yaml_curriculum_drift() fails validate_run_config on drift.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 CURRICULUM = {
     # A3: Sequence-length schedule (bars per sample) - matches run.yaml
     "seq_schedule": [
         {"epoch_start": 0, "seq_len": 120},
     ],
     # A4: Feature group freeze schedule (unfreeze at epoch_unfreeze)
-    # Canonical feature lists: config/run.yaml → curriculum.feature_groups
+    # Canonical feature lists: config/run.yaml â†’ curriculum.feature_groups
     "feature_groups": {
         "core": {"epoch_unfreeze": 0, "always_on": True},
         "microstructure": {"epoch_unfreeze": 0, "always_on": True},
@@ -1036,23 +1034,21 @@ CURRICULUM = {
         "higher_timeframe": {"epoch_unfreeze": 5, "always_on": False},
         # label_quality: disabled in run.yaml (features not implemented)
     },
-    # A2: Chunk-level early stopping
-    "chunk_early_stop_patience": 3,  # abort if Sharpe drops for K chunks in a row
-    "chunk_early_stop_min_batches": 50,  # minimum batches before evaluating chunk Sharpe
+    # A2: Chunk-level early stopping removed.
     # B: Difficulty curriculum - per-bar max of session/spread/news/vol signals.
     # Active run.yaml opens at max_difficulty=2 (no staged ramp).
     "difficulty_schedule": [
         {"epoch_start": 0, "max_difficulty": 2},
     ],
     # Two-tier spread thresholds (medium / hard):
-    "difficulty_spread_threshold": 1.5,  # spread/median > this → medium (1)
-    "difficulty_spread_threshold_hard": 2.0,  # spread/median > this → hard  (2)
+    "difficulty_spread_threshold": 1.5,  # spread/median > this â†’ medium (1)
+    "difficulty_spread_threshold_hard": 2.0,  # spread/median > this â†’ hard  (2)
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # EXECUTION  -  latency, slippage, and infrastructure awareness
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 EXECUTION = {
     # F: Expected execution latency baseline.  Below this we have full edge;
     #    above it the cost of latency eats into the trade edge.
@@ -1069,9 +1065,9 @@ EXECUTION = {
     "slippage_spread_window": 120,  # bars for rolling median spread
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CONFIG PREFLIGHT VALIDATION
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 try:
     from config.config_schema import LiveRiskSchema, SizingSchema, TrainingSchema
 
@@ -1081,3 +1077,4 @@ try:
     _ = LiveRiskSchema(**LIVE_RISK)
 except ImportError:
     pass
+
