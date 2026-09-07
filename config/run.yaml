@@ -649,7 +649,7 @@ training:
   grad_clip: 0.75
   label_method: triple_barrier
   label_smoothing: 0.05
-  loss: sharpe_huber
+  loss: huber
   lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
@@ -673,7 +673,7 @@ training:
   #
   # Reference: sqrt(252 * 78 / 30) ≈ 25.6 (session) or
   #            sqrt(252 * 288 / 30) ≈ 49.2 (full-day FX)
-  sharpe_annualization_factor: null
+  sharpe_annualization_factor: 325.0
   fx_full_day: true  # FX is 24/5 — use full-day bars-per-day (288 for 5m)
   # Weight vs Huber: designed default in gpu_losses.py is 0.2.
   # Was 1.0 (5× too high) — Sharpe gradient dominated loss, causing early_peak
@@ -820,3 +820,4 @@ tabular:
   estimated_build_time: "2-3 hours (vs 9+ hours deep)"
   estimated_dataset_size: "~500 MB (vs 35 GB deep)"
   shared_with: "CatBoost and XGBoost share the same tabular Zarr (config/run_tabular.yaml)"
+
