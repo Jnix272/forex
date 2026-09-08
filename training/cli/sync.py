@@ -138,6 +138,10 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
             if features_sec.get(k) is not None:
                 _settings.FEATURE_SCALES[k] = features_sec[k]
 
+    pip_sec = cfg.get("pip_sizes")
+    if isinstance(pip_sec, dict):
+        _settings.PIP_SIZES.update(pip_sec)
+
     fc = cfg.get("feature_cache")
     if isinstance(fc, dict):
         _settings.FEATURE_CACHE.update(fc)
