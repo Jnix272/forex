@@ -323,32 +323,6 @@ pip_sizes:
   XAG: 0.001
   XAU: 0.1
   default: 0.0001
-# ── Per-regime TP/SL ATR multipliers (overrides settings.LABEL_REGIME) ───────
-# tp_atr_mult / sl_atr_mult scale the profit-target and stop-loss barriers
-# per detected market regime. horizon_mult scales the lookahead window.
-# Changing these requires a dataset rebuild (labels are baked at cache time).
-label_regime:
-  barrier_scale:
-    high_vol:
-      tp_atr_mult: 1.80   # wider TP — noisy market, give it room
-      sl_atr_mult: 1.20   # wider SL — avoid whipsaw stops
-      horizon_mult: 0.2
-    normal:
-      tp_atr_mult: 1.20
-      sl_atr_mult: 0.80
-      horizon_mult: 1.0
-    low_vol:
-      tp_atr_mult: 0.90   # tighter target — less price movement
-      sl_atr_mult: 0.70
-      horizon_mult: 1.0
-    mean_rev:
-      tp_atr_mult: 0.80   # quick scalp target on reversion
-      sl_atr_mult: 0.60   # tight stop — wrong means exit fast
-      horizon_mult: 0.4
-    trending:
-      tp_atr_mult: 2.00   # let trend runners run
-      sl_atr_mult: 0.80   # tight stop — trend is your friend
-      horizon_mult: 0.667
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
 direction_training:
   label_smoothing: 0.05
