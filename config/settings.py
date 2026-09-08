@@ -946,31 +946,38 @@ NO_TRADE = {
 # LABEL REGIME SCALING  -  wider barriers in high-vol, shorter horizons in MR
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LABEL_REGIME = {
-    # Triple-barrier multipliers per regime
+    # Per-regime TP/SL ATR multipliers and lookahead horizon.
+    # tp/sl are multiples of the base LABELING["profit_target_atr"] / ["stop_loss_atr"].
+    # high_vol: wider barriers — price swings far, need room to breathe;
+    #           short horizon so we don't chase a mean-reverting spike.
+    # trending: asymmetric — let winners run (wide TP), tight stop to cut losers fast.
+    # mean_rev: tight both sides — quick in-and-out scalp on the reversion.
+    # low_vol:  slightly narrowed — less price movement, smaller realistic target.
+    # normal:   base values unchanged.
     "barrier_scale": {
         "high_vol": {
-            "tp_atr_mult": LABELING["profit_target_atr"],
-            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "tp_atr_mult": LABELING["profit_target_atr"] * 1.5,   # 1.80 — wider TP in noisy markets
+            "sl_atr_mult": LABELING["stop_loss_atr"] * 1.5,       # 1.20 — wider SL to avoid whipsaws
             "horizon_mult": 0.2,
         },
         "normal": {
-            "tp_atr_mult": LABELING["profit_target_atr"],
-            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "tp_atr_mult": LABELING["profit_target_atr"],          # 1.20
+            "sl_atr_mult": LABELING["stop_loss_atr"],              # 0.80
             "horizon_mult": 1.0,
         },
         "low_vol": {
-            "tp_atr_mult": LABELING["profit_target_atr"],
-            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "tp_atr_mult": LABELING["profit_target_atr"] * 0.75,  # 0.90 — tighter target, less room
+            "sl_atr_mult": LABELING["stop_loss_atr"] * 0.875,     # 0.70 — tighter stop too
             "horizon_mult": 1.0,
         },
         "mean_rev": {
-            "tp_atr_mult": LABELING["profit_target_atr"],
-            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "tp_atr_mult": LABELING["profit_target_atr"] * 0.667, # 0.80 — quick scalp target
+            "sl_atr_mult": LABELING["stop_loss_atr"] * 0.75,      # 0.60 — tight stop; if it goes wrong, exit
             "horizon_mult": 0.4,
         },
         "trending": {
-            "tp_atr_mult": LABELING["profit_target_atr"],
-            "sl_atr_mult": LABELING["stop_loss_atr"],
+            "tp_atr_mult": LABELING["profit_target_atr"] * 1.667, # 2.00 — let trend runners run
+            "sl_atr_mult": LABELING["stop_loss_atr"],             # 0.80 — keep stop tight; trend is your friend
             "horizon_mult": 0.667,
         },
     },

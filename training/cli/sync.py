@@ -142,6 +142,14 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     if isinstance(pip_sec, dict):
         _settings.PIP_SIZES.update(pip_sec)
 
+    lr_sec = cfg.get("label_regime")
+    if isinstance(lr_sec, dict):
+        bs = lr_sec.get("barrier_scale")
+        if isinstance(bs, dict):
+            for regime, regime_cfg in bs.items():
+                if isinstance(regime_cfg, dict):
+                    _settings.LABEL_REGIME["barrier_scale"].setdefault(regime, {}).update(regime_cfg)
+
     fc = cfg.get("feature_cache")
     if isinstance(fc, dict):
         _settings.FEATURE_CACHE.update(fc)
