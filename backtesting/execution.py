@@ -329,18 +329,23 @@ class LimitOrderBook:
         liquidity_flag: str,
     ):
         """Record a fill event."""
-        Fill(
+        fill = Fill(
             fill_id=self._fill_id_counter,
             order_id=taker_order_id,
             timestamp=datetime.now(),
             price=price,
             quantity=quantity,
-            fee=0.0,  # would be calculated separately
+            fee=0.0,
             liquidity_flag=liquidity_flag,
-            queue_position=0,  # would track queue position at fill
+            queue_position=0,
         )
         self._fill_id_counter += 1
-        # Would add to order.fills in real implementation
+        taker_order = self.active_orders.get(taker_order_id)
+        if taker_order is not None:
+            taker_order.fills.append(fill)
+        maker_order = self.active_orders.get(maker_order_id)
+        if maker_order is not None:
+            maker_order.fills.append(fill)
 
     def _update_order_after_fill(self, order: Order, fill_qty: float, fill_price: float, timestamp: datetime):
         """Update resting order after partial fill."""
@@ -951,6 +956,7 @@ class AdvancedBacktestEngine:
         """Reset mutable simulation state so run() is idempotent."""
         self.position = 0.0
         self.avg_entry = 0.0
+        self._entry_time = None  # tracked so Trade records have correct entry_time
         self.equity = self._initial_equity
         self.trades: list[Trade] = []
         self.orders: dict[int, Order] = {}
@@ -1019,7 +1025,8 @@ class AdvancedBacktestEngine:
         cost = lots * self._commission_per_lot
         self.equity += (pnl_usd - cost)
         self._trade_id += 1
-        entry_ts = pd.Timestamp(ts) if pd is not None else ts
+        exit_ts = pd.Timestamp(ts) if pd is not None else ts
+        entry_ts = self._entry_time if self._entry_time is not None else exit_ts
         self.trades.append(
             Trade(
                 trade_id=self._trade_id,
@@ -1029,7 +1036,7 @@ class AdvancedBacktestEngine:
                 direction=direction,
                 stop_loss=0.0,
                 take_profit=0.0,
-                exit_time=entry_ts,
+                exit_time=exit_ts,
                 exit_price=fill_price,
                 exit_lots=lots,
                 pnl_pips=float(pnl_pips),
@@ -1098,7 +1105,9 @@ class AdvancedBacktestEngine:
         equity_curve = []
         for i in iterator:
             bar = get_bar(i)
-            sig = get_sig(i)
+            # 1-bar execution delay: signal from bar i-1 executes at bar i.
+            # This prevents look-ahead bias when signals use bar-close data.
+            sig = get_sig(i - 1) if i > 0 else get_sig(0)
             ts = get_ts(i)
             if pd is not None and isinstance(ts, pd.Timestamp):
                 ts_dt = ts.to_pydatetime()
@@ -1157,6 +1166,7 @@ class AdvancedBacktestEngine:
                 if order.filled_qty > 0:
                     self.position = desired
                     self.avg_entry = float(order.avg_fill_price)
+                    self._entry_time = ts_dt  # record for Trade.entry_time at close
                     self.orders[order.order_id] = order
                     cost = abs(desired) * self._commission_per_lot
                     self.equity -= cost

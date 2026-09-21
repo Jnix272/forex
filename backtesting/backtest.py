@@ -238,7 +238,10 @@ class ForexScalingBacktest:
         self.max_drawdown_limit = max_drawdown_limit
         self.min_spread_clamp = min_spread_clamp
         self.max_spread_clamp = max_spread_clamp
-        self.bars_per_year = float(bars_per_year) if bars_per_year else (252.0 * 24.0 * 60.0)
+        # Default: 5m full-day FX = 252 * 288. Callers should pass the correct value
+        # explicitly; the old default of 252*24*60=362,880 (1-min bars) inflated
+        # annualised Sharpe by sqrt(288/78)≈1.9x for 5m session bars.
+        self.bars_per_year = float(bars_per_year) if bars_per_year else (252.0 * 288.0)
         self._rf_per_bar = risk_free_rate / self.bars_per_year
         self._risk_free_rate = risk_free_rate
         self._volatility_adaptive_slippage = volatility_adaptive_slippage
@@ -1279,7 +1282,7 @@ class ForexScalingBacktest:
             res_drawdown[i] = drawdown
             res_holding[i] = self.holding_bars
 
-            if drawdown > self.max_drawdown_limit or self.equity <= 0:
+            if drawdown > self.max_drawdown_limit or (self.equity + unrealised) <= 0:
                 if self.position != 0:
                     reason = "margin_call" if self.equity <= 0 else "circuit_breaker"
                     self._close_position(i, 1.0, reason)
@@ -1378,11 +1381,11 @@ class ForexScalingBacktest:
             if er_std > 1e-12:
                 sharpe = float(np.mean(excess_returns) / er_std) * ann_factor
 
-        downside_returns = excess_returns[excess_returns < 0]
-        if len(downside_returns) > 1:
-            ds_std = float(np.std(downside_returns, ddof=1))
-            if ds_std > 1e-12:
-                sortino = float(np.mean(excess_returns) / ds_std) * ann_factor
+        # Sortino: semi-deviation (std of min(r, 0) over all bars, not just negative subset)
+        downside_sq = np.minimum(excess_returns, 0.0) ** 2
+        ds_std = float(np.sqrt(np.mean(downside_sq)))
+        if ds_std > 1e-12:
+            sortino = float(np.mean(excess_returns) / ds_std) * ann_factor
 
         rolling_max = np.maximum.accumulate(equity_arr)
         drawdowns = (rolling_max - equity_arr) / (rolling_max + 1e-9)
@@ -1448,18 +1451,17 @@ class ForexScalingBacktest:
             if er_std > 1e-12:
                 sharpe = float(np.mean(excess_returns) / er_std * ann_factor)
 
-        downside = excess_returns[excess_returns < 0]
-        if len(downside) > 1:
-            ds_std = float(np.std(downside, ddof=1))
-            if ds_std > 1e-12:
-                sortino = float(np.mean(excess_returns) / ds_std * ann_factor)
+        _downside_sq = np.minimum(excess_returns, 0.0) ** 2
+        _ds_std = float(np.sqrt(np.mean(_downside_sq)))
+        if _ds_std > 1e-12:
+            sortino = float(np.mean(excess_returns) / _ds_std * ann_factor)
 
         rolling_max = np.maximum.accumulate(equity_arr)
         max_dd = float(((rolling_max - equity_arr) / (rolling_max + 1e-9)).max()) if len(equity_arr) else 0.0
 
         return {
             "total_return_pct": (self.equity / self.initial_equity - 1) * 100,
-            "gross_pnl_usd": net_pnl,
+            "gross_pnl_usd": None,  # not tracked in equity-curve-only path
             "total_pnl_usd": net_pnl,
             "total_commission_usd": 0.0,
             "net_pnl_usd": net_pnl,

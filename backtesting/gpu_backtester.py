@@ -56,23 +56,27 @@ class GPUBacktester:
         denom_prev = self.xp.maximum(d_prices[:-1], 1e-12)
         d_returns = self.xp.diff(d_prices) / denom_prev
 
-        # BUG-007: Proper 1-bar lag - signal[i] trades return[i+1], not return[i].
-        # d_returns[i] is the return from bar i to i+1. signal[i] is the signal from bar i.
-        # To execute at bar i+1 open, we need return from i+1 to i+2 = d_returns[i+1]
-        d_positions = d_signals[:-2]
+        # 1-bar execution lag: signal[i] executes at bar i+1 open, earning return[i+1].
+        # d_returns[i] = (prices[i+1]-prices[i])/prices[i], so d_returns[1:] gives the
+        # return *after* execution. Align: positions from signals[:-1], returns from d_returns[1:].
+        # d_signals[:-1] has length N-1; d_returns[1:] has length N-2 → trim both to N-2
+        d_positions = d_signals[:-1] * lot_size
         d_returns = d_returns[1:]
+        min_len = min(len(d_positions), len(d_returns))
+        d_positions = d_positions[:min_len]
+        d_returns = d_returns[:min_len]
 
-        # Strategy returns
+        # Strategy returns (position already scaled by lot_size)
         d_strat_returns = d_positions * d_returns
 
-        # Denominator for transaction cost fractions
-        denom_mid = self.xp.maximum(d_prices[1:-1], 1e-12)
+        # Denominator for transaction cost fractions (use price at execution bar)
+        denom_mid = self.xp.maximum(d_prices[2:2 + min_len], 1e-12)
 
         # Incorporate spread costs whenever position changes
         d_trades = self.xp.abs(self.xp.diff(d_positions, prepend=0))
         d_spread_costs = d_trades * ((spread * 0.5) / denom_mid)
 
-        # Commission: per lot per trade (scaled by standard lot notional 100,000 * price)
+        # Commission: per lot per trade (lot_size already baked into d_positions/d_trades)
         d_commission = d_trades * (commission_per_lot / (100_000.0 * denom_mid))
 
         # Slippage: fixed pips per trade
