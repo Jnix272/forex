@@ -93,8 +93,11 @@ def resolve_checkpoint_paths(
 
     candidates = [
         ("production", ckpt_dir / PRODUCTION_CHECKPOINT),
+        ("ensemble_meta", ckpt_dir / model / f"{model}_meta_best.pt"),
         ("model_best", ckpt_dir / f"{model}_best.pt"),
         ("nested", ckpt_dir / model / f"{model}_best.pt"),
+        ("repo_nested", PROJECT_ROOT / "checkpoints" / model / f"{model}_best.pt"),
+        ("repo_meta", PROJECT_ROOT / "checkpoints" / model / f"{model}_meta_best.pt"),
         ("legacy_flat", PROJECT_ROOT / "checkpoints" / f"{model}_best.pt"),
     ]
 

@@ -503,13 +503,19 @@ class ForexScalingBacktest:
             self._open_trade.gross_pnl_usd += gross_pnl_usd
             self._open_trade.commission += cost
             self._open_trade.pnl_usd = self._open_trade.gross_pnl_usd - self._open_trade.commission
+            prev_exit_lots = self._open_trade.exit_lots if self._open_trade.exit_lots is not None else 0.0
+            new_exit_lots = prev_exit_lots + close_lots
+            prev_exit_px = self._open_trade.exit_price if self._open_trade.exit_price is not None else 0.0
+            if new_exit_lots > 0:
+                self._open_trade.exit_price = (prev_exit_px * prev_exit_lots + exec_price * close_lots) / new_exit_lots
+            self._open_trade.exit_lots = new_exit_lots
+            if new_exit_lots > 0 and self.pip_value_per_lot > 0:
+                self._open_trade.pnl_pips = self._open_trade.gross_pnl_usd / (self.pip_value_per_lot * new_exit_lots)
+
         if abs(self.position) < 0.001:
             self.position = 0.0
             if self._open_trade:
                 self._open_trade.exit_time = self._bar_timestamp(idx)
-                self._open_trade.exit_price = exec_price
-                self._open_trade.exit_lots = close_lots
-                self._open_trade.pnl_pips = pnl_pips
                 self._open_trade.exit_reason = exit_reason
                 self.trades.append(self._open_trade)
                 self._open_trade = None
@@ -523,11 +529,13 @@ class ForexScalingBacktest:
         """
         Check if price has hit stop-loss or take-profit during current bar.
         Returns True if position was closed.
+        Clamps fills to opening price on gap bars (BUG-05 fix).
         """
         if self.position == 0:
             return False
 
         direction = np.sign(self.position)
+        open_px = self._arr_open[idx] if self._arr_open is not None else self._arr_close[idx]
 
         stop_ok = (
             self.current_stop is not None and np.isfinite(float(self.current_stop)) and float(self.current_stop) > 0.0
@@ -535,23 +543,23 @@ class ForexScalingBacktest:
         tp_ok = self.current_tp is not None and np.isfinite(float(self.current_tp)) and float(self.current_tp) > 0.0
 
         if stop_ok and direction > 0 and self._arr_low[idx] <= self.current_stop:
-            exec_px = self.current_stop - self.slippage_pips * self.pip_size
+            exec_px = min(open_px, self.current_stop) - self.slippage_pips * self.pip_size
             self._close_position(idx, fraction=1.0, exit_reason="stop_loss", override_price=exec_px)
             return True
         if stop_ok and direction < 0 and self._arr_high[idx] >= self.current_stop:
-            exec_px = self.current_stop + self.slippage_pips * self.pip_size
+            exec_px = max(open_px, self.current_stop) + self.slippage_pips * self.pip_size
             self._close_position(idx, fraction=1.0, exit_reason="stop_loss", override_price=exec_px)
             return True
 
         if tp_ok and direction > 0 and self._arr_high[idx] >= self.current_tp:
-            exec_px = self.current_tp - self.slippage_pips * self.pip_size
+            exec_px = max(open_px, self.current_tp) - self.slippage_pips * self.pip_size
             self._close_position(idx, fraction=0.5, exit_reason="scale_out_tp", override_price=exec_px)
             if self.position != 0:
                 self.current_stop = max(self.current_stop, self.avg_entry_price)
             return False
 
         if tp_ok and direction < 0 and self._arr_low[idx] <= self.current_tp:
-            exec_px = self.current_tp + self.slippage_pips * self.pip_size
+            exec_px = min(open_px, self.current_tp) + self.slippage_pips * self.pip_size
             self._close_position(idx, fraction=0.5, exit_reason="scale_out_tp", override_price=exec_px)
             if self.position != 0:
                 self.current_stop = min(self.current_stop, self.avg_entry_price)
@@ -570,7 +578,7 @@ class ForexScalingBacktest:
         arr_bid,
         arr_ask,
         arr_spread,
-        arr_ts,
+        arr_open,
         sig_action,
         sig_sl,
         sig_tp,
@@ -637,7 +645,7 @@ class ForexScalingBacktest:
                     if direction > 0 and arr_low[i] <= current_stop:
                         if avg_entry_price != 0.0:
                             close_lots = abs(position)
-                            exec_price = current_stop - slippage_pips * pip_size
+                            exec_price = min(arr_open[i], current_stop) - slippage_pips * pip_size
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -649,7 +657,7 @@ class ForexScalingBacktest:
                     elif direction < 0 and arr_high[i] >= current_stop:
                         if avg_entry_price != 0.0:
                             close_lots = abs(position)
-                            exec_price = current_stop + slippage_pips * pip_size
+                            exec_price = max(arr_open[i], current_stop) + slippage_pips * pip_size
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -662,7 +670,7 @@ class ForexScalingBacktest:
                     if direction > 0 and arr_high[i] >= current_tp:
                         close_lots = abs(position) * 0.5
                         if avg_entry_price != 0.0:
-                            exec_price = current_tp - slippage_pips * pip_size
+                            exec_price = max(arr_open[i], current_tp) - slippage_pips * pip_size
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -676,7 +684,7 @@ class ForexScalingBacktest:
                     elif direction < 0 and arr_low[i] <= current_tp:
                         close_lots = abs(position) * 0.5
                         if avg_entry_price != 0.0:
-                            exec_price = current_tp + slippage_pips * pip_size
+                            exec_price = min(arr_open[i], current_tp) + slippage_pips * pip_size
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -687,9 +695,29 @@ class ForexScalingBacktest:
                             position = 0.0
                             holding_bars = 0
 
-            # Execute signal
-            if position == 0:
-                if action == 1:  # OPEN_LONG
+            # Execute signal (supports position flipping)
+            if action == 1:  # OPEN_LONG
+                # Flip: if short, close short first
+                if position < 0:
+                    close_lots = abs(position)
+                    if use_bid_ask:
+                        base_price = arr_ask[i]
+                        spread = arr_spread[i] if arr_spread[i] > 0 else (arr_ask[i] - arr_bid[i])
+                    else:
+                        spread = arr_spread[i] if arr_spread[i] > 0 else 0.0001
+                        base_price = arr_close[i] + 0.5 * spread
+                    slippage = 1.0 * slippage_pips * pip_size
+                    price = base_price + slippage
+                    cost = close_lots * commission_per_lot
+                    if avg_entry_price != 0.0:
+                        pnl_pips = -1.0 * (price - avg_entry_price) / pip_size
+                        gross_pnl = pnl_pips * pip_value_per_lot * close_lots
+                        equity += gross_pnl - cost
+                    position = 0.0
+                    avg_entry_price = 0.0
+                    holding_bars = 0
+
+                if position == 0:
                     if lots_to_trade > max_lots:
                         lots_to_trade = max_lots
                     if use_bid_ask:
@@ -713,7 +741,28 @@ class ForexScalingBacktest:
                     current_tp = take_profit
                     holding_bars = 0
 
-                elif action == 2:  # OPEN_SHORT
+            elif action == 2:  # OPEN_SHORT
+                # Flip: if long, close long first
+                if position > 0:
+                    close_lots = abs(position)
+                    if use_bid_ask:
+                        base_price = arr_bid[i]
+                        spread = arr_spread[i] if arr_spread[i] > 0 else (arr_ask[i] - arr_bid[i])
+                    else:
+                        spread = arr_spread[i] if arr_spread[i] > 0 else 0.0001
+                        base_price = arr_close[i] - 0.5 * spread
+                    slippage = -1.0 * slippage_pips * pip_size
+                    price = base_price + slippage
+                    cost = close_lots * commission_per_lot
+                    if avg_entry_price != 0.0:
+                        pnl_pips = 1.0 * (price - avg_entry_price) / pip_size
+                        gross_pnl = pnl_pips * pip_value_per_lot * close_lots
+                        equity += gross_pnl - cost
+                    position = 0.0
+                    avg_entry_price = 0.0
+                    holding_bars = 0
+
+                if position == 0:
                     if lots_to_trade > max_lots:
                         lots_to_trade = max_lots
                     if use_bid_ask:
@@ -926,7 +975,7 @@ class ForexScalingBacktest:
             res_hold[i] = holding_bars
             n_valid = i + 1
 
-            if drawdown > max_drawdown_limit:
+            if drawdown > max_drawdown_limit or equity <= 0.0:
                 if position != 0:
                     close_lots = abs(position)
                     direction = 1.0 if position > 0 else -1.0
@@ -1080,6 +1129,7 @@ class ForexScalingBacktest:
         arr_bid = self._arr_bid_close if self._arr_bid_close is not None else self._arr_close
         arr_ask = self._arr_ask_close if self._arr_ask_close is not None else self._arr_close
         arr_spread = self._arr_spread if self._arr_spread is not None else np.full(n_bars, 0.0001)
+        arr_open = self._arr_open if self._arr_open is not None else self._arr_close
 
         sig_action_f = self._sig_action.astype(np.float64)
         sig_sl_f = self._sig_sl.astype(np.float64)
@@ -1093,7 +1143,7 @@ class ForexScalingBacktest:
             arr_bid,
             arr_ask,
             arr_spread,
-            self._arr_ts,
+            arr_open,
             sig_action_f,
             sig_sl_f,
             sig_tp_f,
@@ -1116,12 +1166,20 @@ class ForexScalingBacktest:
         )
 
         if n_valid > 0:
-            self.equity = float(res_eq[-1])
-            self.position = float(res_pos[-1])
-        self.equity_curve = equity_curve.tolist()
+            self.equity = float(res_eq[n_valid - 1])
+            self.position = float(res_pos[n_valid - 1])
+        self.equity_curve = equity_curve[:n_valid].tolist()
 
         res_ts = self._arr_ts[:n_valid]
-        self.results_df = self._build_results_df(res_ts, res_eq, res_unreal, res_total, res_pos, res_dd, res_hold)
+        self.results_df = self._build_results_df(
+            res_ts,
+            res_eq[:n_valid],
+            res_unreal[:n_valid],
+            res_total[:n_valid],
+            res_pos[:n_valid],
+            res_dd[:n_valid],
+            res_hold[:n_valid],
+        )
         return self.results_df
 
     def _run_python_path(self, n_bars: int):
@@ -1164,10 +1222,16 @@ class ForexScalingBacktest:
             stopped = self._check_stops(i)
 
             if not stopped:
-                if action == ScalingAction.OPEN_LONG and self.position == 0:
-                    self._open_position(i, +1, lots_to_trade, stop_loss, take_profit)
-                elif action == ScalingAction.OPEN_SHORT and self.position == 0:
-                    self._open_position(i, -1, lots_to_trade, stop_loss, take_profit)
+                if action == ScalingAction.OPEN_LONG:
+                    if self.position < 0:
+                        self._close_position(i, 1.0, "flip_to_long")
+                    if self.position == 0:
+                        self._open_position(i, +1, lots_to_trade, stop_loss, take_profit)
+                elif action == ScalingAction.OPEN_SHORT:
+                    if self.position > 0:
+                        self._close_position(i, 1.0, "flip_to_short")
+                    if self.position == 0:
+                        self._open_position(i, -1, lots_to_trade, stop_loss, take_profit)
                 elif action == ScalingAction.SCALE_IN_25 and self.position != 0:
                     self._scale_in(i, lots_to_trade * 0.25)
                 elif action == ScalingAction.SCALE_IN_50 and self.position != 0:
@@ -1215,8 +1279,10 @@ class ForexScalingBacktest:
             res_drawdown[i] = drawdown
             res_holding[i] = self.holding_bars
 
-            if drawdown > self.max_drawdown_limit:
-                self._close_position(i, 1.0, "circuit_breaker")
+            if drawdown > self.max_drawdown_limit or self.equity <= 0:
+                if self.position != 0:
+                    reason = "margin_call" if self.equity <= 0 else "circuit_breaker"
+                    self._close_position(i, 1.0, reason)
                 res_equity[i] = self.equity
                 res_unrealised[i] = 0.0
                 res_total[i] = self.equity

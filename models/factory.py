@@ -30,8 +30,28 @@ def _strict_load_report(model, state_dict, context_name="Model", min_frac_loaded
     target_state = model.state_dict()
     missing = [k for k in target_state if k not in state_dict]
     unexpected = [k for k in state_dict if k not in target_state]
+    def _param_shape(p):
+        if getattr(p, "_is_uninitialized", False) or p.__class__.__name__ == "UninitializedParameter":
+            return None
+        try:
+            return tuple(p.shape)
+        except Exception:
+            return None
+
+    def _safe_numel(p, fallback_tensor=None):
+        if getattr(p, "_is_uninitialized", False) or p.__class__.__name__ == "UninitializedParameter":
+            return fallback_tensor.numel() if fallback_tensor is not None else 0
+        try:
+            return p.numel()
+        except Exception:
+            return 0
+
     shape_mismatch = [
-        k for k in target_state if k in state_dict and tuple(state_dict[k].shape) != tuple(target_state[k].shape)
+        k
+        for k in target_state
+        if k in state_dict
+        and _param_shape(target_state[k]) is not None
+        and tuple(state_dict[k].shape) != _param_shape(target_state[k])
     ]
 
     try:
@@ -44,10 +64,13 @@ def _strict_load_report(model, state_dict, context_name="Model", min_frac_loaded
         pass
 
     loaded_keys = {
-        key for key in target_state if key in state_dict and tuple(state_dict[key].shape) == tuple(target_state[key].shape)
+        key
+        for key in target_state
+        if key in state_dict
+        and (_param_shape(target_state[key]) is None or tuple(state_dict[key].shape) == _param_shape(target_state[key]))
     }
-    n_target = sum(t.numel() for t in target_state.values())
-    n_loaded = sum(target_state[k].numel() for k in loaded_keys)
+    n_target = sum(_safe_numel(t, state_dict.get(k)) for k, t in target_state.items())
+    n_loaded = sum(_safe_numel(target_state[k], state_dict.get(k)) for k in loaded_keys)
     frac_loaded = float(n_loaded / n_target) if n_target else 1.0
 
     if missing or unexpected or shape_mismatch:

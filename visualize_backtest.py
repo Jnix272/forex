@@ -66,10 +66,12 @@ def load_real_backtest_logs(model: str) -> tuple[pd.DataFrame, pd.DataFrame, dic
         try:
             trades_df = pd.read_csv(trades_files[0])
             equity_df = pd.read_csv(equity_files[0])
-            if "timestamp" in trades_df.columns:
+            if "entry_time" in trades_df.columns:
                 trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"])
-                if "exit_time" in trades_df.columns:
-                    trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
+            elif "timestamp" in trades_df.columns:
+                trades_df["entry_time"] = pd.to_datetime(trades_df["timestamp"])
+            if "exit_time" in trades_df.columns:
+                trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
             if "timestamp" in equity_df.columns:
                 equity_df = equity_df.set_index(pd.to_datetime(equity_df["timestamp"]))
 

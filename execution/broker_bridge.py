@@ -179,9 +179,10 @@ class BrokerBridge:
 
         if self.broker == "IBKR":
             contract = self._ibkr_fx_contract(symbol)
-            action = "BUY" if side.upper() == "BUY" else "SELL"
-            # IB FX size is usually in base-currency units (not MT5 lots).
-            qty = float(lot_size)
+            # IB FX size is in base-currency units (e.g. 100,000 for 1.0 standard lot).
+            # If caller passes lot count (e.g. 0.1 to 50 lots), convert to units.
+            unit_mult = float(self.config.get("units_per_lot", 100_000.0))
+            qty = float(lot_size) if float(lot_size) >= 1000.0 else float(lot_size) * unit_mult
             if limit_price is not None:
                 order = LimitOrder(action, qty, float(limit_price))
             else:
@@ -338,6 +339,7 @@ class BrokerBridge:
 
         if self.broker == "IBKR":
             out = []
+            unit_mult = float(self.config.get("units_per_lot", 100_000.0))
             for pos in self._ib.positions():
                 qty = float(pos.position)
                 if qty == 0:
@@ -347,7 +349,7 @@ class BrokerBridge:
                     {
                         "ticket": int(getattr(pos.contract, "conId", 0) or 0),
                         "symbol": str(sym).replace(".", ""),
-                        "volume": abs(qty),
+                        "volume": abs(qty) / unit_mult,
                         "type": "BUY" if qty > 0 else "SELL",
                         "price_open": float(getattr(pos, "avgCost", 0.0) or 0.0),
                         "sl": None,

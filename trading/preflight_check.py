@@ -151,20 +151,24 @@ def check_risk_limits(report: ReadinessReport, config: dict) -> None:
 
         report.risk_limits_loaded = True
 
-        max_dd = risk_cfg.get("max_drawdown_pct", 0)
-        kelly_frac = risk_cfg.get("kelly_fraction", 0)
-        max_pos = risk_cfg.get("max_position_size", 0)
-        risk_pct = risk_cfg.get("risk_pct", 0)
+        max_dd = float(risk_cfg.get("max_drawdown_halt", risk_cfg.get("max_drawdown_pct", 0)) or 0)
+        if 0 < max_dd <= 1.0:
+            max_dd *= 100.0
+        kelly_frac = float(risk_cfg.get("kelly_fraction", 0) or 0)
+        max_pos = float(risk_cfg.get("max_total_lots", risk_cfg.get("max_position_size", 0)) or 0)
+        risk_pct = float(risk_cfg.get("max_position_pct", risk_cfg.get("risk_pct", 0)) or 0)
+        if 0 < risk_pct <= 1.0:
+            risk_pct *= 100.0
 
         issues = []
         if max_dd <= 0 or max_dd > 50:
-            issues.append(f"max_drawdown_pct={max_dd} out of sane range (0,50]")
+            issues.append(f"max_drawdown={max_dd} out of sane range (0,50]")
         if kelly_frac <= 0 or kelly_frac > 1.0:
             issues.append(f"kelly_fraction={kelly_frac} out of range (0,1]")
         if max_pos <= 0:
-            issues.append(f"max_position_size={max_pos} must be positive")
+            issues.append(f"max_position_size/max_total_lots={max_pos} must be positive")
         if risk_pct <= 0 or risk_pct > 10:
-            issues.append(f"risk_pct={risk_pct} out of sane range (0,10]")
+            issues.append(f"risk_pct/max_position_pct={risk_pct} out of sane range (0,10]")
 
         if issues:
             for issue in issues:

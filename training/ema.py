@@ -51,4 +51,7 @@ class ExponentialMovingAverage:
         """
         with torch.no_grad():
             for param_q, param_k in zip(online_network.parameters(), target_network.parameters(), strict=False):
+                if param_k.shape != param_q.shape:
+                    param_k.data = param_q.data.clone()
+                    continue
                 param_k.data = param_k.data * alpha + param_q.data * (1.0 - alpha)

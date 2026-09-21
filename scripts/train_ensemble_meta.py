@@ -32,12 +32,19 @@ from training.cache_integrity import _on_disk_sequence_count, _trainable_max_ind
 from training.gpu_datasets import ZarrStreamDataset
 from training.model_factory import build_model
 
-DEFAULT_CACHE = (
-    ROOT
-    / "data"
-    / "processed"
-    / "dataset_AUDUSD-EURGBP-EURJPY-EURUSD-GBPJPY-GBPUSD-NZDUSD-USDCAD-USDCHF-USDJPY_20000000_dukascopy_60_rl_reward.zarr"
-)
+def _find_default_cache() -> Path:
+    caches = sorted((ROOT / "data" / "processed").glob("dataset_scalping_*.zarr"))
+    if caches:
+        return caches[0]
+    return (
+        ROOT
+        / "data"
+        / "processed"
+        / "dataset_scalping_5m_EURUSD-GBPUSD-USDCAD-USDJPY_20000000_dukascopy_120_cpar_reward_lh30_tp1.2_sl0.8_exec1_lexit-bid_ask_wu14_fmfe0a2838_lr5213b8_news-calendar_ca-auto-auto_2008-01-01_2025-12-30.zarr"
+    )
+
+
+DEFAULT_CACHE = _find_default_cache()
 
 
 def log(message: str) -> None:
@@ -98,8 +105,23 @@ def resolve_checkpoint(model_name: str, checkpoint_dir: Path) -> Path | None:
         if path.exists():
             return path
     model_dir = checkpoint_dir / model_name
-    folds = sorted(model_dir.glob(f"{model_name}_fold*_best.pt"))
-    return folds[-1] if folds else None
+    if model_dir.exists():
+        folds = sorted(model_dir.glob(f"{model_name}_fold*_best.pt"))
+        if folds:
+            return folds[-1]
+    # Check for run-specific subdirectories (e.g. forex_4pair_2015_2025_haelt)
+    for run_dir in sorted(checkpoint_dir.glob(f"*{model_name}*")):
+        if run_dir.is_dir() and run_dir.name != "hpo":
+            best_candidate = run_dir / model_name / f"{model_name}_best.pt"
+            if best_candidate.exists():
+                return best_candidate
+            fold0_candidate = run_dir / model_name / f"{model_name}_fold0_best.pt"
+            if fold0_candidate.exists():
+                return fold0_candidate
+            folds = sorted((run_dir / model_name).glob(f"{model_name}_fold*_best.pt"))
+            if folds:
+                return folds[-1]
+    return None
 
 
 def load_training_config(model_name: str, ckpt_path: Path) -> dict:
@@ -268,6 +290,7 @@ def main() -> int:
     names = []
     configs = {}
     checkpoints = {}
+    base_seq_lens = []
     for name in args.models:
         ckpt = resolve_checkpoint(name, ckpt_dir)
         if ckpt is None:
@@ -283,6 +306,7 @@ def main() -> int:
         names.append(name)
         configs[name] = cfg.get("_config_path")
         checkpoints[name] = str(ckpt)
+        base_seq_lens.append(int(cfg.get("seq_len", seq_len)))
         log(f"  [EnsembleMeta] Loaded {name} from {ckpt}")
 
     if len(bases) < 2:
@@ -298,7 +322,9 @@ def main() -> int:
         pin_memory=False,
     )
 
-    meta = EnsembleMetaLearner(bases, context_dim=32, hidden=64, base_names=names).to(device)
+    meta = EnsembleMetaLearner(
+        bases, context_dim=32, hidden=64, base_names=names, base_seq_lens=base_seq_lens
+    ).to(device)
     log(f"[EnsembleMeta] Training on bases: {names}")
     history = train_meta_learner(
         meta=meta,

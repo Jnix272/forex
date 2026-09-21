@@ -472,6 +472,12 @@ multitask:
   focal_gamma: 2.0
   w_conf: 0.05
   w_ret: 0.08
+direction_training:
+  min_true_class_share: 0.02
+  min_pred_class_share: 0.0
+  max_pred_class_share: 1.0
+  min_recall: 0.0
+  probe: false
 # ── News/sentiment data sources (economic calendar, historical headlines) ───
 news:
   economic_calendar_file: data/raw/eco_calendar/events.csv

@@ -1,9 +1,12 @@
 {
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "forex-scaling-runtime",
   "version": "1.0.0",
+  "description": "High-performance C++20 inference runtime for Forex Scaling Model",
   "dependencies": [
     "cppzmq",
     "nlohmann-json",
     "onnxruntime"
   ]
 }
+

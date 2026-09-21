@@ -168,19 +168,16 @@ def deflated_sharpe_ratio(
 
 
 def _expected_max_of_normals(n: int) -> float:
+    """
+    Expected value of maximum of n independent standard normal variables.
+    Approximated via Marcos López de Prado (2014) Euler-Mascheroni analytic formula.
+    """
     if n <= 1:
         return 0.0
-    if n < 100:
-        # approximation via recursion E_n = E_{n-1} + pdf / cdf
-        mu = 0.0
-        for _ in range(2, n + 1):
-            mu += _norm_pdf(mu) / _norm_cdf(mu)
-        return mu
-    return (
-        math.sqrt(2.0 * math.log(n))
-        - (math.log(math.log(n)) + 2.0 * math.log(4.0 * math.pi)) / (2.0 * math.sqrt(2.0 * math.log(n)))
-        + 0.5 / math.sqrt(2.0 * math.log(n))
-    )
+    euler_mascheroni = 0.57721566490153286
+    p1 = 1.0 - 1.0 / n
+    p2 = 1.0 - 1.0 / (n * math.e)
+    return float((1.0 - euler_mascheroni) * _norm_ppf(p1) + euler_mascheroni * _norm_ppf(p2))
 
 
 def _norm_pdf(x: float) -> float:
@@ -206,7 +203,11 @@ def calmar_ratio(returns, annual_factor: float = 252) -> float:
     mdd = max_drawdown(r)
     if mdd <= 1e-9:
         return 0.0
-    cagr = float(np.prod(1.0 + r) ** (annual_factor / r.size) - 1.0)
+    total_wealth = float(np.prod(1.0 + r))
+    if total_wealth <= 0.0:
+        cagr = -1.0
+    else:
+        cagr = float(total_wealth ** (annual_factor / r.size) - 1.0)
     return float(cagr / mdd)
 
 
@@ -302,7 +303,7 @@ def backtest_metrics(backtest: Any, annual_factor: float = 252) -> dict[str, flo
         "max_drawdown": round(max_drawdown(r), 4),
         "skewness": round(sk, 4),
         "kurtosis": round(ku, 4),
-        "min_backtest_bars": round(minimum_backtest_length(sr, sk, ku), 2),
+        "min_backtest_bars": round(minimum_backtest_length(sr, sk, ku, annual_factor=annual_factor), 2),
         "n_obs": n,
     }
 

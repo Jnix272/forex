@@ -483,14 +483,17 @@ class LatencyModel:
 
     def sample_submission_latency(self) -> float:
         """Total latency from strategy decision to exchange receipt."""
-        if self.is_colocated:
-            net = self._rng.lognormal(
-                mean=np.log(self.network_mean_us / 10) - 0.5 * self.network_std_us**2, sigma=self.network_std_us
-            )
+        m = self.network_mean_us / 10.0 if self.is_colocated else self.network_mean_us
+        s = self.network_std_us / 10.0 if self.is_colocated else self.network_std_us
+        if m <= 0:
+            net = 0.0
+        elif s <= 0:
+            net = m
         else:
-            net = self._rng.lognormal(
-                mean=np.log(self.network_mean_us) - 0.5 * self.network_std_us**2, sigma=self.network_std_us
-            )
+            var_ratio = (s / m) ** 2
+            sigma = float(np.sqrt(np.log(1.0 + var_ratio)))
+            mu = float(np.log(m) - 0.5 * (sigma**2))
+            net = float(self._rng.lognormal(mean=mu, sigma=sigma))
         gateway = self.gateway_fixed_us + max(0, self._rng.normal(0, self.gateway_jitter_us))
         return max(0, net + gateway)
 
@@ -939,6 +942,7 @@ class AdvancedBacktestEngine:
         self._spread_pips = float(self.config.get("spread_pips", 0.8))
         # FIX E5: configurable pip_value_per_lot (was hard-coded as 10.0 USD/pip/lot)
         self._pip_value_per_lot = float(self.config.get("pip_value_per_lot", 10.0))
+        self._commission_per_lot = float(self.config.get("commission_per_lot", 0.0))
 
         # FIX E6: initialise mutable state via reset() so run() is idempotent
         self.reset()
@@ -1012,7 +1016,8 @@ class AdvancedBacktestEngine:
         pnl_pips = pnl_price / self._pip_size
         # FIX E5: use configurable pip_value_per_lot (was hard-coded 10.0)
         pnl_usd = pnl_pips * self._pip_value_per_lot * lots
-        self.equity += pnl_usd
+        cost = lots * self._commission_per_lot
+        self.equity += (pnl_usd - cost)
         self._trade_id += 1
         entry_ts = pd.Timestamp(ts) if pd is not None else ts
         self.trades.append(
@@ -1029,7 +1034,8 @@ class AdvancedBacktestEngine:
                 exit_lots=lots,
                 pnl_pips=float(pnl_pips),
                 gross_pnl_usd=float(pnl_usd),
-                pnl_usd=float(pnl_usd),
+                commission=float(cost),
+                pnl_usd=float(pnl_usd - cost),
                 exit_reason=reason,
             )
         )
@@ -1152,11 +1158,27 @@ class AdvancedBacktestEngine:
                     self.position = desired
                     self.avg_entry = float(order.avg_fill_price)
                     self.orders[order.order_id] = order
+                    cost = abs(desired) * self._commission_per_lot
+                    self.equity -= cost
 
+            if abs(self.position) > 1e-12:
+                dir_m = 1.0 if self.position > 0 else -1.0
+                unrealised_usd = (
+                    ((mid - self.avg_entry) / self._pip_size)
+                    * dir_m
+                    * abs(self.position)
+                    * self._pip_value_per_lot
+                )
+            else:
+                unrealised_usd = 0.0
+
+            total_equity = self.equity + unrealised_usd
             equity_curve.append(
                 {
                     "timestamp": ts,
-                    "equity": self.equity,
+                    "equity": total_equity,
+                    "cash": self.equity,
+                    "unrealised_pnl": unrealised_usd,
                     "position": self.position,
                     "mid": mid,
                 }

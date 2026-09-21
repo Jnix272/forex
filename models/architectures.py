@@ -15,6 +15,7 @@ Shared interface: forward(x) -> (batch,) scalars if num_classes==1, else (batch,
 import argparse
 import inspect
 import warnings
+from types import SimpleNamespace
 from typing import Any, cast
 
 try:
@@ -43,7 +44,7 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
         raise ValueError(f"Unknown model '{name}'. Options: {list(MODEL_REGISTRY)}")
 
     cls = MODEL_REGISTRY[base_name]
-    if isinstance(seq_len, argparse.Namespace):
+    if isinstance(seq_len, (argparse.Namespace, SimpleNamespace)):
         for k, v in vars(seq_len).items():
             if k not in kwargs:
                 kwargs[k] = v
@@ -58,6 +59,7 @@ def build_model(name: str, input_size: int, seq_len: Any | None = 60, **kwargs) 
 
     _ALIASES = {
         "hidden": "hidden_size",
+        "hidden_channels": "hidden",
         "heads": "nhead",
         "lstm_hidden": "hidden_size",
         "n_layers": "num_layers",
@@ -1148,7 +1150,7 @@ if TORCH:
         Time axis is mean-pooled; features are projected into n_nodes x chunk tokens.
         """
 
-        def __init__(self, input_size, hidden, num_layers, dropout, n_nodes=6, num_classes=1, nhead=4):
+        def __init__(self, input_size=64, hidden=64, num_layers=3, dropout=0.1, n_nodes=6, num_classes=1, nhead=4):
             super().__init__()
             chunk = max(8, (input_size + n_nodes - 1) // n_nodes)
             self.n_nodes = n_nodes

@@ -1681,6 +1681,7 @@ def supervised_train(
                     forgetting_threshold=float(getattr(args, "curriculum_forgetting_threshold", 0.15)),
                     easy_threshold=float(getattr(args, "curriculum_easy_threshold", 0.60)),
                     freeze_patience=int(getattr(args, "curriculum_freeze_patience", 1)),
+                    min_stable_sharpe=float((_adaptation_cfg or {}).get("min_stable_sharpe", 0.50)),
                 )
                 _curriculum_mgr = _CurriculumProvider(_curriculum_mgr)
                 print(f"[CurriculumManager] Enabled (mode={_cm_mode}) over {_cm_n:,} train samples")
@@ -1712,7 +1713,7 @@ def supervised_train(
     if _lw_models:
         _lw_allowed = model_name.lower() in [m.strip().lower() for m in _lw_models.split(",")]
 
-    _ema_model = copy.deepcopy(_core_model(model)).to(device)
+    _ema_model = None
 
     # ── Dynamic early-stop state ──────────────────────────────────────────────
     # Composite EMA score: lower is better (val_loss dominates, sharpe subtracts)
@@ -2134,7 +2135,9 @@ def supervised_train(
                 _swa_model.update_parameters(model)
                 _swa_scheduler.step()
 
-        if _ema_model is not None:
+        if _ema_model is None:
+            _ema_model = copy.deepcopy(_core_model(model)).to(device)
+        else:
             ExponentialMovingAverage.update_module(_core_model(model), _ema_model, alpha=0.99)
 
         lr = opt.param_groups[0]["lr"]
@@ -2203,8 +2206,8 @@ def supervised_train(
                     f"recall={[round(float(r), 4) for r in _class_diag.get('recall', [])]}. "
                     f"Diagnostics -> {_diag_path}"
                 )
-                if getattr(args, "ignore_preflight", False) or getattr(args, "quick_mode", False):
-                    print(f"{_msg} (continuing under quick/ignore-preflight)")
+                if getattr(args, "ignore_preflight", False) or getattr(args, "quick_mode", False) or getattr(args, "direction_warmup_soft_gate", True):
+                    print(f"{_msg} (continuing under warmup adaptation)")
                 else:
                     raise RuntimeError(_msg)
 

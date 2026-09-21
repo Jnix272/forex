@@ -202,7 +202,7 @@ def _apply_training_profile(args, model_name: str, cli_overrides: frozenset, log
         features_report[label] = {"mode": val, "source": source}
 
     for dest, value in training_fields.items():
-        if dest in cli_overrides or not hasattr(args, dest):
+        if dest in cli_overrides:
             continue
         setattr(args, dest, value)
         log_parts.append(f"{dest}={value}")

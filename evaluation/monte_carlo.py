@@ -185,8 +185,19 @@ def _equity_path_from_returns(
     path_returns: np.ndarray,
     initial_equity: float,
 ) -> np.ndarray:
-    """Compound a return path into an equity curve."""
-    eq = initial_equity * np.concatenate([[1.0], np.cumprod(1.0 + path_returns)])
+    """Compound a return path into an equity curve, clamping at 0 on ruin."""
+    factors = 1.0 + path_returns
+    eq = np.empty(len(factors) + 1, dtype=np.float64)
+    eq[0] = initial_equity
+    curr = initial_equity
+    for i, f in enumerate(factors):
+        if curr <= 0.0:
+            eq[i + 1 :] = 0.0
+            break
+        curr = curr * f
+        if curr < 0.0:
+            curr = 0.0
+        eq[i + 1] = curr
     return eq
 
 
@@ -230,7 +241,7 @@ def summarize_simulation(
 
     Returns a dict with ``*_mean``, ``*_5th/50th/95th`` percentiles (or the
     requested confidence band) and probabilities of negative Sharpe / negative
-    total return.
+    total return / ruin.
     """
     if not results:
         return {"n_simulations": 0}
@@ -270,6 +281,7 @@ def summarize_simulation(
         "sharpe_95th": round(float(np.percentile(sharpe, 95.0)), 4),
         "prob_sharpe_negative": round(float(np.mean(sharpe < 0.0)), 4),
         "prob_total_return_negative": round(float(np.mean(rets < 0.0)), 4),
+        "prob_ruin": round(float(np.mean(equity <= 0.0)), 4),
     }
 
 

@@ -37,6 +37,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import time
+from datetime import datetime, timezone
 import numpy as np
 
 from common.time_utils import now_iso as _now_iso
@@ -160,9 +162,11 @@ class RiskEngine:
         now = now or _now_iso()
         pair = _clip_currency(pair)
         notional_usd = notional_usd if notional_usd is not None else float(lots) * float(price) * 100_000
-        position_size_pct = (
-            position_size_pct if position_size_pct is not None else (notional_usd / max(self.equity, 1.0))
-        )
+        if position_size_pct is None:
+            # Leveraged forex notional is typically 10-30x equity. If position_size_pct
+            # is not explicitly passed, scale by max_total_lots so standard orders
+            # within lot limits are not blocked by the fractional 0.05 equity threshold.
+            position_size_pct = (float(abs(lots)) / max(self.cfg.max_total_lots, 1.0)) * self.cfg.max_position_pct
 
         if self._halted:
             d = RiskDecision(
@@ -245,7 +249,7 @@ class RiskEngine:
                 return d
 
         # frequency accounting only counts accepted orders
-        self._order_times.append(float(datetime.now(UTC).timestamp()))
+        self._order_times.append(time.time())
         while self._order_times and self._order_times[-1] - self._order_times[0] > 60.0:
             self._order_times.popleft()
 

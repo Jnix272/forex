@@ -18,9 +18,30 @@ class CrossAssetFeatures:
 
         merged = dict(synthetic)
         if data is not None:
+            import pandas as pd
             for k, v in data.items():
+                if isinstance(v, pd.Series):
+                    df_v = v.to_frame(name=k).reset_index()
+                    df_v.columns = ["timestamp_utc", k]
+                    v = pl.from_pandas(df_v)
+                elif isinstance(v, pd.DataFrame):
+                    df_v = v.copy()
+                    if "timestamp_utc" not in df_v.columns:
+                        if df_v.index.name in ("timestamp_utc", "date", "Date", "time", "timestamp") or isinstance(df_v.index, pd.DatetimeIndex):
+                            df_v = df_v.reset_index()
+                    v = pl.from_pandas(df_v)
+                elif not isinstance(v, pl.DataFrame):
+                    continue
+
+                for date_col in ["Date", "date", "time", "timestamp", "datetime", "Datetime"]:
+                    if date_col in v.columns and "timestamp_utc" not in v.columns:
+                        v = v.rename({date_col: "timestamp_utc"})
+
                 if "timestamp_utc" in v.columns:
-                    v = v.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
+                    try:
+                        v = v.with_columns(pl.col("timestamp_utc").cast(bars["timestamp_utc"].dtype))
+                    except Exception:
+                        v = v.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
                 merged[k] = v
 
         # Start with bars
@@ -31,25 +52,36 @@ class CrossAssetFeatures:
 
         # Join assets
         for asset, s_df in merged.items():
-            # Rename value column to the asset name
-            if "value" in s_df.columns:
-                s_df = s_df.rename({"value": asset})
-            elif s_df.columns[-1] not in ["timestamp_utc", "Date", "date", "time", "timestamp"]:
-                s_df = s_df.rename({s_df.columns[-1]: asset})
+            if not isinstance(s_df, pl.DataFrame):
+                continue
 
             for date_col in ["Date", "date", "time", "timestamp", "datetime", "Datetime"]:
-                if date_col in s_df.columns:
+                if date_col in s_df.columns and "timestamp_utc" not in s_df.columns:
                     s_df = s_df.rename({date_col: "timestamp_utc"})
 
             if "timestamp_utc" not in s_df.columns:
-                print(f"[CrossAsset] WARNING: Cannot find time column for {asset}. Columns: {s_df.columns}. Skipping.")
                 continue
 
-            s_df = s_df.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
+            if "value" in s_df.columns:
+                s_df = s_df.rename({"value": asset})
+            elif asset not in s_df.columns:
+                val_cols = [c for c in s_df.columns if c != "timestamp_utc"]
+                if val_cols:
+                    s_df = s_df.rename({val_cols[-1]: asset})
+
+            if asset not in s_df.columns:
+                continue
+
+            try:
+                s_df = s_df.with_columns(pl.col("timestamp_utc").cast(bars["timestamp_utc"].dtype))
+            except Exception:
+                pass
             s_df = s_df.select(["timestamp_utc", asset]).sort("timestamp_utc")
-            F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
-            # forward fill
-            F = F.with_columns([pl.col(asset).fill_null(strategy="forward")])
+            try:
+                F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
+                F = F.with_columns([pl.col(asset).fill_null(strategy="forward").fill_null(0.0)])
+            except Exception:
+                continue
 
             # Returns
             lr = pl.col(asset).log() - pl.col(asset).shift(1).log()

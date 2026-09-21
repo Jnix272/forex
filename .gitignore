@@ -118,3 +118,18 @@ data/store/
 .agents/
 .opencode/
 vcpkg/
+
+# C++ dependencies and build outputs
+cpp/deps/
+cpp/build/
+
+# Scratch & debug debris
+*.err
+dataset_build_err.txt
+help.txt
+import_times.txt
+kill_after_tft.ps1
+test_quality.py
+test_reindex.py
+update_configs.py
+docs/diff.txt

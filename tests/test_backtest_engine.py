@@ -133,9 +133,16 @@ def test_python_and_numba_paths_agree():
     nb.numba_min_bars = 1000
     nb_res = nb.run(use_numba=True, return_trades=False)
 
+    def _to_arr(s):
+        if hasattr(s, "drop_nulls"):
+            return s.drop_nulls().to_numpy()
+        if hasattr(s, "dropna"):
+            return s.dropna().to_numpy()
+        return np.asarray(s)
+
     np.testing.assert_allclose(
-        nb_res["total_value"].dropna().to_numpy(),
-        py_res["total_value"].dropna().to_numpy(),
+        _to_arr(nb_res["total_value"]),
+        _to_arr(py_res["total_value"]),
         rtol=1e-9,
         atol=1e-6,
     )

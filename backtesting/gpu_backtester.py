@@ -52,8 +52,9 @@ class GPUBacktester:
         d_prices = self.xp.array(prices)
         d_signals = self.xp.array(signals)
 
-        # Calculate returns: return[i] = (price[i+1] - price[i]) / price[i]
-        d_returns = self.xp.diff(d_prices) / d_prices[:-1]
+        # Calculate returns safely without zero division: return[i] = (price[i+1] - price[i]) / price[i]
+        denom_prev = self.xp.maximum(d_prices[:-1], 1e-12)
+        d_returns = self.xp.diff(d_prices) / denom_prev
 
         # BUG-007: Proper 1-bar lag - signal[i] trades return[i+1], not return[i].
         # d_returns[i] is the return from bar i to i+1. signal[i] is the signal from bar i.
@@ -64,21 +65,28 @@ class GPUBacktester:
         # Strategy returns
         d_strat_returns = d_positions * d_returns
 
+        # Denominator for transaction cost fractions
+        denom_mid = self.xp.maximum(d_prices[1:-1], 1e-12)
+
         # Incorporate spread costs whenever position changes
         d_trades = self.xp.abs(self.xp.diff(d_positions, prepend=0))
-        d_spread_costs = d_trades * ((spread * 0.5) / d_prices[1:-1])
+        d_spread_costs = d_trades * ((spread * 0.5) / denom_mid)
 
-        # Commission: per lot per trade
-        d_commission = d_trades * (commission_per_lot * lot_size / d_prices[1:-1])
+        # Commission: per lot per trade (scaled by standard lot notional 100,000 * price)
+        d_commission = d_trades * (commission_per_lot / (100_000.0 * denom_mid))
 
         # Slippage: fixed pips per trade
-        d_slippage = d_trades * (slippage_pips * pip_size / d_prices[1:-1])
+        d_slippage = d_trades * (slippage_pips * pip_size / denom_mid)
 
         # Net returns
         d_net_returns = d_strat_returns - d_spread_costs - d_commission - d_slippage
 
-        # Calculate equity curve
+        # Calculate equity curve with bankruptcy clamping (no zombie compounding)
         d_equity = self.xp.cumprod(1 + d_net_returns)
+        neg_mask = (d_equity <= 0) | self.xp.isnan(d_equity)
+        if self.xp.any(neg_mask):
+            first_neg = int(self.xp.argmax(neg_mask))
+            d_equity[first_neg:] = 0.0
 
         # Transfer results back to CPU
         return {

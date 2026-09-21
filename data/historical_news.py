@@ -218,6 +218,8 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
     paths = []
     if news_file:
         paths.append(Path(news_file))
+    elif news_file == "":
+        pass  # Explicitly disabled by caller (e.g. EconomicCalendarGuard)
     elif os.getenv("HISTORICAL_NEWS_FILE"):
         paths.append(Path(os.getenv("HISTORICAL_NEWS_FILE", "")))
     else:
@@ -243,6 +245,8 @@ def _load_events(news_file: str | None, calendar_file: str | None, start_ts=None
 
     if calendar_file:
         paths.append(Path(calendar_file))
+    elif calendar_file == "":
+        pass  # Explicitly disabled by caller
     elif os.getenv("ECONOMIC_CALENDAR_FILE"):
         paths.append(Path(os.getenv("ECONOMIC_CALENDAR_FILE", "")))
     else:

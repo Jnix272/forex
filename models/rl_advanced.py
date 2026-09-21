@@ -20,9 +20,12 @@ from backtesting.backtest import ScalingAction
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+from pathlib import Path
+
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     TORCH = True
 except ImportError:
@@ -89,6 +92,7 @@ class MultiAgentCoordinator:
         self.agents = agents
         self.pairs = pairs
         self.max_corr = max_corr_exposure
+        self.context_dim = int(context_dim)
         self.device = device
 
         if TORCH:
@@ -99,13 +103,15 @@ class MultiAgentCoordinator:
         self.positions: dict[str, float] = dict.fromkeys(pairs, 0.0)
         self.equity = 10_000.0
 
-    def _corr_exposure(self, pair: str, direction: int) -> float:
+    def _corr_exposure(self, pair: str, direction: int, new_lots: float = 1.0) -> float:
         """
         Compute current correlated directional exposure if we add
         this new position. Returns total lots in the same direction
         across highly correlated pairs.
         """
-        total = abs(self.positions.get(pair, 0.0))
+        curr = self.positions.get(pair, 0.0)
+        projected = curr + direction * new_lots
+        total = abs(projected) if np.sign(projected) == direction else 0.0
         for (p1, p2), corr in self.PAIR_CORRELATIONS.items():
             if corr < 0.6:
                 continue
@@ -120,13 +126,15 @@ class MultiAgentCoordinator:
         self,
         observations: dict[str, np.ndarray],
         global_features: np.ndarray | None = None,
-    ) -> dict[str, int]:
+        return_info: bool = False,
+    ) -> dict[str, int] | tuple[dict[str, int], dict[str, Any]]:
         """
         Get action for each pair's agent, applying portfolio-level risk check.
-        Returns dict: pair -> action (0=Buy, 1=Hold, 2=Sell)
+        Returns dict: pair -> action (0=Buy, 1=Hold, 2=Sell).
+        If return_info=True, also returns consensus & diagnostic metrics per pair.
         """
         # Encode global market context
-        context = np.zeros(32)
+        context = np.zeros(self.context_dim, dtype=np.float32)
         if TORCH and global_features is not None:
             with torch.no_grad():
                 gf = torch.tensor(global_features, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -135,14 +143,23 @@ class MultiAgentCoordinator:
                 )  # remove batch dim only; .squeeze() collapses scalar
 
         actions = {}
+        consensus_reports = {}
+
         for pair, agent in self.agents.items():
             obs = observations.get(pair, np.zeros(1))
-            aug_obs = np.concatenate([obs, context])  # Augment with global context
+            aug_obs = np.concatenate([np.atleast_1d(obs), np.atleast_1d(context)])  # Augment with global context
 
             if hasattr(agent, "select_action"):
-                raw_action = agent.select_action(aug_obs)
+                raw = agent.select_action(aug_obs)
+                raw_action = raw[0] if isinstance(raw, tuple) else raw
             else:
                 raw_action = ScalingAction.HOLD.value
+
+            # If agent has consensus information (e.g. RLEnsemble)
+            if hasattr(agent, "last_consensus_info") and agent.last_consensus_info is not None:
+                consensus_reports[pair] = agent.last_consensus_info
+            elif hasattr(agent, "get_consensus_info"):
+                consensus_reports[pair] = agent.get_consensus_info(aug_obs)
 
             # Portfolio-level risk gate - map 10-action space to direction.
             # Only actions that INCREASE net directional exposure are gated:
@@ -151,20 +168,38 @@ class MultiAgentCoordinator:
             #   HOLD(0), SCALE_OUT(6-8), CLOSE_ALL(9) reduce or hold exposure.
             if raw_action == 1:
                 direction = 1
+                new_lots = 1.0
             elif raw_action == 2:
                 direction = -1
+                new_lots = 1.0
             elif raw_action in (3, 4, 5):
                 pos = self.positions.get(pair, 0.0)
-                direction = int(np.sign(pos))
+                direction = int(np.sign(pos)) if pos != 0 else 0
+                new_lots = {3: 0.25, 4: 0.50, 5: 1.0}[raw_action]
             else:
                 direction = 0
+                new_lots = 0.0
             if direction != 0:
-                corr_exp = self._corr_exposure(pair, direction)
+                corr_exp = self._corr_exposure(pair, direction, new_lots=new_lots)
                 if corr_exp >= self.max_corr:
                     raw_action = ScalingAction.HOLD.value  # Force HOLD
 
-            actions[pair] = raw_action
+            actions[pair] = int(raw_action)
+
+        if return_info:
+            return actions, consensus_reports
         return actions
+
+    def set_agent(self, pair: str, agent: Any):
+        """Assign or replace an agent or RLEnsemble for a specific currency pair."""
+        self.agents[pair] = agent
+        if pair not in self.pairs:
+            self.pairs.append(pair)
+            self.positions[pair] = 0.0
+
+    def get_agent(self, pair: str) -> Any:
+        """Retrieve the agent or RLEnsemble for a pair."""
+        return self.agents.get(pair)
 
     def update_position(self, pair: str, lots: float):
         self.positions[pair] = lots
@@ -175,6 +210,574 @@ class MultiAgentCoordinator:
             "total_lots": sum(abs(v) for v in self.positions.values()),
             "net_direction": np.sign(sum(self.positions.values())),
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1b. RL POLICY ENSEMBLE (Consensus & Multi-Agent Fusion)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class RLEnsemble:
+    """
+    Ensemble of Reinforcement Learning policies with multi-policy consensus.
+
+    Supports combining:
+      - Multiple PPO agents (trained with varied seeds, volatility regimes, or hyperparameters)
+      - Multiple DQN agents
+      - Mixed heterogeneous ensembles (PPO + DQN)
+
+    Consensus modes:
+      1. 'soft_vote':
+         Averages predicted action probability distributions across all agents.
+         Argmax (or sampling) on the ensemble mean probability distribution.
+      2. 'majority':
+         Plurality vote across discrete actions chosen by individual agents.
+         Safety fallback: If there is a direct conflict between BUY (OPEN_LONG)
+         and SELL (OPEN_SHORT), it immediately falls back to HOLD (0).
+      3. 'conservative':
+         Ultra-safe capital preservation mode:
+         - If ANY agent votes HOLD (0), the ensemble action is forced to HOLD (0).
+         - If opposite directional conflict (BUY vs SELL) occurs, forced to HOLD (0).
+         - If all agents agree on direction but choose different scale sizes, downsizes
+           to the minimal/safest position size (e.g. SCALE_IN_25 instead of SCALE_IN_100).
+    """
+
+    CONSENSUS_MODES = ("soft_vote", "majority", "conservative")
+
+    def __init__(
+        self,
+        agents: list[Any] | dict[str, Any],
+        agent_types: list[str] | None = None,
+        consensus_mode: str = "soft_vote",
+        weights: list[float] | None = None,
+        obs_size: int | None = None,
+        n_actions: int = 10,
+        device: str = "cpu",
+        temperature: float = 1.0,
+    ):
+        if isinstance(agents, dict):
+            self.agent_names = list(agents.keys())
+            self.agents = list(agents.values())
+        else:
+            self.agents = list(agents)
+            self.agent_names = [f"agent_{i}" for i in range(len(self.agents))]
+
+        if len(self.agents) == 0:
+            raise ValueError("RLEnsemble requires at least one sub-agent.")
+
+        if consensus_mode not in self.CONSENSUS_MODES:
+            raise ValueError(f"Unknown consensus_mode '{consensus_mode}'. Must be one of {self.CONSENSUS_MODES}")
+
+        self.consensus_mode = consensus_mode
+        self.device = str(device)
+        self.temperature = max(float(temperature), 1e-4)
+        self.n_actions = int(n_actions)
+
+        # Infer or validate agent types
+        if agent_types is not None:
+            if len(agent_types) != len(self.agents):
+                raise ValueError("Length of agent_types must match number of agents.")
+            self.agent_types = [str(t).lower() for t in agent_types]
+        else:
+            self.agent_types = []
+            for a in self.agents:
+                cname = type(a).__name__.lower()
+                if "ppo" in cname:
+                    self.agent_types.append("ppo")
+                elif "dqn" in cname:
+                    self.agent_types.append("dqn")
+                else:
+                    self.agent_types.append("custom")
+
+        # Weights
+        if weights is not None:
+            if len(weights) != len(self.agents):
+                raise ValueError("Length of weights must match number of agents.")
+            w_arr = np.array(weights, dtype=np.float32)
+            w_sum = float(w_arr.sum())
+            if w_sum <= 0:
+                raise ValueError("Weights sum must be positive.")
+            self.weights = (w_arr / w_sum).tolist()
+        else:
+            self.weights = [1.0 / len(self.agents)] * len(self.agents)
+
+        # Observation size
+        if obs_size is not None:
+            self.obs_size = int(obs_size)
+        else:
+            self.obs_size = self._infer_obs_size()
+
+        self.last_consensus_info: dict[str, Any] | None = None
+
+    def _infer_obs_size(self) -> int:
+        for a in self.agents:
+            if hasattr(a, "obs_size") and a.obs_size is not None:
+                return int(a.obs_size)
+            if hasattr(a, "net"):
+                if hasattr(a.net, "backbone") and len(a.net.backbone) > 0 and hasattr(a.net.backbone[0], "in_features"):
+                    return int(a.net.backbone[0].in_features)
+                if hasattr(a.net, "lstm") and hasattr(a.net.lstm, "input_size"):
+                    return int(a.net.lstm.input_size)
+            if hasattr(a, "policy_net"):
+                if hasattr(a.policy_net, "net") and len(a.policy_net.net) > 0 and hasattr(a.policy_net.net[0], "in_features"):
+                    return int(a.policy_net.net[0].in_features)
+        return 0
+
+    def get_agent_probabilities(
+        self, agent: Any, obs: np.ndarray, mask: np.ndarray | None = None
+    ) -> tuple[np.ndarray, float]:
+        """Extract action probability distribution and state-value estimate from an individual agent."""
+        if not TORCH:
+            action = agent.select_action(obs)
+            if isinstance(action, tuple):
+                action = action[0]
+            probs = np.zeros(self.n_actions, dtype=np.float32)
+            probs[int(action)] = 1.0
+            return probs, 0.0
+
+        # Custom agent with explicit probability extraction method
+        if hasattr(agent, "get_action_probabilities"):
+            raw = agent.get_action_probabilities(obs, mask=mask)
+            if isinstance(raw, tuple):
+                return np.asarray(raw[0], dtype=np.float32), float(raw[1])
+            return np.asarray(raw, dtype=np.float32), 0.0
+
+        dev = getattr(agent, "device", torch.device(self.device))
+
+        # PPOAgent / ActorCritic
+        if hasattr(agent, "net") and hasattr(agent.net, "actor"):
+            if getattr(agent, "use_lstm", False) and hasattr(agent, "_preview_obs_seq"):
+                x = agent._preview_obs_seq(obs)
+                xt = torch.as_tensor(x, dtype=torch.float32, device=dev).unsqueeze(0)
+            else:
+                xt = torch.as_tensor(obs, dtype=torch.float32, device=dev)
+                if xt.ndim == 1:
+                    xt = xt.unsqueeze(0)
+
+            with torch.no_grad():
+                logits, value = agent.net(xt)
+                if mask is not None:
+                    m = torch.as_tensor(mask, dtype=torch.bool, device=dev)
+                    if m.ndim == 1:
+                        m = m.unsqueeze(0)
+                    logits = logits.masked_fill(~m, -1e9)
+                probs = F.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+                val = float(value.squeeze().cpu().item()) if value.numel() > 0 else 0.0
+            return probs.astype(np.float32), val
+
+        # DQNAgent / DQNetwork
+        elif hasattr(agent, "policy_net"):
+            xt = torch.as_tensor(obs, dtype=torch.float32, device=dev)
+            if xt.ndim == 1:
+                xt = xt.unsqueeze(0)
+
+            with torch.no_grad():
+                q = agent.policy_net(xt)
+                if mask is not None:
+                    m = torch.as_tensor(mask, dtype=torch.bool, device=dev)
+                    if m.ndim == 1:
+                        m = m.unsqueeze(0)
+                    q = q.masked_fill(~m, -1e9)
+                probs = F.softmax(q / self.temperature, dim=-1).squeeze(0).cpu().numpy()
+                val = float(q.max(dim=-1)[0].squeeze().cpu().item())
+            return probs.astype(np.float32), val
+
+        # Generic / Fallback
+        else:
+            try:
+                action = agent.select_action(obs, mask=mask)
+            except TypeError:
+                action = agent.select_action(obs)
+            if isinstance(action, tuple):
+                action = action[0]
+            probs = np.zeros(self.n_actions, dtype=np.float32)
+            probs[int(action)] = 1.0
+            return probs, 0.0
+
+    def get_consensus_info(
+        self,
+        obs: np.ndarray,
+        mask: np.ndarray | None = None,
+        greedy: bool = True,
+        mode_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Compute full multi-agent consensus metrics, action distributions, and final action."""
+        mode = mode_override or self.consensus_mode
+        n_agents = len(self.agents)
+
+        probs_list: list[np.ndarray] = []
+        values_list: list[float] = []
+        actions_list: list[int] = []
+
+        for agent in self.agents:
+            p, v = self.get_agent_probabilities(agent, obs, mask=mask)
+            probs_list.append(p)
+            values_list.append(v)
+            if greedy:
+                actions_list.append(int(np.argmax(p)))
+            else:
+                p_sub = p.astype(np.float64)
+                p_sub_sum = p_sub.sum()
+                if p_sub_sum > 0:
+                    p_sub /= p_sub_sum
+                else:
+                    p_sub = np.ones(self.n_actions, dtype=np.float64) / self.n_actions
+                actions_list.append(int(np.random.choice(self.n_actions, p=p_sub)))
+
+        # Weighted average probabilities
+        probs_matrix = np.stack(probs_list, axis=0)  # (N, n_actions)
+        weights_arr = np.array(self.weights, dtype=np.float32)[:, np.newaxis]  # (N, 1)
+        mean_probs = np.sum(probs_matrix * weights_arr, axis=0)  # (n_actions,)
+        p_sum = mean_probs.sum()
+        if p_sum > 0:
+            mean_probs /= p_sum
+        else:
+            if mask is not None and np.any(mask):
+                mean_probs = np.zeros(self.n_actions, dtype=np.float32)
+                mean_probs[mask] = 1.0 / np.sum(mask)
+            else:
+                mean_probs = np.ones(self.n_actions, dtype=np.float32) / self.n_actions
+
+        mean_val = float(sum(w * v for w, v in zip(self.weights, values_list)))
+
+        # BUY / SELL Conflict Detection
+        # ScalingAction: HOLD=0, OPEN_LONG=1, OPEN_SHORT=2, SCALE_IN_25=3, 50=4, 100=5, SCALE_OUT_25=6, 50=7, 100=8, CLOSE_ALL=9
+        has_long_entry = any(a == ScalingAction.OPEN_LONG.value for a in actions_list)
+        has_short_entry = any(a == ScalingAction.OPEN_SHORT.value for a in actions_list)
+        conflict_detected = bool(has_long_entry and has_short_entry)
+
+        # Directional conflict
+        long_actions = {1, 3, 4, 5}
+        short_actions = {2}
+        has_long = any(a in long_actions for a in actions_list)
+        has_short = any(a in short_actions for a in actions_list)
+        directional_conflict = bool(has_long and has_short)
+
+        # ── Action Resolution according to Consensus Mode ──
+        if mode == "soft_vote":
+            if greedy:
+                consensus_action = int(np.argmax(mean_probs))
+            else:
+                p_draw = mean_probs.astype(np.float64)
+                p_draw_sum = p_draw.sum()
+                if p_draw_sum > 0:
+                    p_draw /= p_draw_sum
+                else:
+                    p_draw = np.ones(self.n_actions, dtype=np.float64) / self.n_actions
+                consensus_action = int(np.random.choice(self.n_actions, p=p_draw))
+
+        elif mode == "majority":
+            if conflict_detected or directional_conflict:
+                # Direct opposition: safety fall-back to HOLD
+                consensus_action = ScalingAction.HOLD.value
+            else:
+                votes: dict[int, float] = collections.defaultdict(float)
+                for a, w in zip(actions_list, self.weights):
+                    votes[a] += w
+
+                max_vote = max(votes.values())
+                candidates = [a for a, v in votes.items() if abs(v - max_vote) < 1e-6]
+                if len(candidates) == 1:
+                    consensus_action = candidates[0]
+                else:
+                    # Tie-breaking: candidate with highest average probability
+                    consensus_action = max(candidates, key=lambda c: mean_probs[c])
+
+        elif mode == "conservative":
+            # 1. Any agent voting HOLD forces HOLD
+            if any(a == ScalingAction.HOLD.value for a in actions_list):
+                consensus_action = ScalingAction.HOLD.value
+            # 2. Opposite direction conflict forces HOLD
+            elif conflict_detected or directional_conflict:
+                consensus_action = ScalingAction.HOLD.value
+            # 3. If all agents vote in same scale-in family, take the smallest / safest size
+            elif all(a in (3, 4, 5) for a in actions_list):
+                scale_in_rank = {3: 1, 4: 2, 5: 3}
+                consensus_action = min(actions_list, key=lambda a: scale_in_rank.get(a, 99))
+            elif all(a in (6, 7, 8) for a in actions_list):
+                scale_out_rank = {6: 1, 7: 2, 8: 3}
+                consensus_action = min(actions_list, key=lambda a: scale_out_rank.get(a, 99))
+            # 4. If all agents unanimously agree on action
+            elif len(set(actions_list)) == 1:
+                consensus_action = actions_list[0]
+            else:
+                # Disagreement among active non-HOLD trades: conservative fall-back to HOLD
+                consensus_action = ScalingAction.HOLD.value
+
+        else:
+            consensus_action = ScalingAction.HOLD.value
+
+        # Mask sanity check: if consensus_action is invalid according to mask, pick best valid action
+        if mask is not None and 0 <= consensus_action < len(mask) and not mask[consensus_action]:
+            valid_actions = np.where(mask)[0]
+            if len(valid_actions) > 0:
+                consensus_action = int(valid_actions[np.argmax(mean_probs[valid_actions])])
+
+        # ── Agreement / Disagreement / Policy Uncertainty Metrics ──
+        if n_agents > 1:
+            total_pairs = n_agents * (n_agents - 1) // 2
+            matching_pairs = sum(
+                1 for i in range(n_agents) for j in range(i + 1, n_agents) if actions_list[i] == actions_list[j]
+            )
+            action_agreement = matching_pairs / total_pairs
+        else:
+            action_agreement = 1.0
+
+        def _get_dir(a: int) -> int:
+            if a in (1, 3, 4, 5):
+                return 1
+            if a in (2,):
+                return -1
+            return 0
+
+        if n_agents > 1:
+            matching_dir_pairs = sum(
+                1
+                for i in range(n_agents)
+                for j in range(i + 1, n_agents)
+                if _get_dir(actions_list[i]) == _get_dir(actions_list[j])
+            )
+            direction_agreement = matching_dir_pairs / total_pairs
+        else:
+            direction_agreement = 1.0
+
+        if n_agents > 1:
+            tvd_sum = 0.0
+            for i in range(n_agents):
+                for j in range(i + 1, n_agents):
+                    tvd_sum += 0.5 * float(np.sum(np.abs(probs_list[i] - probs_list[j])))
+            mean_tvd = tvd_sum / total_pairs
+            distributional_agreement = float(np.clip(1.0 - mean_tvd, 0.0, 1.0))
+        else:
+            distributional_agreement = 1.0
+
+        entropy = -float(np.sum(mean_probs * np.log(mean_probs + 1e-12)))
+        max_entropy = float(np.log(self.n_actions))
+        policy_uncertainty = float(np.clip(entropy / max_entropy, 0.0, 1.0))
+
+        agreement_score = float(action_agreement)
+        disagreement_score = float(1.0 - agreement_score)
+        mean_log_prob = float(np.log(max(mean_probs[consensus_action], 1e-12)))
+
+        info = {
+            "consensus_action": int(consensus_action),
+            "consensus_mode": mode,
+            "greedy": greedy,
+            "agreement_score": agreement_score,
+            "disagreement_score": disagreement_score,
+            "action_agreement": action_agreement,
+            "direction_agreement": direction_agreement,
+            "distributional_agreement": distributional_agreement,
+            "policy_uncertainty": policy_uncertainty,
+            "conflict_detected": conflict_detected,
+            "directional_conflict": directional_conflict,
+            "individual_actions": actions_list,
+            "individual_values": values_list,
+            "action_counts": dict(collections.Counter(actions_list)),
+            "mean_probabilities": mean_probs,
+            "mean_value": mean_val,
+            "mean_log_prob": mean_log_prob,
+        }
+        return info
+
+    def select_action(
+        self,
+        obs: np.ndarray,
+        mask: np.ndarray | None = None,
+        greedy: bool = True,
+        return_tuple: bool = True,
+    ) -> int | tuple[int, float, float]:
+        """Select an action using the ensemble consensus policy."""
+        info = self.get_consensus_info(obs, mask=mask, greedy=greedy)
+        self.last_consensus_info = info
+        if return_tuple:
+            return info["consensus_action"], info["mean_log_prob"], info["mean_value"]
+        return info["consensus_action"]
+
+    def save_checkpoint(self, path: str | Path, meta: dict | None = None) -> Path:
+        """Save full ensemble checkpoint with all sub-agent weights and meta configuration."""
+        if not TORCH:
+            raise RuntimeError("PyTorch is required to save RLEnsemble checkpoint.")
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        agent_states = []
+        agent_configs = []
+
+        for agent, atype in zip(self.agents, self.agent_types):
+            cfg = {
+                "type": atype,
+                "obs_size": getattr(agent, "obs_size", self.obs_size),
+                "n_actions": getattr(agent, "n_actions", self.n_actions),
+                "hidden": getattr(agent, "hidden", 256),
+                "use_lstm": getattr(agent, "use_lstm", False),
+            }
+            if atype == "ppo":
+                state = agent.net.state_dict() if hasattr(agent, "net") else {}
+                cfg.update({
+                    "lr": getattr(agent, "lr", 3e-4),
+                    "gamma": getattr(agent, "gamma", 0.99),
+                    "lam": getattr(agent, "lam", 0.95),
+                    "clip": getattr(agent, "clip", 0.2),
+                    "entropy_coef": getattr(agent, "ent_c", 0.01),
+                    "lstm_hidden": getattr(agent, "lstm_hidden", 128),
+                    "hist_len": getattr(agent, "hist_len", 32),
+                })
+            elif atype == "dqn":
+                state = agent.policy_net.state_dict() if hasattr(agent, "policy_net") else {}
+                cfg.update({
+                    "lr": getattr(agent, "lr", 1e-4),
+                    "gamma": getattr(agent, "gamma", 0.99),
+                    "batch": getattr(agent, "batch", 64),
+                    "double": getattr(agent, "double", True),
+                    "eps_start": getattr(agent, "eps", 1.0),
+                    "eps_end": getattr(agent, "eps_end", 0.01),
+                    "eps_decay": getattr(agent, "eps_decay", 0.995),
+                })
+            else:
+                state = {}
+
+            agent_states.append(state)
+            agent_configs.append(cfg)
+
+        payload = {
+            "version": "1.0",
+            "model_type": "RLEnsemble",
+            "consensus_mode": self.consensus_mode,
+            "weights": self.weights,
+            "obs_size": self.obs_size,
+            "n_actions": self.n_actions,
+            "agent_types": self.agent_types,
+            "agent_names": self.agent_names,
+            "agent_configs": agent_configs,
+            "agent_states": agent_states,
+            "meta": meta or {},
+        }
+        torch.save(payload, path)
+        return path
+
+    @classmethod
+    def load_checkpoint(cls, path: str | Path, device: str = "cpu") -> "RLEnsemble":
+        """Load RLEnsemble from checkpoint path."""
+        if not TORCH:
+            raise RuntimeError("PyTorch is required to load RLEnsemble checkpoint.")
+        from models.rl_agents import DQNAgent, PPOAgent
+
+        path = Path(path)
+        payload = torch.load(path, map_location=device, weights_only=False)
+
+        consensus_mode = payload.get("consensus_mode", "soft_vote")
+        weights = payload.get("weights")
+        obs_size = payload.get("obs_size")
+        n_actions = payload.get("n_actions", 10)
+        agent_types = payload.get("agent_types", [])
+        agent_configs = payload.get("agent_configs", [])
+        agent_states = payload.get("agent_states", [])
+
+        agents = []
+        for i, atype in enumerate(agent_types):
+            cfg = agent_configs[i] if i < len(agent_configs) else {}
+            state = agent_states[i] if i < len(agent_states) else {}
+            sub_obs = cfg.get("obs_size", obs_size)
+            sub_actions = cfg.get("n_actions", n_actions)
+
+            if atype == "ppo":
+                ag = PPOAgent(
+                    obs_size=sub_obs,
+                    n_actions=sub_actions,
+                    hidden=cfg.get("hidden", 256),
+                    lr=cfg.get("lr", 3e-4),
+                    gamma=cfg.get("gamma", 0.99),
+                    lam=cfg.get("lam", 0.95),
+                    clip=cfg.get("clip", 0.2),
+                    entropy_coef=cfg.get("entropy_coef", 0.01),
+                    device=device,
+                    use_lstm=cfg.get("use_lstm", False),
+                    lstm_hidden=cfg.get("lstm_hidden", 128),
+                    hist_len=cfg.get("hist_len", 32),
+                )
+                if state:
+                    ag.net.load_state_dict(state)
+            elif atype == "dqn":
+                ag = DQNAgent(
+                    obs_size=sub_obs,
+                    n_actions=sub_actions,
+                    hidden=cfg.get("hidden", 256),
+                    lr=cfg.get("lr", 1e-4),
+                    gamma=cfg.get("gamma", 0.99),
+                    batch=cfg.get("batch", 64),
+                    double_dqn=cfg.get("double", True),
+                    eps_start=cfg.get("eps_start", 1.0),
+                    eps_end=cfg.get("eps_end", 0.01),
+                    eps_decay=cfg.get("eps_decay", 0.995),
+                    device=device,
+                    use_lstm=cfg.get("use_lstm", False),
+                )
+                if state:
+                    ag.policy_net.load_state_dict(state)
+                    ag.target_net.load_state_dict(state)
+            else:
+                raise ValueError(f"Unsupported agent type '{atype}' in checkpoint.")
+
+            agents.append(ag)
+
+        return cls(
+            agents=agents,
+            agent_types=agent_types,
+            consensus_mode=consensus_mode,
+            weights=weights,
+            obs_size=obs_size,
+            n_actions=n_actions,
+            device=device,
+        )
+
+    def evaluate(
+        self,
+        env: Any,
+        n_episodes: int = 5,
+        greedy: bool = True,
+    ) -> tuple[list[float], dict[str, Any], dict[str, float]]:
+        """Run evaluation episodes on env using ensemble consensus policy.
+
+        Returns (returns, env.summary(), ensemble_diagnostics).
+        """
+        returns = []
+        agreement_scores = []
+        disagreement_scores = []
+        uncertainties = []
+        conflict_steps = 0
+        total_steps = 0
+
+        for _ in range(int(n_episodes)):
+            obs = env.reset()
+            while not env.done:
+                mask = env.action_mask() if hasattr(env, "action_mask") else None
+                info = self.get_consensus_info(obs, mask=mask, greedy=greedy)
+                action = info["consensus_action"]
+                obs, _, _, _ = env.step(action)
+
+                agreement_scores.append(info["agreement_score"])
+                disagreement_scores.append(info["disagreement_score"])
+                uncertainties.append(info["policy_uncertainty"])
+                if info["conflict_detected"]:
+                    conflict_steps += 1
+                total_steps += 1
+
+            returns.append(env.summary()["total_return_pct"])
+
+        diagnostics = {
+            "mean_agreement_score": float(np.mean(agreement_scores)) if agreement_scores else 1.0,
+            "mean_disagreement_score": float(np.mean(disagreement_scores)) if disagreement_scores else 0.0,
+            "mean_policy_uncertainty": float(np.mean(uncertainties)) if uncertainties else 0.0,
+            "conflict_rate": float(conflict_steps / max(total_steps, 1)),
+            "total_steps": total_steps,
+        }
+        return returns, env.summary(), diagnostics
+
+
+# Alias
+PolicyEnsemble = RLEnsemble
 
 
 # ─────────────────────────────────────────────────────────────────────────────

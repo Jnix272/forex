@@ -244,10 +244,10 @@ def build_inference_agents(
         arch_name = _read_sidecar_model_name(paths.pt_path, model_name)
     meta["arch_name"] = arch_name
 
-    if str(arch_name).lower() == "ensemble" and runtime == "onnx":
+    if str(arch_name).lower() == "ensemble" and runtime == "onnx" and paths.onnx_path is None:
         raise RuntimeError(
-            "[Live] ONNX runtime does not support ensemble export. "
-            "Use --runtime pytorch, or pass --demo for paper testing only."
+            "[Live] ONNX runtime requires an exported ensemble ONNX model. "
+            "Export it via export-ensemble or use --runtime pytorch."
         )
 
     slow_engine = None
@@ -540,14 +540,22 @@ class LiveSafetyGate:
 
 
 class PaperBroker(BrokerInterface):
-    """In-memory broker for paper trading and unit tests."""
+    """
+    In-memory broker for paper trading and unit tests.
+    Tracks mark-to-market positions, fills orders at current bid/ask,
+    and updates balance and equity on price changes and position closes.
+    """
 
     def __init__(self, initial_equity: float = 10_000.0):
+        self.initial_equity = float(initial_equity)
+        self.balance = float(initial_equity)
         self.equity = float(initial_equity)
         self._bid = 1.10000
         self._ask = 1.10005
+        self._quotes: dict[str, tuple[float, float]] = {}
         self._connected = False
-        self._positions: dict[str, float] = {}
+        self._positions: dict[str, float] = {}  # pair -> signed lots
+        self._position_entry: dict[str, float] = {}  # pair -> average entry price
 
     def connect(self) -> bool:
         self._connected = True
@@ -556,35 +564,109 @@ class PaperBroker(BrokerInterface):
     def disconnect(self) -> None:
         self._connected = False
 
-    def update_quote(self, bid: float, ask: float) -> None:
+    def update_quote(self, bid: float, ask: float, pair: str | None = None) -> None:
         self._bid = float(bid)
         self._ask = float(ask)
+        if pair:
+            p = str(pair).upper()
+            self._quotes[p] = (float(bid), float(ask))
+        self._update_equity()
 
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
+        p = str(pair).upper()
+        if p in self._quotes:
+            return self._quotes[p]
         return self._bid, self._ask
 
     def get_positions(self) -> dict[str, float]:
-        return dict(self._positions)
+        return {p: float(v) for p, v in self._positions.items() if abs(v) > 1e-12}
+
+    def _get_multiplier(self, pair: str) -> float:
+        p = str(pair).upper()
+        if "JPY" in p:
+            return 1000.0
+        return 100_000.0
+
+    def _update_equity(self) -> None:
+        unrealized = 0.0
+        for pair, lots in self._positions.items():
+            if abs(lots) <= 1e-12:
+                continue
+            entry = self._position_entry.get(pair, 0.0)
+            if entry <= 0:
+                continue
+            bid, ask = self.get_bid_ask(pair)
+            mult = self._get_multiplier(pair)
+            if lots > 0:
+                unrealized += (bid - entry) * mult * lots
+            else:
+                unrealized += (entry - ask) * mult * abs(lots)
+        self.equity = round(self.balance + unrealized, 2)
 
     def get_account(self) -> dict:
-        return {"equity": self.equity}
+        self._update_equity()
+        return {"equity": self.equity, "balance": self.balance}
 
     def market_order(
         self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
     ) -> dict:
-        signed = float(lots) if str(side).lower() in ("buy", "long") else -float(lots)
-        self._positions[pair] = self._positions.get(pair, 0.0) + signed
+        pair_key = str(pair).upper()
+        bid, ask = self.get_bid_ask(pair_key)
+        is_buy = str(side).lower() in ("buy", "long")
+        fill_price = ask if is_buy else bid
+        order_lots = float(lots)
+        signed_order = order_lots if is_buy else -order_lots
+
+        curr_pos = self._positions.get(pair_key, 0.0)
+        mult = self._get_multiplier(pair_key)
+
+        if curr_pos != 0 and ((curr_pos > 0 and not is_buy) or (curr_pos < 0 and is_buy)):
+            entry = self._position_entry.get(pair_key, fill_price)
+            closing_lots = min(abs(curr_pos), order_lots)
+            if curr_pos > 0:
+                realized = (fill_price - entry) * mult * closing_lots
+            else:
+                realized = (entry - fill_price) * mult * closing_lots
+            self.balance += realized
+            new_pos = curr_pos + signed_order
+            self._positions[pair_key] = new_pos
+            if abs(new_pos) <= 1e-12:
+                self._positions.pop(pair_key, None)
+                self._position_entry.pop(pair_key, None)
+            elif (curr_pos > 0 and new_pos < 0) or (curr_pos < 0 and new_pos > 0):
+                self._position_entry[pair_key] = fill_price
+        else:
+            total_lots = abs(curr_pos) + order_lots
+            prev_entry = self._position_entry.get(pair_key, fill_price)
+            avg_entry = ((prev_entry * abs(curr_pos)) + (fill_price * order_lots)) / max(total_lots, 1e-12)
+            self._positions[pair_key] = curr_pos + signed_order
+            self._position_entry[pair_key] = avg_entry
+
+        self._update_equity()
         return {
             "ok": True,
             "pair": pair,
             "side": side,
             "lots": lots,
+            "fill_price": fill_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
         }
 
     def close_position(self, pair: str) -> dict:
-        self._positions.pop(pair, None)
+        pair_key = str(pair).upper()
+        curr_pos = self._positions.pop(pair_key, 0.0)
+        entry = self._position_entry.pop(pair_key, 0.0)
+        if abs(curr_pos) > 1e-12 and entry > 0:
+            bid, ask = self.get_bid_ask(pair_key)
+            fill_price = bid if curr_pos > 0 else ask
+            mult = self._get_multiplier(pair_key)
+            if curr_pos > 0:
+                realized = (fill_price - entry) * mult * curr_pos
+            else:
+                realized = (entry - fill_price) * mult * abs(curr_pos)
+            self.balance += realized
+            self._update_equity()
         return {"ok": True, "pair": pair}
 
 
@@ -771,8 +853,8 @@ class BridgeBrokerAdapter(BrokerInterface):
     def get_account(self) -> dict:
         try:
             equity = float(self._bridge.get_account_equity())
-        except Exception:
-            equity = 0.0
+        except Exception as exc:
+            raise RuntimeError(f"BridgeBrokerAdapter failed to fetch equity: {exc}") from exc
         return {"equity": equity}
 
     def get_positions(self) -> dict[str, float]:
@@ -789,11 +871,22 @@ class OANDABroker(BrokerInterface):
     """OANDA v20 REST broker (practice/live via env host override)."""
 
     def __init__(self):
-        self._token = os.environ.get("OANDA_BEARER_TOKEN") or os.environ.get("OANDA_API_TOKEN")
+        self._token = (
+            os.environ.get("OANDA_BEARER_TOKEN")
+            or os.environ.get("OANDA_API_TOKEN")
+            or os.environ.get("OANDA_API_KEY")
+        )
         self._account_id = os.environ.get("OANDA_ACCOUNT_ID")
+        env = (os.environ.get("OANDA_ENV") or "practice").strip().lower()
+        default_host = (
+            "https://api-fxtrade.oanda.com"
+            if env in ("live", "prod", "production")
+            else "https://api-fxpractice.oanda.com"
+        )
         self._host = (
-            os.environ.get("OANDA_API_URL") or os.environ.get("OANDA_API_HOST") or "https://api-fxpractice.oanda.com"
+            os.environ.get("OANDA_API_URL") or os.environ.get("OANDA_API_HOST") or default_host
         ).rstrip("/")
+        self.units_per_lot = float(os.environ.get("OANDA_UNITS_PER_LOT", 10_000.0))
         self._bid = None
         self._ask = None
 
@@ -822,12 +915,19 @@ class OANDABroker(BrokerInterface):
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         import json as _json
         import urllib.request
+        import urllib.error
 
         inst = self._instrument(pair)
         url = f"{self._host}/v3/accounts/{self._account_id}/pricing?instruments={inst}"
         req = urllib.request.Request(url, headers=self._headers())
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+        except Exception as exc:
+            if self._bid is not None and self._ask is not None:
+                return float(self._bid), float(self._ask)
+            raise RuntimeError(f"OANDA pricing fetch failed for {inst}: {exc}") from exc
+
         prices = data.get("prices") or []
         if not prices:
             if self._bid is not None and self._ask is not None:
@@ -843,6 +943,7 @@ class OANDABroker(BrokerInterface):
     def get_account(self) -> dict:
         import json as _json
         import urllib.request
+        import urllib.error
 
         url = f"{self._host}/v3/accounts/{self._account_id}/summary"
         req = urllib.request.Request(url, headers=self._headers())
@@ -865,8 +966,9 @@ class OANDABroker(BrokerInterface):
     ) -> dict:
         import json as _json
         import urllib.request
+        import urllib.error
 
-        units = round(float(lots) * 10_000)
+        units = round(float(lots) * self.units_per_lot)
         if str(side).lower() in ("sell", "short"):
             units = -abs(units)
         else:
@@ -885,25 +987,76 @@ class OANDABroker(BrokerInterface):
         body = _json.dumps({"order": order_body}).encode("utf-8")
         url = f"{self._host}/v3/accounts/{self._account_id}/orders"
         req = urllib.request.Request(url, data=body, headers=self._headers(), method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return _json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+
+            # OANDA v20 returns 201 Created with orderFillTransaction or orderCancelTransaction
+            if "orderFillTransaction" in data:
+                fill = data["orderFillTransaction"]
+                return {
+                    "ok": True,
+                    "fill": fill,
+                    "price": float(fill.get("price", 0.0) or 0.0),
+                    "units": float(fill.get("units", 0.0) or 0.0),
+                    "raw": data,
+                }
+            if "orderCancelTransaction" in data:
+                cancel = data["orderCancelTransaction"]
+                return {
+                    "ok": False,
+                    "reason": cancel.get("reason", "ORDER_CANCELLED"),
+                    "details": cancel,
+                    "raw": data,
+                }
+            if "orderRejectTransaction" in data:
+                reject = data["orderRejectTransaction"]
+                return {
+                    "ok": False,
+                    "reason": reject.get("reason", "ORDER_REJECTED"),
+                    "details": reject,
+                    "raw": data,
+                }
+            return {"ok": True, "raw": data}
+        except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="ignore")
+            try:
+                err_json = _json.loads(err_body)
+            except Exception:
+                err_json = {"raw": err_body}
+            return {
+                "ok": False,
+                "reason": f"http_error_{exc.code}",
+                "error": err_json,
+                "status_code": exc.code,
+            }
+        except Exception as exc:
+            return {"ok": False, "reason": "network_error", "error": str(exc)}
 
     def close_position(self, pair: str) -> dict:
         import json as _json
         import urllib.request
+        import urllib.error
 
         url = f"{self._host}/v3/accounts/{self._account_id}/positions/{self._instrument(pair)}/close"
         body = _json.dumps({"longUnits": "ALL", "shortUnits": "ALL"}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=self._headers(), method="PUT")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                return _json.loads(resp.read())
+                data = _json.loads(resp.read())
+            if "longOrderCancelTransaction" in data and "shortOrderCancelTransaction" in data:
+                return {"ok": False, "reason": "close_cancelled", "details": data}
+            return {"ok": True, "raw": data}
+        except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="ignore")
+            return {"ok": False, "reason": f"http_error_{exc.code}", "error": err_body}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "reason": "network_error", "error": str(exc)}
 
     def get_positions(self):
         import json as _json
         import urllib.request
+        import urllib.error
 
         req = urllib.request.Request(
             f"{self._host}/v3/accounts/{self._account_id}/positions",
@@ -923,8 +1076,23 @@ class OANDABroker(BrokerInterface):
             # OANDA usually returns short units as negative; abs() also covers
             # feeds/fixtures that report short size as a positive magnitude.
             net = long_u - abs(short_u)
-            pos[inst] = net / 10000.0
+            pos[inst] = net / self.units_per_lot
         return pos
+
+
+def _align_next_bar(freq_str: str, now: datetime | None = None) -> datetime:
+    if now is None:
+        now = datetime.now(UTC)
+    now_clean = now.replace(microsecond=0)
+    try:
+        offset = pd.tseries.frequencies.to_offset(freq_str)
+        ts = pd.Timestamp(now_clean)
+        next_ts = ts.floor(offset) + offset
+        if next_ts <= ts:
+            next_ts = ts + offset
+        return next_ts.to_pydatetime()
+    except Exception:
+        return now_clean.replace(second=0) + pd.Timedelta(minutes=1)
 
 
 class LiveTradingEngine:
@@ -1023,9 +1191,14 @@ class LiveTradingEngine:
             self.session_limits = SessionLimitsEnforcer()
 
         mode = (sentiment_mode or os.getenv("LIVE_SENTIMENT_MODE", "auto")).lower()
-        self.sentiment = DualStreamSentiment(prefer_backend=mode, use_cache=True)
-        self.finbert = SentimentPipeline()
-        self._sent_backend = mode
+        if mode in ("off", "none", "neutral"):
+            self.sentiment = None
+            self.finbert = None
+            self._sent_backend = mode
+        else:
+            self.sentiment = DualStreamSentiment(prefer_backend=mode, use_cache=True)
+            self.finbert = SentimentPipeline()
+            self._sent_backend = mode
         self.logger.event(
             "INFO", "sentiment_backend", f"[Live] Sentiment mode={mode}", pair=self.pair, mode=mode, backend=mode
         )
@@ -1263,32 +1436,48 @@ class LiveTradingEngine:
                 if "timestamp_utc" in macro_df.columns:
                     macro_df = macro_df.drop("timestamp_utc")
                 if macro_df is not None and len(macro_df) == len(features):
-                    if _POLARS and isinstance(features, pl.DataFrame):
-                        features = features.hstack(macro_df)
-                    else:
-                        features = pd.concat([features, macro_df], axis=1)
-            bias = 0.0
-            try:
-                if self._sent_backend == "ollama":
-                    bias = float(self.sentiment.get_bias())
-                else:
-                    headlines = get_latest_headlines(limit=12) or ["Market update"]
-                    bias = float(self.finbert.score_headlines(headlines))
-            except Exception:
+                    macro_cols = [c for c in macro_df.columns if c not in features.columns]
+                    if macro_cols:
+                        if _POLARS and isinstance(features, pl.DataFrame):
+                            features = features.hstack(macro_df.select(macro_cols))
+                        else:
+                            features = pd.concat([features, macro_df[macro_cols]], axis=1)
+            if self.afb is not None:
                 try:
-                    headlines = get_latest_headlines(limit=12) or ["Market update"]
-                    bias = float(self.finbert.score_headlines(headlines))
-                    self._sent_backend = "finbert"
-                    self.logger.event(
-                        "WARN",
-                        "sentiment_fallback",
-                        "[Live] Sentiment fallback -> finbert",
-                        pair=self.pair,
-                        backend="finbert",
-                    )
+                    adv_df = self.afb.build(bars, features)
+                    if adv_df is not None and len(adv_df) == len(features):
+                        adv_df = _ensure_polars_frame(adv_df)
+                        adv_cols = [c for c in adv_df.columns if c not in features.columns and c != "timestamp_utc"]
+                        if adv_cols:
+                            if _POLARS and isinstance(features, pl.DataFrame):
+                                features = features.hstack(adv_df.select(adv_cols))
+                            else:
+                                features = pd.concat([features, adv_df[adv_cols]], axis=1)
                 except Exception as e:
-                    self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
-                    bias = 0.0
+                    self.logger.event("WARN", "afb_warning", f"[Live] AFB build skipped: {e}", pair=self.pair)
+            bias = 0.0
+            if self._sent_backend not in ("off", "none", "neutral"):
+                try:
+                    if self._sent_backend == "ollama":
+                        bias = float(self.sentiment.get_bias())
+                    else:
+                        headlines = get_latest_headlines(limit=12) or ["Market update"]
+                        bias = float(self.finbert.score_headlines(headlines))
+                except Exception:
+                    try:
+                        headlines = get_latest_headlines(limit=12) or ["Market update"]
+                        bias = float(self.finbert.score_headlines(headlines))
+                        self._sent_backend = "finbert"
+                        self.logger.event(
+                            "WARN",
+                            "sentiment_fallback",
+                            "[Live] Sentiment fallback -> finbert",
+                            pair=self.pair,
+                            backend="finbert",
+                        )
+                    except Exception as e:
+                        self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
+                        bias = 0.0
             if _POLARS and isinstance(features, pl.DataFrame):
                 features = features.with_columns(pl.lit(bias).cast(pl.Float64).alias("finbert_sentiment"))
             else:
@@ -1487,12 +1676,14 @@ class LiveTradingEngine:
             self.trade_journal.record({"event": "blocked", "reason": spread_result.reason})
             return
         regime_result = self.regime_router.route(features, calendar_blocked=False)
+        is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
         disagreement_result = self.disagreement_gate.check(
             action,
             obs,
             fast_model=self.fast,
             slow_model=self.slow,
             confidence=None,
+            bypass_disagreement=is_tip,
         )
         if disagreement_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": disagreement_result.reason})
@@ -1663,6 +1854,26 @@ class LiveTradingEngine:
                 self.risk_engine.open_position(
                     self.pair, abs(self._position), self._entry_price, direction="long" if buy else "short"
                 )
+        elif action in (int(LiveAction.CLOSE), int(LiveAction.SCALE_OUT_100)):
+            if abs(self._position) > 1e-12:
+                self.broker.close_position(self.pair)
+                self._risk_trade_closed(mid, "signal_close")
+                self._position = 0.0
+                self._holding_bars = 0
+                self._entry_price = 0.0
+        elif action in (int(LiveAction.SCALE_OUT_25), int(LiveAction.SCALE_OUT_50)):
+            if abs(self._position) > 1e-12:
+                fraction = 0.25 if action == int(LiveAction.SCALE_OUT_25) else 0.50
+                reduce_lots = round(abs(self._position) * fraction, 4)
+                if reduce_lots > 0:
+                    reduce_side = "sell" if self._position > 0 else "buy"
+                    r = self.broker.market_order(self.pair, reduce_side, reduce_lots)
+                    if not (isinstance(r, dict) and r.get("ok") is False):
+                        if self._position > 0:
+                            self._position -= reduce_lots
+                        else:
+                            self._position += reduce_lots
+                        self._risk_trade_closed(mid, f"scale_out_{int(fraction * 100)}")
         elif action == int(LiveAction.HOLD):
             self._holding_bars += 1
 
@@ -1727,12 +1938,10 @@ class LiveTradingEngine:
     def _feature_columns(self, features) -> list[str]:
         if self._expected_features is not None:
             missing = [c for c in self._expected_features if c not in features.columns]
-            current_features = [c for c in features.columns if c != "timestamp_utc"]
-            extra = [c for c in current_features if c not in self._expected_features]
-            if missing or extra:
+            if missing:
                 err_msg = (
                     f"Feature schema mismatch! Expected {len(self._expected_features)} features, "
-                    f"missing={missing[:5]}, extra={extra[:5]}."
+                    f"missing {len(missing)}: {missing[:5]}."
                 )
                 self.logger.event("FATAL", "schema_mismatch", err_msg, pair=self.pair)
                 raise RuntimeError(err_msg)
@@ -1841,8 +2050,7 @@ class LiveTradingEngine:
         threading.Thread(target=_loop, daemon=True).start()
 
     def _next_bar(self) -> datetime:
-        now = datetime.now(UTC)
-        return now.replace(second=0, microsecond=0) + pd.Timedelta(minutes=1)
+        return _align_next_bar(self.bar_freq)
 
     def _save_log(self):
         path = self.log_dir / f"live_{datetime.now(UTC):%Y%m%d}.jsonl"
@@ -1932,6 +2140,7 @@ class MultiPairLiveTradingEngine:
                 port=int(ALERTS.get("prometheus_port", 8000)),
                 initial_equity=float(equity),
             )
+        self.bar_freq = str(bar_freq)
         self._running = False
 
     def start(self, max_bars: int | None = None):
@@ -1954,7 +2163,7 @@ class MultiPairLiveTradingEngine:
             self.prom.start()
         print(f"[Live] MultiPair synchronized loop started for {self.pairs}")
         bar_count = 0
-        next_bar_time = datetime.now(UTC).replace(second=0, microsecond=0) + pd.Timedelta(minutes=1)
+        next_bar_time = _align_next_bar(self.bar_freq)
         while self._running:
             if max_bars and bar_count >= max_bars:
                 break
@@ -1971,7 +2180,7 @@ class MultiPairLiveTradingEngine:
                 if bars is not None and len(bars) >= 70:
                     e._on_new_bar(bars, bar_count)
             bar_count += 1
-            next_bar_time = datetime.now(UTC).replace(second=0, microsecond=0) + pd.Timedelta(minutes=1)
+            next_bar_time = _align_next_bar(self.bar_freq)
         self.stop()
 
     def stop(self):

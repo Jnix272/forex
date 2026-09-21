@@ -81,7 +81,7 @@ training:
   num_classes: 1
   label_method: cpar
   label_smoothing: 0.05
-  loss: sharpe_huber
+  loss: huber
   lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
@@ -92,7 +92,7 @@ training:
   save_every: 5
   seed: 1337
   seq_len: 60
-  sharpe_annualization_factor: null  # auto-detect: sqrt(bars_per_year / lookahead_bars)
+  sharpe_annualization_factor: 325.0
   fx_full_day: true
   sharpe_weight: 0.25
   swa_enabled: true

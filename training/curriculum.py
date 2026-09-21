@@ -767,6 +767,7 @@ def create_curriculum_manager(
             stages=("easy", "medium", "hard"),
             seq_lens=(30, 60, 90, 120),
             stable_epochs_required=3,
+            min_stable_sharpe=kwargs.get("min_stable_sharpe", 0.50),
         )
 
     config = CurriculumManagerConfig(

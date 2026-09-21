@@ -25,6 +25,8 @@ class TrainingController:
         self.train_loss_history: list[float] = []
         self.val_loss_history: list[float] = []
         self.val_sharpe_history: list[float] = []
+        self.val_sharpe_ema_history: list[float] = []
+        self.val_sharpe_ema: float | None = None
 
         _adap = adaptation or {}
         self.collapse_drop: float = float(_adap.get("collapse_drop", 0.50))
@@ -35,6 +37,10 @@ class TrainingController:
         self.min_epochs_per_stage: int = int(_adap.get("min_epochs_per_stage", 1))
         self.advance_lr_mult: float = float(_adap.get("advance_lr_mult", 1.0))
         self.collapse_reversal_threshold: float = float(_adap.get("collapse_reversal_threshold", -0.10))
+        # sharpe_ema_alpha smooths the noisy per-epoch val Sharpe before it feeds the
+        # collapse detector, so a single lucky epoch can't set an unreachable "peak".
+        self.sharpe_ema_alpha: float = float(_adap.get("sharpe_ema_alpha", 0.30))
+        self.min_stable_sharpe: float = float(_adap.get("min_stable_sharpe", 0.05))
 
         self.report_data: dict[str, Any] = {
             "model_recipe_used": "unknown",
@@ -74,6 +80,12 @@ class TrainingController:
         self.train_loss_history.append(train_loss)
         self.val_loss_history.append(val_loss)
         self.val_sharpe_history.append(val_sharpe)
+        self.val_sharpe_ema = (
+            val_sharpe
+            if self.val_sharpe_ema is None
+            else self.sharpe_ema_alpha * val_sharpe + (1.0 - self.sharpe_ema_alpha) * self.val_sharpe_ema
+        )
+        self.val_sharpe_ema_history.append(self.val_sharpe_ema)
 
         responses = {
             "lower_lr": False,
@@ -92,14 +104,22 @@ class TrainingController:
                 responses["increase_dropout"] = True
                 responses["hold_curriculum"] = True
 
-        if len(self.val_sharpe_history) >= 4:
-            peak_sharpe = max(self.val_sharpe_history)
-            current_sharpe = self.val_sharpe_history[-1]
+        if len(self.val_sharpe_ema_history) >= 4:
+            # Use the EMA-smoothed stream (not the raw per-epoch Sharpe) so a single
+            # noisy epoch can't set an unreachable "peak" that every later epoch is
+            # then compared against.
+            peak_sharpe = max(self.val_sharpe_ema_history)
+            current_sharpe = self.val_sharpe_ema_history[-1]
             collapse_threshold = peak_sharpe * (1.0 - self.collapse_drop)
-            if peak_sharpe > self.collapse_min_peak and current_sharpe < collapse_threshold:
+            if (
+                peak_sharpe > self.collapse_min_peak
+                and peak_sharpe >= self.min_stable_sharpe
+                and current_sharpe < collapse_threshold
+            ):
                 msg = (
-                    f"Epoch {epoch}: Sharpe collapse detected (Peak {peak_sharpe:.2f} -> Current {current_sharpe:.2f}, "
-                    f"threshold {collapse_threshold:.2f})."
+                    f"Epoch {epoch}: Sharpe collapse detected (EMA peak {peak_sharpe:.2f} -> "
+                    f"EMA current {current_sharpe:.2f}, threshold {collapse_threshold:.2f}; "
+                    f"raw={val_sharpe:.2f})."
                 )
                 self.logger.warning(msg)
                 self.report_data["overfitting_signals_detected"].append(msg)

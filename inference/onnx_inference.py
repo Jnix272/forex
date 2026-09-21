@@ -306,6 +306,13 @@ def _export_onnx(model, dummy, output_path, opset, input_names, output_name, dyn
     emit opset-18+ attributes like Split.num_outputs even at lower opsets)."""
     import torch
 
+    # Disable MHA fastpath so PyTorch decomposes TransformerEncoderLayer into standard ONNX-exportable ops
+    if hasattr(torch.backends, "mha") and hasattr(torch.backends.mha, "set_fastpath_enabled"):
+        try:
+            torch.backends.mha.set_fastpath_enabled(False)
+        except Exception:
+            pass
+
     if dynamic_axes is None:
         dynamic_axes = {
             input_names[0]: {0: "batch_size"},
@@ -1016,8 +1023,12 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         device_id: int = 0,
         prefer_cpu: bool = False,
         hold_threshold: float = 0.45,
+        n_features: int | None = None,
+        **kwargs: Any,
     ):
         import onnxruntime as ort  # pyright: ignore[reportMissingImports]
+
+        self.n_features = n_features
 
         self.onnx_path = str(onnx_path)
         self.seq_len = seq_len
@@ -1039,9 +1050,16 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        opts.intra_op_num_threads = 4
-
-        self.session = ort.InferenceSession(self.onnx_path, opts, providers=providers)
+        session = None
+        for prov_candidate in [providers, ["CPUExecutionProvider"]]:
+            try:
+                session = ort.InferenceSession(self.onnx_path, opts, providers=prov_candidate)
+                break
+            except Exception as e:
+                if prov_candidate == ["CPUExecutionProvider"]:
+                    raise
+                print(f"[DirectMLInferenceEngine] Hardware provider failed ({e}), falling back to CPUExecutionProvider...")
+        self.session = session
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
 

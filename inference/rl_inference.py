@@ -24,7 +24,7 @@ from trading.live_actions import LiveAction, scaling_action_to_live_action
 
 def _resolve_rl_checkpoint(checkpoint_dir: Path, algo: str = "dqn") -> Path | None:
     algo = str(algo).lower()
-    for name in (f"rl_{algo}_best.pt", f"rl_{algo}_last.pt"):
+    for name in (f"rl_{algo}_best.pt", f"rl_{algo}_last.pt", f"rl_{algo}.pt", f"{algo}_best.pt"):
         p = checkpoint_dir / name
         if p.is_file():
             return p
@@ -96,7 +96,12 @@ class RLInferenceAgent(BaseInferenceEngine):
             n_actions = self._infer_n_actions(ckpt)
 
         algo_kw = dict(RL.get(self.algo, {}))
-        if self.algo == "dqn":
+        if self.algo == "ensemble" or (isinstance(ckpt, dict) and ckpt.get("model_type") == "RLEnsemble"):
+            from models.rl_advanced import RLEnsemble
+
+            self.algo = "ensemble"
+            self._agent = RLEnsemble.load_checkpoint(rl_checkpoint, device=str(self.device))
+        elif self.algo == "dqn":
             self._agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
             agent_any = cast(Any, self._agent)
             agent_any.policy_net.load_state_dict(ckpt, strict=False)
@@ -133,6 +138,8 @@ class RLInferenceAgent(BaseInferenceEngine):
     def _infer_n_actions(self, ckpt) -> int:
         if not isinstance(ckpt, dict) or not ckpt:
             return 10
+        if ckpt.get("model_type") == "RLEnsemble" and "n_actions" in ckpt:
+            return int(ckpt["n_actions"])
         if self.algo == "dqn":
             for key, value in reversed(list(ckpt.items())):
                 if getattr(value, "ndim", 0) in (1, 2) and (key.endswith("net.4.bias") or key.endswith("net.4.weight")):
@@ -207,13 +214,12 @@ class RLInferenceAgent(BaseInferenceEngine):
         try:
             # PPO exposes `greedy=` kwarg on select_action; DQN does not, so we
             # guard with try/except to stay backward-compatible with DQN agents.
-            agent_any = cast(Any, self._agent)
-            action_t = agent_any.select_action(full_obs, greedy=True)
+            action_t = self._agent.select_action(full_obs, greedy=True)
             # PPO returns (action, log_prob, value); DQN-style returns scalar
             action_int = int(action_t[0]) if isinstance(action_t, tuple) else int(action_t)
         except TypeError:
             # DQN-style agent without greedy kwarg - fall through to default
-            action_int = int(cast(Any, self._agent).select_action(full_obs))
+            action_int = int(self._agent.select_action(full_obs))
         action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)
 

@@ -591,6 +591,10 @@ if TORCH:
             lstm_hidden=128,
             hist_len=32,
         ):
+            self.obs_size = int(obs_size)
+            self.n_actions = int(n_actions)
+            self.hidden = int(hidden)
+            self.lr = float(lr)
             self.gamma = gamma
             self.lam = lam
             self.clip = clip
@@ -599,6 +603,7 @@ if TORCH:
             self.n_epochs = n_epochs
             self.device = torch.device(device)
             self.use_lstm = bool(use_lstm)
+            self.lstm_hidden = int(lstm_hidden)
             self.hist_len = int(hist_len)
             self.net = ActorCritic(
                 obs_size=obs_size,
@@ -813,8 +818,14 @@ if TORCH:
             target_update=100,
             double_dqn=True,
             device="cpu",
+            use_lstm: bool = False,
+            **kwargs,
         ):
-            self.n_actions = n_actions
+            self.use_lstm = use_lstm
+            self.obs_size = int(obs_size)
+            self.n_actions = int(n_actions)
+            self.hidden = int(hidden)
+            self.lr = float(lr)
             self.gamma = gamma
             self.batch = batch
             self.double = double_dqn
@@ -1206,6 +1217,13 @@ def train_agent(
             )
 
     return returns
+
+
+def __getattr__(name: str):
+    if name in ("RLEnsemble", "PolicyEnsemble"):
+        from models.rl_advanced import RLEnsemble
+        return RLEnsemble
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":

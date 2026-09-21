@@ -87,8 +87,10 @@ class EconomicCalendarGuard:
     def _refresh(self, now: pd.Timestamp) -> None:
         if (now - self._loaded_at).total_seconds() < 60:
             return
-        raw = _load_events(None, self.calendar_file)
-        self._events = _filter_relevant(raw, now - pd.Timedelta(days=1), now + pd.Timedelta(days=7), self.pair)
+        start_ts = now - pd.Timedelta(days=1)
+        end_ts = now + pd.Timedelta(days=7)
+        raw = _load_events("", self.calendar_file, start_ts=start_ts, end_ts=end_ts)
+        self._events = _filter_relevant(raw, start_ts, end_ts, self.pair)
         self._loaded_at = now
 
     def check(self, now=None) -> GuardResult:
@@ -98,10 +100,14 @@ class EconomicCalendarGuard:
         else:
             now_ts = now_ts.tz_convert("UTC")
         self._refresh(now_ts)
-        if self._events.empty:
+        if self._events is None or len(self._events) == 0:
             return GuardResult(False, details={"events_loaded": 0})
 
-        for _, row in self._events.iterrows():
+        events_df = self._events.to_pandas() if hasattr(self._events, "to_pandas") else self._events
+        if getattr(events_df, "empty", True):
+            return GuardResult(False, details={"events_loaded": 0})
+
+        for _, row in events_df.iterrows():
             event_time = pd.Timestamp(row["timestamp_utc"]).tz_convert("UTC")
             name = str(row.get("headline", row.get("event", "")))
             low_name = name.lower()
@@ -226,13 +232,20 @@ class DisagreementGate:
             return None
 
     def check(
-        self, action: int, obs, *, fast_model=None, slow_model=None, confidence: float | None = None
+        self,
+        action: int,
+        obs,
+        *,
+        fast_model=None,
+        slow_model=None,
+        confidence: float | None = None,
+        bypass_disagreement: bool = False,
     ) -> GuardResult:
         if confidence is not None and float(confidence) < self.min_confidence:
             return GuardResult(
                 True, "low_confidence", {"confidence": float(confidence), "min_confidence": self.min_confidence}
             )
-        if not self.enabled or fast_model is None or slow_model is None:
+        if not self.enabled or bypass_disagreement or fast_model is None or slow_model is None:
             return GuardResult(False, details={"confidence": confidence})
         fast_action = self._safe_action(fast_model, obs)
         slow_action = self._safe_action(slow_model, obs)
