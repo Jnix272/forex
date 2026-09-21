@@ -388,15 +388,28 @@ class LiveTickBuffer:
                 }
             )
 
+    def seed_bars(self, ohlcv_df: pd.DataFrame) -> None:
+        """Seed the buffer with historical OHLCV bars so the engine starts warm."""
+        if ohlcv_df is None or ohlcv_df.empty:
+            return
+        with self._lock:
+            self._seeded_bars = ohlcv_df.copy()
+
     def get_bars(self):
         with self._lock:
-            if len(self._ticks) < 2:
-                return None
             ticks = list(self._ticks)
-        bars = self._aggregate_ticks(ticks)
-        if bars is None or len(bars) == 0:
-            return None
-        return bars.tail(self.max_bars) if hasattr(bars, "tail") else bars
+            seeded = getattr(self, "_seeded_bars", None)
+        live_bars = None
+        if len(ticks) >= 2:
+            live_bars = self._aggregate_ticks(ticks)
+        if seeded is not None and not seeded.empty:
+            if live_bars is not None and not live_bars.empty:
+                combined = pd.concat([seeded[~seeded.index.isin(live_bars.index)], live_bars]).sort_index()
+                return combined.tail(self.max_bars)
+            return seeded.tail(self.max_bars)
+        if live_bars is not None and len(live_bars) > 0:
+            return live_bars.tail(self.max_bars) if hasattr(live_bars, "tail") else live_bars
+        return None
 
     def _aggregate_ticks(self, ticks):
         if _POLARS and pl is not None:
@@ -899,16 +912,24 @@ class OANDABroker(BrokerInterface):
             os.environ.get("OANDA_API_URL") or os.environ.get("OANDA_API_HOST") or default_host
         ).rstrip("/")
         self.units_per_lot = float(os.environ.get("OANDA_UNITS_PER_LOT", 10_000.0))
-        self._bid = None
-        self._ask = None
+        self._quotes: dict[str, tuple[float, float]] = {}
 
         # Optional ZMQ tick cache (populated by C++ oanda_stream process)
         self._zmq_endpoint: str | None = os.environ.get("OANDA_ZMQ_ENDPOINT")
         self._zmq_ctx = None
         self._zmq_sub = None
         self._zmq_lock = None
+        self._zmq_running = False
         if self._zmq_endpoint:
             self._init_zmq_subscriber()
+
+    @property
+    def _bid(self) -> float | None:
+        return next((v[0] for v in self._quotes.values()), None)
+
+    @property
+    def _ask(self) -> float | None:
+        return next((v[1] for v in self._quotes.values()), None)
 
     def _init_zmq_subscriber(self) -> None:
         """Connect to the C++ oanda_stream ZMQ PUB socket."""
@@ -923,6 +944,7 @@ class OANDABroker(BrokerInterface):
             self._zmq_sub.setsockopt_string(_zmq.SUBSCRIBE, "")  # all topics
             self._zmq_sub.connect(self._zmq_endpoint)
             self._zmq_lock = threading.Lock()
+            self._zmq_running = True
             # Cache: instrument -> (bid, ask, ts_us)
             self._zmq_cache: dict = {}
             # Background drain thread keeps cache fresh
@@ -935,13 +957,14 @@ class OANDABroker(BrokerInterface):
             print(f"[OANDABroker] ZMQ init failed ({exc}); falling back to REST polling")
             self._zmq_sub = None
             self._zmq_endpoint = None
+            self._zmq_running = False
 
     def _zmq_drain_loop(self) -> None:
         """Drain the ZMQ PUB socket and update the bid/ask cache."""
         import struct
         # magic(I) + ts_us(Q) + bid(d) + ask(d) + instrument(16s) = 44 bytes
         fmt = struct.Struct("<IQdd16s")
-        while True:
+        while getattr(self, "_zmq_running", True):
             try:
                 if self._zmq_sub is None:
                     break
@@ -959,7 +982,8 @@ class OANDABroker(BrokerInterface):
                 with self._zmq_lock:
                     self._zmq_cache[inst] = (bid, ask, ts_us)
             except Exception:
-                pass  # EAGAIN / context terminated — loop continues
+                if not getattr(self, "_zmq_running", True):
+                    break
 
     def _zmq_bid_ask(self, pair: str) -> tuple[float, float] | None:
         """Return (bid, ask) from ZMQ cache if available and fresh (< 5 s)."""
@@ -973,8 +997,8 @@ class OANDABroker(BrokerInterface):
             return None
         bid, ask, ts_us = entry
         age_s = (_time.time() * 1e6 - ts_us) / 1e6
-        if age_s > 5.0:
-            return None  # stale — fall back to REST
+        if age_s > 5.0 or age_s < -5.0:
+            return None  # stale or desynced — fall back to REST
         return float(bid), float(ask)
 
     def _headers(self) -> dict:
@@ -997,41 +1021,49 @@ class OANDABroker(BrokerInterface):
         return bool(self._token and self._account_id)
 
     def disconnect(self) -> None:
+        if self._zmq_sub is not None:
+            try:
+                self._zmq_running = False
+                self._zmq_sub.close(linger=0)
+            except Exception:
+                pass
+            self._zmq_sub = None
         return None
 
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
+        inst = self._instrument(pair)
         # Fast path: ZMQ cache populated by C++ oanda_stream process
         cached = self._zmq_bid_ask(pair)
         if cached is not None:
-            self._bid, self._ask = cached
+            self._quotes[inst] = cached
             return cached
 
         import json as _json
         import urllib.request
         import urllib.error
 
-        inst = self._instrument(pair)
         url = f"{self._host}/v3/accounts/{self._account_id}/pricing?instruments={inst}"
         req = urllib.request.Request(url, headers=self._headers())
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = _json.loads(resp.read())
         except Exception as exc:
-            if self._bid is not None and self._ask is not None:
-                return float(self._bid), float(self._ask)
+            if inst in self._quotes:
+                return self._quotes[inst]
             raise RuntimeError(f"OANDA pricing fetch failed for {inst}: {exc}") from exc
 
         prices = data.get("prices") or []
         if not prices:
-            if self._bid is not None and self._ask is not None:
-                return float(self._bid), float(self._ask)
+            if inst in self._quotes:
+                return self._quotes[inst]
             raise RuntimeError(f"OANDA pricing empty for {inst}")
         px = prices[0]
         bids = px.get("bids") or [{"price": px.get("closeoutBid")}]
         asks = px.get("asks") or [{"price": px.get("closeoutAsk")}]
-        self._bid = float(bids[0]["price"])
-        self._ask = float(asks[0]["price"])
-        return self._bid, self._ask
+        b = float(bids[0]["price"])
+        a = float(asks[0]["price"])
+        self._quotes[inst] = (b, a)
+        return b, a
 
     def get_account(self) -> dict:
         import json as _json
@@ -1053,6 +1085,57 @@ class OANDABroker(BrokerInterface):
             }
         except Exception as exc:
             raise RuntimeError(f"OANDA get_account failed: {exc}") from exc
+
+    def get_candles(self, pair: str, count: int = 120, granularity: str = "M5") -> pd.DataFrame | None:
+        """Fetch historical candles from OANDA v20 REST for immediate buffer warmup."""
+        import json as _json
+        import urllib.request
+        import urllib.error
+
+        inst = self._instrument(pair)
+        gran = str(granularity).upper()
+        if gran in ("1MIN", "1M", "M1"):
+            gran = "M1"
+        elif gran in ("5MIN", "5M", "M5"):
+            gran = "M5"
+        elif gran in ("15MIN", "15M", "M15"):
+            gran = "M15"
+        elif gran in ("1H", "H1", "60MIN"):
+            gran = "H1"
+        elif gran in ("1D", "D"):
+            gran = "D"
+
+        url = f"{self._host}/v3/instruments/{inst}/candles?count={int(count)}&granularity={gran}&price=MBA"
+        req = urllib.request.Request(url, headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+            candles = data.get("candles") or []
+            if not candles:
+                return None
+            records = []
+            for c in candles:
+                ts = pd.Timestamp(c["time"])
+                mid = c.get("mid") or {}
+                bid = c.get("bid") or mid
+                ask = c.get("ask") or mid
+                records.append(
+                    {
+                        "timestamp": ts,
+                        "open": float(mid.get("o", 0.0)),
+                        "high": float(mid.get("h", 0.0)),
+                        "low": float(mid.get("l", 0.0)),
+                        "close": float(mid.get("c", 0.0)),
+                        "volume": float(c.get("volume", 1.0)),
+                        "bid_close": float(bid.get("c", mid.get("c", 0.0))),
+                        "ask_close": float(ask.get("c", mid.get("c", 0.0))),
+                    }
+                )
+            df = pd.DataFrame(records).set_index("timestamp").sort_index()
+            return df
+        except Exception as exc:
+            print(f"[OANDABroker] Warning: historical candles fetch failed for {inst} ({exc})")
+            return None
 
     def market_order(
         self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
@@ -1215,6 +1298,7 @@ class LiveTradingEngine:
         no_trade_threshold: float = 0.70,
         allow_paper_fallback: bool = False,
         risk_engine=None,
+        cross_asset=None,
     ):
         self.broker = broker
         self.pair = str(pair).upper()
@@ -1256,19 +1340,20 @@ class LiveTradingEngine:
         )
         self.afb = AdvancedFeatureBuilder(hurst_windows=[30, 60])
         self.macro = MacroYieldFeatureBuilder()
-        self.cross_asset = None
-        try:
-            end = pd.Timestamp.utcnow()
-            start = end - pd.Timedelta(days=45)
-            self.cross_asset = load_cross_asset_panel(
-                start=start.strftime("%Y-%m-%d"),
-                end=end.strftime("%Y-%m-%d"),
-                cache_dir=str(Path(PATHS.get("data_processed", "data/processed")) / "cross_asset"),
-                source=os.getenv("CROSS_ASSET_SOURCE", "auto").strip() or "auto",
-            )
-            print(f"[Live] Cross-asset loaded: {len(self.cross_asset)} series")
-        except Exception as e:
-            print(f"[Live] Cross-asset unavailable ({e}); continuing without it")
+        self.cross_asset = cross_asset
+        if self.cross_asset is None:
+            try:
+                end = pd.Timestamp.utcnow()
+                start = end - pd.Timedelta(days=45)
+                self.cross_asset = load_cross_asset_panel(
+                    start=start.strftime("%Y-%m-%d"),
+                    end=end.strftime("%Y-%m-%d"),
+                    cache_dir=str(Path(PATHS.get("data_processed", "data/processed")) / "cross_asset"),
+                    source=os.getenv("CROSS_ASSET_SOURCE", "auto").strip() or "auto",
+                )
+                print(f"[Live] Cross-asset loaded: {len(self.cross_asset)} series")
+            except Exception as e:
+                print(f"[Live] Cross-asset unavailable ({e}); continuing without it")
 
         self.rck = RegimeConditionalKelly()
         self.ac = AlmgrenChrissExecutor()
@@ -1428,6 +1513,16 @@ class LiveTradingEngine:
                 print(f"[Live] Broker pricing probe failed ({e}) - falling back to PaperBroker")
                 self.broker = PaperBroker(initial_equity=self.equity)
                 self.broker.connect()
+
+        if hasattr(self.broker, "get_candles"):
+            try:
+                hist_df = self.broker.get_candles(self.pair, count=120, granularity=self.bar_freq)
+                if hist_df is not None and not hist_df.empty:
+                    self.buf.seed_bars(hist_df)
+                    print(f"[Live] Preloaded {len(hist_df)} historical bars for {self.pair} buffer warmup")
+            except Exception as exc:
+                print(f"[Live] Warning: Historical candle preload failed for {self.pair} ({exc})")
+
         self._running = True
         signal.signal(signal.SIGINT, lambda *_: self.stop())
         try:
@@ -2140,7 +2235,7 @@ class LiveTradingEngine:
             encoding="utf-8",
         )
         script = Path(__file__).resolve().parent.parent / "training" / "train_gpu.py"
-        cmd = [sys.executable, str(script), "--model", "haelt", "--resume"]
+        cmd = [sys.executable, str(script), "--model", "haelt", "--resume", "--live-retrain"]
         self.logger.event(
             "WARN",
             "retrain_trigger",
@@ -2237,6 +2332,22 @@ class MultiPairLiveTradingEngine:
         self.pairs = [p.upper() for p in pairs]
         self.allow_paper_fallback = bool(allow_paper_fallback)
         per_pair = float(max_lots) / max(1, len(self.pairs))
+
+        shared_cross_asset = None
+        try:
+            end = pd.Timestamp.utcnow()
+            start = end - pd.Timedelta(days=45)
+            shared_cross_asset = load_cross_asset_panel(
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+                cache_dir=str(Path(PATHS.get("data_processed", "data/processed")) / "cross_asset"),
+                source=os.getenv("CROSS_ASSET_SOURCE", "auto").strip() or "auto",
+            )
+            if shared_cross_asset is not None:
+                print(f"[Live] Shared cross-asset loaded: {len(shared_cross_asset)} series across {len(self.pairs)} pairs")
+        except Exception as exc:
+            print(f"[Live] Shared cross-asset unavailable ({exc}); continuing without it")
+
         self.engines = [
             LiveTradingEngine(
                 broker=broker,
@@ -2263,6 +2374,7 @@ class MultiPairLiveTradingEngine:
                 take_profit_atr=take_profit_atr,
                 allow_paper_fallback=allow_paper_fallback,
                 risk_engine=risk_engine,
+                cross_asset=shared_cross_asset,
             )
             for p in self.pairs
         ]
@@ -2287,6 +2399,17 @@ class MultiPairLiveTradingEngine:
                 raise RuntimeError("PaperBroker fallback failed to connect")
             for e in self.engines:
                 e.broker = self.broker
+
+        if hasattr(self.broker, "get_candles"):
+            for e in self.engines:
+                try:
+                    hist_df = self.broker.get_candles(e.pair, count=120, granularity=self.bar_freq)
+                    if hist_df is not None and not hist_df.empty:
+                        e.buf.seed_bars(hist_df)
+                        print(f"[Live] Preloaded {len(hist_df)} historical bars for {e.pair} buffer warmup")
+                except Exception as exc:
+                    print(f"[Live] Warning: Historical candle preload failed for {e.pair} ({exc})")
+
         self._running = True
         for e in self.engines:
             e._running = True
@@ -2296,6 +2419,11 @@ class MultiPairLiveTradingEngine:
         print(f"[Live] MultiPair synchronized loop started for {self.pairs}")
         bar_count = 0
         next_bar_time = _align_next_bar(self.bar_freq)
+        poll_interval = (
+            0.1
+            if (getattr(self.broker, "_zmq_sub", None) is not None or isinstance(self.broker, PaperBroker))
+            else 0.5
+        )
         while self._running:
             if max_bars and bar_count >= max_bars:
                 break
@@ -2305,7 +2433,7 @@ class MultiPairLiveTradingEngine:
                     bid, ask = self.broker.get_bid_ask(e.pair)
                     if bid and ask:
                         e.buf.push_tick(bid, ask)
-                time.sleep(0.1)
+                time.sleep(poll_interval)
                 continue
             for e in self.engines:
                 bars = e.buf.get_bars()
@@ -2393,7 +2521,10 @@ if __name__ == "__main__":
         help="Inference backend: pytorch (CUDA) or onnx (AMD DirectML)",
     )
     p.add_argument(
-        "--sentiment-mode", default="auto", choices=["auto", "ollama", "finbert"], help="Sentiment backend priority"
+        "--sentiment-mode",
+        default="auto",
+        choices=["auto", "ollama", "finbert", "off", "none", "neutral"],
+        help="Sentiment backend priority (or 'off' to disable)",
     )
     p.add_argument(
         "--seq-len",
@@ -2491,6 +2622,8 @@ if __name__ == "__main__":
             Path(ckpt_paths.checkpoint_dir) / args.model / "promotion_gate.json",
             Path(ckpt_paths.checkpoint_dir) / "promotion_gate.json",
             Path(ckpt_paths.checkpoint_dir) / "ensemble" / "promotion_gate.json",
+            Path("checkpoints/ensemble/optimal_roadmap_certification.json"),
+            Path("checkpoints/ensemble/promotion_gate.json"),
         ):
             if not _cand.exists():
                 continue
@@ -2498,7 +2631,11 @@ if __name__ == "__main__":
                 import json as _json
 
                 _pg = _json.loads(_cand.read_text(encoding="utf-8"))
-                if bool(_pg.get("promoted")):
+                if (
+                    bool(_pg.get("promoted"))
+                    or bool(_pg.get("quality_gate_passed"))
+                    or _pg.get("status") == "CERTIFIED_READY_FOR_DEPLOYMENT"
+                ):
                     _promoted = True
                     print(f"[Live] Promotion gate OK: {_cand}")
                     break

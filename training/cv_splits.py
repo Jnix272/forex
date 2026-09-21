@@ -166,6 +166,28 @@ def walk_forward_splits(
     return out
 
 
+def live_safe_n(n_samples: int, args) -> int:
+    """Return the number of trailing samples that must be quarantined as the
+    live-data embargo when retraining on a dataset that includes bars the model
+    has already traded on.
+
+    The live window = promotion_holdout_n (forward gate) + embargo_bars (label
+    leakage gap).  Walk-forward folds and the promotion gate must never use
+    indices >= (n_samples - live_safe_n).
+
+    This is ONLY applied when ``args.live_retrain=True`` (auto-retrain from the
+    live engine) so offline full-history training is unaffected.
+    """
+    if not getattr(args, "live_retrain", False):
+        return 0
+    from training.cache_integrity import _promotion_holdout_n
+    holdout = _promotion_holdout_n(n_samples, args)
+    embargo = _embargo_bars(args)
+    # Extra live-data buffer: at least 1 day of bars (288 for 5-min FX)
+    extra = int(getattr(args, "live_extra_embargo_bars", 288))
+    return min(n_samples, holdout + embargo + extra)
+
+
 def _build_cv_splits(model_args, n_samples: int) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
     """
     Build CV splits for supervised training (Improvement #11 wiring).
@@ -185,8 +207,15 @@ def _build_cv_splits(model_args, n_samples: int) -> tuple[list[tuple[np.ndarray,
     _method = _validation_method(model_args)
     _n_folds = max(1, int(getattr(model_args, "walk_forward_folds", 1) or 1))
 
+    # Live-data embargo: trim trailing bars the model has already traded on.
+    _live_q = live_safe_n(n_samples, model_args)
+    _safe_n = max(100, n_samples - _live_q)
+    if _live_q > 0:
+        print(f"[CV] live_retrain=True — quarantining last {_live_q} bars "
+              f"(holdout+embargo+extra). Effective n_samples={_safe_n}/{n_samples}")
+
     def _legacy():
-        return walk_forward_splits(n_samples, _n_folds, _embargo, _purge, _method)
+        return walk_forward_splits(_safe_n, _n_folds, _embargo, _purge, _method)
 
     if strategy == "legacy":
         return _legacy(), "legacy"
@@ -194,7 +223,7 @@ def _build_cv_splits(model_args, n_samples: int) -> tuple[list[tuple[np.ndarray,
     try:
         from validation.cv import CombCV, OnlineCV, WalkForwardCV
 
-        X = np.zeros((max(n_samples, 1), 1))
+        X = np.zeros((max(_safe_n, 1), 1))
         if strategy == "walk_forward":
             cv = WalkForwardCV(
                 n_splits=_n_folds,

@@ -1192,6 +1192,23 @@ def parse_args():
     )
 
     p.add_argument(
+        "--live-retrain",
+        dest="live_retrain",
+        action="store_true",
+        default=False,
+        help="Mark this as a live-data retrain. Quarantines trailing bars the "
+        "model has already traded on (promotion_holdout + embargo + 1-day buffer) "
+        "so walk-forward folds never see live-bar data.",
+    )
+    p.add_argument(
+        "--live-extra-embargo-bars",
+        dest="live_extra_embargo_bars",
+        type=int,
+        default=288,
+        help="Extra bars of live-data buffer beyond holdout+embargo (default 288 = 1 day of 5-min bars).",
+    )
+
+    p.add_argument(
         "--training-memory",
         dest="training_memory",
         action=argparse.BooleanOptionalAction,
