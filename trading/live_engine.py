@@ -777,7 +777,7 @@ class LMAXBroker(BrokerInterface):
         fix_side = fix.Side_BUY if side.upper() == "BUY" else fix.Side_SELL
         msg.setField(fix.Side(fix_side))
 
-        msg.setField(fix.TransactTime(int(time.time())))
+        msg.setField(fix.TransactTime(datetime.now(UTC).strftime("%Y%m%d-%H:%M:%S")))
         msg.setField(fix.OrderQty(float(lots)))
         msg.setField(fix.OrdType(fix.OrdType_MARKET))
 
@@ -1305,6 +1305,7 @@ class LiveTradingEngine:
         self._position = 0.0
         self._entry_price = 0.0
         self._holding_bars = 0
+        self._halt_new_orders = False
         self._bar_log: list = []
         self._baseline_fitted = False
         self._retrain_lock = Path(PATHS.get("checkpoints", "checkpoints")) / "retrain_in_progress.lock"
@@ -1359,11 +1360,17 @@ class LiveTradingEngine:
                     pass
                 time.sleep(0.1)
                 continue
+            bar_ts = next_bar_time
             bars = self.buf.get_bars()
             if bars is not None and len(bars) >= 70:
                 self._on_new_bar(bars, bar_count)
             bar_count += 1
-            next_bar_time = self._next_bar()
+            # Advance by fixed interval so slow processing never skips bars
+            import pandas as _pd_bar
+            _interval = _pd_bar.Timedelta(self.bar_freq)
+            next_bar_time = bar_ts + _interval
+            while next_bar_time <= datetime.now(UTC):
+                next_bar_time += _interval
         self.stop()
 
     def _risk_trade_closed(self, mid: float, reason: str) -> None:
@@ -1502,6 +1509,8 @@ class LiveTradingEngine:
             self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
             return
 
+        obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
         atr = _last_float(features, "atr_6", _last_float(features, f"atr_{FEATURES.get('atr_window', 14)}", 0.0005))
         bid, ask = self.broker.get_bid_ask(self.pair)
         mid = (float(bid) + float(ask)) / 2.0 if bid and ask else _last_float(features, "close", 0.0)
@@ -1513,7 +1522,7 @@ class LiveTradingEngine:
                 self._position < 0 and mid >= self._entry_price + stop_dist
             )
             if hit_sl:
-                self.broker.close_position(self.pair)
+                _close_ok = self.broker.close_position(self.pair)
                 self.trade_journal.record(
                     {
                         "event": "stop_loss",
@@ -1525,8 +1534,9 @@ class LiveTradingEngine:
                         "position": self._position,
                     }
                 )
-                self._risk_trade_closed(mid, "atr_stop")
-                self._position = 0.0
+                if not (isinstance(_close_ok, dict) and _close_ok.get("ok") is False):
+                    self._risk_trade_closed(mid, "atr_stop")
+                    self._position = 0.0
                 self._holding_bars = 0
                 self._entry_price = 0.0
                 return
@@ -1551,11 +1561,12 @@ class LiveTradingEngine:
             if self.risk_engine is not None:
                 _risk_mon = self.risk_engine.update_equity(self.equity)
                 if _risk_mon.get("circuit_breaker") and abs(self._position) > 0:
-                    self._risk_trade_closed(mid, "risk_circuit_breaker")
-                    self.broker.close_position(self.pair)
-                    self._position = 0.0
-                    self._entry_price = 0.0
-                    self._holding_bars = 0
+                    _cb_ok = self.broker.close_position(self.pair)
+                    if not (isinstance(_cb_ok, dict) and _cb_ok.get("ok") is False):
+                        self._risk_trade_closed(mid, "risk_circuit_breaker")
+                        self._position = 0.0
+                        self._entry_price = 0.0
+                        self._holding_bars = 0
                     self.trade_journal.record(
                         {
                             "event": "blocked",
@@ -1618,12 +1629,14 @@ class LiveTradingEngine:
             self._trigger_retrain("demotion", details={"triggers": triggers})
 
         dae = self.dae.update(self.equity, pnl)
-        if str(dae.get("action", "")).upper() in ("FLATTEN", "HALT", "CLOSE_ALL") and abs(self._position) > 0:
-            self._risk_trade_closed(mid, "drawdown_guard")
-            self.broker.close_position(self.pair)
-            self._position = 0.0
-            self._entry_price = 0.0
-            self._holding_bars = 0
+        if str(dae.get("action", "")).upper() in ("FLATTEN", "HALT", "CLOSE_ALL"):
+            self._halt_new_orders = True
+            if abs(self._position) > 0:
+                self._risk_trade_closed(mid, "drawdown_guard")
+                self.broker.close_position(self.pair)
+                self._position = 0.0
+                self._entry_price = 0.0
+                self._holding_bars = 0
             self.trade_journal.record(
                 {
                     "event": "blocked",
@@ -1798,6 +1811,9 @@ class LiveTradingEngine:
                     )
                     return
 
+        if self._halt_new_orders:
+            return
+
         if lots > 0 and action in (int(LiveAction.BUY), int(LiveAction.SELL)):
             buy = action == int(LiveAction.BUY)
 
@@ -1841,12 +1857,15 @@ class LiveTradingEngine:
                 if not _place("buy", abs(float(self._position))):
                     return
                 self._risk_trade_closed(mid, "signal_flip")
+                self._position = 0.0
+                self._entry_price = 0.0
             elif not buy and self._position > 0:
                 if not _place("sell", abs(float(self._position))):
                     return
                 self._risk_trade_closed(mid, "signal_flip")
-            # Open the new leg; self._position is still the old signed value
-            # until the new leg fills below.
+                self._position = 0.0
+                self._entry_price = 0.0
+            # Open the new leg.
             if not _place("buy" if buy else "sell", lots):
                 return
             self._position = lots if buy else -lots
@@ -1858,11 +1877,12 @@ class LiveTradingEngine:
                 )
         elif action in (int(LiveAction.CLOSE), int(LiveAction.SCALE_OUT_100)):
             if abs(self._position) > 1e-12:
-                self.broker.close_position(self.pair)
-                self._risk_trade_closed(mid, "signal_close")
-                self._position = 0.0
-                self._holding_bars = 0
-                self._entry_price = 0.0
+                _sc_ok = self.broker.close_position(self.pair)
+                if not (isinstance(_sc_ok, dict) and _sc_ok.get("ok") is False):
+                    self._risk_trade_closed(mid, "signal_close")
+                    self._position = 0.0
+                    self._holding_bars = 0
+                    self._entry_price = 0.0
         elif action in (int(LiveAction.SCALE_OUT_25), int(LiveAction.SCALE_OUT_50)):
             if abs(self._position) > 1e-12:
                 fraction = 0.25 if action == int(LiveAction.SCALE_OUT_25) else 0.50
@@ -1876,6 +1896,23 @@ class LiveTradingEngine:
                         else:
                             self._position += reduce_lots
                         self._risk_trade_closed(mid, f"scale_out_{int(fraction * 100)}")
+        elif action in (int(LiveAction.SCALE_IN_25), int(LiveAction.SCALE_IN_50), int(LiveAction.SCALE_IN_100)):
+            if abs(self._position) > 1e-12:
+                fraction = {int(LiveAction.SCALE_IN_25): 0.25, int(LiveAction.SCALE_IN_50): 0.50, int(LiveAction.SCALE_IN_100): 1.0}[action]
+                add_lots = round(abs(lots) * fraction, 4)
+                if add_lots > 0:
+                    add_side = "buy" if self._position > 0 else "sell"
+                    r = self.broker.market_order(self.pair, add_side, add_lots)
+                    if not (isinstance(r, dict) and r.get("ok") is False):
+                        if self._position > 0:
+                            self._position += add_lots
+                        else:
+                            self._position -= add_lots
+                        if self.risk_engine is not None:
+                            self.risk_engine.open_position(
+                                self.pair, abs(self._position), self._entry_price,
+                                direction="long" if self._position > 0 else "short"
+                            )
         elif action == int(LiveAction.HOLD):
             self._holding_bars += 1
 

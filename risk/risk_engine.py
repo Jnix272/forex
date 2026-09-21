@@ -76,6 +76,7 @@ class RiskConfig:
     cvar_multiplier: float = float(_LR.get("cvar_multiplier", 1.5))
     gap_move_threshold: float = float(_LR.get("gap_move_threshold", 0.02))
     require_approval: bool = bool(_LR.get("require_approval_on_flatten", False))
+    max_leverage: float = float(_LR.get("max_leverage", 50.0))
 
     @classmethod
     def from_dict(cls, data: dict | None = None, **overrides: float) -> RiskConfig:
@@ -189,7 +190,7 @@ class RiskEngine:
         )
         total_notional = current_notional + notional_usd
 
-        total_notional / max(self.equity, 1.0)
+        notional_leverage = total_notional / max(self.equity, 1.0)
 
         checks = [
             # Use caller's position_size_pct for max_position_pct (backward-compat)
@@ -214,6 +215,13 @@ class RiskEngine:
                 self.cfg.max_notional_usd,
                 allowed_fn=lambda v, lim: v <= lim,
                 reason="cumulative notional exceeds max_notional_usd",
+            ),
+            self._check(
+                "max_leverage",
+                notional_leverage,
+                self.cfg.max_leverage,
+                allowed_fn=lambda v, lim: v <= lim,
+                reason="notional leverage exceeds max_leverage",
             ),
             self._check(
                 "daily_loss",
@@ -250,7 +258,8 @@ class RiskEngine:
 
         # frequency accounting only counts accepted orders
         self._order_times.append(time.time())
-        while self._order_times and self._order_times[-1] - self._order_times[0] > 60.0:
+        cutoff = time.time() - 60.0
+        while self._order_times and self._order_times[0] < cutoff:
             self._order_times.popleft()
 
         ok = RiskDecision(True, "pre_trade_checks", position_size_pct, self.cfg.max_position_pct)

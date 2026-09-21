@@ -184,14 +184,14 @@ class BrokerBridge:
             unit_mult = float(self.config.get("units_per_lot", 100_000.0))
             qty = float(lot_size) if float(lot_size) >= 1000.0 else float(lot_size) * unit_mult
             if limit_price is not None:
-                order = LimitOrder(action, qty, float(limit_price))
+                order = LimitOrder(side, qty, float(limit_price))
             else:
-                order = MarketOrder(action, qty)
+                order = MarketOrder(side, qty)
             trade = self._ib.placeOrder(contract, order)
             if stop_loss is not None or take_profit is not None:
                 # Deliver SL/TP as child orders attached to the parent, so they
                 # survive engine restarts (fail-closed protection on IBKR).
-                opp = "SELL" if action == "BUY" else "BUY"
+                opp = "SELL" if side == "BUY" else "BUY"
                 child_orders = []
                 if take_profit is not None:
                     tp = LimitOrder(opp, qty, float(take_profit))
