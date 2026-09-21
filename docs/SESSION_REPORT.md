@@ -1,3 +1,32 @@
+---
+
+## Commit `41a2cfd` — 2026-09-21 21:53 UTC
+**Author:** Antigravity Bot  
+**Message:** feat: C++ OANDA streaming tick receiver with ZMQ PUB cache
+
+**Files changed:**
+```
+cpp/CMakeLists.txt
+cpp/include/oanda_stream.h
+cpp/src/oanda_stream.cpp
+cpp/src/oanda_stream_main.cpp
+cpp/vcpkg.json
+trading/live_engine.py
+```
+
+---
+
+## Commit `2ae4dba` — 2026-09-21 21:35 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: live trading engine — 15 bugs (crashes, money loss, logic errors)
+
+**Files changed:**
+```
+execution/broker_bridge.py
+risk/risk_engine.py
+trading/live_engine.py
+```
+
 ## Session — 2026-09-21 (17:11 EDT)
 
 ### Summary
