@@ -16,19 +16,24 @@ int main(int argc, char** argv) {
     }
 
     std::string model_path = argv[1];
-    int batch_size = std::stoi(argv[2]);
-    int seq_len = std::stoi(argv[3]);
-    int n_features = std::stoi(argv[4]);
+    int batch_size = 0, seq_len = 0, n_features = 0;
     int iterations = 1000;
     float threshold = 0.5f;
-
-    for (int i = 5; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--iterations" && i + 1 < argc) {
-            iterations = std::stoi(argv[++i]);
-        } else if (arg == "--threshold" && i + 1 < argc) {
-            threshold = std::stof(argv[++i]);
+    try {
+        batch_size = std::stoi(argv[2]);
+        seq_len    = std::stoi(argv[3]);
+        n_features = std::stoi(argv[4]);
+        for (int i = 5; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--iterations" && i + 1 < argc) {
+                iterations = std::stoi(argv[++i]);
+            } else if (arg == "--threshold" && i + 1 < argc) {
+                threshold = std::stof(argv[++i]);
+            }
         }
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing arguments: " << e.what() << "\n";
+        return 1;
     }
 
     if (!std::filesystem::exists(model_path)) {

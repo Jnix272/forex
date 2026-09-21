@@ -68,23 +68,18 @@ float EnsembleRunner::logits_to_signal(const std::vector<float>& logits) {
     }
 
     if (logits.size() == 10) {
-        // 10-class ScalingAction RL policy (matching trading.live_actions and onnx_inference.py):
-        // 0: HOLD, 1: OPEN_LONG, 2: OPEN_SHORT, 3..5: SCALE_IN, 6..8: SCALE_OUT, 9: CLOSE_ALL
-        float buy = logits[1];
-        float sell = logits[2];
-        float hold = logits[0];
-        for (size_t i = 3; i < 10; ++i) {
-            if (logits[i] > hold) hold = logits[i];
-        }
-
-        float max_l = std::max({sell, hold, buy});
-        float e_sell = std::exp(sell - max_l);
-        float e_hold = std::exp(hold - max_l);
-        float e_buy  = std::exp(buy - max_l);
-        float sum = e_sell + e_hold + e_buy;
-        if (sum <= 0.0f || std::isnan(sum)) return 0.0f;
-
-        return std::clamp((e_buy - e_sell) / sum, -1.0f, 1.0f);
+        // 10-class ScalingAction: 0=HOLD, 1=OPEN_LONG, 2=OPEN_SHORT, 3-5=SCALE_IN, 6-8=SCALE_OUT, 9=CLOSE_ALL
+        // Full softmax over all 10 classes; sum hold-group probabilities.
+        // Previous code used max(hold_logits) as one class — underestimates hold mass
+        // when uncertainty is spread across multiple hold actions.
+        float max_l = *std::max_element(logits.begin(), logits.end());
+        float exps[10];
+        float total = 0.0f;
+        for (int i = 0; i < 10; ++i) { exps[i] = std::exp(logits[i] - max_l); total += exps[i]; }
+        if (total <= 0.0f || std::isnan(total)) return 0.0f;
+        const float p_buy  = exps[1] / total;
+        const float p_sell = exps[2] / total;
+        return std::clamp(p_buy - p_sell, -1.0f, 1.0f);
     }
 
     // Default fallback for general multidimensional logits: neutral signal
@@ -152,13 +147,17 @@ EnsembleRunner::EnsembleRunner(
 
 EnsembleRunner::~EnsembleRunner() = default;
 
-EnsembleRunner::EnsembleRunner(EnsembleRunner&& other) noexcept 
-    : models_(std::move(other.models_)),
-      max_variance_(other.max_variance_),
-      batch_size_(other.batch_size_),
-      max_seq_len_(other.max_seq_len_),
-      common_n_features_(other.common_n_features_),
-      concurrent_(other.concurrent_) {}
+EnsembleRunner::EnsembleRunner(EnsembleRunner&& other) noexcept {
+    // Must lock other.inference_mutex_ to prevent a concurrent infer_detailed() on
+    // other from reading other.models_ while we move it out.
+    std::lock_guard<std::mutex> lock(other.inference_mutex_);
+    models_            = std::move(other.models_);
+    max_variance_      = other.max_variance_;
+    batch_size_        = other.batch_size_;
+    max_seq_len_       = other.max_seq_len_;
+    common_n_features_ = other.common_n_features_;
+    concurrent_        = other.concurrent_;
+}
 
 EnsembleRunner& EnsembleRunner::operator=(EnsembleRunner&& other) noexcept {
     if (this != &other) {
@@ -231,7 +230,10 @@ EnsembleResult EnsembleRunner::infer_detailed(const std::vector<float>& features
                 for (size_t b = 0; b < static_cast<size_t>(batch_size_); ++b) {
                     for (size_t s = 0; s < static_cast<size_t>(required_seq); ++s) {
                         const size_t src_step = step_offset + s;
-                        const size_t src_idx = (b * incoming_seq_len + src_step) * static_cast<size_t>(common_n_features_);
+                        // Wire layout is time-major: [step0_b0, step0_b1, ..., step1_b0, step1_b1, ...]
+                        // (elements_per_step = batch_size * n_features, consistent with line above).
+                        // Previous code used batch-major index (b*seq+step), which is wrong for batch>1.
+                        const size_t src_idx = (src_step * static_cast<size_t>(batch_size_) + b) * static_cast<size_t>(common_n_features_);
                         const size_t dst_idx = (b * static_cast<size_t>(required_seq) + s) * static_cast<size_t>(required_feat);
                         std::memcpy(packed_buffer.data() + dst_idx, features.data() + src_idx, static_cast<size_t>(required_feat) * sizeof(float));
                     }

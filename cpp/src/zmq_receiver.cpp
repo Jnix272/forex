@@ -69,15 +69,20 @@ ZmqReceiver::~ZmqReceiver() {
     }
 }
 
-ZmqReceiver::ZmqReceiver(ZmqReceiver&& other) noexcept
-    : endpoint_(std::move(other.endpoint_)),
-      socket_type_(other.socket_type_),
-      role_(other.role_),
-      rcv_timeout_ms_(other.rcv_timeout_ms_),
-      rcv_hwm_(other.rcv_hwm_),
-      running_(other.running_.load()),
-      context_(std::move(other.context_)),
-      socket_(std::move(other.socket_)) {}
+ZmqReceiver::ZmqReceiver(ZmqReceiver&& other) noexcept {
+    // Lock other.receive_mutex_ so a concurrent receive() on other cannot read
+    // other.socket_ while we move it out (data race / use-after-move).
+    other.running_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(other.receive_mutex_);
+    endpoint_       = std::move(other.endpoint_);
+    socket_type_    = other.socket_type_;
+    role_           = other.role_;
+    rcv_timeout_ms_ = other.rcv_timeout_ms_;
+    rcv_hwm_        = other.rcv_hwm_;
+    running_.store(false, std::memory_order_relaxed);  // source was stopped above
+    context_        = std::move(other.context_);
+    socket_         = std::move(other.socket_);
+}
 
 ZmqReceiver& ZmqReceiver::operator=(ZmqReceiver&& other) noexcept {
     if (this != &other) {
@@ -95,7 +100,7 @@ ZmqReceiver& ZmqReceiver::operator=(ZmqReceiver&& other) noexcept {
 }
 
 void ZmqReceiver::stop() noexcept {
-    running_.store(false, std::memory_order_relaxed);
+    running_.store(false, std::memory_order_release);
 }
 
 bool ZmqReceiver::receive(std::vector<float>& features) {
@@ -136,6 +141,13 @@ bool ZmqReceiver::receive(std::vector<float>& features) {
         if (magic == FX_BINARY_MAGIC) {
             uint32_t count = 0;
             std::memcpy(&count, raw_bytes + sizeof(uint32_t), sizeof(uint32_t));
+            // Guard against network-controlled count causing OOM or size_t overflow.
+            // 16 M floats = 64 MB is a safe upper bound for any feature vector.
+            constexpr uint32_t MAX_FLOAT_COUNT = 1u << 24;
+            if (count == 0 || count > MAX_FLOAT_COUNT) {
+                std::cerr << "[ZmqReceiver] Warning: Rejecting frame with out-of-range count=" << count << "\n";
+                return false;
+            }
             const size_t expected_payload_bytes = static_cast<size_t>(count) * sizeof(float);
             if (msg_size == 8 + expected_payload_bytes) {
                 features.resize(count);
