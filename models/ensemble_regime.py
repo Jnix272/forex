@@ -105,7 +105,11 @@ class RegimeEnsembleMetaLearner(nn.Module):
         with torch.no_grad():
             base_preds = []
             for model in self.base_models:
-                pred = model(x)  # (B, 1) or (B, 3) for direction
+                raw = model(x)
+                # MultiTaskWrapper returns (logits, ret_hat, conf); extract the regression head
+                pred = raw[1] if isinstance(raw, (tuple, list)) and len(raw) > 1 else raw
+                if isinstance(pred, (tuple, list)):
+                    pred = pred[0]
                 if pred.dim() == 2 and pred.shape[1] == 3:
                     pred = pred[:, 2] - pred[:, 0]  # buy - sell logit
                 elif pred.dim() == 2 and pred.shape[1] == 1:

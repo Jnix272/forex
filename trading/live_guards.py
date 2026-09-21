@@ -197,7 +197,7 @@ class RegimeRouter:
             return GuardResult(
                 True, "news_block", {"regime": "news_block"}, size_multiplier=0.0, confidence_threshold=1.0
             )
-        in_rollover = hour >= self.rollover_start_utc or hour <= self.rollover_end_utc
+        in_rollover = hour >= self.rollover_start_utc or hour < self.rollover_end_utc
         if in_rollover:
             return GuardResult(
                 True,

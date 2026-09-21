@@ -100,8 +100,8 @@ def check_feed(report: ReadinessReport, feed_client: Any) -> None:
                 if age > 30.0:
                     report.errors.append(f"Last tick is {age:.1f}s old (stale)")
             else:
-                report.last_tick_age_s = 0.0
-                report.warnings.append("No tick received yet (first start?)")
+                report.last_tick_age_s = float("inf")
+                report.errors.append("Feed connected but no tick received — cannot confirm data flow")
 
         if hasattr(feed_client, "ping"):
             t0 = time.perf_counter()
@@ -267,8 +267,8 @@ def run_preflight(
     elif model_schema_hash or live_schema_hash:
         report.warnings.append("Only one schema hash provided - cannot compare")
     else:
-        report.schema_matched = True
-        report.warnings.append("Schema check skipped (no hashes provided)")
+        # schema_matched stays False — no hashes means the gate cannot be cleared
+        report.errors.append("Schema check skipped: pass model_schema_hash and live_schema_hash to enable")
 
     if save_report:
         try:

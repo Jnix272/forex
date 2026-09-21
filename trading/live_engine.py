@@ -1554,6 +1554,7 @@ class LiveTradingEngine:
                     self._risk_trade_closed(mid, "risk_circuit_breaker")
                     self.broker.close_position(self.pair)
                     self._position = 0.0
+                    self._entry_price = 0.0
                     self._holding_bars = 0
                     self.trade_journal.record(
                         {
@@ -1621,6 +1622,7 @@ class LiveTradingEngine:
             self._risk_trade_closed(mid, "drawdown_guard")
             self.broker.close_position(self.pair)
             self._position = 0.0
+            self._entry_price = 0.0
             self._holding_bars = 0
             self.trade_journal.record(
                 {
@@ -1675,7 +1677,7 @@ class LiveTradingEngine:
         if spread_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": spread_result.reason})
             return
-        regime_result = self.regime_router.route(features, calendar_blocked=False)
+        regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
         disagreement_result = self.disagreement_gate.check(
             action,
