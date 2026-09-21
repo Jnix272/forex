@@ -40,6 +40,10 @@ if(NOT onnxruntime_FOUND)
 endif()
 
 find_package(cppzmq CONFIG QUIET)
+find_package(CURL CONFIG QUIET)
+if(NOT CURL_FOUND)
+    find_package(CURL REQUIRED)
+endif()
 
 find_package(nlohmann_json CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)
@@ -86,6 +90,29 @@ if(cppzmq_FOUND)
     if(MSVC)
         target_compile_definitions(forex_runner PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
     endif()
+endif()
+
+# OANDA streaming tick receiver — publishes bid/ask over ZMQ PUB
+if(cppzmq_FOUND AND CURL_FOUND)
+    add_executable(oanda_stream
+        src/oanda_stream_main.cpp
+        src/oanda_stream.cpp
+    )
+    target_include_directories(oanda_stream PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(oanda_stream PRIVATE
+        cppzmq
+        CURL::libcurl
+        nlohmann_json::nlohmann_json
+        ${PLATFORM_LIBS}
+    )
+    if(MSVC)
+        target_compile_definitions(oanda_stream PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    endif()
+    message(STATUS "oanda_stream target: enabled (cppzmq + curl found)")
+else()
+    message(STATUS "oanda_stream target: SKIPPED (needs cppzmq and libcurl)")
 endif()
 
 # Ensemble benchmark executable (standalone low-latency performance benchmark)

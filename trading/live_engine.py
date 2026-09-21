@@ -868,7 +868,19 @@ class BridgeBrokerAdapter(BrokerInterface):
 
 
 class OANDABroker(BrokerInterface):
-    """OANDA v20 REST broker (practice/live via env host override)."""
+    """OANDA v20 REST broker (practice/live via env host override).
+
+    Tick feed: if OANDA_ZMQ_ENDPOINT is set (e.g. "tcp://127.0.0.1:5557"),
+    get_bid_ask() reads from the C++ oanda_stream ZMQ PUB socket instead of
+    making a REST call, giving sub-millisecond tick access with no per-call
+    HTTP overhead. The C++ process must be running separately.
+    Orders still go through the v20 REST API (OANDA has no FIX for retail).
+    """
+
+    # Binary tick frame layout published by oanda_stream.cpp
+    # magic(4) + ts_us(8) + bid(8) + ask(8) + instrument(16) = 44 bytes
+    _TICK_MAGIC  = 0x4F414E44  # "OAND"
+    _TICK_STRUCT = None  # struct.Struct, lazily built
 
     def __init__(self):
         self._token = (
@@ -889,6 +901,81 @@ class OANDABroker(BrokerInterface):
         self.units_per_lot = float(os.environ.get("OANDA_UNITS_PER_LOT", 10_000.0))
         self._bid = None
         self._ask = None
+
+        # Optional ZMQ tick cache (populated by C++ oanda_stream process)
+        self._zmq_endpoint: str | None = os.environ.get("OANDA_ZMQ_ENDPOINT")
+        self._zmq_ctx = None
+        self._zmq_sub = None
+        self._zmq_lock = None
+        if self._zmq_endpoint:
+            self._init_zmq_subscriber()
+
+    def _init_zmq_subscriber(self) -> None:
+        """Connect to the C++ oanda_stream ZMQ PUB socket."""
+        import threading
+        try:
+            import zmq as _zmq  # type: ignore[import]
+            self._zmq_ctx = _zmq.Context.instance()
+            self._zmq_sub = self._zmq_ctx.socket(_zmq.SUB)
+            self._zmq_sub.setsockopt(_zmq.RCVTIMEO, 200)   # 200 ms timeout
+            self._zmq_sub.setsockopt(_zmq.RCVHWM, 100)
+            self._zmq_sub.setsockopt(_zmq.LINGER, 0)
+            self._zmq_sub.setsockopt_string(_zmq.SUBSCRIBE, "")  # all topics
+            self._zmq_sub.connect(self._zmq_endpoint)
+            self._zmq_lock = threading.Lock()
+            # Cache: instrument -> (bid, ask, ts_us)
+            self._zmq_cache: dict = {}
+            # Background drain thread keeps cache fresh
+            self._zmq_thread = threading.Thread(
+                target=self._zmq_drain_loop, daemon=True, name="oanda-zmq-drain"
+            )
+            self._zmq_thread.start()
+            print(f"[OANDABroker] ZMQ tick cache connected to {self._zmq_endpoint}")
+        except Exception as exc:
+            print(f"[OANDABroker] ZMQ init failed ({exc}); falling back to REST polling")
+            self._zmq_sub = None
+            self._zmq_endpoint = None
+
+    def _zmq_drain_loop(self) -> None:
+        """Drain the ZMQ PUB socket and update the bid/ask cache."""
+        import struct
+        # magic(I) + ts_us(Q) + bid(d) + ask(d) + instrument(16s) = 44 bytes
+        fmt = struct.Struct("<IQdd16s")
+        while True:
+            try:
+                if self._zmq_sub is None:
+                    break
+                # Multipart: [topic_bytes, data_bytes]
+                parts = self._zmq_sub.recv_multipart(flags=0)
+                if len(parts) < 2:
+                    continue
+                data = parts[1]
+                if len(data) < fmt.size:
+                    continue
+                magic, ts_us, bid, ask, inst_raw = fmt.unpack_from(data)
+                if magic != self._TICK_MAGIC:
+                    continue
+                inst = inst_raw.rstrip(b"\x00").decode("ascii", errors="ignore")
+                with self._zmq_lock:
+                    self._zmq_cache[inst] = (bid, ask, ts_us)
+            except Exception:
+                pass  # EAGAIN / context terminated — loop continues
+
+    def _zmq_bid_ask(self, pair: str) -> tuple[float, float] | None:
+        """Return (bid, ask) from ZMQ cache if available and fresh (< 5 s)."""
+        if self._zmq_sub is None or self._zmq_lock is None:
+            return None
+        import time as _time
+        key = self._instrument(pair)
+        with self._zmq_lock:
+            entry = self._zmq_cache.get(key)
+        if entry is None:
+            return None
+        bid, ask, ts_us = entry
+        age_s = (_time.time() * 1e6 - ts_us) / 1e6
+        if age_s > 5.0:
+            return None  # stale — fall back to REST
+        return float(bid), float(ask)
 
     def _headers(self) -> dict:
         return {
@@ -913,6 +1000,12 @@ class OANDABroker(BrokerInterface):
         return None
 
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
+        # Fast path: ZMQ cache populated by C++ oanda_stream process
+        cached = self._zmq_bid_ask(pair)
+        if cached is not None:
+            self._bid, self._ask = cached
+            return cached
+
         import json as _json
         import urllib.request
         import urllib.error

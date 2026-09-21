@@ -5,6 +5,7 @@
   "description": "High-performance C++20 inference runtime for Forex Scaling Model",
   "dependencies": [
     "cppzmq",
+    "curl",
     "nlohmann-json",
     "onnxruntime"
   ]
