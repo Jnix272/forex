@@ -446,12 +446,10 @@ class RLEnsemble:
         has_short_entry = any(a == ScalingAction.OPEN_SHORT.value for a in actions_list)
         conflict_detected = bool(has_long_entry and has_short_entry)
 
-        # Directional conflict
-        long_actions = {1, 3, 4, 5}
-        short_actions = {2}
-        has_long = any(a in long_actions for a in actions_list)
-        has_short = any(a in short_actions for a in actions_list)
-        directional_conflict = bool(has_long and has_short)
+        # Directional conflict: only unambiguous opposite-entry actions (OPEN_LONG vs OPEN_SHORT).
+        # SCALE_IN (3/4/5) is direction-agnostic (adds to current position regardless of side),
+        # so including it in either long_actions or short_actions causes false conflicts.
+        directional_conflict = conflict_detected  # same as has_long_entry and has_short_entry
 
         # ── Action Resolution according to Consensus Mode ──
         if mode == "soft_vote":

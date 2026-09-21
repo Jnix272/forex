@@ -52,6 +52,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         device: Any | None = None,
         initial_equity: float = 10_000.0,
         max_lots: float = 3.0,
+        lot_size: float = 10_000.0,
     ):
         import torch
 
@@ -62,6 +63,7 @@ class RLInferenceAgent(BaseInferenceEngine):
         self.seq_len = int(seq_len)
         self.initial_equity = float(initial_equity)
         self.max_lots = float(max_lots)
+        self._lot_size = float(lot_size)  # must match ForexTradingEnv(lot_size=)
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self._model, self.n_features, self.seq_len, self.arch_name, self._scaler = load_pytorch_model(
@@ -188,10 +190,11 @@ class RLInferenceAgent(BaseInferenceEngine):
             emb = h.float().cpu().numpy().reshape(-1)
 
         price = float(self._last_price) if getattr(self, "_last_price", 0) else 0.0
-        # Standard FX lot = 100,000 base currency units
-        STANDARD_LOT_SIZE = 100_000.0
+        # Must match ForexTradingEnv default (10_000), NOT the standard FX lot (100_000).
+        # A mismatch inflates the upnl feature 10x vs training, pushing obs out-of-distribution.
+        _lot_size = getattr(self, "_lot_size", 10_000.0)
         upnl = (
-            (price - self._entry_price) * self._position * STANDARD_LOT_SIZE
+            (price - self._entry_price) * self._position * _lot_size
             if self._position != 0 and price > 0
             else 0.0
         )
@@ -207,18 +210,29 @@ class RLInferenceAgent(BaseInferenceEngine):
         )
         full_obs = np.concatenate([emb, agent_state]).astype(np.float32)
 
+        # Build action mask from current position state so the policy only selects
+        # legal actions (PPO was trained with env.action_mask(); without it, illegal
+        # actions like SCALE_IN while flat can be selected with highest logit).
+        n_actions = getattr(self._agent, "n_actions", 10)
+        mask = np.ones(n_actions, dtype=bool)
+        pos = self._position
+        if pos == 0:
+            mask[3:9] = False  # can't scale/reduce/close when flat
+        elif pos > 0:
+            mask[2] = False    # can't open short while long
+        elif pos < 0:
+            mask[1] = False    # can't open long while short
+
         # I3 fix (2026-08-07): live inference must be deterministic.
         # The PPO actor used to always sample, injecting stochasticity into
         # position-sizing decisions. Pass greedy=True for PPO (DQN already
         # has eps=0 set in __init__ at line 99, so it doesn't need this kwarg).
         try:
-            # PPO exposes `greedy=` kwarg on select_action; DQN does not, so we
-            # guard with try/except to stay backward-compatible with DQN agents.
-            action_t = self._agent.select_action(full_obs, greedy=True)
+            # PPO exposes `greedy=` and `mask=` kwargs; DQN does not.
+            action_t = self._agent.select_action(full_obs, greedy=True, mask=mask)
             # PPO returns (action, log_prob, value); DQN-style returns scalar
             action_int = int(action_t[0]) if isinstance(action_t, tuple) else int(action_t)
         except TypeError:
-            # DQN-style agent without greedy kwarg - fall through to default
             action_int = int(self._agent.select_action(full_obs))
         action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)

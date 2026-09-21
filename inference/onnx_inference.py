@@ -839,7 +839,7 @@ def export_rl_to_onnx(
         agent_any.policy_net.load_state_dict(state, strict=False)
         policy = agent_any.policy_net
     else:
-        n_actions = int(meta.get("n_actions", 0) or 0) or 3
+        n_actions = int(meta.get("n_actions", 0) or 0) or 10
         if isinstance(state, dict):
             for key, value in state.items():
                 if key.endswith("actor.weight") and getattr(value, "ndim", 0) == 2:

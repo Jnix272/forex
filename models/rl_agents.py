@@ -808,7 +808,7 @@ if TORCH:
                 
             self._sample_calls += 1
             valid_len = self._cached_len
-            indices = np.random.choice(valid_len, size=min(n, valid_len), p=self._cached_weights, replace=True)
+            indices = np.random.choice(valid_len, size=min(n, valid_len), p=self._cached_weights, replace=False)
             return [self.buf[i] for i in indices]
 
         def __len__(self):
@@ -1228,7 +1228,10 @@ def train_agent(
                     # for identical states (HER requires a UVFA-style obs+goal input).
                     o = np.asarray(tr["obs"], dtype=np.float32).reshape(-1)
                     no = np.asarray(tr["next_obs"], dtype=np.float32).reshape(-1)
-                    if o.shape[0] < obs_dim or no.shape[0] < obs_dim:
+                    if o.shape[0] != obs_dim or no.shape[0] != obs_dim:
+                        # HER obs include goal dimensions (obs_dim + goal_dim); the DQN network
+                        # expects exactly obs_dim inputs — skip oversized HER transitions unless
+                        # the network was built with UVFA-style obs+goal input size.
                         continue
                     agent.store(o, int(tr["action"]), float(tr["reward"]), no, bool(tr["done"]))
             except Exception:
