@@ -99,7 +99,7 @@ class ForexTradingEnv:
         self.commission = commission_per_lot
         self.slippage_pips = slippage_pips
         self.pip_size = pip_size
-        self.rw = {"pnl": 1.0, "drawdown": 0.5, "tx_cost": 0.3, "overtrade": 0.2, "holding": 0.01}
+        self.rw = {"pnl": 1.0, "drawdown": 0.5, "tx_cost": 0.3, "overtrade": 0.0005, "holding": 0.01, "idle": 1.0}
         if reward_weights:
             self.rw.update(
                 {
@@ -117,6 +117,9 @@ class ForexTradingEnv:
                     ),
                     "holding": float(
                         reward_weights.get("holding", reward_weights.get("holding_cost", self.rw["holding"]))
+                    ),
+                    "idle": float(
+                        reward_weights.get("idle", reward_weights.get("idle_penalty", self.rw["idle"]))
                     ),
                 }
             )
@@ -403,12 +406,26 @@ class ForexTradingEnv:
         mtm_pnl = mtm_equity - getattr(self, "_prev_mtm_equity", mtm_equity)
         self._prev_mtm_equity = mtm_equity
         holding_penalty = w["holding"] * abs(self.position) * min(self.holding / 100, 1.0)
+
+        # Opportunity cost / idle penalty for inaction when supervised signal is strongly directional
+        idle_penalty = 0.0
+        if self.features is not None and len(self.features) > 0 and self.features.shape[1] > 0:
+            try:
+                sig_val = float(self.features[self.idx, 0])
+                if abs(sig_val) > 0.15 and (
+                    self.position == 0 or (action == ScalingAction.HOLD.value and np.sign(self.position) != np.sign(sig_val))
+                ):
+                    idle_penalty = 0.001 * abs(sig_val) * w.get("idle", 1.0)
+            except Exception:
+                idle_penalty = 0.0
+
         reward = (
             w["pnl"] * mtm_pnl / self.initial_equity
             - w["drawdown"] * dd
             - w["tx_cost"] * cost / self.initial_equity
             - w["overtrade"] * (1.0 if opened_or_flipped else 0.0)
             - holding_penalty
+            - idle_penalty
         )
 
         self.idx += 1
@@ -1021,11 +1038,13 @@ def evaluate_agent(
     agent_type: str = "ppo",
     greedy: bool = True,
 ) -> tuple:
-    """Run evaluation episodes; return (episode_returns, env.summary())."""
+    """Run evaluation episodes; return (episode_returns, agg_summary)."""
     old_eps = getattr(agent, "eps", None)
     if greedy and agent_type != "ppo" and old_eps is not None:
         agent.eps = 0.0
     returns = []
+    episode_summaries = []
+    all_pnls = []
     for _ in range(int(n_episodes)):
         obs = env.reset()
         while not env.done:
@@ -1035,10 +1054,30 @@ def evaluate_agent(
             else:
                 action = agent.select_action(obs)
             obs, _, _, _ = env.step(action)
-        returns.append(env.summary()["total_return_pct"])
+        ep_summ = env.summary()
+        episode_summaries.append(ep_summ)
+        returns.append(float(ep_summ["total_return_pct"]))
+        if hasattr(env, "episode_pnl"):
+            all_pnls.extend(env.episode_pnl)
+
     if greedy and old_eps is not None:
         agent.eps = old_eps
-    return returns, env.summary()
+
+    all_pnls_arr = np.array(all_pnls)
+    if len(all_pnls_arr) > 1 and all_pnls_arr.std(ddof=1) > 1e-12:
+        agg_sharpe = float((all_pnls_arr.mean() / all_pnls_arr.std(ddof=1)) * np.sqrt(getattr(env, "bars_per_year", 75000)))
+    else:
+        agg_sharpe = float(np.mean([s["sharpe"] for s in episode_summaries])) if episode_summaries else 0.0
+
+    agg_summary = {
+        "total_return_pct": float(np.mean(returns)) if returns else 0.0,
+        "sharpe": agg_sharpe,
+        "n_trades": int(sum(s["n_trades"] for s in episode_summaries)),
+        "total_costs": float(sum(s["total_costs"] for s in episode_summaries)),
+        "max_dd_pct": float(max((s["max_dd_pct"] for s in episode_summaries), default=0.0)),
+        "episode_summaries": episode_summaries,
+    }
+    return returns, agg_summary
 
 
 def _estimate_off_policy_rewards(agent, obs_list, actions, rewards, episode: int) -> dict | None:

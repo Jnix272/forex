@@ -244,7 +244,7 @@ def run_true_walkforward():
             if regime_vals is not None:
                 rl = float(np.asarray(regime_vals[args.seq_len + off]).item())
                 if rl > 0.5:
-                    adj_min_conf = max(0.5, args.min_confidence - 0.05)
+                    adj_min_conf = max(1.0 / 3.0 + 0.01, args.min_confidence - 0.05)
                 elif rl < -0.5:
                     adj_min_conf = min(0.95, args.min_confidence + 0.05)
 

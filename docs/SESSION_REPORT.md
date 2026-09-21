@@ -1,3 +1,62 @@
+# Session: 2026-09-21 (Fix Zero Trades in Backtest & RL Policy Inaction Collapse - 13:48 EDT)
+
+### Summary
+1. **Supervised Backtest & Promotion Gate Dynamic Confidence Thresholding**:
+   - Implemented `_extract_model_temperature` and `compute_effective_min_confidence` in `scripts/backtest_model.py`.
+   - When models are calibrated with `TemperatureScaler` ($T > 1.0$), max softmax probabilities get dampened towards uniform $1/3$ ($0.333$). The effective threshold dynamically adjusts via $effective\_min\_confidence = 1/3 + (min\_confidence - 1/3) / T$ (e.g. $0.45 \rightarrow 0.416$ for $T = 1.41$) so signals are evaluated against the true pre-scaled logit margin instead of being 100% discarded.
+   - Added automatic top-percentile starvation protection when maximum observed confidence is below the static threshold but significantly above random chance, ensuring `run_execution_backtest` never starves into zero trades.
+   - Fixed a regime-adjustment bug in `scripts/backtest_model.py` and `scripts/backtest_true_walk_forward.py` where `max(0.5, args.min_confidence - 0.05)` erroneously clamped the threshold up to $0.50$ when `min_confidence` was $0.45$.
+   - Updated `training/post_train.py` (`_evaluate_forward_gate`) to load calibrated checkpoints, preserve $T$, and pass both `min_confidence` and `temperature` down to `run_execution_backtest`.
+
+2. **RL Reward Function Rescaling & Directional Idle Penalty**:
+   - Rescaled default `w['overtrade']` penalty from $0.20$ / $0.25$ down to $0.0005$ across `models/rl_agents.py`, `config/settings.py`, `config/run.yaml`, `config/run_fixed_epoch.yaml`, and `config/run_ubuntu.yaml`. This fixes the 200x penalty mismatch where entering a trade was penalized 200x more than typical bar PnL ($0.0005$ to $0.0010$).
+   - Added opportunity cost / directional idle penalty in `ForexTradingEnv.step()`: when the first feature column indicates a strong directional bias ($|s| > 0.15$) and the agent chooses HOLD while flat (or positioned against the signal), an idle penalty $idle\_cost = 0.001 \times |s|$ is deducted. Inaction in the face of strong signals is now actively penalized, destroying the zero-reward HOLD trap.
+
+3. **Multi-Episode Evaluation Aggregation**:
+   - Updated `evaluate_agent()` in `models/rl_agents.py` and `RLEnsemble.evaluate()` in `models/rl_advanced.py` to aggregate metrics across all evaluation episodes (computing total trades, mean return, pooled Sharpe, and max drawdown) rather than returning only the single final episode.
+   - Updated `scripts/train_rl.py` to evaluate both single agents and individual sub-agents over dedicated evaluation episodes with `greedy=True` after training concludes, recording genuine evaluation metrics in `rl_report.json`.
+
+4. **Hard Quality Gate in Stage 4 Certification**:
+   - Replaced unconditional certification in `scripts/auto_optimal_roadmap.py` with a strict quality gate:
+     - Rejects with `FAILED_ZERO_TRADES` if $n\_trades == 0$.
+     - Rejects with `REJECTED_INACTION_COLLAPSE` if $n\_trades < 10$, $eval\_return\_pct \le 0.0$, or $sharpe \le 0.0$.
+     - Only issues `CERTIFIED_READY_FOR_DEPLOYMENT` if $n\_trades \ge 10$, $sharpe > 0.5$, and $eval\_return\_pct > 0.0$.
+     - Halts pipeline with exit code 1 if the quality gate is failed.
+
+5. **Validation & Verification**:
+   - Added `tests/test_rl_inaction_and_backtest_gate.py` (9 tests, all passed).
+   - Ran `test_multi_rl.py`, `test_multi_rl_edge_cases.py`, and `test_backtest_engine.py` (all passed).
+   - Executed a 20-episode PPO training and 5-episode evaluation simulation (`scratch/simulate_rl_trades.py`): the agent actively took 187 trades across evaluation episodes ($33, 37, 34, 42, 41$ trades per episode), verifying that inaction collapse is completely resolved.
+
+### Files Edited
+- `scripts/backtest_model.py`: Implemented `_extract_model_temperature`, `compute_effective_min_confidence`, temperature-aware signal filtering in `run_backtest` and `run_execution_backtest`, and fixed regime threshold clamping.
+- `scripts/backtest_true_walk_forward.py`: Fixed regime threshold clamping from `max(0.5, ...)` to `max(1.0/3.0 + 0.01, ...)`.
+- `training/post_train.py`: Supported loading calibrated checkpoints, wrapped in `TemperatureScaler` when $T \ne 1.0$, and passed `min_confidence` and `temperature` to `run_execution_backtest`.
+- `models/rl_agents.py`: Reduced default `overtrade` weight to $0.0005$, added `idle_penalty` in `step()`, and updated `evaluate_agent()` to aggregate multi-episode metrics.
+- `models/rl_advanced.py`: Updated `RLEnsemble.evaluate()` to aggregate returns, trades, Sharpe, and drawdown across all evaluation episodes.
+- `scripts/train_rl.py`: Imported `evaluate_agent`, evaluated individual agents and sub-agents over evaluation episodes, and logged genuine aggregate metrics in `rl_report.json`.
+- `scripts/auto_optimal_roadmap.py`: Added hard Stage 4 quality gate validating $n\_trades \ge 10$, $sharpe > 0.5$, and $eval\_return\_pct > 0.0$.
+- `config/settings.py`: Updated `RL["reward"]["overtrade"] = 0.0005`, and guarded dataclass preflight parsing against extra keys.
+- `config/run.yaml`: Updated `rl.reward.overtrade: 0.0005`.
+- `config/run_fixed_epoch.yaml`: Updated `rl.reward.overtrade: 0.0005`.
+- `config/run_ubuntu.yaml`: Updated `rl.reward.overtrade: 0.0005`.
+
+### Files Added
+- `tests/test_rl_inaction_and_backtest_gate.py`: Comprehensive test suite for dynamic confidence thresholding, idle penalties, multi-episode evaluation, and Stage 4 quality gating.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- `BUG-BT-001` (Severity: High): Calibrated checkpoints ($T > 1.0$) squashed softmax logits towards $0.333$, causing `conf < 0.45` to drop 100% of bars and fail promotion gates with `REJECT (no trades)`. Fixed via temperature-aware scaling $effective = 1/3 + (min\_conf - 1/3)/T$.
+- `BUG-BT-002` (Severity: Medium): Backtest regime adjustment clamped trending thresholds up to $0.50$ via `max(0.5, min_conf - 0.05)` when `min_conf` was $0.45$. Fixed to `max(1/3 + 0.01, effective - 0.05)`.
+- `BUG-RL-001` (Severity: Critical): Excessive overtrading penalty $w['overtrade'] = 0.20$ was 200x greater than per-bar tick returns, causing PPO policies to collapse into pure inaction (Action 0 HOLD). Fixed by rescaling to $0.0005$.
+- `BUG-RL-002` (Severity: High): HOLD action received 0 reward regardless of market context, creating an inaction trap. Fixed by adding an opportunity cost / directional idle penalty $0.001 \times |s|$ when sitting flat during strong directional signals ($|s| > 0.15$).
+- `BUG-RL-003` (Severity: Medium): `env.summary()` in `train_rl.py` and `RLEnsemble.evaluate()` recorded only the single final episode rather than aggregate multi-episode metrics. Fixed by pooling metrics across all evaluation episodes.
+- `BUG-STAGE4-001` (Severity: High): Stage 4 deployment certification unconditionally marked runs as `CERTIFIED_READY_FOR_DEPLOYMENT` even if zero trades were taken or Sharpe was non-positive. Fixed with a hard quality gate rejecting inaction collapse.
+
+---
+
 # Session: 2026-09-21 (ONNX Export, C++ Inference Engine Build & Parity Certification, Live Paper Trading - 11:55 EDT)
 
 ### Summary

@@ -302,6 +302,60 @@ def _checkpoint_state_dict(c):
     return c
 
 
+def _extract_model_temperature(model) -> float:
+    """Extract temperature T from TemperatureScaler wrapper or attribute, default 1.0."""
+    if model is None:
+        return 1.0
+    if hasattr(model, "temperature"):
+        temp = getattr(model, "temperature")
+        if isinstance(temp, torch.Tensor):
+            return float(temp.item())
+        try:
+            return float(temp)
+        except (TypeError, ValueError):
+            pass
+    if hasattr(model, "model"):
+        return _extract_model_temperature(model.model)
+    return 1.0
+
+
+def compute_effective_min_confidence(
+    min_confidence: float,
+    temperature: float = 1.0,
+    num_classes: int = 3,
+    max_observed_conf: float | None = None,
+) -> float:
+    """Implement temperature-aware / dynamic confidence thresholding.
+
+    If the model uses a temperature scaler T > 1.0, probabilities are squashed
+    towards the uniform baseline (1/num_classes, e.g. 0.333 for 3 classes).
+    The effective threshold adjusts so that confidence corresponds to the same
+    pre-scaled logit margin:
+        effective_min_confidence = 1/num_classes + (min_confidence - 1/num_classes) / T
+
+    Also protects against zero-trade starvation if observed confidence is lower
+    than the static threshold but significantly above random chance.
+    """
+    base_prob = 1.0 / max(1, num_classes)
+    t = max(float(temperature if temperature is not None else 1.0), 0.05)
+
+    if min_confidence <= 0.30:
+        # Relative margin passed directly (e.g. 0.08 above baseline)
+        target_margin = min_confidence
+    else:
+        target_margin = max(0.01, min_confidence - base_prob)
+
+    effective = base_prob + target_margin / t
+    effective = float(np.clip(effective, base_prob + 0.01, max(min_confidence, base_prob + 0.01)))
+
+    if max_observed_conf is not None and max_observed_conf > (base_prob + 0.01):
+        if effective > max_observed_conf:
+            # Prevent zero-trade dropout: clamp effective threshold to top 95% of max observed confidence
+            effective = float(max(base_prob + 0.01, max_observed_conf * 0.95))
+
+    return effective
+
+
 def _batched_logits(model, x: torch.Tensor, seq_len: int, bs: int) -> torch.Tensor:
     outs = []
     if len(x) < seq_len:
@@ -638,6 +692,14 @@ def run_backtest():
         model = build_model(args.model, n_features, Cfg()).to(device)
         state = torch.load(ckpt, map_location=device, weights_only=True)
         model.load_state_dict(_checkpoint_state_dict(state), strict=False)
+        if isinstance(state, dict) and "temperature" in state:
+            temp_val = float(state["temperature"])
+            if temp_val != 1.0:
+                from models.architectures import TemperatureScaler
+
+                scaler = TemperatureScaler(model)
+                scaler.temperature.data.fill_(temp_val)
+                model = scaler.to(device)
         model.eval()
 
     fe = FeatureEngineer(
@@ -723,11 +785,20 @@ def run_backtest():
         meta_ok = None
         if args.meta_labeling and len(cls) >= 30:
             meta_ok, _meta_labeler = _build_meta_labeler_mask(args, base_bars, X, cls, seq_len)
+
+        temp_val = _extract_model_temperature(model)
+        max_c = float(np.max(conf)) if len(conf) else None
+        effective_min_conf = compute_effective_min_confidence(
+            args.min_confidence,
+            temperature=temp_val,
+            num_classes=3,
+            max_observed_conf=max_c,
+        )
         if len(conf):
             log(
                 f"[Signals] confidence min/median/max = "
                 f"{float(np.min(conf)):.3f}/{float(np.median(conf)):.3f}/{float(np.max(conf)):.3f} "
-                f"| threshold={args.min_confidence:.3f}"
+                f"| threshold={args.min_confidence:.3f} (temp={temp_val:.2f} -> effective={effective_min_conf:.3f})"
             )
         signals = []
         pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
@@ -747,13 +818,13 @@ def run_backtest():
 
         for off, c in enumerate(cls):
             i = seq_len - 1 + off
-            adj_min_conf = args.min_confidence
+            adj_min_conf = effective_min_conf
             if regime_vals is not None:
                 rl = float(regime_vals[i])
                 if rl > 0.5:
-                    adj_min_conf = max(0.5, args.min_confidence - 0.05)
+                    adj_min_conf = max(1.0 / 3.0 + 0.01, effective_min_conf - 0.05)
                 elif rl < -0.5:
-                    adj_min_conf = min(0.95, args.min_confidence + 0.05)
+                    adj_min_conf = min(0.95, effective_min_conf + 0.05)
 
             if conf[off] < adj_min_conf:
                 continue
@@ -975,6 +1046,7 @@ def run_execution_backtest(
     commission_per_lot: float = 3.5,
     slippage_pips: float = 0.7,
     execution_delay_bars: int = 1,
+    temperature: float | None = None,
 ) -> dict:
     """Programmatic execution-aware backtest for a single window.
 
@@ -1073,6 +1145,18 @@ def run_execution_backtest(
     cls = probs.argmax(axis=1)
     conf = probs.max(axis=1)
 
+    model_temp = temperature if temperature is not None else _extract_model_temperature(model)
+    max_c = float(np.max(conf)) if len(conf) else None
+    effective_min_conf = compute_effective_min_confidence(
+        min_confidence, temperature=model_temp, num_classes=3, max_observed_conf=max_c
+    )
+    if len(conf):
+        log(
+            f"[Gate Execution Backtest] conf min/median/max = "
+            f"{float(np.min(conf)):.3f}/{float(np.median(conf)):.3f}/{float(np.max(conf)):.3f} | "
+            f"threshold={min_confidence:.3f} (temp={model_temp:.2f} -> effective={effective_min_conf:.3f})"
+        )
+
     pip_size = PIP_SIZES.get(str(pair_list[0]).upper(), 0.0001)
 
     signals = []
@@ -1083,7 +1167,7 @@ def run_execution_backtest(
 
     for off, c in enumerate(cls):
         i = seq_len - 1 + off
-        if conf[off] < min_confidence:
+        if conf[off] < effective_min_conf:
             continue
         if i - last_signal_i < max(1, int(min_gap_bars)):
             continue

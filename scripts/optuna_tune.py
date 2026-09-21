@@ -957,6 +957,9 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
             else:
                 checkpoint_dir = Path(checkpoint_dir)
             confirm = _evaluate_trial_artifacts(checkpoint_dir, args.model, int(args.full_confirm_folds), args.metric)
+        except (subprocess.CalledProcessError, optuna.exceptions.TrialPruned) as _ce:
+            print(f"[Optuna] Confirmation trial {t.number} failed/pruned ({type(_ce).__name__}); skipping.")
+            continue
             confirm_rows.append(
                 {
                     "trial": int(t.number),
@@ -1008,7 +1011,13 @@ def objective(trial, args):
                     proc.kill()
                 raise optuna.exceptions.TrialPruned()
 
-        checkpoint_dir = Path(f"checkpoints/optuna_{_safe_slug(args.model)}_proxy_{int(trial.number)}")
+        # Use checkpoint_dir from the live payload if the generator ran; fall back
+        # to the expected path only when the subprocess exited before reporting
+        # any epoch (e.g. the run was completed without intermediate prune checks).
+        if checkpoint_dir is None:
+            checkpoint_dir = Path(f"checkpoints/optuna_{_safe_slug(args.model)}_proxy_{int(trial.number)}")
+        else:
+            checkpoint_dir = Path(checkpoint_dir)
         result = _evaluate_trial_artifacts(checkpoint_dir, args.model, int(args.folds), args.metric)
         trial.set_user_attr("checkpoint_path", result["checkpoint_path"])
         trial.set_user_attr("diagnostics", result["diagnostics"])

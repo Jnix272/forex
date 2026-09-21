@@ -589,7 +589,7 @@ rl:
     n_steps: 2048
   reward:
     drawdown: 1.5
-    overtrade: 0.25
+    overtrade: 0.0005
     pnl: 1.0
     tx_cost: 0.3
   val_frac: 0.15

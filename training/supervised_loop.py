@@ -1379,6 +1379,35 @@ def supervised_train(
 
     # -- B: Difficulty curriculum -- load diff sidecar once, filter each epoch -
     _diff_arr = _load_diff_array(cache_path, n_samples)
+    # If no pre-built sidecar exists, synthesise difficulty from label magnitude
+    # and HMM regime (if available):
+    #   0=easy  → |y| > p75 AND regime=trending
+    #   1=medium → |y| > p40
+    #   2=hard  → |y| ≤ p40 (near-zero / ambiguous direction)
+    # This makes curriculum advancement meaningful: the model must first learn
+    # unambiguous directional moves before being exposed to noisy near-zero bars.
+    if _diff_arr is None and str(cache_path).endswith(".zarr"):
+        try:
+            import zarr as _zarr_diff
+            _zd = _zarr_diff.open(str(cache_path), mode="r")
+            if "y" in _zd:
+                _y_full = np.asarray(_zd["y"][:n_samples], dtype=np.float32)
+                _abs_y = np.abs(_y_full)
+                _p40 = float(np.percentile(_abs_y, 40))
+                _p75 = float(np.percentile(_abs_y, 75))
+                _diff_synth = np.where(_abs_y <= _p40, 2,
+                              np.where(_abs_y >= _p75, 0, 1)).astype(np.uint8)
+                # Regime overlay: if HMM regime available, promote trending bars to easy
+                if "regime" in _zd:
+                    _reg = np.asarray(_zd["regime"][:n_samples], dtype=np.int8)
+                    # regime=0 assumed trending (lowest-vol HMM state)
+                    _diff_synth = np.where((_reg == 0) & (_abs_y >= _p40), 0, _diff_synth)
+                _diff_arr = _diff_synth
+                _pct_easy = int((_diff_arr == 0).mean() * 100)
+                _pct_hard = int((_diff_arr == 2).mean() * 100)
+                print(f"[Curriculum] Built difficulty from |y|+regime: easy={_pct_easy}% hard={_pct_hard}%")
+        except Exception as _de:
+            print(f"[Curriculum] Difficulty synthesis failed (no sidecar): {_de}")
     _feature_schema = _load_feature_schema(cache_path, n_features)
     if _feature_schema is None:
         _log_warn(
@@ -1792,6 +1821,10 @@ def supervised_train(
             _max_shift = float(_stab_report["feat_max_shift"])
             _dyn_w = 1.0 / (1.0 + (_max_shift**2))
             epoch_si_lambda = epoch_si_lambda * _dyn_w
+            # Clamp to per-model bounds from profile (si_lambda_min / si_lambda_max)
+            _si_lmin = float(getattr(args, "si_lambda_min", 0.0))
+            _si_lmax = float(getattr(args, "si_lambda_max", epoch_si_lambda))
+            epoch_si_lambda = max(_si_lmin, min(_si_lmax, epoch_si_lambda))
 
             if _stab_report["feat_frozen"] > 0 or _stab_report["feat_noisy"] > 0:
                 _log_info(
@@ -1856,6 +1889,26 @@ def supervised_train(
         # Reset frozen features if difficulty stage increased
         # -- B: Difficulty curriculum -- rebuild dataloader with filtered indices --
         ep_train_idx = train_idx
+        # Label-magnitude gate: early epochs only train on unambiguous bars.
+        # Threshold decays from p75 → 0 (all samples unlocked) over half of
+        # total_epochs so the model first learns clear directional moves.
+        # Only active when _diff_arr was built from |y| (or loaded from sidecar)
+        # AND no CurriculumManager is running (avoids double-gating).
+        if _curriculum_mgr is None and _diff_arr is not None:
+            _total_eps = max(1, int(args.epochs))
+            _gate_epochs = max(1, _total_eps // 2)
+            if ep < _gate_epochs:
+                # Unlock easy (0) first, add medium (1) at epoch _gate_epochs//2
+                _max_tier = 0 if ep < _gate_epochs // 2 else 1
+                _tier_mask = _diff_arr[train_idx] <= _max_tier
+                _gated = train_idx[_tier_mask]
+                if len(_gated) >= 50:
+                    ep_train_idx = _gated
+                    if ep == 0 or ep == _gate_epochs // 2:
+                        _log_info(
+                            f"[LabelMagnitudeGate] Epoch {ep + 1}: "
+                            f"tier≤{_max_tier} → {len(ep_train_idx):,}/{len(train_idx):,} samples"
+                        )
         if _curriculum_mgr is not None:
             _cm_mask = _curriculum_mgr.get_inclusion_mask(ep)
             # Apply mask to ep_train_idx by intersecting with allowed indices
@@ -2089,7 +2142,7 @@ def supervised_train(
         val_pbar.close()
 
         # TrainingController: detect overfit / Sharpe collapse and act
-        _ctrl_resp = _train_ctrl.evaluate_epoch(ep + 1, float(tl), float(vl), float(v_sh))
+        _ctrl_resp = _train_ctrl.evaluate_epoch(ep + 1, float(tl), float(vl), float(v_sh), dir_acc=float(da))
         _ctrl_curriculum = {"seq_frozen": _seq_frozen}
         _ctrl_applied = _train_ctrl.apply_responses(
             _ctrl_resp,

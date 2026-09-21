@@ -161,6 +161,9 @@ def _apply_training_profile(args, model_name: str, cli_overrides: frozenset, log
         "ewc_lambda": tprofile.ewc_lambda,
         "enable_si": tprofile.enable_si,
         "si_lambda": tprofile.si_lambda,
+        "si_dynamic": tprofile.si_dynamic,
+        "si_lambda_min": tprofile.si_lambda_min,
+        "si_lambda_max": tprofile.si_lambda_max,
         # Pretraining
         "pretrain_method": tprofile.pretrain_method,
         "pretrain_framework": tprofile.pretrain_framework,

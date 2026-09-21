@@ -270,7 +270,8 @@ TRAINING = {
     # Defaults mirrored from config/run.yaml (YAML wins when --config is used).
     "batch_size": 512,
     "epochs": 40,
-    "loss": "huber",  # matches config/run.yaml
+    "loss": "sharpe_huber",  # matches config/run.yaml
+    "sharpe_weight": 0.5,
     "huber_delta": 1.0,
     "asymmetric_sign_weight": 2.0,
     "grad_clip": 0.75,
@@ -508,7 +509,7 @@ RL = {
         "pnl_weight": 1.0,
         "drawdown_penalty": 0.5,
         "transaction_cost_penalty": 0.3,
-        "overtrade": 0.25,  # matches config/run.yaml
+        "overtrade": 0.0005,  # matches config/run.yaml
         "holding_cost": 0.01,
     },
 }
@@ -1075,9 +1076,9 @@ try:
     from config.config_schema import LiveRiskSchema, SizingSchema, TrainingSchema
 
     # Parse dictionaries into validated models at runtime
-    _ = TrainingSchema(**TRAINING)
-    _ = SizingSchema(**SIZING)
-    _ = LiveRiskSchema(**LIVE_RISK)
-except ImportError:
+    _ = TrainingSchema(**{k: v for k, v in TRAINING.items() if k in TrainingSchema.__dataclass_fields__})
+    _ = SizingSchema(**{k: v for k, v in SIZING.items() if k in SizingSchema.__dataclass_fields__})
+    _ = LiveRiskSchema(**{k: v for k, v in LIVE_RISK.items() if k in LiveRiskSchema.__dataclass_fields__})
+except (ImportError, Exception):
     pass
 

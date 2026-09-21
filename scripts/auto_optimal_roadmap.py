@@ -167,14 +167,14 @@ def run_stage_2_ensemble(device: str = "cuda") -> bool:
         return False
 
 
-def run_stage_3_multi_rl(cache_path: Path, device: str = "cuda") -> bool:
+def run_stage_3_multi_rl(cache_path: Path, device: str = "cuda", episodes: int = 250, retrain: bool = False) -> bool:
     """Stage 3: Train Multi-RL Policy Ensemble (3-Agent Recurrent PPO with Voting)."""
     log("=" * 70)
-    log("STAGE 3: TRAINING MULTI-RL RECURRENT PPO ENSEMBLE")
+    log(f"STAGE 3: TRAINING MULTI-RL RECURRENT PPO ENSEMBLE ({episodes} EPISODES)")
     log("Supervised Base: 4-Model Stacking Ensemble (HAELT+GNN+Mamba+TFT)")
     log("Committee: 3 PPO Agents, LSTM Memory (hist_len=32), Soft-Voting Consensus")
     rl_ckpt = ENSEMBLE_DIR / "rl_ensemble_best.pt"
-    if rl_ckpt.exists():
+    if rl_ckpt.exists() and not retrain:
         log(f"[INFO] Stage 3 checkpoint already exists at {rl_ckpt}. Skipping retraining.")
         return True
 
@@ -206,7 +206,7 @@ def run_stage_3_multi_rl(cache_path: Path, device: str = "cuda") -> bool:
         "--batch-size",
         "256",
         "--episodes",
-        "500",
+        str(episodes),
         "--device",
         device,
     ]
@@ -249,9 +249,54 @@ def run_stage_4_certification() -> dict:
         except Exception as e:
             log(f"Warning reading rl_report.json: {e}")
 
+    # Extract performance metrics for quality gating
+    if "ensemble_consensus" in rl_metrics:
+        cons = rl_metrics["ensemble_consensus"]
+        n_trades = int(cons.get("n_trades", 0))
+        sharpe = float(cons.get("sharpe", 0.0))
+        eval_return_pct = float(cons.get("eval_return_pct", 0.0))
+    else:
+        n_trades = int(rl_metrics.get("n_trades", 0))
+        sharpe = float(rl_metrics.get("sharpe", 0.0))
+        eval_return_pct = float(rl_metrics.get("eval_return_pct", rl_metrics.get("train_return_pct", 0.0)))
+
+    # Hard Quality Gate evaluation
+    reasons = []
+    if n_trades == 0:
+        cert_status = "FAILED_ZERO_TRADES"
+        reasons.append("Model/Ensemble took zero trades during evaluation (inaction collapse)")
+    elif n_trades < 10 or eval_return_pct <= 0.0 or sharpe <= 0.0:
+        cert_status = "REJECTED_INACTION_COLLAPSE"
+        if n_trades < 10:
+            reasons.append(f"Insufficient trade count: {n_trades} < 10 required")
+        if eval_return_pct <= 0.0:
+            reasons.append(f"Non-positive evaluation return: {eval_return_pct:+.2f}% <= 0.0%")
+        if sharpe <= 0.0:
+            reasons.append(f"Non-positive Sharpe ratio: {sharpe:.2f} <= 0.0")
+    elif n_trades >= 10 and sharpe > 0.5 and eval_return_pct > 0.0:
+        cert_status = "CERTIFIED_READY_FOR_DEPLOYMENT"
+    else:
+        cert_status = "REJECTED_INACTION_COLLAPSE"
+        reasons.append(f"Sub-par performance metrics: n_trades={n_trades}, sharpe={sharpe:.2f}, eval_return={eval_return_pct:+.2f}%")
+
+    log(f"[Quality Gate] Verdict: {cert_status} | n_trades={n_trades} | Sharpe={sharpe:.2f} | Return={eval_return_pct:+.2f}%")
+    if reasons:
+        for r in reasons:
+            log(f"  [REASON] {r}")
+
     certification = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "status": "CERTIFIED_READY_FOR_DEPLOYMENT",
+        "status": cert_status,
+        "quality_gate_passed": bool(cert_status == "CERTIFIED_READY_FOR_DEPLOYMENT"),
+        "rejection_reasons": reasons,
+        "performance_gate": {
+            "n_trades": n_trades,
+            "sharpe": sharpe,
+            "eval_return_pct": eval_return_pct,
+            "min_trades_required": 10,
+            "min_sharpe_required": 0.5,
+            "min_return_required": 0.0,
+        },
         "architecture_stack": {
             "base_models": ["haelt", "mamba", "gnn", "tft"],
             "ensemble_meta": "Attention-Gated Neural Stacking (checkpoints/ensemble/ensemble_meta_best.pt)",
@@ -282,6 +327,8 @@ def main():
     parser = argparse.ArgumentParser(description="Optimal Roadmap Automated Orchestrator")
     parser.add_argument("--check-only", action="store_true", help="Check status and exit without waiting")
     parser.add_argument("--force-start", action="store_true", help="Start Stage 2 immediately using current checkpoints")
+    parser.add_argument("--episodes", type=int, default=250, help="Number of RL episodes per agent (default: 250)")
+    parser.add_argument("--retrain-rl", action="store_true", help="Force retrain RL even if checkpoint exists")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -326,7 +373,7 @@ def main():
 
     status["stage"] = "training_multi_rl"
     update_status(status)
-    s3_ok = run_stage_3_multi_rl(cache_path=cache_path, device=args.device)
+    s3_ok = run_stage_3_multi_rl(cache_path=cache_path, device=args.device, episodes=args.episodes, retrain=args.retrain_rl)
     if not s3_ok:
         log("Stage 3 failed. Halting pipeline.")
         status["stage"] = "failed_stage_3"
@@ -335,18 +382,26 @@ def main():
     status["stages_completed"].append("Stage 3: Multi-RL Policy Ensemble")
     update_status(status)
 
-    status["stage"] = "compiling_certification"
-    update_status(status)
     cert = run_stage_4_certification()
     status["stages_completed"].append("Stage 4: Deployment Certification")
-    status["stage"] = "all_completed"
-    status["completed_at"] = datetime.now(timezone.utc).isoformat()
-    update_status(status)
-
-    log("=" * 70)
-    log("THE OPTIMAL ROADMAP PIPELINE HAS COMPLETED 100% SUCCESSFULLY!")
-    log("Stack is certified and ready for live paper trading.")
-    log("=" * 70)
+    if cert["status"] == "CERTIFIED_READY_FOR_DEPLOYMENT":
+        status["stage"] = "all_completed"
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
+        update_status(status)
+        log("=" * 70)
+        log("THE OPTIMAL ROADMAP PIPELINE HAS COMPLETED 100% SUCCESSFULLY!")
+        log("Stack is certified and ready for live paper trading.")
+        log("=" * 70)
+    else:
+        status["stage"] = "certification_failed"
+        update_status(status)
+        log("=" * 70)
+        log(f"STAGE 4 QUALITY GATE FAILED: {cert['status']}")
+        for r in cert.get("rejection_reasons", []):
+            log(f"  - {r}")
+        log("Deployment rejected due to inaction collapse or subpar performance.")
+        log("=" * 70)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

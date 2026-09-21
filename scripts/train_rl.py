@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 from config.settings import PATHS
 from models.ensemble import EnsembleMetaLearner
 from models.rl_advanced import CurriculumScheduler, RLEnsemble
-from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, train_agent
+from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, evaluate_agent, train_agent
 from scripts.train_ensemble_meta import load_base_model, resolve_checkpoint
 from training.gpu_datasets import ZarrStreamDataset
 
@@ -409,14 +409,20 @@ def main():
         logging.info(f"Training single {args.agent.upper()} agent for {args.episodes} episodes...")
         returns = train_agent(agent, env, n_episodes=args.episodes, agent_type=args.agent, curriculum=curriculum)
 
-        final_summary = env.summary()
+        eval_episodes = max(1, min(5, args.episodes))
+        logging.info(f"Evaluating single {args.agent.upper()} agent over {eval_episodes} evaluation episodes...")
+        eval_returns, final_summary = evaluate_agent(agent, env, n_episodes=eval_episodes, agent_type=args.agent, greedy=True)
+        eval_ret_avg = float(np.mean(eval_returns))
+
         report = {
             "supervised_model": args.model_name,
             "is_ensemble": is_ensemble,
             "multi_agent": False,
             "agent": args.agent,
             "episodes": args.episodes,
+            "eval_episodes": eval_episodes,
             "train_return_pct": float(np.mean(returns[-10:]) if len(returns) >= 10 else np.mean(returns)),
+            "eval_return_pct": eval_ret_avg,
             "max_drawdown_pct": float(final_summary["max_dd_pct"]),
             "n_trades": int(final_summary["n_trades"]),
             "sharpe": float(final_summary["sharpe"]),
@@ -491,10 +497,14 @@ def main():
             sub_returns = train_agent(
                 sub_agent, env, n_episodes=args.episodes, agent_type=atype, curriculum=curriculum
             )
-            sub_summary = env.summary()
-            ret_avg = float(np.mean(sub_returns[-10:]) if len(sub_returns) >= 10 else np.mean(sub_returns))
+            eval_episodes = max(1, min(5, args.episodes))
+            sub_eval_returns, sub_summary = evaluate_agent(
+                sub_agent, env, n_episodes=eval_episodes, agent_type=atype, greedy=True
+            )
+            ret_avg = float(np.mean(sub_eval_returns))
+            train_ret_avg = float(np.mean(sub_returns[-10:]) if len(sub_returns) >= 10 else np.mean(sub_returns))
             logging.info(
-                f"[Multi-RL Agent {i+1}/{len(agent_types)}] Finished | Return: {ret_avg:+.2f}% | "
+                f"[Multi-RL Agent {i+1}/{len(agent_types)}] Finished | Eval Return: {ret_avg:+.2f}% | "
                 f"Sharpe: {sub_summary['sharpe']:.2f} | Trades: {sub_summary['n_trades']}"
             )
 
@@ -503,7 +513,8 @@ def main():
                 "agent_id": i,
                 "agent_type": atype,
                 "seed": sub_seed,
-                "train_return_pct": ret_avg,
+                "train_return_pct": train_ret_avg,
+                "eval_return_pct": ret_avg,
                 "sharpe": float(sub_summary["sharpe"]),
                 "max_drawdown_pct": float(sub_summary["max_dd_pct"]),
                 "n_trades": int(sub_summary["n_trades"]),

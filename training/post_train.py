@@ -818,7 +818,18 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         core = model
         state = {}  # dummy state to pass the strict load report
     else:
-        candidates = [ckpt_dir / model_name / f"{model_name}_best.pt", ckpt_dir / f"{model_name}_best.pt"]
+        candidates = []
+        if getattr(args, "use_calibrated", False) or getattr(args, "calibrate", False):
+            candidates.extend([
+                ckpt_dir / model_name / f"{model_name}_calibrated.pt",
+                ckpt_dir / f"{model_name}_calibrated.pt",
+            ])
+        candidates.extend([
+            ckpt_dir / model_name / f"{model_name}_best.pt",
+            ckpt_dir / f"{model_name}_best.pt",
+            ckpt_dir / model_name / f"{model_name}_calibrated.pt",
+            ckpt_dir / f"{model_name}_calibrated.pt",
+        ])
         ckpt_path = next((p for p in candidates if p.exists()), None)
         if ckpt_path is None:
             return {
@@ -835,9 +846,24 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         _dummy = torch.zeros(2, getattr(args, "seq_len", 60), n_features, device=device)
         _ = model(_dummy)
 
-        state = torch_load_safe(ckpt_path, map_location=device)
-        if isinstance(state, dict) and "model_state" in state:
-            state = state["model_state"]
+        raw_state = torch_load_safe(ckpt_path, map_location=device)
+        temp_val = 1.0
+        if isinstance(raw_state, dict):
+            if "temperature" in raw_state:
+                temp_val = float(raw_state["temperature"])
+            if "model_state" in raw_state:
+                state = raw_state["model_state"]
+            else:
+                state = raw_state
+        else:
+            state = raw_state
+
+        if temp_val != 1.0:
+            from models.architectures import TemperatureScaler
+
+            scaler = TemperatureScaler(model)
+            scaler.temperature.data.fill_(temp_val)
+            model = scaler.to(device)
     try:
         if model_name != "ensemble":
             _strict_load_report(core, state, f"Gate:{model_name}", min_frac_loaded=0.6)
@@ -920,6 +946,8 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
             stop_pips=15.0,  # Will be overridden by ATR tracking ideally, using defaults for gate
             take_pips=20.0,
             inference_batch_size=getattr(args, "batch_size", 4096),
+            min_confidence=getattr(args, "min_confidence", None),
+            temperature=temp_val if "temp_val" in locals() else None,
         )
 
     except Exception as e:

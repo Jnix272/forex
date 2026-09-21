@@ -740,9 +740,11 @@ class RLEnsemble:
     ) -> tuple[list[float], dict[str, Any], dict[str, float]]:
         """Run evaluation episodes on env using ensemble consensus policy.
 
-        Returns (returns, env.summary(), ensemble_diagnostics).
+        Returns (returns, agg_summary, ensemble_diagnostics).
         """
         returns = []
+        episode_summaries = []
+        all_pnls = []
         agreement_scores = []
         disagreement_scores = []
         uncertainties = []
@@ -764,7 +766,26 @@ class RLEnsemble:
                     conflict_steps += 1
                 total_steps += 1
 
-            returns.append(env.summary()["total_return_pct"])
+            ep_summ = env.summary()
+            episode_summaries.append(ep_summ)
+            returns.append(float(ep_summ["total_return_pct"]))
+            if hasattr(env, "episode_pnl"):
+                all_pnls.extend(env.episode_pnl)
+
+        all_pnls_arr = np.array(all_pnls)
+        if len(all_pnls_arr) > 1 and all_pnls_arr.std(ddof=1) > 1e-12:
+            agg_sharpe = float((all_pnls_arr.mean() / all_pnls_arr.std(ddof=1)) * np.sqrt(getattr(env, "bars_per_year", 75000)))
+        else:
+            agg_sharpe = float(np.mean([s["sharpe"] for s in episode_summaries])) if episode_summaries else 0.0
+
+        agg_summary = {
+            "total_return_pct": float(np.mean(returns)) if returns else 0.0,
+            "sharpe": agg_sharpe,
+            "n_trades": int(sum(s["n_trades"] for s in episode_summaries)),
+            "total_costs": float(sum(s["total_costs"] for s in episode_summaries)),
+            "max_dd_pct": float(max((s["max_dd_pct"] for s in episode_summaries), default=0.0)),
+            "episode_summaries": episode_summaries,
+        }
 
         diagnostics = {
             "mean_agreement_score": float(np.mean(agreement_scores)) if agreement_scores else 1.0,
@@ -773,7 +794,7 @@ class RLEnsemble:
             "conflict_rate": float(conflict_steps / max(total_steps, 1)),
             "total_steps": total_steps,
         }
-        return returns, env.summary(), diagnostics
+        return returns, agg_summary, diagnostics
 
 
 # Alias

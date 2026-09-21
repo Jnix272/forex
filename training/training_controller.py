@@ -27,6 +27,10 @@ class TrainingController:
         self.val_sharpe_history: list[float] = []
         self.val_sharpe_ema_history: list[float] = []
         self.val_sharpe_ema: float | None = None
+        self.dir_acc_history: list[float] = []
+        # How many consecutive epochs dir_acc must stay below 0.50 before acting.
+        self.dir_acc_below_random_window: int = int(_adap.get("dir_acc_below_random_window", 2))
+        self.dir_acc_random_threshold: float = float(_adap.get("dir_acc_random_threshold", 0.50))
 
         _adap = adaptation or {}
         self.collapse_drop: float = float(_adap.get("collapse_drop", 0.50))
@@ -72,6 +76,7 @@ class TrainingController:
         train_loss: float,
         val_loss: float,
         val_sharpe: float,
+        dir_acc: float | None = None,
     ) -> dict[str, bool]:
         """
         Detect overfitting signals at the end of every epoch.
@@ -86,6 +91,8 @@ class TrainingController:
             else self.sharpe_ema_alpha * val_sharpe + (1.0 - self.sharpe_ema_alpha) * self.val_sharpe_ema
         )
         self.val_sharpe_ema_history.append(self.val_sharpe_ema)
+        if dir_acc is not None:
+            self.dir_acc_history.append(float(dir_acc))
 
         responses = {
             "lower_lr": False,
@@ -125,6 +132,29 @@ class TrainingController:
                 self.report_data["overfitting_signals_detected"].append(msg)
                 responses["lower_lr"] = True
                 responses["stop_early"] = True
+
+        # Directional accuracy gate: if the model predicts the wrong direction
+        # more often than random for N consecutive epochs, lower LR and bump
+        # dropout. Unlike the Sharpe collapse gate this fires even when Sharpe
+        # is near zero (i.e. when the model is mostly predicting HOLD/zero).
+        if (
+            len(self.dir_acc_history) >= self.dir_acc_below_random_window
+            and all(
+                a < self.dir_acc_random_threshold
+                for a in self.dir_acc_history[-self.dir_acc_below_random_window :]
+            )
+        ):
+            msg = (
+                f"Epoch {epoch}: dir_acc below random for "
+                f"{self.dir_acc_below_random_window} consecutive epochs "
+                f"(last={self.dir_acc_history[-1]:.3f} < {self.dir_acc_random_threshold:.2f}). "
+                "Lowering LR and bumping dropout."
+            )
+            self.logger.warning(msg)
+            self.report_data["overfitting_signals_detected"].append(msg)
+            responses["lower_lr"] = True
+            responses["increase_dropout"] = True
+            responses["hold_curriculum"] = True
 
         return responses
 

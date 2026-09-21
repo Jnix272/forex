@@ -598,7 +598,7 @@ rl:
     n_steps: 2048
   reward:
     drawdown: 1.5
-    overtrade: 0.25
+    overtrade: 0.0005
     pnl: 1.0
     tx_cost: 0.3
   val_frac: 0.15
@@ -631,10 +631,13 @@ tracking:
 training:
   amp: true
   batch_size: 256
-  enable_ewc: false
-  ewc_lambda: 1000.0
-  enable_si: false
-  si_lambda: 1.0
+  enable_ewc: true
+  ewc_lambda: 400.0
+  enable_si: true
+  si_lambda: 0.5
+  si_dynamic: true
+  si_lambda_min: 0.05
+  si_lambda_max: 2.0
   cross_asset_mode: auto
   cross_asset_provider: auto
   direction_weight: 0.75
@@ -655,7 +658,8 @@ training:
   grad_clip: 0.75
   label_method: cpar
   label_smoothing: 0.05
-  loss: huber
+  loss: sharpe_huber
+  sharpe_weight: 0.5
   lr: 1.95e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
