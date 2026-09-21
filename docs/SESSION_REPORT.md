@@ -1,3 +1,102 @@
+## Session — 2026-09-21 (17:11 EDT)
+
+### Summary
+Completed full 250-episode Multi-RL PPO Ensemble retraining on CUDA (RTX 4060 Laptop GPU). All 3 agents trained with curriculum learning (Low Vol → Normal Vol → High Vol → Full Volatility). Stage 4 hard quality gate passed with genuine performance metrics. Exported updated ONNX artifacts for both single-agent and 3-agent consensus ensemble.
+
+### What Was Done
+1. **Multi-RL Retraining (250 episodes × 3 agents)** — `scripts/auto_optimal_roadmap.py --force-start --retrain-rl --episodes 250 --device cuda`
+   - Agent 1 (seed 1337): Sharpe 13.47, 13,957 eval trades
+   - Agent 2 (seed 1437): Sharpe 11.65, 293 eval trades
+   - Agent 3 (seed 1537): Sharpe 6.59, 8,002 eval trades
+   - **Ensemble Consensus (soft_vote):** Sharpe **6.79** | Trades **364** | Return **+7.74%** | Max DD **6.77%**
+2. **Stage 4 Hard Quality Gate — PASSED** (`CERTIFIED_READY_FOR_DEPLOYMENT`)
+   - n_trades=364 ≥ 10 ✅ | Sharpe=6.79 > 0.5 ✅ | Return=+7.74% > 0.0% ✅
+   - mean_disagreement_score=0.877 (agents genuinely diverse — not collapsing to unanimous HOLD)
+3. **ONNX Export** — `scripts/export_rl_onnx.py`
+   - `checkpoints/ensemble/rl_best.onnx` (single PPO, obs_size=591, 10 actions, LSTM hidden=128)
+   - `checkpoints/ensemble/rl_ensemble_best.onnx` (3-agent soft-vote consensus)
+
+### Files Edited
+| File | Change |
+|------|--------|
+| `checkpoints/ensemble/rl_ensemble_best.pt` | Updated 3-agent PPO ensemble weights (250 ep retrain) |
+| `checkpoints/ensemble/rl_best.pt` | Updated single PPO agent weights |
+| `checkpoints/ensemble/optimal_roadmap_certification.json` | Stage 4 certification with real metrics (not hardcoded) |
+| `checkpoints/ensemble/rl_best.onnx` | Re-exported from new weights |
+| `checkpoints/ensemble/rl_ensemble_best.onnx` | Re-exported from new 3-agent consensus |
+| `docs/SESSION_REPORT.md` | This entry |
+
+### Bugs Fixed
+- None this sub-session (all fixes committed in prior sub-session `21f4891`)
+
+### Files Added / Deleted
+- None
+
+---
+
+## Commit `148032d` — 2026-09-21 19:05 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: C++ ensemble/ZMQ bugs — wrong softmax, thread safety, buffer overflow, layout
+
+**Files changed:**
+```
+cpp/src/ensemble_benchmark.cpp
+cpp/src/ensemble_runner.cpp
+cpp/src/zmq_receiver.cpp
+```
+
+---
+
+## Commit `4d47e0f` — 2026-09-21 18:58 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: deployment certification and ensemble bugs — gate bypasses, stale state, crash
+
+**Files changed:**
+```
+models/ensemble_regime.py
+trading/live_engine.py
+trading/live_guards.py
+trading/preflight_check.py
+```
+
+---
+
+## Commit `68db652` — 2026-09-21 18:47 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: RL and ensemble bugs — lot size mismatch, action mask, HER crash, replay bias
+
+**Files changed:**
+```
+inference/onnx_inference.py
+inference/rl_inference.py
+models/rl_advanced.py
+models/rl_agents.py
+```
+
+---
+
+## Commit `9f90e46` — 2026-09-21 18:35 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: multiple backtesting bugs — look-ahead bias, Sortino, margin call, fills
+
+**Files changed:**
+```
+backtesting/backtest.py
+backtesting/execution.py
+backtesting/gpu_backtester.py
+```
+
+---
+
+## Commit `3db00fc` — 2026-09-21 18:29 UTC
+**Author:** Antigravity Bot  
+**Message:** fix: correct sharpe setup in run.yaml — remove 325x inflation and duplicate weight
+
+**Files changed:**
+```
+config/run.yaml
+```
+
 # Session: 2026-09-21 (Fix Zero Trades in Backtest & RL Policy Inaction Collapse - 13:48 EDT)
 
 ### Summary
