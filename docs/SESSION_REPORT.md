@@ -1,3 +1,153 @@
+# Session: 2026-09-21 (Phase 1 Live Paper Trading Status & USDJPY Pip Scale / Macro Yield Cache Hardening - 19:48 EDT)
+
+### Summary
+Addressed user inquiries regarding live paper trading status, FRED macro yield utilization, economic news handling, and signal generation mechanics. Diagnosed and resolved the root cause behind USDJPY trade signals being rejected by `SpreadVolatilityGuard` (100x pip size calculation error when `pair` was omitted in `fe.build`), implemented 1-hour TTL caching for FRED yields to reduce bar evaluation latency from 14s to 6s, and verified clean execution of the live paper trading daemon across all 4 pairs on OANDA Practice account `101-001-38834567-001`.
+
+### What Was Done
+1. **Live Paper Trading Operation & Answering User Questions**:
+   - Verified that Phase 1 live paper trading is actively running on OANDA Practice account `101-001-38834567-001` (NAV ~$98,723 USD) evaluating EURUSD, GBPUSD, USDCAD, and USDJPY on 5-minute bars.
+   - Clarified that EURUSD, GBPUSD, and USDCAD models have remained in `HOLD` during the low-volatility US/Asian session transition, while USDJPY generated active signals.
+   - Explained how FRED macroeconomic yields (US10Y, US2Y, DE10Y, JP10Y, GB10Y, AU10Y, CA10Y, NZ10Y, CH10Y) are processed into sovereign yield spreads, carry differentials, and yield curve slope features fed directly into the 4-model Stacking Ensemble.
+   - Clarified economic calendar protection via `EconomicCalendarGuard` against high-impact news releases, and explained why news sentiment is turned off (`--sentiment-mode off`) to prioritize quantitative technical, microstructure, and macro indicators.
+2. **Fixed USDJPY 100x Pip Scale Spread Block**:
+   - Identified that `self.fe.build(bars, cross_asset=self.cross_asset)` in `trading/live_engine.py` was called without `pair=self.pair`, defaulting to `EURUSD` (pip size 0.0001 instead of 0.01 for JPY).
+   - This caused USDJPY's 1.7 pip spread to be calculated as `0.017 / 0.0001 = 170.0` pips, causing `SpreadVolatilityGuard` to falsely reject all USDJPY entries as `spread_too_wide`.
+   - Updated `LiveTradingEngine._on_new_bar()` to pass `pair=self.pair` to `self.fe.build()`.
+3. **FRED Macro Yield TTL Cache**:
+   - Added an in-memory TTL cache (`_YIELD_CACHE`, 1-hour duration) in `features/macro_features.py`.
+   - Eliminated 36 redundant external FRED API calls every 5 minutes across the 4 pairs, drastically reducing network strain and dropping multi-pair bar processing time from 14 seconds to 6 seconds.
+4. **Daemon Verification**:
+   - Restarted the live paper trading daemon under task `task-12020` with updated code, preloaded 120 historical bars for all 4 pairs, and confirmed bar evaluation runs without spread errors.
+
+### Files Edited
+- `features/macro_features.py`: Added 1-hour TTL caching (`_YIELD_CACHE`) to `MacroYieldFeatureBuilder.load_yields()` to cache daily bond yields across pairs and bars.
+- `trading/live_engine.py`: Passed `pair=self.pair` to `self.fe.build()` in `LiveTradingEngine._on_new_bar()`.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- `BUG-LIVE-006` (Severity: High): In `LiveTradingEngine._on_new_bar()`, `self.fe.build(bars)` was missing `pair=self.pair`, causing pip size calculation to default to EURUSD (0.0001) rather than USDJPY (0.01). A 1.7 pip spread was scaled to 170.0 pips, falsely triggering `SpreadVolatilityGuard`'s `spread_too_wide` rule and blocking valid USDJPY orders.
+- `BUG-MACRO-001` (Severity: Medium): `MacroYieldFeatureBuilder` queried FRED without in-memory caching, making 36 HTTP API calls every 5 minutes across the 4 pairs. Added a 1-hour TTL cache that cut bar processing latency by over 50%.
+
+---
+
+# Session: 2026-09-21 (Phase 1 OANDA Live Paper Trading Launch & Full Engine Hardening - 19:18 EDT)
+
+### Summary
+Successfully verified OANDA API credentials, hardened the multi-pair live trading pipeline against cross-pair contamination, rate limiting, and Polars/pandas index mismatches, added instant historical candle warmup (120 bars), verified end-to-end execution with a real 1-bar dry run, and launched **Phase 1** live paper trading daemon on OANDA Practice account `101-001-38834567-001` across 4 pairs (EURUSD, GBPUSD, USDCAD, USDJPY) using the full 4-model Stacking Ensemble Meta-Learner (HAELT + MAMBA + GNN + TFT).
+
+### What Was Done
+1. **OANDA Live Paper Trading Daemon Launch (Phase 1)**:
+   - Configured and deployed the live paper trading daemon using account `101-001-38834567-001` with Practice environment, 10,000 units/lot, scalping strategy, 5-minute bar frequency, and max 0.20 total lots.
+   - Verified that the 4 base models (HAELT, MAMBA, GNN, TFT) and the stacking ensemble meta-learner load cleanly onto NVIDIA RTX 4060 GPU and warm up in <500 ms.
+   - Verified that the daemon actively polls ticks, maintains the 120-bar buffer, runs feature engineering, evaluates models, applies risk gating, and logs signals.
+2. **Instant Historical Buffer Warmup**:
+   - Implemented `OANDABroker.get_candles()` querying `/v3/instruments/{inst}/candles` to preload 120 historical M5 candles on startup.
+   - Implemented `LiveTickBuffer.seed_bars()` and updated `get_bars()` to seamlessly merge historical seeded candles with incoming live ticks.
+   - Bypassed the 70-bar (~5.8 hour) cold-start wait, enabling the engine to evaluate signals from its very first bar boundary.
+3. **Cross-Asset Panel Deduplication & Rate Limiting Guard**:
+   - Shared the cross-asset panel across child engines in `MultiPairLiveTradingEngine`, eliminating 3 redundant 45-day downloads and speeding up multi-pair initialization.
+   - Introduced rate-limit aware polling intervals (0.5s for REST to stay well within OANDA's practice limits; 0.1s for ZMQ/paper).
+4. **Data Type & Schema Resilience**:
+   - Fixed `LiveTickBuffer.get_bars()` to safely handle both Polars and pandas DataFrames without crashing on missing `.empty` or `.index` attributes.
+   - Updated `_ensure_polars_frame()` and `FeatureEngineer.build()` to automatically preserve and alias `timestamp` and `timestamp_utc`, resolving `ColumnNotFoundError` during microstructure volatility clock calculation.
+5. **Phase 1 Automation & Launcher**:
+   - Created `scripts/run_phase1_oanda.ps1` for one-command startup and daemon management with full environment variable fallbacks.
+
+### Files Edited
+- `trading/live_engine.py`: Isolated quotes per pair in `OANDABroker._quotes`, added `get_candles()`, added `seed_bars()`, unified Polars/pandas bar merging, shared cross-asset panel, tuned polling interval, and wired certification gate check.
+- `features/engineering/core.py`: Added automatic aliasing between `timestamp` and `timestamp_utc` to prevent Polars column lookup exceptions in downstream feature builders.
+- `monitoring/live_logger.py`: Guarded `info()`, `warn()`, `error()` against closed stream handles during interpreter shutdown.
+- `execution/broker_bridge.py`: Fixed undefined `action` variable in IBKR order logging (`NameError`).
+- `cpp/CMakeLists.txt`: Made `CURL` dependency quiet to allow building inference tools when libcurl is absent.
+- `cpp/src/oanda_stream.cpp`: Fixed closeout quote override and time conversion bounds checks.
+- `cpp/src/oanda_stream_main.cpp`: Fixed lambda capture of `log_every` by value.
+- `tests/test_live_safety_promotion.py`: Isolated test environment from network cross-asset and sentiment dependencies.
+
+### Files Added
+- `scripts/run_phase1_oanda.ps1`: Automated launcher for Phase 1 live paper trading on OANDA.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- `BUG-LIVE-003` (Severity: High): `LiveTickBuffer.get_bars()` threw `AttributeError: 'DataFrame' object has no attribute 'empty'` when live bars were generated as Polars DataFrame and combined with seeded pandas DataFrame. Fixed with robust length checks and explicit type conversion.
+- `BUG-FEAT-001` (Severity: High): `FeatureEngineer.build()` threw `ColumnNotFoundError: unable to find column "timestamp_utc"` when fed seeded bars with a `"timestamp"` column. Fixed by automatically creating bidirectional aliases for `timestamp` and `timestamp_utc`.
+- `BUG-LIVE-004` (Severity: Medium): In `MultiPairLiveTradingEngine`, REST pricing loop polled 4 pairs every 0.1s (~40 req/s), risking HTTP 429 rate limit errors from OANDA. Fixed by setting poll interval to 0.5s for REST.
+- `BUG-LIVE-005` (Severity: Medium): Cold-start inaction trap required 70 live bars (350 minutes / ~5.8 hours) before first signal evaluation. Fixed by preloading 120 historical candles via `get_candles()` on startup.
+
+---
+
+---
+
+## Commit `84c046c` — 2026-09-21 23:02 UTC
+**Author:** Antigravity Bot  
+**Message:** feat: autonomous continuous-learning scheduler + live-retrain data embargo
+
+**Files changed:**
+```
+trading/live_engine.py
+training/cli/__init__.py
+training/continuous_learner.py
+training/cv_splits.py
+```
+
+## Session — 2026-09-21 (18:45 EDT)
+
+### Summary
+Comprehensive inspection, bug fixing, and test verification across the live trading engine, C++ OANDA streaming integration, broker bridge, and logging modules. Resolved CMake build failure, cross-pair quote contamination, timestamp overflow bugs, residual NameErrors, and interpreter shutdown logging crashes. Verified that all 12 live safety tests pass cleanly with 0 errors and 0 build issues.
+
+### What Was Done
+1. **CMake Build & Dependency Isolation**:
+   - Fixed `cpp/CMakeLists.txt` where `find_package(CURL REQUIRED)` broke CMake configuration for all C++ targets (`ensemble_benchmark`, `onnx_verifier`, `forex_inference`) whenever libcurl wasn't installed system-wide. Made it optional via `find_package(CURL QUIET)`.
+   - Successfully compiled and linked C++ targets with MSVC 2022.
+2. **C++ OANDA Stream Hardening**:
+   - Fixed `cpp/src/oanda_stream.cpp` where `closeoutBid`/`closeoutAsk` unconditionally overwrote tradeable top-of-book prices with wider margin closeout prices.
+   - Fixed `_mkgmtime` return value check in `oanda_stream.cpp` to prevent `(time_t)-1` wrapping around to `18446744073709551615ULL`, which broke timestamp freshness checks in Python.
+   - Hardened sub-second fractional parsing with `try/catch` around `std::stoi`.
+   - Captured `log_every` by value in `oanda_stream_main.cpp`.
+3. **Multi-Pair Quote Isolation in `trading/live_engine.py`**:
+   - Fixed `OANDABroker` storing `self._bid` and `self._ask` as global scalar floats. In multi-pair environments, a pricing fallback would return the previous pair's quote (e.g. EURUSD price assigned to USDJPY).
+   - Migrated to `self._quotes: dict[str, tuple[float, float]]` keyed by normalized instrument name.
+   - Added `self._zmq_running` flag and graceful socket closure on `disconnect()`.
+4. **Broker Bridge Crash Fix in `execution/broker_bridge.py`**:
+   - Fixed residual `NameError: name 'action' is not defined` in IBKR order placement logging (swapped to `side`).
+5. **Clean Interpreter Shutdown in `monitoring/live_logger.py`**:
+   - Fixed `ValueError: I/O operation on closed file.` occurring when `atexit` invoked `LiveLogger.close()` after Python's `logging.shutdown()` had closed underlying streams.
+   - Added stream closure detection across `info()`, `warn()`, `error()`.
+6. **Hermetic Test Suite**:
+   - Made `test_paper_fallback_requires_explicit_flag` hermetic by setting `CROSS_ASSET_SOURCE="none"` and `sentiment_mode="off"`, preventing external HTTP calls to Stooq/Yahoo Finance.
+   - Verified that all 12 live safety tests pass with exit code 0 and no tracebacks.
+
+### Files Edited
+| File | Description |
+|------|-------------|
+| `cpp/CMakeLists.txt` | Made CURL search optional (`QUIET`) so missing libcurl does not fail builds of other targets |
+| `cpp/src/oanda_stream.cpp` | Fixed closeout price overwrite, guarded `_mkgmtime` against `-1` overflow, hardened fractional timestamp parsing |
+| `cpp/src/oanda_stream_main.cpp` | Captured `log_every` by value in tick callback lambda |
+| `execution/broker_bridge.py` | Replaced undefined `action` with `side` in IBKR order logging |
+| `trading/live_engine.py` | Added per-pair quote dictionary in `OANDABroker`, fixed ZMQ drain loop lifecycle on disconnect |
+| `monitoring/live_logger.py` | Guarded against logging to closed streams during interpreter finalization / `atexit` |
+| `tests/test_live_safety_promotion.py` | Hermetic test setup avoiding live HTTP calls in unit tests |
+| `docs/SESSION_REPORT.md` | Prepending this session log |
+
+### Bugs Fixed
+- **CMake Build Blocker** (Severity: High): `find_package(CURL REQUIRED)` failed CMake configuration for all targets when libcurl was absent.
+- **Cross-Pair Price Contamination** (Severity: Critical): Global scalar `_bid`/`_ask` in `OANDABroker` caused pricing fallbacks to inject another pair's exchange rate in multi-pair runs.
+- **Timestamp Overflow Wrap** (Severity: High): `_mkgmtime` returning `-1` caused `uint64_t` wrap to `18446744073709551615ULL` in `oanda_stream.cpp`.
+- **IBKR NameError** (Severity: High): Undefined `action` variable in `BrokerBridge.execute_order()` IBKR logging.
+- **Shutdown Logging Traceback** (Severity: Medium): `ValueError: I/O operation on closed file` during interpreter teardown in `LiveLogger.close()`.
+
+### Files Added
+- None
+
+### Files Deleted
+- None
+
 ---
 
 ## Commit `41a2cfd` — 2026-09-21 21:53 UTC

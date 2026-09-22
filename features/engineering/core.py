@@ -329,6 +329,11 @@ class FeatureEngineer:
                 bars.index.name = "timestamp_utc"
             bars = pl.from_pandas(bars.reset_index())
 
+        if "timestamp" in bars.columns and "timestamp_utc" not in bars.columns:
+            bars = bars.with_columns(pl.col("timestamp").alias("timestamp_utc"))
+        elif "timestamp_utc" in bars.columns and "timestamp" not in bars.columns:
+            bars = bars.with_columns(pl.col("timestamp_utc").alias("timestamp"))
+
         # Ensure timestamp is UTC and correctly cast datatypes to prevent join_asof crashes
         _ts_dtype = None
         if "timestamp_utc" in bars.columns:
@@ -382,9 +387,8 @@ class FeatureEngineer:
         tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
         vol = pl.when(pl.col("volume") == 0).then(1.0).otherwise(pl.col("volume")).fill_null(1.0)
         vwap = (tp * vol).rolling_sum(self.vwap_w) / vol.rolling_sum(self.vwap_w)
-
         vwap_bands_expr = vwap_bands(self.vwap_w, 2.0)
-
+        atr_col_name = f"atr_{self.atr_w}" if f"atr_{self.atr_w}" in F.columns else f"atr_{self.atr_ws[0]}"
         F = F.with_columns(
             vwap_bands_expr
             + [volume_weighted_momentum(20)]
@@ -395,7 +399,7 @@ class FeatureEngineer:
                 ).alias("ofi_z")
             ]
             + [
-                ((pl.col(f"atr_{self.atr_w}") / (pl.col("atr_20") + 1e-9)).clip(0.1, 10.0)).alias(
+                ((pl.col(atr_col_name) / (pl.col("atr_20") + 1e-9)).clip(0.1, 10.0)).alias(
                     f"atr_ratio_{self.atr_w}_20"
                 )
             ]

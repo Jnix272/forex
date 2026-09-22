@@ -40,10 +40,7 @@ if(NOT onnxruntime_FOUND)
 endif()
 
 find_package(cppzmq CONFIG QUIET)
-find_package(CURL CONFIG QUIET)
-if(NOT CURL_FOUND)
-    find_package(CURL REQUIRED)
-endif()
+find_package(CURL QUIET)
 
 find_package(nlohmann_json CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)

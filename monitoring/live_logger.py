@@ -61,9 +61,13 @@ class LiveLogger:
         return {"log": log_path, "jsonl": jsonl_path}
 
     def close(self) -> None:
-        if self._jsonl is None:
+        if self._jsonl is None and self._log is None:
             return
-        self.event("INFO", "shutdown", "live logger closed")
+        if not getattr(sys, "is_finalizing", lambda: False)():
+            try:
+                self.event("INFO", "shutdown", "live logger closed")
+            except Exception:
+                pass
         if self._jsonl is not None:
             try:
                 self._jsonl.flush()
@@ -71,18 +75,44 @@ class LiveLogger:
             except Exception:
                 pass
             self._jsonl = None
+        if self._log is not None:
+            for handler in list(self._log.handlers):
+                try:
+                    handler.close()
+                    self._log.removeHandler(handler)
+                except Exception:
+                    pass
+            self._log = None
 
     def info(self, msg: str) -> None:
         if self._log:
-            self._log.info(msg)
+            try:
+                for h in self._log.handlers:
+                    if getattr(getattr(h, "stream", None), "closed", False):
+                        return
+                self._log.info(msg)
+            except Exception:
+                pass
 
     def warn(self, msg: str) -> None:
         if self._log:
-            self._log.warning(msg)
+            try:
+                for h in self._log.handlers:
+                    if getattr(getattr(h, "stream", None), "closed", False):
+                        return
+                self._log.warning(msg)
+            except Exception:
+                pass
 
     def error(self, msg: str) -> None:
         if self._log:
-            self._log.error(msg)
+            try:
+                for h in self._log.handlers:
+                    if getattr(getattr(h, "stream", None), "closed", False):
+                        return
+                self._log.error(msg)
+            except Exception:
+                pass
 
     def critical(self, msg: str) -> None:
         if self._log:

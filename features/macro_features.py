@@ -189,6 +189,11 @@ def _synthetic_yields(
 # ── Feature builder ───────────────────────────────────────────────────────────
 
 
+# Cache for FRED yields across pairs and bars: (start_date, end_date) -> (timestamp, data)
+_YIELD_CACHE: dict[tuple[str, str], tuple[float, dict[str, pd.Series]]] = {}
+_YIELD_CACHE_TTL: float = 3600.0  # 1 hour
+
+
 class MacroYieldFeatureBuilder:
     """
     Builds yield-spread, carry, and yield-curve features aligned to minute bars.
@@ -216,6 +221,13 @@ class MacroYieldFeatureBuilder:
         end: pd.Timestamp,
     ) -> dict[str, pd.Series]:
         """Load all yield series; fills any gaps with synthetic data."""
+        cache_key = (str(start.date()), str(end.date()))
+        now_ts = time.time()
+        if cache_key in _YIELD_CACHE:
+            cached_time, cached_data = _YIELD_CACHE[cache_key]
+            if now_ts - cached_time < _YIELD_CACHE_TTL:
+                return {k: v.copy() if hasattr(v, "copy") else v for k, v in cached_data.items()}
+
         _t0 = time.perf_counter()
         if self._fred_key:
             try:
@@ -237,6 +249,7 @@ class MacroYieldFeatureBuilder:
                     t0=_t0,
                     note=f"real={n_real}, synthetic={n_synth}",
                 )
+                _YIELD_CACHE[cache_key] = (now_ts, raw)
                 return raw  # type: ignore[return-value]
             except Exception as e:
                 log_data_load(

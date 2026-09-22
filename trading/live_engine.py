@@ -336,7 +336,25 @@ def _ensure_polars_frame(df):
     if not _POLARS:
         return df
     if isinstance(df, pd.DataFrame):
-        return pl.from_pandas(df)
+        if df.index.name or not isinstance(df.index, pd.RangeIndex):
+            idx_name = df.index.name or "timestamp_utc"
+            if idx_name == "timestamp":
+                idx_name = "timestamp_utc"
+            df = df.copy()
+            df.index.name = idx_name
+            pldf = pl.from_pandas(df.reset_index())
+        else:
+            pldf = pl.from_pandas(df)
+        if "timestamp" in pldf.columns and "timestamp_utc" not in pldf.columns:
+            pldf = pldf.with_columns(pl.col("timestamp").alias("timestamp_utc"))
+        elif "timestamp_utc" in pldf.columns and "timestamp" not in pldf.columns:
+            pldf = pldf.with_columns(pl.col("timestamp_utc").alias("timestamp"))
+        return pldf
+    if isinstance(df, pl.DataFrame):
+        if "timestamp" in df.columns and "timestamp_utc" not in df.columns:
+            return df.with_columns(pl.col("timestamp").alias("timestamp_utc"))
+        elif "timestamp_utc" in df.columns and "timestamp" not in df.columns:
+            return df.with_columns(pl.col("timestamp_utc").alias("timestamp"))
     return df
 
 
@@ -390,7 +408,7 @@ class LiveTickBuffer:
 
     def seed_bars(self, ohlcv_df: pd.DataFrame) -> None:
         """Seed the buffer with historical OHLCV bars so the engine starts warm."""
-        if ohlcv_df is None or ohlcv_df.empty:
+        if ohlcv_df is None or len(ohlcv_df) == 0:
             return
         with self._lock:
             self._seeded_bars = ohlcv_df.copy()
@@ -402,12 +420,25 @@ class LiveTickBuffer:
         live_bars = None
         if len(ticks) >= 2:
             live_bars = self._aggregate_ticks(ticks)
-        if seeded is not None and not seeded.empty:
-            if live_bars is not None and not live_bars.empty:
-                combined = pd.concat([seeded[~seeded.index.isin(live_bars.index)], live_bars]).sort_index()
+        has_seeded = seeded is not None and len(seeded) > 0
+        has_live = live_bars is not None and len(live_bars) > 0
+        if has_seeded:
+            if has_live:
+                if _POLARS and pl is not None and isinstance(live_bars, pl.DataFrame):
+                    lb_pd = live_bars.to_pandas()
+                    if "timestamp" in lb_pd.columns:
+                        lb_pd = lb_pd.set_index("timestamp").sort_index()
+                else:
+                    lb_pd = live_bars
+                s_pd = (
+                    seeded.to_pandas()
+                    if (_POLARS and pl is not None and isinstance(seeded, pl.DataFrame))
+                    else seeded
+                )
+                combined = pd.concat([s_pd[~s_pd.index.isin(lb_pd.index)], lb_pd]).sort_index()
                 return combined.tail(self.max_bars)
             return seeded.tail(self.max_bars)
-        if live_bars is not None and len(live_bars) > 0:
+        if has_live:
             return live_bars.tail(self.max_bars) if hasattr(live_bars, "tail") else live_bars
         return None
 
@@ -1624,7 +1655,7 @@ class LiveTradingEngine:
         t0 = time.perf_counter()
         bars = _ensure_polars_frame(bars)
         try:
-            features = _ensure_polars_frame(self.fe.build(bars, cross_asset=self.cross_asset))
+            features = _ensure_polars_frame(self.fe.build(bars, cross_asset=self.cross_asset, pair=self.pair))
             macro_df = self.macro.build(bars)
             if macro_df is not None and len(macro_df) > 0:
                 macro_df = _ensure_polars_frame(macro_df)

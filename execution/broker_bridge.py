@@ -209,7 +209,7 @@ class BrokerBridge:
             if status in {"Cancelled", "Inactive", "ApiCancelled"}:
                 logger.error(f"IBKR order failed: status={status}")
                 return False
-            logger.info(f"IBKR order placed: {action} {qty} {symbol} status={status or 'Submitted'}")
+            logger.info(f"IBKR order placed: {side} {qty} {symbol} status={status or 'Submitted'}")
             return True
 
         raise BrokerNotImplementedError(

@@ -119,8 +119,10 @@ def test_live_safety_halts_on_daily_loss_limit():
     assert str(result["reason"]).startswith("daily_loss_limit")
 
 
-def test_paper_fallback_requires_explicit_flag():
+def test_paper_fallback_requires_explicit_flag(monkeypatch):
     from trading.live_engine import BrokerInterface, LiveTradingEngine
+
+    monkeypatch.setenv("CROSS_ASSET_SOURCE", "none")
 
     class _FailBroker(BrokerInterface):
         def connect(self) -> bool:
@@ -158,6 +160,7 @@ def test_paper_fallback_requires_explicit_flag():
         pair="EURUSD",
         equity=10_000.0,
         max_lots=0.1,
+        sentiment_mode="off",
         allow_paper_fallback=False,
         prometheus_enabled=False,
     )

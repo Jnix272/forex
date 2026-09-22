@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
 
     // Log every 10,000th tick to stdout so the operator can see it's alive
     uint64_t log_every = 10'000;
-    auto on_tick = [&log_every](const OandaTick& t) {
+    auto on_tick = [log_every](const OandaTick& t) {
         static uint64_t count = 0;
         if (++count % log_every == 0) {
             std::cout << "[oanda_stream] tick #" << count

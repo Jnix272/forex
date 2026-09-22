@@ -70,19 +70,26 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
 #else
                         time_t t = timegm(&tm_utc);
 #endif
-                        // Extract sub-second part
-                        size_t dot = ts_str.find('.');
-                        if (dot != std::string::npos) {
-                            std::string frac = ts_str.substr(dot + 1);
-                            // Remove trailing 'Z' or other suffix
-                            while (!frac.empty() && (frac.back() < '0' || frac.back() > '9'))
-                                frac.pop_back();
-                            // Pad or truncate to 6 digits
-                            frac.resize(6, '0');
-                            micros = std::stoi(frac.substr(0, 6));
+                        if (t != static_cast<time_t>(-1)) {
+                            // Extract sub-second part
+                            size_t dot = ts_str.find('.');
+                            if (dot != std::string::npos) {
+                                std::string frac = ts_str.substr(dot + 1);
+                                // Remove trailing 'Z' or other suffix
+                                while (!frac.empty() && (frac.back() < '0' || frac.back() > '9'))
+                                    frac.pop_back();
+                                if (!frac.empty()) {
+                                    frac.resize(6, '0');
+                                    try {
+                                        micros = std::stoi(frac.substr(0, 6));
+                                    } catch (...) {
+                                        micros = 0;
+                                    }
+                                }
+                            }
+                            tick.ts_us = static_cast<uint64_t>(t) * 1'000'000ULL
+                                       + static_cast<uint64_t>(micros);
                         }
-                        tick.ts_us = static_cast<uint64_t>(t) * 1'000'000ULL
-                                   + static_cast<uint64_t>(micros);
                     }
                 }
                 if (tick.ts_us == 0) {
@@ -94,18 +101,20 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
                     );
                 }
 
-                // Best bid / ask
+                // Best bid / ask — prefer tradeable bids[]/asks[]; use
+                // closeoutBid/Ask ONLY as fallback (they are wider margin-closeout
+                // prices, not the real tradeable spread).
                 double bid = 0.0, ask = 0.0;
                 if (j.contains("bids") && j["bids"].is_array() && !j["bids"].empty())
                     bid = std::stod(j["bids"][0].value("price", "0"));
                 if (j.contains("asks") && j["asks"].is_array() && !j["asks"].empty())
                     ask = std::stod(j["asks"][0].value("price", "0"));
-                if (j.contains("closeoutBid")) bid = std::stod(j.value("closeoutBid", "0"));
-                if (j.contains("closeoutAsk")) ask = std::stod(j.value("closeoutAsk", "0"));
-                // Prefer tradeable bid/ask when present
-                if (j.contains("tradeable") && !j["tradeable"].get<bool>()) {
-                    // non-tradeable tick — still publish for bar construction
-                }
+                // Fallback only when arrays absent
+                if (bid == 0.0 && j.contains("closeoutBid"))
+                    bid = std::stod(j.value("closeoutBid", "0"));
+                if (ask == 0.0 && j.contains("closeoutAsk"))
+                    ask = std::stod(j.value("closeoutAsk", "0"));
+                // non-tradeable ticks still published for bar construction
 
                 tick.bid = bid;
                 tick.ask = ask;
@@ -206,15 +215,28 @@ bool OandaStreamReceiver::stream_once() {
         ? "https://stream-fxpractice.oanda.com"
         : "https://stream-fxtrade.oanda.com";
 
-    // URL-encode instruments (commas → %2C)
-    std::string inst_param = instruments_;
-    {
-        std::string encoded;
-        for (char c : inst_param) {
-            if (c == ',') encoded += "%2C";
-            else           encoded += c;
+    // URL-encode instruments using libcurl so special chars are handled correctly.
+    // OANDA accepts both raw commas and %2C — use curl_easy_escape for correctness.
+    CURL* curl_enc = curl_easy_init();
+    std::string inst_param;
+    if (curl_enc) {
+        // Encode each instrument separately and join with %2C
+        std::string remaining = instruments_;
+        bool first = true;
+        while (!remaining.empty()) {
+            size_t comma = remaining.find(',');
+            std::string token = (comma == std::string::npos) ? remaining : remaining.substr(0, comma);
+            char* esc = curl_easy_escape(curl_enc, token.c_str(), static_cast<int>(token.size()));
+            if (!first) inst_param += "%2C";
+            if (esc) { inst_param += esc; curl_free(esc); }
+            else      { inst_param += token; }  // fallback: raw
+            first = false;
+            if (comma == std::string::npos) break;
+            remaining = remaining.substr(comma + 1);
         }
-        inst_param = encoded;
+        curl_easy_cleanup(curl_enc);
+    } else {
+        inst_param = instruments_;  // fallback: pass raw (OANDA accepts commas)
     }
 
     const std::string url = host + "/v3/accounts/" + account_id_
