@@ -46,6 +46,8 @@ from validation.gate_policy import (  # noqa: E402
     MIN_TRADES,
     PROMOTION_GATE_VERSION,
     agent_rejection_reasons,
+    check_gate_artifact,
+    hash_artifacts,
 )
 from validation.gate_policy import MAX_DRAWDOWN_PCT as MAX_EVAL_DRAWDOWN_PCT  # noqa: E402
 
@@ -274,7 +276,8 @@ def run_stage_4_certification() -> dict:
     else:
         n_trades = int(rl_metrics.get("n_trades", 0))
         sharpe = float(rl_metrics.get("sharpe", 0.0))
-        eval_return_pct = float(rl_metrics.get("eval_return_pct", rl_metrics.get("train_return_pct", 0.0)))
+        # Never fall back to train_return_pct: an in-sample number cannot certify.
+        eval_return_pct = float(rl_metrics.get("eval_return_pct", 0.0))
         max_drawdown_pct = float(rl_metrics.get("max_drawdown_pct", float("inf")))
         conflict_rate = float(rl_metrics.get("conflict_rate", float("inf")))
         agreement_score = float(rl_metrics.get("mean_agreement_score", 0.0))
@@ -283,27 +286,42 @@ def run_stage_4_certification() -> dict:
     # 7-fold averaged promotion: reject single-fold lottery (e.g. gnn 38 vs -19, tft 41 vs -26)
     try:
         import glob as _glob
-        fold_sharpes=[]
-        for pat in ["checkpoints/forex_4pair_2015_2025_*/**/*_fold*_config.json", "checkpoints/ensemble/*_fold*_config.json"]:
-            for fp in _glob.glob(pat, recursive=True):
-                try:
-                    import json as _j; _d=_j.load(open(fp))
-                    v=float(_d.get("best_val_sharpe_proxy", _d.get("best_val_sharpe", 0)))
-                    if abs(v)<100: fold_sharpes.append(v)
-                except Exception as _fe:
-                    log(f"  [WARN] unreadable fold config {fp}: {_fe}")
-        if len(fold_sharpes)>=7:
-            avg_sh=float(sum(fold_sharpes)/len(fold_sharpes))
-            var_sh=float(max(fold_sharpes)-min(fold_sharpes))
-            if var_sh>30:
-                reasons.append(f"High fold variance {var_sh:.1f} (max {max(fold_sharpes):.1f} min {min(fold_sharpes):.1f}) single-fold lottery")
-            if avg_sh<2.0:
-                reasons.append(f"7-fold avg Sharpe {avg_sh:.2f} <2.0")
-            if any(v < -15 for v in fold_sharpes):
-                reasons.append(f"Fold crash < -15 Sharpe present {min(fold_sharpes):.1f}")
+        # Honest per-fold net Sharpe written by train_gpu (fold_cost_sharpes);
+        # the old source, best_val_sharpe_proxy, was the noisy +/-30 label proxy.
+        fold_sharpes = []
+        for fp in _glob.glob("checkpoints/**/train_summary.json", recursive=True):
+            try:
+                import json as _j
+                _d = _j.load(open(fp, encoding="utf-8"))
+                fold_sharpes += [float(v) for v in (_d.get("fold_cost_sharpes") or [])]
+            except Exception as _fe:
+                log(f"  [WARN] unreadable train summary {fp}: {_fe}")
+        if fold_sharpes and len(fold_sharpes) < 7:
+            reasons.append(f"Only {len(fold_sharpes)} honest fold results (need >= 7)")
+        if len(fold_sharpes) >= 7:
+            import statistics as _st
+
+            _med = float(_st.median(fold_sharpes))
+            _pos = sum(v > 0 for v in fold_sharpes) / len(fold_sharpes)
+            if _med <= 0:
+                reasons.append(f"Median honest fold Sharpe {_med:.2f} <= 0")
+            if _pos < 0.7:
+                reasons.append(f"Only {_pos:.0%} of folds positive (< 70%): single-fold lottery")
     except Exception as _e:
         reasons.append(f"Fold consistency check failed: {_e}")
     reasons.extend(agent_rejection_reasons(rl_metrics.get("individual_agents")))
+    # The supervised stack must hold its own PromotionGate certificate (cached
+    # holdout, per-observation PSR/DSR, hash-verified). The RL report alone is the
+    # RL environment's self-assessment and cannot certify live capital.
+    _sup_cert = ENSEMBLE_DIR / "promotion_gate.json"
+    _sup_doc: dict = {}
+    try:
+        _sup_doc = json.loads(_sup_cert.read_text(encoding="utf-8")) if _sup_cert.exists() else {}
+    except Exception as _se:
+        reasons.append(f"ensemble promotion_gate.json unreadable: {_se}")
+    _sup_ok, _sup_why = check_gate_artifact(_sup_doc) if _sup_doc else (False, "missing")
+    if not _sup_ok:
+        reasons.append(f"Ensemble PromotionGate certificate not valid: {_sup_why}")
     # Hard Quality Gate evaluation
     if n_trades == 0:
         cert_status = "FAILED_ZERO_TRADES"
@@ -344,7 +362,14 @@ def run_stage_4_certification() -> dict:
         for r in reasons:
             log(f"  [REASON] {r}")
 
+    _cert_files = [
+        ENSEMBLE_DIR / "rl_ensemble_best.pt",
+        ENSEMBLE_DIR / "rl_best.pt",
+        ENSEMBLE_DIR / "ensemble_meta_best.pt",
+        *[Path(p) for p in (_sup_doc.get("artifact_hashes") or {})],
+    ]
     certification = {
+        "artifact_hashes": hash_artifacts(_cert_files) if cert_status == CERTIFIED_STATUS else {},
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "gate_version": PROMOTION_GATE_VERSION,
         "status": cert_status,

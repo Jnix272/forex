@@ -403,7 +403,9 @@ def _build_meta_labeler_mask(args, base_bars: pd.DataFrame, X: pd.DataFrame, cls
         # multiples so the triple-barrier labeler - which multiplies ATR -
         # matches the backtest's actual stop/take semantics instead of treating
         # pips as ATR multipliers (which produced ~18x/12x unreachable barriers).
-        pip_size_lbl = float(PIP_SIZES.get(str(args.pair).upper(), 0.0001))
+        from config.settings import get_pip_size
+
+        pip_size_lbl = float(get_pip_size(str(args.pair)))
         stop_pips_lbl = float(getattr(args, "stop_pips", 12.0) or 12.0)
         take_pips_lbl = float(getattr(args, "take_pips", 18.0) or 18.0)
         try:
@@ -801,7 +803,9 @@ def run_backtest():
                 f"| threshold={args.min_confidence:.3f} (temp={temp_val:.2f} -> effective={effective_min_conf:.3f})"
             )
         signals = []
-        pip_size = PIP_SIZES.get(args.pair.upper(), 0.0001)
+        from config.settings import get_pip_size
+
+        pip_size = float(get_pip_size(pair_list[0]))  # shared pair-aware lookup
         stop_pips = float(args.stop_pips)
         take_pips = float(args.take_pips)
         last_signal_i = -(10**9)
@@ -911,6 +915,7 @@ def run_backtest():
             commission_per_lot=args.commission_per_lot,
             slippage_pips=eff_slippage,
             pip_size=pip_size,
+            pair=pair_list[0],
             execution_delay_bars=max(1, int(args.execution_delay_bars)),
             bars_per_year=_bars_per_year_from_freq(args.bar_freq),
         )
@@ -1157,7 +1162,10 @@ def run_execution_backtest(
             f"threshold={min_confidence:.3f} (temp={model_temp:.2f} -> effective={effective_min_conf:.3f})"
         )
 
-    pip_size = PIP_SIZES.get(str(pair_list[0]).upper(), 0.0001)
+    from config.settings import get_pip_size
+
+    # Shared pair-aware lookup (same source as training/live).
+    pip_size = float(get_pip_size(str(pair_list[0])))
 
     signals = []
     last_signal_i = -(10**9)
@@ -1222,6 +1230,7 @@ def run_execution_backtest(
         commission_per_lot=commission_per_lot,
         slippage_pips=slippage_pips,
         pip_size=pip_size,
+        pair=pair_list[0],
         execution_delay_bars=max(1, int(execution_delay_bars)),
         bars_per_year=_bars_per_year_from_freq(bar_freq),
     )

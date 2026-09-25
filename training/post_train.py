@@ -792,6 +792,28 @@ def _promote_best_fold(
             pass
 
 
+def _record_holdout_use(model_name: str, start: int, end: int) -> None:
+    """Count how often the promotion holdout has been scored (B5).
+
+    Every retrain / study judged on the same tail overfits it; the count makes
+    that visible and ``holdout_uses`` is copied into the gate details.
+    """
+    path = Path("logs") / "holdout_usage.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    key = f"{start}:{end}"
+    data[key] = int(data.get(key, 0)) + 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    if data[key] > 20:
+        print(f"[PromotionGate] WARN: holdout rows {key} scored {data[key]} times; it is no longer untouched")
+
+
 def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, device, fold_sharpes=None) -> dict:
     """B-C1: execution-aware forward holdout gate for a freshly trained challenger.
 
@@ -984,146 +1006,108 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
             "summary": "REJECT (missing holdout dates)",
         }
 
-    pairs = list(_get_pairs(args))
-
-    if not pairs:
-        pairs = ["EURUSD"]
-
-    print(f"\n[PromotionGate] Running EXECUTION-AWARE Backtest for {model_name} on {holdout_start} -> {holdout_end}")
-
-    try:
-        import sys
-
-        _ROOT = Path(__file__).resolve().parent.parent
-
-        if str(_ROOT) not in sys.path:
-            sys.path.insert(0, str(_ROOT))
-
-        from scripts.backtest_model import run_execution_backtest
-
-        bt_metrics = run_execution_backtest(
-            model=model,
-            pair_list=pairs,
-            start_date=holdout_start,
-            end_date=holdout_end,
-            seq_len=getattr(args, "seq_len", 60),
-            n_features=n_features,
-            device=device,
-            bar_freq=getattr(args, "bar_freq", "1Min"),
-            data_source=getattr(args, "data_source", "dukascopy"),
-            stop_pips=15.0,  # Will be overridden by ATR tracking ideally, using defaults for gate
-            take_pips=20.0,
-            inference_batch_size=getattr(args, "batch_size", 4096),
-            min_confidence=getattr(args, "min_confidence", None),
-            temperature=temp_val if "temp_val" in locals() else None,
-        )
-
-    except Exception as e:
-        print(f"[PromotionGate] Execution backtest failed: {e}")
-
-        bt_metrics = {"error": str(e)}
-
-    if bt_metrics.get("error"):
-        return {
-            "promoted": False,
-            "details": {"n_trades": 0.0, "error": bt_metrics["error"]},
-            "reasons": [f"Execution backtest failed: {bt_metrics['error']}"],
-            "summary": "REJECT (backtest error)",
-        }
-
-    # Extract metrics for PromotionGate
-
-    pnls = (
-        bt_metrics.pop("signals_df", pd.DataFrame())["pnl_pips"].to_list()
-        if "signals_df" in bt_metrics and "pnl_pips" in bt_metrics["signals_df"]
-        else []
+    pairs = list(_get_pairs(args)) or ["EURUSD"]
+    holdout_idx = np.arange(start, n_samples, dtype=np.int64)
+    print(
+        f"\n[PromotionGate] Cached-holdout backtest for {model_name} on rows [{start}, {n_samples}) "
+        f"({holdout_start} -> {holdout_end})"
     )
 
-    bt_metrics.pop("equity_curve", [10000.0])
+    # The model's own training transform: per-checkpoint scaler for a single model;
+    # for the ensemble each base scales its own input (attach_base_scalers).
+    _gate_scaler = None
+    try:
+        if model_name == "ensemble":
+            from models.ensemble import load_base_scaler
+
+            _bscalers = [load_base_scaler(ckpt_dir / b / f"{b}_best.pt") for b in base_names]
+            if _bscalers and all(sc is not None for sc in _bscalers) and hasattr(model, "attach_base_scalers"):
+                model.attach_base_scalers(_bscalers)
+                model.to(device)
+        elif ckpt_path is not None:
+            from inference._scaler_load import load_inference_scaler
+
+            _sc_path = Path(ckpt_path).with_name(Path(ckpt_path).stem + "_scaler.npz")
+            _gate_scaler = load_inference_scaler(_sc_path) if _sc_path.is_file() else None
+            if _gate_scaler is None:
+                return {
+                    "promoted": False,
+                    "details": {"gate_input_type": "cached_holdout"},
+                    "reasons": [f"no scaler sidecar {_sc_path.name}; cannot reproduce training inputs"],
+                    "summary": "REJECT (missing scaler sidecar)",
+                }
+    except Exception as e:
+        return {
+            "promoted": False,
+            "details": {"gate_input_type": "cached_holdout"},
+            "reasons": [f"gate input setup failed: {e}"],
+            "summary": "REJECT (gate setup)",
+        }
+
+    try:
+        from training.honest_eval import holdout_gate_metrics
+
+        bt_metrics = holdout_gate_metrics(
+            model,
+            str(cache_path),
+            holdout_idx,
+            horizon=int(getattr(args, "lookahead_bars", None) or 30),
+            bar_freq=str(getattr(args, "bar_freq", "5min")),
+            scaler=_gate_scaler,
+            pair_names=pairs,
+            device=device,
+            batch_size=min(int(getattr(args, "batch_size", 512) or 512), 1024),
+        )
+    except Exception as e:
+        print(f"[PromotionGate] Holdout backtest failed: {e}")
+        return {
+            "promoted": False,
+            "details": {"n_trades": 0.0, "error": str(e), "gate_input_type": "cached_holdout"},
+            "reasons": [f"Holdout backtest failed: {e}"],
+            "summary": "REJECT (backtest error)",
+        }
 
     if bt_metrics["n_trades"] < 1:
         return {
             "promoted": False,
-            "details": {"n_trades": 0.0},
-            "reasons": ["challenger took no trades on forward window"],
+            "details": {"n_trades": 0.0, "gate_input_type": "cached_holdout"},
+            "reasons": ["challenger took no trades on the holdout"],
             "summary": "REJECT (no trades)",
         }
 
+    from validation.promotion_gate import count_research_trials
+
+    pnls = [float(v) for v in bt_metrics.get("returns", [])]  # per-trade net returns
     folds = list(fold_sharpes) if fold_sharpes else []
-    n_trials = max(1, len(folds))
-    sharpe_std = float(np.std(folds)) if len(folds) > 1 else 0.0
-    gate = PromotionGate(GateConfig(strict_psr=True))  # B-M4: deflated Sharpe for retrain selection
-
-    # Overwrite the gate evaluate call with the execution-aware metrics directly
-    # P1 fix (2026-08-07): stop substituting net_pnl for gross_pnl and 0.0 for
-    # transaction costs - that defeated the cost gate (cost_pct = 0.0 always
-    # passed max_cost_pct=0.30). The backtester now exposes gross_pnl_usd
-    # (sum of gross trade P&L = wins + losses *before* costs) and
-    # total_commission_usd separately; we pass both so the cost gate fires.
-    # The cost gate is `transaction_costs / max(abs(gross_pnl), 1e-9) <= 0.30`
-    # so it now measures real cost drag.
-    gross_pnl_value = float(bt_metrics.get("gross_pnl", 0.0) or 0.0)
-    transaction_costs_value = float(bt_metrics.get("total_commission", 0.0) or 0.0)
-    # If the backtester didn't populate gross_pnl (old cache/pre-2026-08-07),
-    # fall back to deriving gross from net + total_commission.
-    if gross_pnl_value == 0.0 and transaction_costs_value > 0.0:
-        # gross_pnl_usd = net_pnl + total_commission (since commission subtracted to get net)
-        gross_pnl_value = float(bt_metrics.get("net_pnl", 0.0) or 0.0) + transaction_costs_value
-
-    # Only winners contribute to gross_profit (the gate expects gross *winnings*
-    # in the denominator, not signed sums). The backtester emits `gross_pnl_usd`
-    # as the sum of gross trade P&L (can be negative if losses exceed wins).
-    # For the cost gate we use the correct denominator: only *winning* gross.
-    # When winners-side is unavailable, use abs(gross_pnl) which is a stronger
-    # (smaller) denominator so cost_pct is still meaningful.
-    gross_for_cost_gate = abs(gross_pnl_value) if gross_pnl_value != 0.0 else None
-
-    if gross_for_cost_gate is None:
-        # Flag: caller should fail the cost gate explicitly when gross profit
-        # information is unavailable. PromotionGate raises on gross_pnl=None,
-        # which converts into a REJECT - a fail-closed signal to the operator
-        # that the forward backtest didn't expose cost data. We catch here so
-        # the rest of the chain can run; the gate's reject message explains.
-        try:
-            result = gate.evaluate(
-                sharpe=bt_metrics["sharpe"],
-                profit_factor=bt_metrics.get("profit_factor", 1.0),
-                max_drawdown=bt_metrics["max_drawdown"],
-                n_trades=bt_metrics["n_trades"],
-                regime_pnl={},
-                gross_pnl=None,  # triggers fail-closed ValueError in gate
-                transaction_costs=0.0,
-                n_backtest_trials=n_trials,
-                backtest_sharpe_std=sharpe_std,
-                emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
-                n_obs=max(1, int(bt_metrics.get("n_trades", 0) or 0)),
-            )
-        except ValueError as _ve:
-            print(f"[PromotionGate] forward gate rejected: gross_pnl not exposed by backtest - {_ve}")
-            return {
-                "promoted": False,
-                "details": {"n_trades": bt_metrics["n_trades"], "error": "gross_pnl unavailable"},
-                "reasons": ["forward backtest missing gross_pnl (cannot run cost gate)"],
-                "summary": "REJECT (no gross_pnl - cost gate cannot run)",
-            }
-    else:
-        result = gate.evaluate(
-            sharpe=bt_metrics["sharpe"],
-            profit_factor=bt_metrics.get("profit_factor", 1.0),
-            max_drawdown=bt_metrics["max_drawdown"],
-            n_trades=bt_metrics["n_trades"],
-            regime_pnl={},  # Not tracking regime pnl in backtest_model return yet
-            gross_pnl=gross_for_cost_gate,  # P1: real gross_pnl, not net_pnl
-            transaction_costs=transaction_costs_value,  # P1: real costs, not 0.0
-            n_backtest_trials=n_trials,
-            backtest_sharpe_std=sharpe_std,
-            emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
-            n_obs=max(1, int(bt_metrics.get("n_trades", 0) or 0)),
-        )
-    result["gate_input_type"] = "execution_backtest"
+    n_trials = count_research_trials(str(ckpt_dir.parent if ckpt_dir.name else ckpt_dir))
+    gate = PromotionGate(GateConfig())  # strict_psr (deflated Sharpe) is on by default
+    result = gate.evaluate(
+        sharpe=bt_metrics["sharpe"],
+        profit_factor=bt_metrics["profit_factor"],
+        max_drawdown=bt_metrics["max_drawdown"],
+        n_trades=bt_metrics["n_trades"],
+        regime_pnl=None,
+        gross_pnl=abs(bt_metrics["gross_pnl"]) or 1e-12,
+        transaction_costs=bt_metrics["transaction_costs"],  # spread cost, in return units
+        n_obs=bt_metrics["n_trades"],
+        periods_per_year=bt_metrics["periods_per_year"],
+        n_backtest_trials=n_trials,
+        fold_sharpes=folds,
+        emergency_retrain=bool(getattr(args, "finetune_warm_start", False)),
+    )
     result.setdefault("details", {}).update(
         {
-            "gate_input_type": "execution_backtest",
+            "n_research_trials": n_trials,
+            "sharpe_ci_low": bt_metrics["sharpe_ci_low"],
+            "sharpe_ci_high": bt_metrics["sharpe_ci_high"],
+            "per_pair_sharpe": bt_metrics["per_pair"],
+        }
+    )
+    _record_holdout_use(model_name, start, n_samples)
+    result["gate_input_type"] = "cached_holdout"
+    result.setdefault("details", {}).update(
+        {
+            "gate_input_type": "cached_holdout",
             "forward_window": float(n_fwd),
             "holdout_start": holdout_start,
             "holdout_end": holdout_end,
@@ -1187,6 +1171,9 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
     try:
         from validation.promotion_gate import write_threshold_tuning_json
 
+        # G9: the holdout backtest carries no confidence scores, so this sweep no
+        # longer tunes a threshold on the very data the gate scores. Tune on a
+        # validation slice instead if re-enabled.
         conf_scores = bt_metrics.get("confidence_scores", []) or []
 
         conf_traded = np.array(conf_scores, dtype=float) if len(conf_scores) >= 30 else np.array([])

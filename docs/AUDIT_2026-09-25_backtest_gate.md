@@ -26,7 +26,7 @@
 - **Positional fitting:** `_fit_feature_width` truncates or zero-pads each pair's columns to `n_features / n_pairs`, and `X` is then truncated or padded again to `n_features`. Columns are matched by position, not by name.
 - **Look-ahead in sentiment:** `finbert_sentiment` is set to today's `get_latest_headlines()` score for *every historical bar*.
 - **Possibly synthetic, and tiny:** data comes from `load_or_generate(..., n_rows=100_000)`, a function that can fall back to generated data. It's also capped at 100k ticks, a few days of EURUSD.
-- **Wrong JPY scale:** `pip_size = PIP_SIZES.get(pair_list[0].upper(), 0.0001)`, but `PIP_SIZES` is keyed by currency (`"JPY"`), not pair, so it's always 0.0001. For USDJPY the fixed 12/18-pip stop and take-profit are 100× too tight.
+- ~~**Wrong JPY scale**~~ *(correction: this script's `PIP_SIZES` is keyed by pair, so USDJPY did get 0.01. Not a bug; now uses the shared `get_pip_size`.)*
 
 **Fix:** score the gate on the cached holdout rows (`X`, `close_pairs`, `spread_pairs`), with the checkpoint's own scaler, the feature-names sidecar and the per-pair pip size. That's what `training/honest_eval.py` already does for validation.
 
@@ -114,3 +114,29 @@
 4. **G3/G10, G6, B3–B6:** real regime P&L, remove the synthetic gate simulation, a finite profit factor, all costs counted, and a final test set that is used once.
 
 Until 1–3 are done, no certificate means anything. The current ones are already refused by gate v2 and by preflight's `_features.json` requirement.
+
+---
+
+## Fix log
+
+| # | Fix |
+|---|---|
+| G1 | New `training/honest_eval.holdout_gate_metrics` scores the gate on the cached holdout rows, with the checkpoint's own scaler (clipped like training), per-pair close/spread for per-pair heads, and non-overlapping trades net of spread. `post_train._evaluate_forward_gate` uses it; `run_execution_backtest` is no longer on the gate path. A missing scaler sidecar is a REJECT. |
+| G2 | PSR and DSR take `periods_per_year` and work on the per-observation scale. Without it, PSR and DSR fail closed. The returns-based DSR in `evaluation/metrics.py` now uses sd(SR) × E[max of N normals]. |
+| G3 / G10 | The regime check is optional (`GateConfig.require_regime_pnl`, default False) instead of failing every gate. |
+| G4 | `strict_psr` (DSR) is on by default. The trial count is `count_research_trials()`: fold checkpoints plus Optuna trials. |
+| G5 | Gate v3: certificates carry SHA-256 hashes of every certified artifact (weights, scaler, feature sidecar) and `check_gate_artifact` recomputes them. `train_gpu` writes certificates via `certificate_from_gate`. The roadmap certificate requires a valid ensemble PromotionGate certificate, never uses `train_return_pct`, and reads honest fold Sharpes (median > 0, ≥ 70% of folds positive). |
+| G6 | The CV gate simulation (invented PF/DD) is removed. |
+| G7 | `gate_policy` thresholds are derived from `GateConfig`. |
+| G8 | `n_obs` no longer defaults to 1000 (falls back to `n_trades`). |
+| G9 | The gate backtest has no confidence scores, so the threshold sweep no longer tunes on gate data. |
+| B1 | `ForexScalingBacktest(pair=...)` derives pip size and USD pip value (USD-base pairs converted by median price). `backtest_model` passes the pair. |
+| B2 | Stop and TP exits pay half the spread (Python and Numba paths). |
+| B3 | Profit factor is capped at 100, and 0 with no trades. |
+| B4 | The backtest reports `spread_slippage_cost_usd` and `total_cost_usd`; the gate's cost input is the measured spread cost. |
+| B5 | `logs/holdout_usage.json` counts holdout scorings and warns after 20. |
+| B6 | Sharpe stability uses `fold_sharpes` (≥ 3 folds, mean > 0, CV < 1). |
+
+**Tests:** `tests/test_gate_fixes_2026_09_25.py`, plus updated gate, cost-gate and backtest tests. The two remaining failures (`test_bug02_gpu_backtester_commission_and_ruin`, `test_auto_retrain_on_drift_no_data`) already failed before these changes.
+
+**Consequence:** every existing certificate is now invalid (gate v3 needs artifact hashes). Certification requires models retrained with scaler and feature sidecars, gated on the rebuilt cache.

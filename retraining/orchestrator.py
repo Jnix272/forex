@@ -303,7 +303,9 @@ def check_promotion_gates(metrics: dict[str, Any]) -> tuple[bool, list[str]]:
         n_trades=metrics.get("n_trades", 0),
         gross_pnl=metrics.get("gross_pnl", 0.0) if metrics.get("gross_pnl") is not None else 1.0,
         transaction_costs=metrics.get("transaction_costs", 0.0),
-        n_obs=metrics.get("n_obs", 1),
+        n_obs=metrics.get("n_obs", metrics.get("n_trades", 1)),
+        # Periods per year of the returns behind ``val_sharpe`` (PSR/DSR scale).
+        periods_per_year=metrics.get("periods_per_year"),
         n_backtest_trials=metrics.get("n_backtest_trials", 1),
         backtest_sharpe_std=metrics.get("backtest_sharpe_std", 0.0),
         regime_pnl=metrics.get("regime_pnl", {}),

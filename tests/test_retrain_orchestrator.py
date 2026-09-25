@@ -170,6 +170,7 @@ class TestPromotionGates:
                 "max_drawdown": 0.08,
                 "val_loss": 0.5,
                 "n_trades": 1000,
+                "periods_per_year": 252,  # daily trade returns
                 "gross_pnl": 5000.0,
                 "transaction_costs": 800.0,
                 "n_backtest_trials": 1,

@@ -969,15 +969,10 @@ def main():
             print(f"[Holdout] Reserved last {_holdout_n:,} bars for promotion gate (CV uses 0:{_cv_n:,})")
 
         def _gate_sim_for_hist_outer(hist: dict, early_metric: str) -> dict:
-            try:
-                vs = hist.get("val_sharpe", []) or []
-                best_sh = float(max(vs)) if vs else 0.0
-                pf = max(1.0, 1.0 + best_sh * 0.12)
-                mdd = max(0.02, 0.12 - best_sh * 0.015)
-                gate = PromotionGate(GateConfig()).evaluate(sharpe=best_sh, profit_factor=pf, max_drawdown=mdd, n_trades=150, gross_pnl=1.0, n_obs=800)
-                return gate
-            except Exception as _ge:
-                return {"promoted": False, "error": str(_ge)}
+            # No simulated gate: profit factor / drawdown used to be invented from
+            # the max validation Sharpe. Real gate evidence comes only from the
+            # cached-holdout backtest (post_train._evaluate_forward_gate).
+            return {"promoted": False, "skipped": True, "reason": "fold gate simulation removed"}
 
         if model_args.walk_forward_cv:
             splits, _cv_strategy = _build_cv_splits(model_args, _cv_n)
@@ -988,23 +983,8 @@ def main():
             cv_hist: list[dict] = []
 
             def _gate_sim_for_hist(hist: dict, early_metric: str) -> dict:
-                """Simulate promotion gate on CV history (mismatch fix)."""
-                try:
-                    vs = hist.get("val_sharpe", []) or []
-                    best_sh = float(max(vs)) if vs else 0.0
-                    # Approximate gate inputs from history when full backtest not run
-                    pf = max(1.0, 1.0 + best_sh * 0.12)
-                    mdd = max(0.02, 0.12 - best_sh * 0.015)
-                    n_tr = 150
-                    gate = PromotionGate(GateConfig()).evaluate(
-                        sharpe=best_sh, profit_factor=pf, max_drawdown=mdd, n_trades=n_tr, gross_pnl=1.0, n_obs=800
-                    )
-                    # Log mismatch: early_stop on cost_sharpe vs gate on sharpe
-                    if early_metric == "cost_sharpe" and best_sh < 1.5 and gate.get("gates", {}).get("sharpe_ok"):
-                        print(f"[GateSim] Fold early_stop cost_sharpe but gate sharpe {best_sh:.2f} < 1.5 → would REJECT despite early_stop PASS")
-                    return gate
-                except Exception as _ge:
-                    return {"promoted": False, "error": str(_ge)}
+                """No simulated gate (inputs were invented from val Sharpe); see post_train."""
+                return {"promoted": False, "skipped": True, "reason": "fold gate simulation removed"}
 
             _start_fold = 0
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))
@@ -1338,7 +1318,20 @@ def main():
                 gate_result["model"] = model_name
                 gate_result["gate_on_checkpoint"] = f"{model_name}_best.pt"
 
-                _safe_save_json(gate_result, _prom_path)
+                from validation.gate_policy import certificate_from_gate
+
+                # Certificate bound to the exact weights / scaler / feature list gated.
+                _cert = certificate_from_gate(
+                    gate_result,
+                    [
+                        ckpt_best,
+                        ckpt_best.with_name(ckpt_best.stem + "_scaler.npz"),
+                        ckpt_best.with_name(ckpt_best.stem + "_features.json"),
+                    ],
+                    model=model_name,
+                )
+                gate_result["promoted"] = _cert["promoted"]
+                _safe_save_json(_cert, _prom_path)
                 print(f"[PromotionGate] decision written -> {_prom_path}")
             except Exception as _pe:
                 print(f"[PromotionGate] could not write decision json: {_pe}")
@@ -1821,7 +1814,22 @@ def main():
             _prom_dir = Path(args.checkpoint_dir) / "ensemble"
             _prom_path = _prom_dir / "promotion_gate.json"
             ens_gate_result["model"] = "ensemble"
-            _safe_save_json(ens_gate_result, _prom_path)
+            from validation.gate_policy import certificate_from_gate
+
+            _base_ckpts = []
+            try:
+                _man = json.loads((_prom_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
+                for _b in _man.get("base_models") or []:
+                    _bp = Path(str(_b.get("checkpoint", "")))
+                    if _bp.name:
+                        _base_ckpts += [_bp, _bp.with_name(_bp.stem + "_scaler.npz"), _bp.with_name(_bp.stem + "_features.json")]
+            except Exception as _me:
+                print(f"[PromotionGate] ensemble manifest unreadable ({_me}); certifying meta weights only")
+            _cert = certificate_from_gate(
+                ens_gate_result, [_prom_dir / "ensemble_meta_best.pt", *_base_ckpts], model="ensemble"
+            )
+            ens_gate_result["promoted"] = _cert["promoted"]
+            _safe_save_json(_cert, _prom_path)
 
             if ens_gate_result.get("promoted"):
                 _prod = _prom_dir / "ensemble_meta_best.pt"

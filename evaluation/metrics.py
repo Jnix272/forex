@@ -154,13 +154,15 @@ def deflated_sharpe_ratio(
 
     # Benchmark Sharpe inflation from multiple trials:
     #   E[max of N ~ N(0,1)] ~ sqrt(2 ln N)  (per-period basis).
+    # E[max SR over N trials] = sd(SR across trials) x E[max of N std normals]
+    # (per-period scale). Under the null, sd of a per-period SR estimate is about
+    # 1/sqrt(n-1). The old default divided E[max] by sqrt(annual_factor), mixing
+    # a unit-variance normal with the annualisation factor.
     if n_trials <= 1:
         sr_benchmark = 0.0
-    elif variance_of_trials is not None:
-        # Use the supplied cross-sectional variance of trial Sharpes (period basis).
-        sr_benchmark = math.sqrt(variance_of_trials / max(n_trials, 1))
     else:
-        sr_benchmark = _expected_max_of_normals(n_trials) / math.sqrt(annual_factor)
+        var_sr = float(variance_of_trials) if variance_of_trials is not None else 1.0 / (n - 1.0)
+        sr_benchmark = math.sqrt(max(var_sr, 0.0)) * _expected_max_of_normals(n_trials)
 
     return probabilistic_sharpe_ratio(
         r, benchmark_sharpe=sr_benchmark * math.sqrt(annual_factor), annual_factor=annual_factor

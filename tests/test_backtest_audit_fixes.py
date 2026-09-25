@@ -154,8 +154,10 @@ def test_bug05_gap_bar_stop_loss_clamping():
     assert len(bt.trades) == 1
     t = bt.trades[0]
     assert t.exit_reason == "stop_loss"
-    # Fills at bar open (1.0950) on gap bar, not at phantom 1.0980!
-    assert t.exit_price == pytest.approx(1.0950, abs=1e-5)
+    # Fills at bar open (1.0950) on gap bar, not at phantom 1.0980, minus half the
+    # spread: a long stop sells at the bid (2026-09-25 audit B2).
+    _half_spread = 0.5 * float(bt._arr_spread[15]) if bt._arr_spread is not None else 0.0
+    assert t.exit_price == pytest.approx(1.0950 - _half_spread, abs=1e-5)
 
 
 # -----------------------------------------------------------------------------

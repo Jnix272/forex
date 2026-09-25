@@ -91,6 +91,8 @@ def net_pnl_metrics(
     out["mean_ret_bps"] = float(net.mean() * 1e4)
     out["cost_bps"] = float(cost.mean() * 1e4)
     out["_net_returns"] = net  # for pooling across pairs; not a scalar metric
+    out["_gross_returns"] = gross
+    out["_costs"] = cost
     if n >= min_trades:
         lo, hi, p0 = bootstrap_sharpe_ci(net, ann)
         out["sharpe_net_ci_low"], out["sharpe_net_ci_high"], out["sharpe_net_p_le_0"] = lo, hi, p0
@@ -149,7 +151,7 @@ def pooled_pair_metrics(
     d = np.asarray(directions, dtype=np.float64)
     n_p = d.shape[1]
     names = pair_names or [f"pair_{k}" for k in range(n_p)]
-    per_pair, pooled = {}, []
+    per_pair, pooled, pooled_gross, pooled_cost = {}, [], [], []
     for k in range(n_p):
         m = net_pnl_metrics(
             d[:, k], sample_idx, close_pairs[:, k],
@@ -157,8 +159,12 @@ def pooled_pair_metrics(
             horizon, bars_per_year=bars_per_year, min_trades=min_trades,
         )
         r = m.pop("_net_returns", None)
+        g = m.pop("_gross_returns", None)
+        c = m.pop("_costs", None)
         if r is not None:
             pooled.append(np.asarray(r))
+            pooled_gross.append(np.asarray(g))
+            pooled_cost.append(np.asarray(c))
         per_pair[names[k]] = m
     out = {"sharpe_net": 0.0, "sharpe_gross": 0.0, "n_trades": 0, "win_rate": 0.0, "mean_ret_bps": 0.0,
            "cost_bps": float(np.mean([m["cost_bps"] for m in per_pair.values()])) if per_pair else 0.0,
@@ -166,6 +172,9 @@ def pooled_pair_metrics(
            "per_pair": per_pair}
     if pooled:
         net = np.concatenate(pooled)
+        out["_net_returns"] = net
+        out["_gross_returns"] = np.concatenate(pooled_gross)
+        out["_costs"] = np.concatenate(pooled_cost)
         ann = math.sqrt(bars_per_year / max(1, int(horizon)))
         out["n_trades"] = int(len(net))
         if len(net) >= min_trades and net.std(ddof=1) > 0:
@@ -237,3 +246,109 @@ def load_price_arrays(
             else:
                 spread = arr
     return close, spread
+
+
+def trade_stats(net: np.ndarray, gross: np.ndarray | None = None, cost: np.ndarray | None = None) -> dict:
+    """Equity-style stats from per-trade net returns (fraction of notional, 1x).
+
+    Profit factor is capped at 100 and 0 when there are no trades; it used to be
+    +inf with no losing trades, which the gate treated as a pass.
+    """
+    net = np.asarray(net, dtype=np.float64).reshape(-1)
+    if net.size == 0:
+        return {"profit_factor": 0.0, "max_drawdown": 0.0, "gross_pnl": 0.0, "transaction_costs": 0.0, "net_pnl": 0.0}
+    equity = 1.0 + np.cumsum(net)
+    peak = np.maximum.accumulate(np.concatenate([[1.0], equity]))[1:]
+    dd = float(np.max((peak - equity) / np.maximum(peak, 1e-12)))
+    wins, losses = net[net > 0].sum(), -net[net < 0].sum()
+    pf = float(min(100.0, wins / losses)) if losses > 0 else (100.0 if wins > 0 else 0.0)
+    return {
+        "profit_factor": pf,
+        "max_drawdown": max(0.0, dd),
+        # Gross is before the spread cost; the gate's cost ratio divides the
+        # summed spread cost by the absolute gross (both in return units).
+        "gross_pnl": float(np.sum(gross)) if gross is not None else float(np.sum(net)),
+        "transaction_costs": float(np.sum(cost)) if cost is not None else 0.0,
+        "net_pnl": float(np.sum(net)),
+    }
+
+
+def holdout_gate_metrics(
+    model,
+    cache_path: str,
+    holdout_idx: np.ndarray,
+    *,
+    horizon: int,
+    bar_freq: str = "5min",
+    scaler=None,
+    pair_names: list[str] | None = None,
+    device=None,
+    batch_size: int = 512,
+) -> dict:
+    """Promotion-gate backtest on the cached holdout rows.
+
+    Uses exactly what training used: the cached X windows, the checkpoint's own
+    scaler (clipped like training), and each pair's close/spread. Replaces
+    scripts.backtest_model.run_execution_backtest for the gate, which rebuilt
+    features with a different pipeline, no scaler, position-padded columns and
+    today's headline sentiment on every historical bar.
+
+    Returns gate inputs: sharpe, n_trades, profit_factor, max_drawdown,
+    gross_pnl, transaction_costs, returns, periods_per_year (+ per_pair).
+    """
+    import torch
+    import zarr  # type: ignore
+
+    from inference._scaler_load import SCALED_FEATURE_CLIP
+
+    idx = np.sort(np.asarray(holdout_idx, dtype=np.int64))
+    root = zarr.open(str(cache_path), mode="r")
+    X = root["X"]
+    dev = device or torch.device("cpu")
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for i in range(0, len(idx), int(batch_size)):
+            b = idx[i : i + int(batch_size)]
+            xb = np.asarray(X.get_orthogonal_selection((b, slice(None), slice(None))), dtype=np.float32)
+            np.nan_to_num(xb, copy=False, nan=0.0, posinf=1e6, neginf=-1e6)
+            if scaler is not None:
+                shp = xb.shape
+                xb = scaler.transform(xb.reshape(-1, shp[-1])).astype(np.float32).reshape(shp)
+                np.clip(xb, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=xb)
+            out = model(torch.from_numpy(xb).to(dev))
+            logit = out[0] if isinstance(out, (tuple, list)) else out
+            logit = logit.detach().float().cpu().numpy()
+            if logit.ndim == 2 and logit.shape[-1] == 3:  # sell/hold/buy classes
+                d = logit.argmax(-1).astype(np.float64) - 1.0
+            else:  # scalar or per-pair direction logits
+                d = np.sign(logit.reshape(len(b), -1)).astype(np.float64)
+                d = d[:, 0] if d.shape[1] == 1 else d
+            rows.append(d)
+    dirs = np.concatenate(rows, axis=0)
+    bpy = fx_bars_per_year(bar_freq)
+    h = max(1, int(horizon))
+    if dirs.ndim == 2:
+        if "close_pairs" not in root:
+            raise RuntimeError("per-pair model but cache has no close_pairs; rebuild the cache")
+        sp = np.asarray(root["spread_pairs"][:]) if "spread_pairs" in root else None
+        m = pooled_pair_metrics(
+            dirs, idx, np.asarray(root["close_pairs"][:]), sp, h, pair_names=pair_names, bars_per_year=bpy
+        )
+    else:
+        sp = np.asarray(root["spread"][:]) if "spread" in root else None
+        m = net_pnl_metrics(dirs, idx, np.asarray(root["close"][:]), sp, h, bars_per_year=bpy)
+    net = np.asarray(m.pop("_net_returns", np.zeros(0)))
+    gross = m.pop("_gross_returns", None)
+    cost = m.pop("_costs", None)
+    return {
+        "sharpe": float(m.get("sharpe_net", 0.0)),
+        "n_trades": int(m.get("n_trades", 0)),
+        "returns": net,
+        # Non-overlapping trades are spaced h bars apart -> bars_per_year / h per year.
+        "periods_per_year": bpy / h,
+        "sharpe_ci_low": float(m.get("sharpe_net_ci_low", 0.0)),
+        "sharpe_ci_high": float(m.get("sharpe_net_ci_high", 0.0)),
+        "per_pair": {k: v.get("sharpe_net") for k, v in (m.get("per_pair") or {}).items()},
+        **trade_stats(net, gross, cost),
+    }

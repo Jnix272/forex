@@ -178,19 +178,18 @@ def test_cost_pct_zero_with_zero_costs_is_documented():
 
 
 def test_post_train_does_not_substitute_net_pnl_for_gross_pnl():
-    """The OLD bug line `gross_pnl=bt_metrics["net_pnl"]` must NOT appear."""
+    """The gate gets gross (pre-cost) P&L from the cached-holdout backtest."""
     post_train = _ROOT / "training" / "post_train.py"
     if not post_train.exists():
         pytest.skip("training/post_train.py not found")
     src = post_train.read_text(encoding="utf-8")
     assert 'gross_pnl=bt_metrics["net_pnl"]' not in src, "P1 bug is back! net_pnl substituted for gross_pnl"
-    assert "gross_pnl=gross_for_cost_gate" in src, "post_train should pass the real (derived) gross_pnl to the gate"
+    assert 'gross_pnl=abs(bt_metrics["gross_pnl"])' in src
+    assert "holdout_gate_metrics" in src
 
 
 def test_post_train_does_not_pass_hardcoded_zero_costs():
-    """The OLD bug line `transaction_costs=0.0` (always-zero) must be replaced
-    by the real commission number from backtest metrics.
-    """
+    """Transaction costs come from the backtest (spread cost), never a literal 0.0."""
     post_train = _ROOT / "training" / "post_train.py"
     if not post_train.exists():
         pytest.skip("training/post_train.py not found")
@@ -198,26 +197,21 @@ def test_post_train_does_not_pass_hardcoded_zero_costs():
     assert "transaction_costs=0.0, # Already accounted for" not in src, (
         "P1 bug is back! hardcoded zero transaction_costs"
     )
-    assert "transaction_costs_value" in src
-    assert "transaction_costs=transaction_costs_value" in src
-    assert "gross_for_cost_gate" in src
+    assert 'transaction_costs=bt_metrics["transaction_costs"]' in src
 
 
-# ---------------------------------------------------------------------------
-# post_train derives gross_pnl from net_pnl + total_commission as fallback
-# ---------------------------------------------------------------------------
+def test_holdout_trade_stats_separate_gross_and_costs():
+    """Gross and cost are measured separately (the old net+commission fallback is gone)."""
+    import numpy as np
 
+    from training.honest_eval import trade_stats
 
-def test_post_train_falls_back_to_net_plus_costs_when_gross_missing():
-    """When gross_pnl=0 but total_commission>0, gross is reconstructed as
-    net_pnl + total_commission.
-    """
-    post_train = _ROOT / "training" / "post_train.py"
-    if not post_train.exists():
-        pytest.skip("training/post_train.py not found")
-    src = post_train.read_text(encoding="utf-8")
-    # The fallback formula should be present
-    assert 'gross_pnl_value = float(bt_metrics.get("net_pnl", 0.0) or 0.0) + transaction_costs_value' in src
+    gross = np.array([0.003, -0.001, 0.002])
+    cost = np.array([0.0005, 0.0005, 0.0005])
+    st = trade_stats(gross - cost, gross, cost)
+    assert st["gross_pnl"] == pytest.approx(0.004)
+    assert st["transaction_costs"] == pytest.approx(0.0015)
+    assert st["net_pnl"] == pytest.approx(0.0025)
 
 
 # ---------------------------------------------------------------------------

@@ -17,8 +17,17 @@ def _cert(**over):
     return doc
 
 
-def test_current_certificate_passes():
-    assert check_gate_artifact(_cert()) == (True, "ok")
+def test_current_certificate_passes(tmp_path):
+    ckpt = tmp_path / "m_best.pt"
+    ckpt.write_bytes(b"w")
+    from validation.gate_policy import sha256_file
+
+    assert check_gate_artifact(_cert(artifact_hashes={str(ckpt): sha256_file(ckpt)})) == (True, "ok")
+
+
+def test_certificate_without_artifact_hashes_is_rejected():
+    ok, why = check_gate_artifact(_cert())
+    assert not ok and "artifact_hashes" in why
 
 
 def test_legacy_certificate_without_version_is_rejected():

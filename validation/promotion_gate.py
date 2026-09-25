@@ -69,7 +69,12 @@ class GateConfig:
     # 95% confidence the true Sharpe beats the benchmark before promoting.
     min_psr: float = 0.95
     min_dsr: float = 0.95
-    strict_psr: bool = False  # enable Deflated Sharpe (requires trials>1)
+    # Deflated Sharpe on by default: models are picked from hundreds of
+    # fold/arch/Optuna/seed combinations, so an undeflated Sharpe is optimistic.
+    strict_psr: bool = True
+    # Regime P&L concentration is checked only when a backtest supplies it; an
+    # empty dict used to fail every per-model gate (nothing produced it).
+    require_regime_pnl: bool = False
 
     # K: Capital efficiency gates - predict live survivability better than raw Sharpe.
     # All three are optional gates (skipped when input data is unavailable).
@@ -87,6 +92,7 @@ def probabilistic_sharpe_ratio(
     n_obs: int,
     skewness: float = 0.0,
     kurtosis: float = 5.0,
+    periods_per_year: float | None = None,
 ) -> float:
     """
     P(SR* > SR_benchmark) using Bailey & de Prado (2012).
@@ -100,6 +106,11 @@ def probabilistic_sharpe_ratio(
     """
     if n_obs < 5:
         return 0.5  # not enough data
+    if periods_per_year:
+        # The formula is for a per-observation Sharpe. Callers pass annualised
+        # Sharpes; unconverted, any positive Sharpe gave PSR ~ 1.0.
+        k = math.sqrt(float(periods_per_year))
+        sr_hat, sr_benchmark = sr_hat / k, sr_benchmark / k
     try:
         from scipy.stats import norm
     except ImportError:
@@ -122,18 +133,44 @@ def deflated_sharpe_ratio(
     n_obs: int,
     skewness: float = 0.0,
     kurtosis: float = 5.0,
+    periods_per_year: float | None = None,
 ) -> float:
     """
-    Deflated Sharpe Ratio from Bailey & de Prado (2014).
-    Accounts for multiple testing / hyperparameter search.
+    Deflated Sharpe Ratio from Bailey & de Prado (2014): PSR against the
+    expected maximum Sharpe of ``sr_trials`` null strategies.
+
+    Per-observation scale: E[max SR] = sd(SR) x E[max of N std normals], with
+    sd(SR) ~ 1/sqrt(n_obs - 1) under the null. ``sr_hat`` is annualised when
+    ``periods_per_year`` is given.
     """
     if sr_trials <= 1:
-        return sr_hat
-    # Expected maximum SR under multiple trials (approximation)
-    gamma_euler = 0.5772156649
-    e_max_sr = (1 - gamma_euler) * math.sqrt(2 * math.log(sr_trials)) + gamma_euler / math.sqrt(2 * math.log(sr_trials))
-    psr = probabilistic_sharpe_ratio(sr_hat, e_max_sr, n_obs, skewness, kurtosis)
-    return float(psr)
+        return probabilistic_sharpe_ratio(sr_hat, 0.0, n_obs, skewness, kurtosis, periods_per_year)
+    from evaluation.metrics import _expected_max_of_normals
+
+    e_max_obs = _expected_max_of_normals(int(sr_trials)) / math.sqrt(max(n_obs - 1, 1))
+    bench = e_max_obs * math.sqrt(float(periods_per_year)) if periods_per_year else e_max_obs
+    return float(probabilistic_sharpe_ratio(sr_hat, bench, n_obs, skewness, kurtosis, periods_per_year))
+
+
+def count_research_trials(checkpoint_root: str = "checkpoints", optuna_dir: str = "logs/optuna") -> int:
+    """Number of model configurations tried, for the Deflated Sharpe.
+
+    Counts every fold checkpoint across architectures plus every Optuna trial on
+    record. The gate used to pass the number of CV folds (7), which hugely
+    under-deflates a model picked from hundreds of runs.
+    """
+    import glob
+    import sqlite3
+
+    n = len(glob.glob(f"{checkpoint_root}/**/*_fold*_best.pt", recursive=True))
+    for db in glob.glob(f"{optuna_dir}/*.db"):
+        try:
+            con = sqlite3.connect(db)
+            n += int(con.execute("SELECT COUNT(*) FROM trials").fetchone()[0])
+            con.close()
+        except Exception:
+            pass
+    return max(1, n)
 
 
 # ── main gate ────────────────────────────────────────────────────────────────
@@ -158,9 +195,11 @@ class PromotionGate:
         regime_pnl: dict[str, float] | None = None,
         gross_pnl: float | None = None,
         transaction_costs: float = 0.0,
-        n_obs: int = 1000,
+        n_obs: int | None = None,
         n_backtest_trials: int = 1,
         backtest_sharpe_std: float = 0.0,
+        periods_per_year: float | None = None,
+        fold_sharpes: "list[float] | None" = None,
         skewness: float = 0.0,
         kurtosis: float = 5.0,
         emergency_retrain: bool = False,
@@ -216,6 +255,9 @@ class PromotionGate:
                 "emergency_mode": emergency_retrain,
             }
 
+        if n_obs is None:
+            # No silent default sample size for PSR/DSR (was 1000).
+            n_obs = int(n_trades)
         min_sr = self.cfg.min_sharpe_emergency if emergency_retrain else self.cfg.min_sharpe
         gates: dict[str, bool] = {}
         details: dict[str, float] = {}
@@ -253,7 +295,8 @@ class PromotionGate:
             gates["regime_ok"] = max_conc <= self.cfg.max_regime_conc
         else:
             max_conc, dominant = 0.0, "unknown"
-            gates["regime_ok"] = False
+            gates["regime_ok"] = not self.cfg.require_regime_pnl
+            details["regime_skipped"] = True
         details["max_regime_conc"] = max_conc
         details["dominant_regime"] = dominant  # type: ignore[assignment]
 
@@ -269,14 +312,27 @@ class PromotionGate:
         details["cost_limit"] = self.cfg.max_cost_pct
 
         # 8. Probabilistic Sharpe
-        psr = probabilistic_sharpe_ratio(sharpe, 0.0, n_obs, skewness, kurtosis)
-        gates["psr_ok"] = psr > self.cfg.min_psr  # B-M4: 95% confident by default
+        if not periods_per_year:
+            # Without the Sharpe's own periods/year PSR can't be put on the
+            # per-observation scale it needs; fail closed instead of PSR ~ 1.0.
+            psr = 0.0
+            gates["psr_ok"] = False
+            details["psr_error"] = "periods_per_year required"
+        else:
+            psr = probabilistic_sharpe_ratio(sharpe, 0.0, n_obs, skewness, kurtosis, periods_per_year)
+            gates["psr_ok"] = psr > self.cfg.min_psr  # B-M4: 95% confident by default
         details["psr"] = psr
         details["min_psr"] = self.cfg.min_psr
+        details["periods_per_year"] = float(periods_per_year or 0.0)
 
         if self.cfg.strict_psr:
-            if n_backtest_trials > 1:
-                dsr = deflated_sharpe_ratio(sharpe, n_backtest_trials, n_obs, skewness, kurtosis)
+            if n_backtest_trials > 1 and not periods_per_year:
+                # Multiple trials reported but no scale to deflate on: fail closed.
+                gates["dsr_ok"] = False
+                details["dsr"] = 0.0
+                details["dsr_error"] = "periods_per_year required"
+            elif n_backtest_trials > 1:
+                dsr = deflated_sharpe_ratio(sharpe, n_backtest_trials, n_obs, skewness, kurtosis, periods_per_year)
                 gates["dsr_ok"] = dsr > self.cfg.min_dsr
                 details["dsr"] = dsr
                 details["min_dsr"] = self.cfg.min_dsr
@@ -295,7 +351,18 @@ class PromotionGate:
         # Sharpe stability gate: reject models whose walk-forward Sharpe is
         # highly variable (low confidence that OOS performance will persist).
         # backtest_sharpe_std > 0 indicates multiple fold results are available.
-        if backtest_sharpe_std > 0 and n_backtest_trials > 1:
+        _folds = [float(v) for v in (fold_sharpes or []) if math.isfinite(float(v))]
+        if len(_folds) >= 3:
+            # Stability across folds of the same metric (was fold std vs the
+            # holdout Sharpe, gated on the trial count instead of the folds).
+            f_mean = sum(_folds) / len(_folds)
+            f_std = (sum((v - f_mean) ** 2 for v in _folds) / (len(_folds) - 1)) ** 0.5
+            sharpe_cv = f_std / max(abs(f_mean), 1e-6)
+            gates["sharpe_stability_ok"] = f_mean > 0 and sharpe_cv < 1.0
+            details["backtest_sharpe_std"] = f_std
+            details["fold_sharpe_mean"] = f_mean
+            details["sharpe_cv"] = sharpe_cv
+        elif backtest_sharpe_std > 0 and n_backtest_trials > 1:
             sharpe_cv = backtest_sharpe_std / max(abs(sharpe), 1e-6)
             gates["sharpe_stability_ok"] = sharpe_cv < 1.0  # CV < 100%
             details["backtest_sharpe_std"] = backtest_sharpe_std

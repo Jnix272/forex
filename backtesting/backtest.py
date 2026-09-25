@@ -174,6 +174,7 @@ class ForexScalingBacktest:
         bars_per_year: float | None = None,
         risk_free_rate: float = 0.02,
         volatility_adaptive_slippage: bool = False,
+        pair: str | None = None,
     ):
         """
         Parameters
@@ -230,6 +231,23 @@ class ForexScalingBacktest:
         self.slippage_pips = slippage_pips
         self.pip_size = pip_size
         self.pip_value_per_lot = pip_value_per_lot
+        self.pair = pair
+        if pair:
+            # The EURUSD defaults (pip 0.0001, $1/pip/lot) mis-scale USDJPY ~100x.
+            # Derive both from the pair; USD-base pairs price pips in the quote
+            # currency, so convert with the median close (Python and Numba paths).
+            from config.settings import get_pip_size
+
+            _pc = str(pair).upper().replace("/", "").replace("_", "")
+            if pip_size == 0.0001:
+                self.pip_size = float(get_pip_size(_pc))
+            if pip_value_per_lot == 1.0:
+                _closes = np.asarray(_get_column_numpy(bars, "close"), dtype=np.float64)
+                _px = float(np.nanmedian(_closes)) if _closes.size else 1.0
+                _pv = float(lot_size) * self.pip_size
+                if _pc.startswith("USD") and not _pc.endswith("USD") and _px > 0:
+                    _pv /= _px
+                self.pip_value_per_lot = _pv
         self.max_lots = max_lots
         self.execution_delay = execution_delay_bars
         self.use_bid_ask = use_bid_ask
@@ -539,6 +557,10 @@ class ForexScalingBacktest:
 
         direction = np.sign(self.position)
         open_px = self._arr_open[idx] if self._arr_open is not None else self._arr_close[idx]
+        # Stops/TPs trigger on mid bars; the fill is on the far side of the spread
+        # (long exits sell at bid, short exits buy at ask). Entries already paid
+        # the spread, so exits without it made round trips half-spread cheap.
+        half_spread = 0.5 * float(self._arr_spread[idx]) if self._arr_spread is not None else 0.0
 
         stop_ok = (
             self.current_stop is not None and np.isfinite(float(self.current_stop)) and float(self.current_stop) > 0.0
@@ -546,23 +568,23 @@ class ForexScalingBacktest:
         tp_ok = self.current_tp is not None and np.isfinite(float(self.current_tp)) and float(self.current_tp) > 0.0
 
         if stop_ok and direction > 0 and self._arr_low[idx] <= self.current_stop:
-            exec_px = min(open_px, self.current_stop) - self.slippage_pips * self.pip_size
+            exec_px = min(open_px, self.current_stop) - self.slippage_pips * self.pip_size - half_spread
             self._close_position(idx, fraction=1.0, exit_reason="stop_loss", override_price=exec_px)
             return True
         if stop_ok and direction < 0 and self._arr_high[idx] >= self.current_stop:
-            exec_px = max(open_px, self.current_stop) + self.slippage_pips * self.pip_size
+            exec_px = max(open_px, self.current_stop) + self.slippage_pips * self.pip_size + half_spread
             self._close_position(idx, fraction=1.0, exit_reason="stop_loss", override_price=exec_px)
             return True
 
         if tp_ok and direction > 0 and self._arr_high[idx] >= self.current_tp:
-            exec_px = max(open_px, self.current_tp) - self.slippage_pips * self.pip_size
+            exec_px = max(open_px, self.current_tp) - self.slippage_pips * self.pip_size - half_spread
             self._close_position(idx, fraction=0.5, exit_reason="scale_out_tp", override_price=exec_px)
             if self.position != 0:
                 self.current_stop = max(self.current_stop, self.avg_entry_price)
             return False
 
         if tp_ok and direction < 0 and self._arr_low[idx] <= self.current_tp:
-            exec_px = min(open_px, self.current_tp) + self.slippage_pips * self.pip_size
+            exec_px = min(open_px, self.current_tp) + self.slippage_pips * self.pip_size + half_spread
             self._close_position(idx, fraction=0.5, exit_reason="scale_out_tp", override_price=exec_px)
             if self.position != 0:
                 self.current_stop = min(self.current_stop, self.avg_entry_price)
@@ -648,7 +670,7 @@ class ForexScalingBacktest:
                     if direction > 0 and arr_low[i] <= current_stop:
                         if avg_entry_price != 0.0:
                             close_lots = abs(position)
-                            exec_price = min(arr_open[i], current_stop) - slippage_pips * pip_size
+                            exec_price = min(arr_open[i], current_stop) - slippage_pips * pip_size - 0.5 * arr_spread[i]
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -660,7 +682,7 @@ class ForexScalingBacktest:
                     elif direction < 0 and arr_high[i] >= current_stop:
                         if avg_entry_price != 0.0:
                             close_lots = abs(position)
-                            exec_price = max(arr_open[i], current_stop) + slippage_pips * pip_size
+                            exec_price = max(arr_open[i], current_stop) + slippage_pips * pip_size + 0.5 * arr_spread[i]
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -673,7 +695,7 @@ class ForexScalingBacktest:
                     if direction > 0 and arr_high[i] >= current_tp:
                         close_lots = abs(position) * 0.5
                         if avg_entry_price != 0.0:
-                            exec_price = max(arr_open[i], current_tp) - slippage_pips * pip_size
+                            exec_price = max(arr_open[i], current_tp) - slippage_pips * pip_size - 0.5 * arr_spread[i]
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -687,7 +709,7 @@ class ForexScalingBacktest:
                     elif direction < 0 and arr_low[i] <= current_tp:
                         close_lots = abs(position) * 0.5
                         if avg_entry_price != 0.0:
-                            exec_price = min(arr_open[i], current_tp) + slippage_pips * pip_size
+                            exec_price = min(arr_open[i], current_tp) + slippage_pips * pip_size + 0.5 * arr_spread[i]
                             pnl_pips = direction * (exec_price - avg_entry_price) / pip_size
                             gross_pnl = pnl_pips * pip_value_per_lot * close_lots
                             cost = close_lots * commission_per_lot
@@ -1362,6 +1384,11 @@ class ForexScalingBacktest:
             print("WARNING: Total PnL is exactly 0.0. No profitable or losing trades executed.")
 
         total_cost = sum(t.commission for t in self.trades)
+        _med_spread = (
+            float(np.nanmedian(self._arr_spread)) if self._arr_spread is not None and len(self._arr_spread) else 0.0
+        )
+        _rt_pips = (_med_spread / max(self.pip_size, 1e-12)) + 2.0 * float(self.slippage_pips)
+        _spread_cost = float(sum(abs(t.entry_lots) for t in self.trades) * _rt_pips * self.pip_value_per_lot)
         winning_trades = [t for t in self.trades if t.pnl_usd > 0]
         losing_trades = [t for t in self.trades if t.pnl_usd < 0]
 
@@ -1427,11 +1454,17 @@ class ForexScalingBacktest:
             "sortino_ratio": sortino,
             "max_drawdown_pct": max_dd * 100,
             "avg_holding_minutes": avg_bars_held,
+            # Capped: +inf with no losing trades passed profit-factor gates on
+            # tiny samples.
             "profit_factor": (
-                sum(t.pnl_usd for t in winning_trades) / max(abs(sum(t.pnl_usd for t in losing_trades)), 0.01)
+                min(100.0, sum(t.pnl_usd for t in winning_trades) / max(abs(sum(t.pnl_usd for t in losing_trades)), 0.01))
                 if losing_trades
-                else float("inf")
+                else (100.0 if winning_trades else 0.0)
             ),
+            # Commission only counts part of the cost: spread and slippage are
+            # inside fill prices. Estimated round-trip friction per trade.
+            "spread_slippage_cost_usd": _spread_cost,
+            "total_cost_usd": total_cost + _spread_cost,
         }
 
     def _equity_curve_metrics(self) -> dict:
