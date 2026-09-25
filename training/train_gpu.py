@@ -1159,6 +1159,25 @@ def main():
             "early_stop_metric": getattr(model_args, 'early_stop_metric', 'val_loss'),
             "completed_at": datetime.now(UTC).isoformat(),
         }
+        # Per-fold best metrics + robust aggregate for HPO / gates: the median of
+        # fold bests, not the last fold's max-over-epochs.
+        try:
+            if model_args.walk_forward_cv and "cv_hist" in locals() and cv_hist:
+                _fb = [float(e["best_metric"]) for e in cv_hist
+                       if e.get("best_metric") is not None and np.isfinite(float(e["best_metric"]))]
+                if _fb:
+                    _ts_summary["fold_best_metrics"] = [round(v, 6) for v in _fb]
+                    _ts_summary["fold_best_median"] = round(float(np.median(_fb)), 6)
+                    _ts_summary["fold_positive_frac"] = round(float(np.mean([v > 0 for v in _fb])), 4)
+                    if getattr(model_args, "early_stop_metric", "") == "cost_sharpe":
+                        _ts_summary["best_cost_sharpe"] = _ts_summary["fold_best_median"]
+            else:
+                _cs = [float(v) for v in (_ts_hist.get("cost_aware_sharpe") or []) if v is not None]
+                if _cs:
+                    # Average best and final epoch: discounts one-epoch spikes chosen by max().
+                    _ts_summary["best_cost_sharpe"] = round((max(_cs) + _cs[-1]) / 2.0, 6)
+        except Exception as _fbe:
+            print(f"[TrainSummary] fold aggregate skipped: {_fbe}")
         try:
             _safe_save_json(_ts_summary, _ts_path)
             print(f"[TrainSummary] Written -> {_ts_path}")

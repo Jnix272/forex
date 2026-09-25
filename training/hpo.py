@@ -706,7 +706,7 @@ def build_optuna_search(
     scheduler = str(scheduler or "tpe").lower()
     if scheduler == "tpe":
         sampler = TPESampler(seed=seed)
-        pruner = MedianPruner(n_startup_trials=3, n_warmup_steps=2)
+        pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=1)  # warmup 2 never pruned 2-epoch proxies
     elif scheduler == "asha":
         sampler = TPESampler(seed=seed)
         pruner = optuna.pruners.SuccessiveHalvingPruner(

@@ -369,10 +369,16 @@ def _assemble_trial_params(
     *,
     curriculum_only: bool,
     base_cfg_path: Path,
+    model_name: str = "",
 ) -> dict[str, Any]:
     """Merge Optuna trial dict with architecture params when searching curriculum only."""
+    raw = dict(raw)
+    if any(k not in raw for k in ("cur_seq_start", "cur_seq_ramp_epoch", "cur_seq_target")):
+        # Curriculum was pinned (short proxy) and not stored on the trial: restore the pinned values.
+        for k, v in _sample_curriculum(_FixedMidTrial(), model_name).items():
+            raw.setdefault(k, v)
     if not curriculum_only:
-        return dict(raw)
+        return raw
     arch = _read_arch_params_from_config(base_cfg_path)
     curriculum = {k: raw[k] for k in _CURRICULUM_PARAMS if k in raw}
     return {**arch, **curriculum}
@@ -511,15 +517,32 @@ def _build_seq_schedule(
 # ---------------------------------------------------------------------------
 
 
+_MIN_EPOCHS_FOR_CURRICULUM = 12
+
+
+class _FixedMidTrial:
+    """Stand-in trial that returns the middle choice without registering a param."""
+
+    @staticmethod
+    def suggest_categorical(name, choices):
+        return list(choices)[len(choices) // 2]
+
+
 def _sample_params(
     trial,
     model_name: str,
     *,
     curriculum_only: bool = False,
     base_cfg_path: Path | None = None,
+    proxy_epochs: int | None = None,
 ) -> dict[str, Any]:
     model_name = str(model_name).lower().strip()
-    curriculum = _sample_curriculum(trial, model_name)
+    if proxy_epochs is not None and int(proxy_epochs) < _MIN_EPOCHS_FOR_CURRICULUM:
+        # Curriculum ramps start at epoch 4-20; a short proxy never reaches them, so
+        # sampling ~14 inert params only adds noise dimensions to TPE. Pin to mid-choices.
+        curriculum = _sample_curriculum(_FixedMidTrial(), model_name)
+    else:
+        curriculum = _sample_curriculum(trial, model_name)
     if curriculum_only:
         path = base_cfg_path or Path("config/run.yaml")
         if not path.exists():
@@ -749,6 +772,8 @@ def _run_trial_process(
     live_epoch = 0
     latest_loss = None
     latest_sharpe = None
+    latest_cost = None
+    honest_seen = False
     live_lines: list[str] = []
     try:
         assert process.stdout is not None
@@ -768,11 +793,25 @@ def _run_trial_process(
             m_sh = re.search(r"(?:val[_ ]sharpe|sharpe_proxy)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE)
             if m_sh:
                 latest_sharpe = float(m_sh.group(1))
+            # cost_sharpe objective must prune on the same metric it is scored on:
+            # the honest net-PnL Sharpe (falls back to the label-based cost_sharpe line).
+            if "[Val][honest] enabled" in line:
+                honest_seen = True  # printed before epoch 1: never report label-based values
+            m_hon = re.search(r"\[Val\]\[honest\] net_sharpe=([-+]?\d+(?:\.\d+)?)", line)
+            if m_hon:
+                honest_seen = True
+                latest_cost = float(m_hon.group(1))
+            elif not honest_seen:
+                m_cs = re.search(r"\bcost_sharpe=([-+]?\d+(?:\.\d+)?)", line)
+                if m_cs:
+                    latest_cost = float(m_cs.group(1))
 
             report_value = None
             if args.metric == "val_loss" and latest_loss is not None:
                 report_value = latest_loss
-            elif args.metric in ("val_sharpe", "cost_sharpe") and latest_sharpe is not None:
+            elif args.metric == "cost_sharpe" and latest_cost is not None:
+                report_value = latest_cost
+            elif args.metric == "val_sharpe" and latest_sharpe is not None:
                 report_value = latest_sharpe
             if report_value is not None and live_epoch > 0:
                 yield_payload = {
@@ -913,7 +952,9 @@ def _export_best_config(args, study: optuna.Study) -> None:
     best_params = study.best_trial.params
     base_cfg_path = Path("config/run.yaml")
     curriculum_only = bool(getattr(args, "curriculum_only", False))
-    params = _assemble_trial_params(best_params, curriculum_only=curriculum_only, base_cfg_path=base_cfg_path)
+    params = _assemble_trial_params(
+        best_params, curriculum_only=curriculum_only, base_cfg_path=base_cfg_path, model_name=args.model
+    )
     args._trial_suffix = f"best_{_safe_slug(args.metric)}"
     # Keep production epoch budget from run.yaml - not the short confirm-trial count.
     production_epochs = _production_epochs_from_config(base_cfg_path)
@@ -957,7 +998,11 @@ def _export_best_config(args, study: optuna.Study) -> None:
 def _confirm_top_trials(args, study: optuna.Study) -> None:
     if args.confirm_top_k <= 0:
         return
-    top_trials = [t for t in study.best_trials[: args.confirm_top_k] if t.value is not None]
+    # study.best_trials is only the Pareto front (1 trial for single-objective);
+    # rank all completed trials to confirm the real top-K.
+    _done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
+    _done.sort(key=lambda t: t.value, reverse=_metric_direction(args.metric) == "maximize")
+    top_trials = _done[: args.confirm_top_k]
     if not top_trials:
         return
 
@@ -969,6 +1014,7 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
             t.params,
             curriculum_only=curriculum_only,
             base_cfg_path=base_cfg_path,
+            model_name=args.model,
         )
         trial_cfg_path = None
         checkpoint_dir = None
@@ -1017,6 +1063,7 @@ def objective(trial, args):
         args.model,
         curriculum_only=curriculum_only,
         base_cfg_path=base_cfg_path,
+        proxy_epochs=int(args.epochs),
     )
     searched = {k: v for k, v in params.items() if k in _CURRICULUM_PARAMS} if curriculum_only else params
     print(f"\n[Optuna] Starting Trial {trial.number} for {args.model} with: {searched}")
@@ -1143,6 +1190,12 @@ def main():
         pruner=pruner,
     )
 
+    if int(args.epochs) < _MIN_EPOCHS_FOR_CURRICULUM:
+        print(
+            f"[Optuna] Proxy epochs={args.epochs} < {_MIN_EPOCHS_FOR_CURRICULUM}: curriculum params pinned "
+            "(ramps never trigger in short proxies)."
+            + (" WARNING: --curriculum-only now searches nothing; raise --epochs." if args.curriculum_only else "")
+        )
     search_scope = "curriculum-only" if args.curriculum_only else "architecture + curriculum"
     print(f"[Optuna] Commencing {args.trials} trials for {args.model}")
     print(
