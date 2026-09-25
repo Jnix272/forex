@@ -8,6 +8,7 @@ DirectMLInferenceEngine and training checkpoints (production_best.pt / *_best.pt
 from __future__ import annotations
 
 import os
+import warnings
 import sys
 import time
 from collections import deque
@@ -160,21 +161,18 @@ def load_pytorch_model(
     if scaler is not None:
         scaler_n = scaler_feature_count(scaler)
         if scaler_n is not None and int(scaler_n) != int(n_features):
-            # Allow tile compatibility when model has 4 pairs (e.g. 584 = 4 x 146)
-            # and scaler was fitted on single-pair features.
-            if int(n_features) % int(scaler_n) == 0:
-                pass
-            else:
-                raise RuntimeError(
-                    f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
-                    f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
-                    "feature-mask has drifted from when this checkpoint was trained - "
-                    "either re-train against the new cache or rebuild the cache with "
-                    "the original feature_mask."
-                )
+            # No "tile" allowance: a single-pair scaler (e.g. 146 cols) on a 4-pair
+            # model (584) would put EURUSD statistics on every pair's columns.
+            raise RuntimeError(
+                f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
+                f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
+                "feature-mask has drifted from when this checkpoint was trained - "
+                "either re-train against the new cache or rebuild the cache with "
+                "the original feature_mask."
+            )
 
     if sidecar_model == "ensemble":
-        from models.ensemble import EnsembleMetaLearner
+        from models.ensemble import EnsembleMetaLearner, load_base_scaler
         from scripts.train_ensemble_meta import load_base_model, resolve_checkpoint
 
         manifest = ensemble_manifest
@@ -186,6 +184,8 @@ def load_pytorch_model(
 
         dev = device or _resolve_device()
         bases = []
+        base_scalers = []
+        base_seq_lens = []
         ckpt_root = ckpt_path.parent.parent
         for name in base_names:
             manifest_ckpt = next(
@@ -205,9 +205,11 @@ def load_pytorch_model(
             )
             if base_ckpt is None:
                 raise FileNotFoundError(f"Missing base checkpoint for ensemble member {name}")
-            base, _ = load_base_model(name, base_ckpt, int(n_features), int(seq_len), dev)
+            base, base_cfg = load_base_model(name, base_ckpt, int(n_features), int(seq_len), dev)
             base.eval()
             bases.append(base)
+            base_scalers.append(load_base_scaler(base_ckpt))
+            base_seq_lens.append(int((base_cfg or {}).get("seq_len", seq_len)))
 
         ensemble_ctor = cast(Any, EnsembleMetaLearner)
         model = ensemble_ctor(
@@ -215,8 +217,21 @@ def load_pytorch_model(
             context_dim=int(meta.get("context_dim", 32)),
             hidden=int(meta.get("hidden", 64)),
             base_names=base_names,
+            base_seq_lens=base_seq_lens,  # same per-base windows as in meta training
         ).to(dev)
         model.load_state_dict(state_dict, strict=False)
+        if all(sc is not None for sc in base_scalers):
+            # Each base scales its own input (as in meta training); the caller
+            # must pass raw features, so no outer scaler.
+            model.attach_base_scalers(base_scalers)
+            model.to(dev)
+            scaler = None
+        else:
+            warnings.warn(
+                "Ensemble bases lack *_scaler.npz sidecars; bases will see inputs scaled with the "
+                "cache scaler, which may differ from their training transform.",
+                stacklevel=2,
+            )
         model = _wrap_logits_output(model)
         model.eval()
         return model, int(n_features), int(seq_len), sidecar_model, scaler

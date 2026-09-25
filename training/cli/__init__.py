@@ -483,8 +483,8 @@ def parse_args():
         "--sacs-enabled",
         dest="sacs_enabled",
         action=argparse.BooleanOptionalAction,
-        default=bool(TRAINING.get("sacs_enabled", True)),
-        help="Enable Sharpness-Aware Checkpoint Selection (SACS).",
+        default=bool(TRAINING.get("sacs_enabled", False)),
+        help="Enable Sharpness-Aware Checkpoint Selection (SACS). Off by default: 5 extra full validation passes per epoch.",
     )
     p.add_argument(
         "--sacs-eps",

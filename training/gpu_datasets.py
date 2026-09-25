@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset
 
+from inference._scaler_load import SCALED_FEATURE_CLIP
 from training.gpu_cache_io import (
     ZARR,
     _pq_path,
@@ -203,6 +204,7 @@ class MemmapSequenceDataset(Dataset):
                 X = self.scaler.transform(X.reshape(1, -1)).astype(np.float32).reshape(orig_shape)
             else:
                 X = self.scaler.transform(X).astype(np.float32)
+            np.clip(X, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=X)
         y = float(np.nan_to_num(np.float32(y), nan=0.0, posinf=0.0, neginf=0.0))  # type: ignore[arg-type]
         return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
@@ -439,6 +441,7 @@ class ZarrStreamDataset(IterableDataset):
                 X_blk = X_blk.reshape(orig_shape)
             else:
                 X_blk = self.scaler.transform(X_blk).astype(np.float32)
+            np.clip(X_blk, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=X_blk)
         np.nan_to_num(y_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         if yc_blk is not None:
             np.nan_to_num(yc_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)

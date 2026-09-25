@@ -851,7 +851,10 @@ def supervised_train(
                 _max_sample = min(50000, len(train_idx))
                 _subset = np.random.choice(train_idx, _max_sample, replace=False)
                 _subset.sort()
-                _x_data = np.asarray(_x_arr.get_orthogonal_selection((_subset, slice(None), slice(None))))
+                # Last timestep only: windows overlap by seq_len-1 bars, so these rows
+                # cover the same bars as full windows at 1/seq_len of the memory
+                # (full windows were 50k x 120 x 584 floats, ~14 GB).
+                _x_data = np.asarray(_x_arr.get_orthogonal_selection((_subset, -1, slice(None))))
                 if _x_data.ndim == 3:
                     _x_data = _x_data.reshape(-1, _x_data.shape[-1])
                 _x_finite = _x_data[np.isfinite(_x_data).all(axis=1)]
@@ -863,9 +866,16 @@ def supervised_train(
             else:
                 _scaler = _global_scaler
         except Exception as _se:
-            print(f"[Data] WARN: train-only scaler refit failed ({_se}); falling back to the cache-wide "
-                  f"scaler, whose statistics include validation rows (mild leakage).")
-            _scaler = _global_scaler if hasattr(_global_scaler, "scale_") or hasattr(_global_scaler, "center_") else None
+            # The cache-wide scaler was fit on validation/holdout rows too; using it
+            # would leak evaluation statistics into training. Fail instead.
+            raise RuntimeError(f"[Data] train-only scaler refit failed: {_se}") from _se
+    if _scaler is not None:
+        from training.dataset_builder import neutralize_price_level_columns
+        from training.direction_control import _load_feature_schema as _lfs
+
+        _neutral = neutralize_price_level_columns(_scaler, _lfs(cache_path, n_features))
+        if _neutral:
+            print(f"[Data] Neutralised {len(_neutral)} raw price-level columns in the scaler (e.g. {_neutral[:3]})")
     if use_direction_targets:
         try:
             _direction_preflight(cache_path, train_idx, val_idx, args)
@@ -1314,11 +1324,12 @@ def supervised_train(
                 raise e
 
     # SACS config (read once; defaults are safe no-ops when sacs_enabled=False)
-    _sacs_enabled = bool(getattr(args, "sacs_enabled", True))
+    _sacs_enabled = bool(getattr(args, "sacs_enabled", False))
     _sacs_eps = float(getattr(args, "sacs_eps", 0.005))
     _sacs_n = max(1, int(getattr(args, "sacs_n_samples", 5)))
     _sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
     _best_sacs_score: float = float("inf")  # lower = better (sharpness-penalized val loss)
+    _best_from_warmup = False  # current best came from a direction-only warmup epoch
 
     if start_ep == 0:
         best_val_loss = float("inf")
@@ -1821,11 +1832,6 @@ def supervised_train(
     _des_lr_halved: bool = False
     _des_best_ema: float = float("inf")
     _des_prev_difficulty: int = -1         # curriculum stage tracker (reset counter on advance)
-    # Regularisation penalty corrections: both SI and EWC inflate val_loss over time.
-    # We subtract a linear approximation of their contribution from the composite score
-    # so the EMA tracks learning signal, not growing penalty.
-    _des_si_lambda: float = float(getattr(args, "si_lambda", 0.0))
-    _des_ewc_lambda: float = float(getattr(args, "ewc_lambda", 0.0)) if getattr(args, "enable_ewc", False) else 0.0
 
     # Early-stop metric flags — defined here so they're in scope inside the epoch loop.
     stop_on_sharpe = getattr(args, "early_stop_metric", "val_loss") == "sharpe"
@@ -2417,7 +2423,16 @@ def supervised_train(
                 _sacs_score = vl
                 print(f"[SACS] epoch {ep+1} sharpness eval failed (non-fatal): {_sacs_ep_e}")
 
+        # Direction-warmup epochs score a direction-only loss on a class-balanced
+        # subset, which is lower than and not comparable with the full multitask
+        # loss. Before this guard every fold's "best" was a warmup epoch (0 or 1).
+        # Keep a warmup best only as a placeholder; the first full epoch replaces it.
+        if _best_from_warmup and not _direction_warmup_active:
+            _best_sacs_score = float("inf")
+            _best_from_warmup = False
         improved = _sacs_score < _best_sacs_score
+        if improved:
+            _best_from_warmup = _direction_warmup_active
 
         if improved:
             best_sharpe = v_sh
@@ -2445,18 +2460,14 @@ def supervised_train(
                 print(f"[DynStop] Curriculum advanced to level {_cur_difficulty} — resetting patience counter")
             _des_prev_difficulty = _cur_difficulty
 
-            # Fix-2: SI and EWC penalties inflate val_loss over time; subtract their
-            # combined contribution so the composite reflects learning, not penalty growth.
-            _reg_progress = (ep + 1) / max(1, args.epochs)
-            _si_correction = _des_si_lambda * _reg_progress * 0.1
-            _ewc_correction = _des_ewc_lambda * _reg_progress * 1e-5  # EWC lambda is O(1000)
-            _si_correction = _si_correction + _ewc_correction
             _sharpe_signal = v_sh if v_sh is not None and not (v_sh != v_sh) else 0.0
             # Use SACS score as the base (already sharpness-penalised) so dynamic stop
             # and SACS checkpoint selection agree on what "better" means. Fall back to
             # vl when SACS is disabled.
             _des_base_score = _sacs_score if _sacs_enabled else vl
-            _composite = (_des_base_score - _si_correction) - 0.1 * _sharpe_signal
+            # No SI/EWC credit: subtracting a term that grows with the epoch count made
+            # the composite "improve" on its own, so patience never ran out.
+            _composite = _des_base_score - 0.1 * _sharpe_signal
 
             # EMA-smooth the composite (reduces single-epoch noise)
             if _des_ema is None:
@@ -2476,7 +2487,10 @@ def supervised_train(
                 _des_no_improve += 1
 
             # Fix-3: SWA guard — don't stop before SWA has had a chance to run.
-            _swa_guard_ok = (not _swa_enabled) or (ep >= _swa_start_ep)
+            # Don't hold a plateaued run open until SWA starts (epoch 30 of 40 by
+            # default): that guard meant early stopping never fired. A run that
+            # stops before SWA simply keeps its best checkpoint.
+            _swa_guard_ok = True
 
             if _des_no_improve >= _adaptive_patience and _swa_guard_ok:
                 _cur_lr = opt.param_groups[0]["lr"]
