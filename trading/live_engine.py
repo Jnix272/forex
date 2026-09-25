@@ -356,6 +356,14 @@ def build_inference_agents(
         except Exception as exc:
             print(f"[Live] RL fast agent unavailable ({exc}); using supervised for both paths")
 
+    try:
+        # Per-pair heads predict each pair's own direction (no USD-basis flip live).
+        _m = getattr(slow_engine, "model", None)
+        meta["per_pair_heads"] = bool(
+            _m is not None and any("MultiPair" in type(mod).__name__ for mod in _m.modules())
+        )
+    except Exception:
+        meta.setdefault("per_pair_heads", False)
     return fast_agent, slow_engine, meta
 
 
@@ -409,6 +417,19 @@ def _last_float(features, col: str, default: float = 0.0) -> float:
         return float(pd.to_numeric(features[col], errors="coerce").iloc[-1])
     except Exception:
         return float(default)
+
+
+def _tail_close_array(features, n: int) -> np.ndarray:
+    """Last ``n`` finite close prices as float64 (empty array when unavailable)."""
+    try:
+        if _POLARS and isinstance(features, pl.DataFrame):
+            arr = features.select("close").tail(n).to_numpy().reshape(-1)
+        else:
+            arr = np.asarray(features["close"].tail(n))
+        arr = np.asarray(arr, dtype=np.float64)
+        return arr[np.isfinite(arr) & (arr > 0)]
+    except Exception:
+        return np.zeros(0)
 
 
 def _tail_mean(features, col: str, n: int = 20, default: float = 0.0) -> float:
@@ -2662,7 +2683,13 @@ class LiveTradingEngine:
         pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
         is_inverted = False
         orig_action = action
-        if pair_clean.startswith("USD") and not pair_clean.endswith("USD"):
+        if (
+            pair_clean.startswith("USD")
+            and not pair_clean.endswith("USD")
+            and not bool(self._inference_meta.get("per_pair_heads", False))
+        ):
+            # Only for legacy consensus models. Per-pair heads already predict this
+            # pair's own direction; flipping them would invert correct signals.
             if action == int(LiveAction.BUY):
                 action = int(LiveAction.SELL)
                 is_inverted = True
@@ -2734,7 +2761,11 @@ class LiveTradingEngine:
             self._journal_record({"event": "blocked", "reason": safety.get("reason")})
             return
 
-        ret = _last_float(features, "ret_5", 0.0)
+        # Price-fraction returns from close. ``ret_5`` is a 5-bar log return in
+        # bps since the 2026-09-25 feature fix; VaR/Kelly below want fractions.
+        _closes = _tail_close_array(features, 61)
+        _rets = np.diff(_closes) / _closes[:-1] if len(_closes) > 1 else np.zeros(1)
+        ret = float(_rets[-1]) if len(_rets) else 0.0
         try:
             # R-1/R-2 fix: parametric_var now expects price-fraction returns
             # (NOT pip-scaled). The notional x price-fraction math gives dollar
@@ -2755,13 +2786,8 @@ class LiveTradingEngine:
 
         hurst = _last_float(features, "hurst_60", 0.5)
         corr_stab = _last_float(features, "corr_break", 0.0)
-        cols = list(features.columns)
-        if "ret_5" in cols:
-            if _POLARS and isinstance(features, pl.DataFrame):
-                recent_returns = features.select("ret_5").tail(60).to_numpy().reshape(-1)
-            else:
-                recent_returns = np.asarray(features["ret_5"].tail(60), dtype=np.float64)
-            recent_returns = np.nan_to_num(np.asarray(recent_returns, dtype=np.float64), nan=0.0)
+        if len(_rets) >= 2:
+            recent_returns = np.nan_to_num(np.asarray(_rets, dtype=np.float64), nan=0.0)
         else:
             vol = _last_float(features, "vol_20", 0.001)
             recent_returns = np.full(60, float(ret if ret else vol * 0.1), dtype=np.float64)
