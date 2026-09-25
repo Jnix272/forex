@@ -138,6 +138,7 @@ _YAML_MAP = {
     "training.rl_framework": "rl_framework",
     # Pretrain framework (new)
     "pretrain.enabled": "pretrain",
+    "pretrain.hard_examples": "pretrain_hard_examples",
     "pretrain.framework": "pretrain_framework",
     # RL framework (new)
     "rl.framework": "rl_framework",

@@ -499,6 +499,35 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
             "skipping transfer (was pretraining run?)."
         )
         return False
+    # Only load an encoder its own report accepted: completed, gate passed, not
+    # shown to hurt in an ablation, and the same file that was trained (hash).
+    _rep_path = ckpt_dir / "pretrain_report.json"
+    try:
+        import json as _json_pt
+
+        _rep = _json_pt.loads(_rep_path.read_text(encoding="utf-8")) if _rep_path.is_file() else {}
+    except Exception:
+        _rep = {}
+    _why_not = None
+    if not _rep:
+        _why_not = "no pretrain_report.json"
+    elif _rep.get("status") != "completed":
+        _why_not = f"status={_rep.get('status')}"
+    elif _rep.get("quality_gate_result") != "passed":
+        _why_not = f"quality_gate_result={_rep.get('quality_gate_result')}"
+    elif _rep.get("ablation_verdict") == "pretrain_hurt":
+        _why_not = "ablation verdict pretrain_hurt"
+    elif not _rep.get("scaled_inputs"):
+        _why_not = "encoder trained on unscaled inputs (pre-2026-09-25)"
+    else:
+        import hashlib as _hl
+
+        _h = _hl.sha256(Path(ckpt_path).read_bytes()).hexdigest()
+        if _rep.get("checkpoint_sha256") and _h != _rep.get("checkpoint_sha256"):
+            _why_not = "checkpoint hash differs from the one the report describes"
+    if _why_not:
+        print(f"[Pretrain->Sup] Not loading {ckpt_path.name}: {_why_not}")
+        return False
     encoder = model.backbone if hasattr(model, "backbone") else model
     target = _core_model(encoder)
     # Load on CPU: load_state_dict copies onto the model's device anyway, and a

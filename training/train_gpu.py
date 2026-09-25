@@ -952,6 +952,14 @@ def main():
                 f"skipping pretrain on resume ({_supervised_reason})."
             )
         elif model_args.pretrain:
+            try:
+                # P6: pretrain only on data before the first validation window.
+                _pt_hold = _promotion_holdout_n(n_samples, model_args)
+                _pt_splits, _ = _build_cv_splits(model_args, max(0, n_samples - _pt_hold))
+                _first_val = min(int(np.min(va)) for _tr, va in _pt_splits if len(va))
+                model_args._pretrain_end_index = max(0, _first_val - int(_embargo_bars(model_args)))
+            except Exception as _pte:
+                print(f"[Pretrain] fold-safe cap unavailable ({_pte}); using holdout cap only")
             with _timer.stage(f"pretrain_{model_name}"):
                 _pretrained = run_pretrain(model, cache_path, n_features, model_args, device, run=wandb_run)
                 if _pretrained is not None:

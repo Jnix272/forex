@@ -110,3 +110,24 @@ Alignment and uniformity are reported as 0.0 for the masked and forecast runs, w
    - P6: per-fold spans.
    - P8: run-scoped checkpoints with a hash.
 3. **Re-evaluate:** run the with/without ablation on the rebuilt dataset. Keep pretraining only for models where it wins across folds.
+
+---
+
+## Fix log
+
+| # | Fix |
+|---|---|
+| P1 | Every discard path renames `contrastive_encoder.pt` and its `_ep*.pt` copies to `*.discarded`. The loader requires the report to say `completed` with the gate `passed`. |
+| P2 | Pretraining inputs go through a RobustScaler fit on the pretrain window only, with the same ±10 clip and price-level/volume neutralisation as supervised training (`_fit_pretrain_scaler`). |
+| P3 | `normalized_mse_loss` scale floor raised from 1e-5 to 1e-2, so near-constant channels are no longer amplified. |
+| P4 / P10 | The last 10% of the pretrain window is held out. The gate requires the held-out pretext MSE to be < 0.95 × a predict-the-mean baseline and the training loss to fall; otherwise it discards. Diagnostics are computed on the held-out block. |
+| P5 / P13 | `pretrain.enabled: false` by default. The loader refuses an encoder whose ablation verdict is `pretrain_hurt`, and one trained on unscaled inputs (older runs). |
+| P6 | `train_gpu` ends the pretrain window before the first CV validation window, minus the embargo. |
+| P7 | With scaled inputs and the loss floor the pretext loss is O(1), so the 0.18 / 0.002 handoff thresholds are on the right scale. |
+| P8 / P9 | The report records `checkpoint_sha256`. The loader verifies it along with status, gate result, ablation verdict and `scaled_inputs`. |
+| P11 | A note is logged when `regime_aware` is set for a method other than tscl. |
+| P12 | Hard-example injection is opt-in (`pretrain.hard_examples`, default false). |
+
+**Tests:** `tests/test_pretrain_fixes_2026_09_25.py`. The existing pretrain adapter, loss-scaling and upgrade tests pass: 44 in total.
+
+**Consequence:** every existing encoder is refused by the loader (no `scaled_inputs` or hash).

@@ -12,7 +12,7 @@ import torch
 
 def compute_target_scale(
     target: torch.Tensor,
-    min_scale: float = 1e-5,
+    min_scale: float = 1e-2,
     fallback_scale: float = 1.0,
 ) -> torch.Tensor:
     """Compute per-feature standard deviation scale across batch and sequence dimensions.
@@ -33,6 +33,11 @@ def compute_target_scale(
     -------
     torch.Tensor
         Scale tensor broadcastable to target shape (with 1s on non-channel dimensions).
+
+    ``min_scale`` default 1e-2 (was 1e-5): on scaled (~unit-variance) inputs a
+    channel with batch std below 0.01 is effectively constant; dividing its error
+    by a 1e-5 std multiplied it 100,000x and let a few near-constant columns
+    dominate the loss (observed pretrain losses ~1.5e9).
     """
     if target.ndim <= 1:
         return torch.ones_like(target)
@@ -52,7 +57,7 @@ def normalized_mse_loss(
     target: torch.Tensor,
     mask: torch.Tensor | None = None,
     reduction: str = "mean",
-    min_scale: float = 1e-5,
+    min_scale: float = 1e-2,
     fallback_scale: float = 1.0,
 ) -> torch.Tensor:
     """Variance-normalized MSE loss across feature channels.

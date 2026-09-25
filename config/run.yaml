@@ -503,7 +503,10 @@ pretrain:
   batch: 256
   blocks_per_epoch: auto
   ema_decay: 0.996
-  enabled: true
+  # Off by default (audit 2026-09-25): no run has shown a gain; HAELT's ablation
+  # said it hurt. Re-enable per run only with an ablation on the same folds.
+  enabled: false
+  hard_examples: false
   epochs: 18
   handoff_loss: 0.18
   handoff_min_delta: 0.002

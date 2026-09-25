@@ -174,6 +174,7 @@ def _read_pretrain_spans(
     seq_len: int,
     n_features: int,
     progress_desc: str = "[Pretrain] Loading spans",
+    scaler=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     total = int(sum(length for _, length in spans))
     w_out = np.zeros((total, int(seq_len), int(n_features)), dtype=np.float32)
@@ -190,6 +191,12 @@ def _read_pretrain_spans(
                 chunk_len = end - cursor
                 w_chunk = _crop_to_seq_len(np.asarray(x_reader[cursor:end]), seq_len).copy()
                 np.nan_to_num(w_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                if scaler is not None:
+                    from inference._scaler_load import SCALED_FEATURE_CLIP
+
+                    _shp = w_chunk.shape
+                    w_chunk = scaler.transform(w_chunk.reshape(-1, _shp[-1])).astype(np.float32).reshape(_shp)
+                    np.clip(w_chunk, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=w_chunk)
                 w_out[pos : pos + chunk_len] = w_chunk
                 y_chunk = np.asarray(y_reader[cursor:end], dtype=np.float32).copy()
                 np.nan_to_num(y_chunk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -200,6 +207,60 @@ def _read_pretrain_spans(
                 if _TRAIN_LOGGER:
                     _TRAIN_LOGGER.heartbeat()
     return w_out, y_out
+
+
+def _discard_encoder_files(ckpt: str) -> list[str]:
+    """Rename the encoder checkpoint (+ per-epoch copies) to *.discarded.
+
+    A failed quality gate used to only return a fresh model; the saved
+    contrastive_encoder.pt stayed in place and supervised training loaded it
+    anyway (GNN's collapsed encoder went into all 7 folds).
+    """
+    moved = []
+    p = Path(ckpt)
+    for f in [p, *p.parent.glob(f"{p.stem}_ep*{p.suffix}")]:
+        if f.is_file():
+            dst = f.with_name(f.name + ".discarded")
+            try:
+                os.replace(f, dst)
+                moved.append(str(dst))
+            except OSError:
+                pass
+    return moved
+
+
+def _sha256(path: str) -> str | None:
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for b in iter(lambda: fh.read(1 << 20), b""):
+                h.update(b)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _fit_pretrain_scaler(x_reader, n_total: int, args, rng, max_rows: int = 20_000):
+    """Robust scaler on last-timestep rows of the pretrain window only, with the
+    same price-level / venue-volume neutralisation as supervised training, so the
+    encoder learns on the input distribution it will see after transfer."""
+    from sklearn.preprocessing import RobustScaler
+
+    from training.dataset_builder import neutralize_price_level_columns
+    from training.direction_control import _load_feature_schema
+
+    n_total = int(n_total)
+    idx = np.sort(rng.choice(n_total, size=min(max_rows, n_total), replace=False))
+    rows = np.stack([np.asarray(x_reader[int(i), -1, :], dtype=np.float32) for i in idx])
+    rows = rows[np.isfinite(rows).all(axis=1)]
+    if len(rows) < 32:
+        return None
+    sc = RobustScaler().fit(rows)
+    sc.scale_[sc.scale_ == 0] = 1.0
+    neutralize_price_level_columns(sc, _load_feature_schema(getattr(args, "cache_path", "") or "", rows.shape[1]))
+    return sc
 
 
 def _select_pretrain_trainer_class(method: str, regime_aware: bool):
@@ -651,6 +712,22 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     if 0 < _pretrain_cap < n_total:
         n_total = _pretrain_cap
         print(f"[Pretrain] Holdout-safe index cap: {n_total:,} trainable windows")
+    # P6: end before the first CV validation window (set by train_gpu) so no
+    # fold fine-tunes an encoder that already modelled its validation period.
+    _fold_cap = int(getattr(args, "_pretrain_end_index", 0) or 0)
+    if 0 < _fold_cap < n_total:
+        n_total = _fold_cap
+        print(f"[Pretrain] Fold-safe cap: {n_total:,} windows (before the first validation window)")
+    # P4/P10: hold out the last 10% of the pretrain window for the quality gate.
+    _pt_val_start = int(n_total * 0.9)
+    _pt_val_end = int(n_total)
+    n_total = _pt_val_start
+    args.cache_path = getattr(args, "cache_path", None) or str(cache_path)
+    # P2: same scaled inputs as supervised training.
+    _pt_scaler = _fit_pretrain_scaler(X_reader, n_total, args, _rng)
+    if _pt_scaler is None:
+        print("[Pretrain] WARN: could not fit a pretrain scaler; skipping pretraining")
+        return None
 
     n_windows = min(int(n_windows), int(n_total))
     diff_for_sampling = _load_diff_array(str(cache_path), n_total)
@@ -683,6 +760,10 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         print(
                             f"[Pretrain] Discarded {len(_he_indices) - len(_valid_he)} hard examples outside trainable window (leakage prevention)"
                         )
+                    if not bool(getattr(args, "pretrain_hard_examples", False)):
+                        # P12: supervised-loss hard examples from an earlier run
+                        # do not belong in an unsupervised task (opt-in only).
+                        _valid_he = []
                     _he_spans = [(i, i + 1) for i in _valid_he[: int(n_windows * 0.2)]]  # max 20% hard examples
                     if _he_spans:
                         print(
@@ -700,9 +781,17 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             seq_len=args.seq_len,
             n_features=n_features,
             progress_desc=desc,
+            scaler=_pt_scaler,
         )
 
     windows, y_sample = _sample_pretrain_block()
+    _val_len = max(1, min(2048, _pt_val_end - _pt_val_start))
+    _val_windows, _ = _read_pretrain_spans(
+        X_reader, y_reader, [(_pt_val_start, _val_len)], seq_len=args.seq_len, n_features=n_features,
+        progress_desc="[Pretrain] Loading held-out block", scaler=_pt_scaler,
+    )
+    if use_regime and _method != "tscl":
+        print(f"[Pretrain] NOTE: regime_aware only applies to tscl; ignored for method={_method}")
 
     print(f"[Pretrain] Sampled {len(windows):,} windows | shape {windows.shape[1:]}")
 
@@ -1186,10 +1275,47 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 "epochs_completed": len(all_losses),
                 "loss_history": [float(x) for x in all_losses],
                 "checkpoint_path": str(ckpt),
+                "discarded_files": _discard_encoder_files(ckpt),
             },
         )
         model = build_model(args.model, n_features, args).to(device)
         return model
+
+    # P4: a pretext that does not beat a trivial baseline on held-out windows,
+    # or whose loss rose over training, taught the encoder nothing.
+    _heldout = {}
+    try:
+        from pretrain.loss_scaling import normalized_mse_loss
+
+        _vd = trainer.diagnostics(_val_windows) if hasattr(trainer, "diagnostics") else {}
+        _heldout = {k: float(v) for k, v in (_vd or {}).items() if isinstance(v, (int, float))}
+        _metric_key = next((k for k in ("masked_mse", "forecast_mse", "recon_loss") if k in _heldout), None)
+        if _metric_key is not None:
+            _xv = torch.as_tensor(_val_windows[: min(512, len(_val_windows))])
+            _baseline = float(normalized_mse_loss(torch.zeros_like(_xv), _xv).item())
+            _heldout["baseline_mse"] = _baseline
+            _beats = _heldout[_metric_key] < 0.95 * _baseline
+            _falling = len(all_losses) < 2 or all_losses[-1] < all_losses[0]
+            if not (_beats and _falling):
+                _why = (
+                    f"held-out {_metric_key}={_heldout[_metric_key]:.4f} vs baseline {_baseline:.4f}"
+                    f"{'' if _falling else '; training loss did not fall'}"
+                )
+                print(f"\n[Pretrain] Quality Gate Failed: {_why}. Discarding pretrain weights.")
+                _update_pretrain_report(
+                    args,
+                    {
+                        "status": "discarded",
+                        "quality_gate_result": "failed_heldout_baseline",
+                        "quality_gate_detail": _why,
+                        "heldout_diagnostics": _heldout,
+                        "loss_history": [float(x) for x in all_losses],
+                        "discarded_files": _discard_encoder_files(ckpt),
+                    },
+                )
+                return build_model(args.model, n_features, args).to(device)
+    except Exception as _hg_e:
+        print(f"[Pretrain] held-out gate skipped: {_hg_e}")
 
     # Quality gate - embedding spread for reconstruction-style methods; uniformity for contrastive
     _quality_gate = "passed"
@@ -1201,7 +1327,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     except Exception:
         _handoff_gate = None
     if _method in _PRETRAIN_STD_QUALITY:
-        _final_diag = trainer.diagnostics(_last_w) if hasattr(trainer, "diagnostics") else {}
+        _final_diag = trainer.diagnostics(_val_windows) if hasattr(trainer, "diagnostics") else {}
         _std = float(_final_diag.get("embed_std", 0.0))
         _latest_diag.update(_final_diag or {})
         final_embed_std = _std
@@ -1221,6 +1347,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                     "final_embedding_std": final_embed_std,
                     "diagnostics": _latest_diag,
                     "checkpoint_path": str(ckpt),
+                    "discarded_files": _discard_encoder_files(ckpt),
                 },
             )
             model = build_model(args.model, n_features, args).to(device)
@@ -1253,6 +1380,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         "final_embedding_std": final_embed_std,
                         "diagnostics": _latest_diag,
                         "checkpoint_path": str(ckpt),
+                        "discarded_files": _discard_encoder_files(ckpt),
                     },
                 )
                 model = build_model(args.model, n_features, args).to(device)
@@ -1303,12 +1431,17 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             "average_pretrain_loss": float(avg_loss),
             "final_pretrain_loss": float(all_losses[-1]) if all_losses else None,
             "loss_history": [float(x) for x in all_losses],
+            # None = not computed for this method (0.0 read like a measurement).
             "alignment": final_align,
             "uniformity": final_unif,
             "final_embedding_std": final_embed_std,
             "diagnostics": _latest_diag,
+            "heldout_diagnostics": _heldout,
             "quality_gate_result": _quality_gate,
             "checkpoint_path": str(ckpt),
+            "checkpoint_sha256": _sha256(ckpt),
+            "scaled_inputs": True,
+            "pretrain_window_end": int(_pt_val_end),
             "batch_size": int(pt_bs),
             "blocks_per_epoch": int(_n_blocks),
             "effective_windows_per_epoch": int(effective_windows),
