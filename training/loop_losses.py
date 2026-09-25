@@ -350,6 +350,19 @@ def _build_train_loss(
     stabilizes.
     """
     pred = model(xb)
+    _tuple_out = isinstance(pred, tuple)
+    if _tuple_out and sample_weight_lookup is not None and batch_idx_t is not None:
+        # Multitask criteria ignore weight=; fold per-sample weights (period
+        # balance, curriculum) into bet_size, which they apply per sample.
+        try:
+            _sw = torch.as_tensor(
+                np.asarray(sample_weight_lookup)[batch_idx_t.detach().cpu().numpy().astype(np.int64)],
+                dtype=torch.float32, device=xb.device,
+            )
+            if _sw.numel() == xb.shape[0]:
+                bet_size_b = _sw if bet_size_b is None else bet_size_b.float() * _sw
+        except (IndexError, ValueError, TypeError):
+            pass
     loss = _compute_loss(
         pred,
         crit,
@@ -361,7 +374,7 @@ def _build_train_loss(
         direction_only=direction_only,
         bet_size=bet_size_b,
     )
-    if sample_weight_lookup is not None and batch_idx_t is not None:
+    if not _tuple_out and sample_weight_lookup is not None and batch_idx_t is not None:
         loss = _apply_curriculum_weights(
             loss,
             pred,

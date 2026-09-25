@@ -180,7 +180,9 @@ def _get_cache_path(args) -> Path:
 # Bump when feature or label *code* changes, which no config digest can see.
 # a0925: log-return features, cost-aware CPAR labels, per-pair spread, no
 # multipair lookahead, unit-free eco surprise, no synthetic yields.
-DATASET_BUILD_VERSION = "a0925"
+# a0925b: per-pair y/close/spread arrays + row timestamps; scalar label is the
+# market pair's own (was the 4-pair average); news sentiment in calendar mode.
+DATASET_BUILD_VERSION = "a0925b"
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")

@@ -234,6 +234,11 @@ class MemmapSequenceDataset(Dataset):
             self.y_mmap = np.load(str(npy_y), mmap_mode="r")
 
 
+def _label_tensor(v) -> torch.Tensor:
+    """float32 tensor for a scalar label or a (P,) per-pair label vector."""
+    return torch.as_tensor(np.asarray(v, dtype=np.float32))
+
+
 class ZarrStreamDataset(IterableDataset):
     """
     Sequential-read IterableDataset for zarr-backed training data.
@@ -294,8 +299,11 @@ class ZarrStreamDataset(IterableDataset):
         scaler=None,
         shuffle_buffer_size: int | None = None,
         shuffle_seed: int | None = None,
+        pair_targets: bool = False,
     ):
         self.cache_path = cache_path
+        # Per-pair heads: y / y_cls are the (P,) vectors from y_pairs / ycls_pairs.
+        self.pair_targets = bool(pair_targets)
         # Sort once so contiguous positions map to the same zarr chunk.
         self.sorted_idx = np.ascontiguousarray(np.sort(np.asarray(indices, dtype=np.int64)))
         self.shuffle_chunks = shuffle_chunks
@@ -369,7 +377,15 @@ class ZarrStreamDataset(IterableDataset):
                 z = _zarr_open_group(self.cache_path, mode="r")
                 y_cls = z.get("y_cls", None)
                 pq = z.get("pq", None)
-                self._opened_arrays[key] = (z["X"], z["y"], y_cls, pq, True)
+                y = z["y"]
+                if self.pair_targets:
+                    if "y_pairs" not in z or "ycls_pairs" not in z:
+                        raise RuntimeError(
+                            f"per_pair_heads needs y_pairs/ycls_pairs in {self.cache_path}; "
+                            "rebuild the cache (DATASET_BUILD_VERSION >= a0925b)."
+                        )
+                    y, y_cls = z["y_pairs"], z["ycls_pairs"]
+                self._opened_arrays[key] = (z["X"], y, y_cls, pq, True)
             else:
                 X = np.load(_x_path(self.cache_path), mmap_mode="r")
                 y = np.load(_y_path(self.cache_path), mmap_mode="r")
@@ -442,9 +458,12 @@ class ZarrStreamDataset(IterableDataset):
             else:
                 X_blk = self.scaler.transform(X_blk).astype(np.float32)
             np.clip(X_blk, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=X_blk)
-        np.nan_to_num(y_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-        if yc_blk is not None:
-            np.nan_to_num(yc_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        if not self.pair_targets:
+            np.nan_to_num(y_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            if yc_blk is not None:
+                np.nan_to_num(yc_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        # Pair mode keeps NaN: filler rows (a pair missing from a window) must be
+        # dropped by the batch sanitizer, not trained on as 0 = HOLD.
         if pq_blk is not None:
             np.nan_to_num(pq_blk, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         return X_blk, y_blk, yc_blk, pq_blk, offset
@@ -466,8 +485,8 @@ class ZarrStreamDataset(IterableDataset):
             smp_idx = int(block_idx[j])
             yield self._make_sample(
                 X_blk[j],
-                float(y_blk[j]),  # type: ignore[arg-type]
-                None if yc_blk is None else float(yc_blk[j]),  # type: ignore[arg-type]
+                y_blk[j] if self.pair_targets else float(y_blk[j]),  # type: ignore[arg-type]
+                None if yc_blk is None else (yc_blk[j] if self.pair_targets else float(yc_blk[j])),  # type: ignore[arg-type]
                 None if pq_blk is None else float(pq_blk[j]),  # type: ignore[arg-type]
                 smp_idx,
             )
@@ -489,25 +508,25 @@ class ZarrStreamDataset(IterableDataset):
         if self.return_indices:
             if self.multitask_targets:
                 yc_t = (
-                    torch.tensor(yc_val, dtype=torch.float32)
+                    _label_tensor(yc_val)
                     if yc_val is not None
-                    else torch.tensor(float(y_val), dtype=torch.float32)  # type: ignore[arg-type]
+                    else _label_tensor(y_val)  # type: ignore[arg-type]
                 )
                 pq_t = torch.tensor(1.0 if pq_val is None else float(pq_val), dtype=torch.float32)  # type: ignore[arg-type]
-                y_t = torch.tensor(float(y_val), dtype=torch.float32)  # type: ignore[arg-type]
+                y_t = _label_tensor(y_val)  # type: ignore[arg-type]
                 idx_t = torch.tensor(smp_idx, dtype=torch.long)
                 return (X_t, y_t, yc_t, pq_t, idx_t)
-            return (X_t, torch.tensor(float(y_val), dtype=torch.float32), torch.tensor(smp_idx, dtype=torch.long))  # type: ignore[arg-type]
+            return (X_t, _label_tensor(y_val), torch.tensor(smp_idx, dtype=torch.long))  # type: ignore[arg-type]
         if self.multitask_targets:
             yc_t = (
-                torch.tensor(yc_val, dtype=torch.float32)
+                _label_tensor(yc_val)
                 if yc_val is not None
-                else torch.tensor(float(y_val), dtype=torch.float32)  # type: ignore[arg-type]
+                else _label_tensor(y_val)  # type: ignore[arg-type]
             )
             pq_t = torch.tensor(1.0 if pq_val is None else float(pq_val), dtype=torch.float32)  # type: ignore[arg-type]
-            y_t = torch.tensor(float(y_val), dtype=torch.float32)  # type: ignore[arg-type]
+            y_t = _label_tensor(y_val)  # type: ignore[arg-type]
             return (X_t, y_t, yc_t, pq_t)
-        return (X_t, torch.tensor(float(y_val), dtype=torch.float32))  # type: ignore[arg-type]
+        return (X_t, _label_tensor(y_val))  # type: ignore[arg-type]
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -607,9 +626,11 @@ class ZarrStreamDataset(IterableDataset):
             perm = rng.permutation(n)
             for j in perm:
                 smp_idx = int(block_idx[j])
-                yc_val = None if yc_blk is None else float(yc_blk[j])  # type: ignore[arg-type]
+                _pt = self.pair_targets
+                yc_val = None if yc_blk is None else (yc_blk[j].copy() if _pt else float(yc_blk[j]))  # type: ignore[arg-type]
                 pq_val = None if pq_blk is None else float(pq_blk[j])  # type: ignore[arg-type]
-                sample = _push(X_blk[j].copy(), float(y_blk[j]), yc_val, pq_val, smp_idx)  # type: ignore[arg-type]
+                y_val = y_blk[j].copy() if _pt else float(y_blk[j])  # type: ignore[arg-type]
+                sample = _push(X_blk[j].copy(), y_val, yc_val, pq_val, smp_idx)
                 if sample is not None:
                     yield sample
 

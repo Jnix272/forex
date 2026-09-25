@@ -1180,6 +1180,11 @@ def main():
                 if _fcs:
                     _ts_summary["fold_cost_sharpes"] = [round(v, 6) for v in _fcs]
                     _ts_summary["best_cost_sharpe"] = round(float(np.median(_fcs)), 6)
+                # Lower 95% bootstrap bound of the honest net Sharpe at each fold's
+                # last epoch: a fold only counts as evidence when this is > 0.
+                _fci = [float(((e.get("history") or {}).get("honest_sharpe_ci_low") or [0.0])[-1]) for e in cv_hist]
+                _ts_summary["fold_honest_ci_low"] = [round(v, 4) for v in _fci]
+                _ts_summary["folds_ci_low_positive"] = int(sum(v > 0 for v in _fci))
                 _fb = [float(e["best_metric"]) for e in cv_hist
                        if e.get("best_metric") is not None and np.isfinite(float(e["best_metric"]))]
                 if _fb:

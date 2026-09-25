@@ -29,6 +29,10 @@ except ImportError:
     TORCH = False
 
 
+# Column of per-pair outputs the ensemble / RL / live path trades. Column 0 is
+# the first configured pair, which is also the pair behind the cached close/spread.
+PRIMARY_PAIR_INDEX = 0
+
 if TORCH:
 
     def _base_pred_to_batch_vector(raw: object) -> torch.Tensor:
@@ -52,6 +56,19 @@ if TORCH:
                 and isinstance(raw[1], torch.Tensor)
             )
             t = raw[1] if multitask else first
+            # Per-pair heads return (B, P) logits and return_hat. Use the primary
+            # pair's return_hat; averaging over pairs mixes USD-quote and USD-base
+            # pairs whose moves cancel (the same flaw as the old averaged label).
+            if (
+                len(raw) >= 3
+                and isinstance(first, torch.Tensor)
+                and isinstance(raw[1], torch.Tensor)
+                and first.dim() == 2
+                and raw[1].dim() == 2
+                and first.shape == raw[1].shape
+                and first.shape[-1] > 1
+            ):
+                t = raw[1][:, PRIMARY_PAIR_INDEX]
 
             # Recursive unwrap for nested tuples (e.g. Ensemble inside Ensemble or custom wrappers)
             if isinstance(t, (tuple, list)):

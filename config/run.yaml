@@ -628,6 +628,10 @@ training:
   amp: true
   # Sharpness-aware checkpoint selection: 5 extra full val passes per epoch. Off by audit 2026-09-25.
   sacs_enabled: false
+  # One multitask head per pair on that pair's own label (was a 4-pair average).
+  per_pair_heads: true
+  # Equal total weight per calendar year of training rows.
+  period_balance: true
   batch_size: 256
   enable_ewc: true
   ewc_lambda: 400.0

@@ -2273,10 +2273,13 @@ class MultiPairChunk(tuple):
         elements: tuple | list,
         y_pairs: np.ndarray | None = None,
         ycls_pairs: np.ndarray | None = None,
+        extras: dict | None = None,
     ):
         obj = super().__new__(cls, elements)
         obj.y_pairs = y_pairs
         obj.ycls_pairs = ycls_pairs
+        # Per-pair arrays written to the cache beside X (see _PAIR_EXTRA_KEYS).
+        obj.extras = extras or {}
         return obj
 
     def __getitem__(self, idx: Any) -> Any:
@@ -2340,6 +2343,7 @@ def _build_multipair_chunk(
     pair_pqs: dict = {}
     pair_diffs: dict = {}
     pair_times: dict = {}
+    pair_market: dict = {}
     market_close = market_atr = market_spread = None
 
     for pair, ticks in pair_ticks.items():
@@ -2385,6 +2389,7 @@ def _build_multipair_chunk(
         pair_pqs[pair] = pq_seq
         pair_diffs[pair] = diff_seq
         pair_times[pair] = time_idx
+        pair_market[pair] = (close_seq, atr_seq, spread_seq)
         if market_close is None:
             market_close, market_atr, market_spread = close_seq, atr_seq, spread_seq
 
@@ -2399,10 +2404,12 @@ def _build_multipair_chunk(
         np.array([], dtype=np.float32),
     )
 
-    def _make_return(t9: tuple, yp: np.ndarray | None = None, ycp: np.ndarray | None = None):
+    def _make_return(
+        t9: tuple, yp: np.ndarray | None = None, ycp: np.ndarray | None = None, extras: dict | None = None
+    ):
         if return_pair_targets:
             return (*t9, yp, ycp)
-        return MultiPairChunk(t9, y_pairs=yp, ycls_pairs=ycp)
+        return MultiPairChunk(t9, y_pairs=yp, ycls_pairs=ycp, extras=extras)
 
     if not pair_Xs:
         return _make_return((*_empty8, 0))
@@ -2565,14 +2572,18 @@ def _build_multipair_chunk(
 
     y_pairs = np.stack(y_list, axis=1).astype(np.float32) if y_list else None
     ycls_pairs = np.stack(ycls_list, axis=1).astype(np.int64) if ycls_list else None
-    y_multi = np.mean(y_pairs, axis=1).astype(np.float32) if y_pairs is not None else np.array([], dtype=np.float32)  # (N,)
-    cls_mean = np.mean(ycls_pairs, axis=1) if ycls_pairs is not None else np.array([], dtype=np.float32)
-    consensus_threshold = float(LABELING.get("consensus_threshold", 0.33))
-    y_cls_multi = np.where(
-        np.abs(cls_mean) < consensus_threshold,
-        0.0,
-        np.sign(cls_mean),
-    ).astype(np.float32)
+    # Scalar label = the market pair's own label, the same pair close/spread come
+    # from. It used to be the mean over EURUSD/USDJPY/GBPUSD/USDCAD (and a
+    # consensus sign), which mixes USD-quote and USD-base pairs whose USD moves
+    # cancel, and matched no tradable instrument. Per-pair heads use y_pairs.
+    _label_pairs = [p for p in pair_ticks if p in pair_indices]
+    _mpos = _label_pairs.index(first_pair) if first_pair in _label_pairs else 0
+    y_multi = (
+        y_pairs[:, _mpos].astype(np.float32) if y_pairs is not None else np.array([], dtype=np.float32)
+    )  # (N,)
+    y_cls_multi = (
+        ycls_pairs[:, _mpos].astype(np.float32) if ycls_pairs is not None else np.array([], dtype=np.float32)
+    )
     pq_multi = np.mean(np.stack(pq_list, axis=1), axis=1).astype(np.float32) if pq_list else np.array([], dtype=np.float32)
     diff_multi = np.max(np.stack(diff_list, axis=1), axis=1).astype(np.uint8) if diff_list else np.array([], dtype=np.uint8)
     n_min = X_multi.shape[0]
@@ -2587,7 +2598,22 @@ def _build_multipair_chunk(
         market_spread[:n_min],
         X_multi.shape[2],
     )
-    return _make_return(out_9, yp=y_pairs, ycp=ycls_pairs)
+    extras: dict = {}
+    if y_pairs is not None and ycls_pairs is not None and len(_label_pairs) == len(pair_ticks):
+        # Per-pair arrays in pair_order, row-aligned with X (column k = pair_order[k]).
+        extras["y_pairs"] = y_pairs[:n_min]
+        extras["ycls_pairs"] = ycls_pairs[:n_min].astype(np.float32)
+        for _name, _k in (("close_pairs", 0), ("atr_pairs", 1), ("spread_pairs", 2)):
+            extras[_name] = np.stack(
+                [np.asarray(pair_market[p][_k])[pair_indices[p]] for p in pair_order], axis=1
+            ).astype(np.float32)[:n_min]
+    try:
+        extras["t_ns"] = np.asarray(
+            [k[1] if k[0] == "dt" else -1 for k in common_keys], dtype=np.int64
+        )[:n_min]
+    except Exception:
+        pass
+    return _make_return(out_9, yp=y_pairs, ycp=ycls_pairs, extras=extras)
 
 
 # Raw price levels (and bands built on them) drift across the 2008-2025 range,
@@ -2825,6 +2851,7 @@ def _parallel_window_worker(worker_args: dict):
         X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = result
 
         return {
+            "extras": getattr(result, "extras", None) or {},
             "window_idx": window_idx,
             "X": X_seq,
             "y": y_seq,
@@ -2839,6 +2866,36 @@ def _parallel_window_worker(worker_args: dict):
         }
     except Exception:
         return {"window_idx": worker_args.get("window_idx", -1), "error": traceback.format_exc()}
+
+
+_PAIR_EXTRA_KEYS = ("y_pairs", "ycls_pairs", "close_pairs", "atr_pairs", "spread_pairs", "t_ns")
+
+
+def _store_pair_extras(zs, extras: dict | None, n_rows: int) -> None:
+    """Append per-pair arrays (and row timestamps) beside X, keeping row alignment.
+
+    A window that lacks an array (e.g. a pair produced no sequences) gets a
+    filler block (NaN / -1) so every stored array stays the length of X.
+    Arrays are only created while the cache is empty, so a resumed old cache
+    without them is left as is.
+    """
+    extras = extras or {}
+    n_x = int(zs["X"].shape[0]) if "X" in zs else 0
+    for key in _PAIR_EXTRA_KEYS:
+        arr = extras.get(key)
+        if key not in zs:
+            if arr is None or n_x != n_rows:
+                continue
+            dtype = np.int64 if key == "t_ns" else np.float32
+            _zarr_create(
+                zs, key, shape=(0, *np.asarray(arr).shape[1:]),
+                chunks=(min(2048, max(1, n_rows)), *np.asarray(arr).shape[1:]), dtype=dtype,
+            )
+        tgt = zs[key]
+        if arr is None or len(arr) != n_rows:
+            fill = -1 if key == "t_ns" else np.nan
+            arr = np.full((n_rows, *tgt.shape[1:]), fill, dtype=tgt.dtype)
+        tgt.append(np.asarray(arr, dtype=tgt.dtype))
 
 
 def _build_multipair_dataset(
@@ -2977,7 +3034,19 @@ def _build_multipair_dataset(
         diff = diff_seq if diff_seq is not None else np.zeros(n_rows, dtype=np.uint8)
         return pq, diff
 
-    def _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs=None, ycls_pairs=None):
+    def _append_chunk(
+        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq,
+        y_pairs=None, ycls_pairs=None, extras=None,
+    ):
+        _append_chunk_core(
+            X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs, ycls_pairs
+        )
+        if use_zarr and z_store is not None:
+            _store_pair_extras(z_store, extras, len(X_seq))
+
+    def _append_chunk_core(
+        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs=None, ycls_pairs=None
+    ):
         nonlocal z_store, total_samples
         n_rows = len(X_seq)
         pq_arr, diff_arr = _sidecar_or_default(pq_seq, diff_seq, n_rows)
@@ -3248,6 +3317,7 @@ def _build_multipair_dataset(
                         _res["close"],
                         _res["atr"],
                         _res["spread"],
+                        extras=_res.get("extras"),
                     )
                     print(
                         f"  [Window {_widx + 1}/{len(date_windows)}] "
@@ -3324,7 +3394,7 @@ def _build_multipair_dataset(
                             continue
                         _last_pair_ticks = pair_ticks
 
-                        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = (
+                        _mp_chunk = (
                             _build_multipair_chunk(
                                 pair_ticks,
                                 fe,
@@ -3351,6 +3421,8 @@ def _build_multipair_dataset(
                                 max_zero_frac=float(getattr(args, "max_zero_frac", 0.80)),
                             )
                         )
+                        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, n_feat = _mp_chunk
+                        _mp_extras = getattr(_mp_chunk, "extras", None) or {}
                     except Exception as e:
                         import traceback
 
@@ -3371,7 +3443,9 @@ def _build_multipair_dataset(
                         continue
                     n_features = n_feat
                     total_samples += len(X_seq)
-                    _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq)
+                    _append_chunk(
+                        X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, extras=_mp_extras
+                    )
                     print(f"    {len(X_seq):,} joint sequences | {total_samples:,} total")
                     if not getattr(args, "_feature_schema_checked", False):
                         args._feature_schema_checked = True

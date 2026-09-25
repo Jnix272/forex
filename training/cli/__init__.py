@@ -865,6 +865,21 @@ def parse_args():
         help="Delete existing contrastive encoder checkpoint and pretrain from scratch",
     )
     p.add_argument(
+        "--period-balance",
+        dest="period_balance",
+        action=argparse.BooleanOptionalAction,
+        default=bool(TRAINING.get("period_balance", False)),
+        help="Weight training rows so each calendar year contributes equally (needs t_ns in the cache).",
+    )
+    p.add_argument(
+        "--per-pair-heads",
+        dest="per_pair_heads",
+        action=argparse.BooleanOptionalAction,
+        default=bool(TRAINING.get("per_pair_heads", False)),
+        help="One multitask head per pair, trained on that pair's own label (y_pairs). "
+        "Needs a cache built with per-pair arrays.",
+    )
+    p.add_argument(
         "--multitask",
         action="store_true",
         help="Replace single prediction head with MultiTaskHead (direction CE + magnitude Huber + confidence BCE)",

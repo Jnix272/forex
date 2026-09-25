@@ -11,6 +11,7 @@ import os
 import time
 from contextlib import nullcontext
 from training.ema import ExponentialMovingAverage
+from training.honest_eval import period_balance_weights
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -888,6 +889,7 @@ def supervised_train(
             else:
                 raise
 
+    _pair_targets = bool(getattr(args, "per_pair_heads", False))
     train_ds = ZarrStreamDataset(
         cache_path,
         train_idx,
@@ -895,7 +897,15 @@ def supervised_train(
         multitask_targets=use_direction_targets,
         return_indices=True,
         scaler=_scaler,
+        pair_targets=_pair_targets,
     )
+    # Period balance: weight training rows so each calendar year contributes
+    # equally (news coverage and label mix differ sharply by era).
+    _period_wl = None
+    if bool(getattr(args, "period_balance", False)):
+        _period_wl = period_balance_weights(cache_path, train_idx, n_samples)
+        if _period_wl is None:
+            print("[PeriodBalance] WARN: cache has no t_ns row timestamps; rebuild to enable")
     # Honest validation context: real close/spread for net-of-cost PnL selection.
     _honest_ctx = None
     try:
@@ -910,6 +920,15 @@ def supervised_train(
                 "horizon": int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30)),
                 "bars_per_year": fx_bars_per_year(str(getattr(args, "bar_freq", None) or "5min")),
             }
+            if _pair_targets:
+                _cp, _sp = load_price_arrays(cache_path, pairs=True)
+                if _cp is None:
+                    raise RuntimeError("per_pair_heads needs close_pairs in the cache; rebuild it")
+                _pnames = list(getattr(args, "pairs", None) or [])
+                _honest_ctx.update(
+                    close_pairs=_cp, spread_pairs=_sp, n_pairs=int(_cp.shape[1]),
+                    pair_names=_pnames if len(_pnames) == _cp.shape[1] else None,
+                )
             print(f"[Val][honest] enabled: {len(_hc_close):,} cached prices, spread={'yes' if _hc_spread is not None else 'no'}")
         else:
             print("[Val][honest] WARN: cache has no 'close' array; selection falls back to label-based cost_sharpe")
@@ -921,6 +940,7 @@ def supervised_train(
         shuffle_chunks=False,
         multitask_targets=use_direction_targets,
         scaler=_scaler,
+        pair_targets=_pair_targets,
     )
 
     # Windows DataLoader workers use spawned processes plus shared file mappings.
@@ -1883,7 +1903,7 @@ def supervised_train(
         try:
             _stab_pool = locals().get("ep_train_idx", train_idx)
             _sample_idx = np.random.choice(_stab_pool, size=min(512, len(_stab_pool)), replace=False)
-            _samp_ds = ZarrStreamDataset(cache_path, _sample_idx, shuffle_chunks=False)
+            _samp_ds = ZarrStreamDataset(cache_path, _sample_idx, shuffle_chunks=False, scaler=_scaler)
             _samp_dl = DataLoader(_samp_ds, batch_size=512, shuffle=False, num_workers=0)
             _samp_xb, _ = next(iter(_samp_dl))
             _feat_stability.update(_samp_xb.numpy())
@@ -2047,11 +2067,12 @@ def supervised_train(
 
             except Exception as _cm_exc:
                 _log_warn(f"[CurriculumManager] Epoch {ep + 1} update failed: {_cm_exc}")
-        _cm_wl = None
+        _cm_wl = None if _period_wl is None else _period_wl.copy()
         if _curriculum_mgr is not None and (_sp_allowed or _lw_allowed):
             try:
-                _cm_wl = np.ones(n_samples, dtype=np.float64)
-                _cm_wl[train_idx] = np.asarray(
+                if _cm_wl is None:
+                    _cm_wl = np.ones(n_samples, dtype=np.float64)
+                _cm_wl[train_idx] *= np.asarray(
                     _curriculum_mgr.get_sample_weights(),
                     dtype=np.float64,
                 )
@@ -2094,6 +2115,8 @@ def supervised_train(
                 shuffle_chunks=True,
                 multitask_targets=use_direction_targets,
                 return_indices=True,
+                scaler=_scaler,  # was missing: warmup/curriculum epochs saw unscaled inputs
+                pair_targets=_pair_targets,
             )
             epoch_train_dl = DataLoader(
                 _ep_ds,
@@ -2284,6 +2307,10 @@ def supervised_train(
         history["lr"].append(lr)
         history["val_sharpe"].append(v_sh)
         history.setdefault("cost_aware_sharpe", []).append(float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0)
+        _hm_ci = getattr(validate_epoch, "last_honest", None) or {}
+        history.setdefault("honest_sharpe_ci_low", []).append(float(_hm_ci.get("sharpe_net_ci_low", 0.0)))
+        history.setdefault("honest_sharpe_ci_high", []).append(float(_hm_ci.get("sharpe_net_ci_high", 0.0)))
+        history.setdefault("honest_n_trades", []).append(int(_hm_ci.get("n_trades", 0)))
         history.setdefault("val_pred_counts", []).append([int(x) for x in _class_counts.get("pred", [0, 0, 0])])
         history.setdefault("val_true_counts", []).append([int(x) for x in _class_counts.get("true", [0, 0, 0])])
 
@@ -2651,7 +2678,8 @@ def supervised_train(
             # Use tune_idx to prevent calibration leakage if available
             if getattr(args, "_tune_eval_idx", None) is not None:
                 cal_ds = ZarrStreamDataset(
-                    cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask
+                    cache_path, args._tune_eval_idx, shuffle_chunks=False, multitask_targets=multitask,
+                    scaler=_scaler, pair_targets=_pair_targets,  # calibrate on the training transform
                 )
                 cal_dl = DataLoader(cal_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
                 cal_model.calibrate(cal_dl, device, classification=calibrate_as_classification)

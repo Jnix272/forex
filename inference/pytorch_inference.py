@@ -349,7 +349,14 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
                 logits = logits[0]
             if hasattr(logits, "detach"):
                 logits = logits.detach().cpu().numpy()
-        return _logits_to_proba(np.asarray(logits)[0], threshold=getattr(self, "threshold", None))
+        row = np.asarray(logits)[0]
+        if row.ndim == 1 and row.size > 1 and row.size != 3 and getattr(self.model, "_per_pair_output", True):
+            # Per-pair heads: (P,) direction logits, one per pair. Trade the primary
+            # pair; treating them as a P-class softmax would be meaningless.
+            from models.ensemble import PRIMARY_PAIR_INDEX
+
+            row = row[PRIMARY_PAIR_INDEX : PRIMARY_PAIR_INDEX + 1]
+        return _logits_to_proba(row, threshold=getattr(self, "threshold", None))
 
     def reset_buffer(self):
         self._obs_buffer.clear()
