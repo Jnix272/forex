@@ -789,6 +789,14 @@ class FeatureEngineer:
         if "london_ny" not in F.columns:
             temporal.append(pl.Series("london_ny", ((h >= 13) & (h <= 17)).astype(float)))
         F = F.with_columns(temporal)
+        # session_label arrives as text ("asia"/"london"/"ny"/"off"); in the numeric
+        # X it became a constant 0. Encode it (shared by training and live builds).
+        if "session_label" in F.columns and F.schema["session_label"] == pl.String:
+            F = F.with_columns(
+                pl.col("session_label")
+                .replace_strict({"asia": 0.0, "london": 1.0, "ny": 2.0, "off": 3.0}, default=3.0, return_dtype=pl.Float64)
+                .alias("session_label")
+            )
 
         # Missingness
         tracked = ["sentiment_decayed", "eco_surprise", "buzz"]

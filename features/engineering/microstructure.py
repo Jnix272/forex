@@ -492,13 +492,27 @@ def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int
 
 # === Intraday Volatility Clock ========================================================
 
-def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_days: int = 7) -> pl.DataFrame:
-    """Intraday 'volatility clock' features."""
+def add_volatility_clock_features(df: pl.DataFrame, day_period: int | None = None, k_days: int = 7) -> pl.DataFrame:
+    """Intraday 'volatility clock' features.
+
+    ``day_period`` is bars per day. It used to default to 1440 (1-minute bars):
+    on 5-minute bars the 7-day lookback needed 10,080 bars, longer than any build
+    window, so pace/hot were always null -> constant 0. Now inferred from the
+    median bar spacing when not given.
+    """
+    if day_period is None:
+        day_period = 1440
+        if "timestamp_utc" in df.columns and df.height > 2:
+            _dt = df["timestamp_utc"].diff().drop_nulls()
+            if len(_dt):
+                _med_s = _dt.dt.total_seconds().median()
+                if _med_s and _med_s > 0:
+                    day_period = max(1, int(round(86400 / float(_med_s))))
     ret = (pl.col("close") / pl.col("close").shift(1)).log().abs()
     mins_day = pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp_utc").dt.minute().cast(
         pl.Int32
     )
-    pos = mins_day / float(day_period)
+    pos = mins_day / 1440.0  # fraction of the day, independent of bar size
 
     refs = [ret.shift(day_period * k) for k in range(1, k_days + 1)]
     ref_mean = pl.sum_horizontal(refs) / k_days
@@ -793,11 +807,18 @@ def missingness_flags(df: pl.DataFrame, cols: list, decay: float = 0.9) -> pl.Da
             df = df.with_columns([pl.lit(1.0).alias(f"{c}_missing"), pl.lit(1.0).alias(f"{c}_staleness")])
             continue
 
-        is_null = df[c].is_null()
+        # Upstream joins fill gaps with 0.0, so "missing" is null *or* exactly 0
+        # (only null made it constant). Staleness = 1 - decay**(bars since the value
+        # last changed): 0 right after a fresh release/headline, -> 1 as it ages.
+        # (The old ``is_null.cum_min()`` was 0 after the first value, forever.)
+        v = pl.col(c)
+        changed = (v != v.shift(1)).fill_null(True)
+        grp = changed.cast(pl.Int64).cum_sum()
+        age = pl.int_range(pl.len()).over(grp)
         df = df.with_columns(
             [
-                is_null.cast(pl.Float64).alias(f"{c}_missing"),
-                is_null.cum_min().cast(pl.Float64).alias(f"{c}_staleness"),
+                (v.is_null() | (v == 0.0)).cast(pl.Float64).alias(f"{c}_missing"),
+                (1.0 - pl.lit(float(decay)).pow(age.cast(pl.Float64))).alias(f"{c}_staleness"),
             ]
         )
     return df

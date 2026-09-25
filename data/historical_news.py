@@ -422,17 +422,12 @@ def load_historical_news_bundle(
         if len(eco) != 0:
             eco_actual, eco_forecast, eco_prior = _eco_pair_frames(eco)
 
+    # Raw rows (for live FinBERT re-scoring of unscored headlines) only in "full".
     news_events_df = df if mode == "full" else None
 
-    if mode != "full":
-        return HistoricalNewsBundle(
-            news_events=news_events,
-            eco_actual=eco_actual,
-            eco_forecast=eco_forecast,
-            eco_prior=eco_prior,
-            category_flags=category_flags,
-            news_events_df=news_events_df,
-        )
+    # The pre-computed sentiment_score column is used in every mode. "calendar"
+    # used to return here, so sentiment_raw/decayed were constant 0 in every
+    # cache even though ~20M 2008-2025 headlines are already scored.
 
     # DS-004: removed bag-of-words _sentiment_score fallback which inverts
     # signals for financial contexts (e.g. "weak dollar" = bullish EURUSD).
