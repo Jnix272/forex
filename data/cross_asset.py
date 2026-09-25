@@ -357,6 +357,9 @@ def load_cross_asset_panel(
         used_provider = None
 
         provider_order = ["stooq", "yahoo", "fred", "eodhd"] if source == "auto" else [source]
+        # Yields have no reliable Yahoo symbol: fall back to FRED instead of dropping the series.
+        if "fred" not in provider_order and asset in FRED_YIELD_SYMBOLS:
+            provider_order.append("fred")
 
         for provider in provider_order:
             if ser is not None and not ser.empty:
@@ -407,7 +410,9 @@ def load_cross_asset_panel(
                 cache_path = cdir / f"{asset}_fred_{fsym}.parquet"
                 ser = _cache_read(cache_path, start_ts, end_ts)
                 if ser is None or ser.empty:
-                    ser = _read_fred_daily(fsym, start, end)
+                    # Monthly OECD series: look back 120d so a short window still gets a value to ffill.
+                    _fred_start = (pd.Timestamp(start) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
+                    ser = _read_fred_daily(fsym, _fred_start, end)
                     if ser is not None and not ser.empty:
                         _cache_write(cache_path, ser, metadata={"source": "fred", "symbol": fsym, "asset": asset})
                 if ser is not None and not ser.empty:
@@ -438,6 +443,10 @@ def load_cross_asset_panel(
 
         # Clip to requested range; fall back to full series if no overlap
         clip = ser[(ser.index >= start_ts) & (ser.index <= end_ts)]
+        # Keep the last observation before start so sparse (monthly) series can be ffilled.
+        _prior = ser[ser.index < start_ts]
+        if not _prior.empty and (clip.empty or clip.index.min() > start_ts):
+            clip = pd.concat([_prior.iloc[-1:], clip])
         out[asset] = clip if not clip.empty else ser
 
         # Freshness warning

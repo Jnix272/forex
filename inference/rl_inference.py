@@ -148,6 +148,11 @@ class RLInferenceAgent(BaseInferenceEngine):
             obs_size = self._infer_obs_size() + 5
         if n_actions is None:
             n_actions = self._infer_n_actions(ckpt)
+        # The checkpoint's first Linear input dim is authoritative over metadata/heuristics.
+        _ckpt_obs = self._infer_obs_from_ckpt(ckpt)
+        if _ckpt_obs is not None and _ckpt_obs != obs_size:
+            print(f"[RLInference] WARN: obs_size {obs_size} (meta/inferred) != checkpoint input dim {_ckpt_obs}; using {_ckpt_obs}")
+            obs_size = _ckpt_obs
         # Guard: degenerate obs (e.g. 6 = 1+5) indicates wrong encoder head (ensemble meta-learner)
         # Fall back to raw feature dim +5 to keep live in-distribution with training (which was raw when encoder failed).
         if obs_size is not None and obs_size < 20:
@@ -170,13 +175,13 @@ class RLInferenceAgent(BaseInferenceEngine):
         elif self.algo == "dqn":
             self._agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
             agent_any = cast(Any, self._agent)
-            agent_any.policy_net.load_state_dict(ckpt, strict=False)
+            self._report_load(agent_any.policy_net.load_state_dict(ckpt, strict=False))
             agent_any.target_net.load_state_dict(agent_any.policy_net.state_dict())
             agent_any.eps = 0.0
         else:
             self._agent = PPOAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
             agent_any = cast(Any, self._agent)
-            agent_any.net.load_state_dict(ckpt, strict=False)
+            self._report_load(agent_any.net.load_state_dict(ckpt, strict=False))
 
         # ── Encoder vs raw contract detection ──────────────────────────────
         # Training with rl_encoder_obs=True produces obs = encoder_emb + 5.
@@ -222,6 +227,27 @@ class RLInferenceAgent(BaseInferenceEngine):
             if h.ndim == 3:
                 h = h[:, -1, :]
         return int(h.shape[-1])
+
+    @staticmethod
+    def _infer_obs_from_ckpt(ckpt) -> int | None:
+        """Input dim of the first 2-D weight in a raw state_dict (None if unavailable)."""
+        if not isinstance(ckpt, dict) or ckpt.get("model_type") == "RLEnsemble":
+            return None
+        for key, value in ckpt.items():
+            if key.endswith("weight") and getattr(value, "ndim", 0) == 2:
+                return int(value.shape[1])
+        return None
+
+    @staticmethod
+    def _report_load(result) -> None:
+        """strict=False hides key mismatches; a policy with missing weights is random-init."""
+        missing = list(getattr(result, "missing_keys", []) or [])
+        unexpected = list(getattr(result, "unexpected_keys", []) or [])
+        if missing:
+            print(f"[RLInference] ERROR: {len(missing)} policy weights missing from checkpoint "
+                  f"(random-init!): {missing[:5]}")
+        if unexpected:
+            print(f"[RLInference] WARN: {len(unexpected)} unexpected checkpoint keys ignored: {unexpected[:5]}")
 
     def _infer_n_actions(self, ckpt) -> int:
         if not isinstance(ckpt, dict) or not ckpt:

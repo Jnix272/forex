@@ -55,6 +55,8 @@ import pandas as pd
 
 from infrastructure.logging_utils import log_data_load
 
+_log = logging.getLogger(__name__)
+
 # Windows DLL Order Hardening: PyTorch must load before PyArrow/Pandas
 # to ensure modern MSVCP140.dll (VS 2022) is bound into the process address space.
 try:

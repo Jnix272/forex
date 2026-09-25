@@ -22,12 +22,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import warnings
+
 import numpy as np
 
 
 def _scaler_npz_path(cache_path: str | Path) -> Path:
     """Mirror :func:`training.dataset_builder._scaler_npz_path` with robust sidecar fallback."""
     p = Path(cache_path)
+    if p.suffix == ".npz" and p.is_file():
+        return p
     if (p / "scaler.npz").exists():
         return p / "scaler.npz"
     s = str(cache_path)
@@ -134,6 +138,9 @@ def apply_inference_scaler(scaler: Any, x: np.ndarray) -> np.ndarray:
     np.nan_to_num(arr, copy=False, nan=0.0, posinf=1e6, neginf=-1e6)
     if scaler is None:
         return arr.astype(np.float32, copy=False)
-    out = scaler.transform(arr.reshape(-1, arr.shape[-1]))
+    # Columns are already ordered to match training; ndarray input just lacks names.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="X does not have valid feature names")
+        out = scaler.transform(arr.reshape(-1, arr.shape[-1]))
     out = out.reshape(arr.shape).astype(np.float32, copy=False)
     return out

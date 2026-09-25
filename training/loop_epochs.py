@@ -390,6 +390,7 @@ def validate_epoch(
         tx_cost_bps: float = 0.0,      # transaction cost in basis points per trade (0.3 pct = 30 bps)
         close_prices: torch.Tensor | None = None,  # per-sample close price for computing actual returns
         pip_size: float = 0.0001,      # pip size for FX pair
+        honest_ctx: dict | None = None,  # {sample_idx, close, spread, horizon, bars_per_year} -> real net PnL
     ):
     """Run one validation epoch in eager FP32 by default.
 
@@ -467,10 +468,14 @@ def validate_epoch(
                 probs_sum[_cls] += probs[_mask_cls].sum(dim=0)
         return pred_cls
 
+    _dir_parts: list[torch.Tensor] = []  # per-row directions (loader order) for honest_ctx
     with torch.no_grad():
         for i, batch in enumerate(loader):
+            _b_rows = 0
+            _b_keep = None
             try:
                 xb, yb, y_cls_b, y_conf_b, bet_size, _ = _unpack_batch(batch, device)
+                _b_rows = int(xb.shape[0])
                 if seq_len is not None and xb.shape[1] > seq_len:
                     xb = xb[:, -seq_len:, :]
                 xb, yb, y_cls_b, y_conf_b, bet_size, keep = _sanitize_batch_tensors(
@@ -481,8 +486,11 @@ def validate_epoch(
                     bet_size,
                     skip_bad_targets=True,
                 )
+                _b_keep = keep
                 if keep is not None and not bool(keep.all()):
                     if not bool(keep.any()):
+                        if honest_ctx is not None:
+                            _dir_parts.append(torch.zeros(_b_rows))
                         nan_skips += 1
                         if pbar is not None:
                             pbar.update(1)
@@ -589,6 +597,15 @@ def validate_epoch(
                     side = _match_target_shape(d, y_cls_b.float()).sign()
                     yb_for_returns = yb_for_returns.abs() * side
                 r = (d * yb_for_returns).flatten()
+                if honest_ctx is not None:
+                    # One position per row: average multi-pair/multi-output signs, re-sign.
+                    _d_row = torch.sign(d.detach().float().reshape(d.shape[0], -1).mean(dim=1)).cpu()
+                    _full = torch.zeros(_b_rows)
+                    if _b_keep is not None and not bool(_b_keep.all()):
+                        _full[_b_keep.detach().cpu().bool()] = _d_row
+                    else:
+                        _full[: _d_row.numel()] = _d_row
+                    _dir_parts.append(_full)
                 if r.numel() > 0:
                     r_sum += r.sum()
                     r_sq_sum += (r * r).sum()
@@ -755,6 +772,34 @@ def validate_epoch(
             f"n_trades={n_ret}"
         )
 
+    # Honest metric (real prices, spread, non-overlapping) overrides the label-based
+    # cost_sharpe so early stopping / SACS / gates select on actual net PnL.
+    validate_epoch.last_honest = None
+    if honest_ctx is not None and _dir_parts:
+        try:
+            import numpy as np
+
+            from training.honest_eval import net_pnl_metrics
+
+            _dirs = torch.cat(_dir_parts).numpy()
+            _sidx = np.asarray(honest_ctx["sample_idx"])
+            if len(_dirs) == len(_sidx):
+                _hm = net_pnl_metrics(
+                    _dirs, _sidx, honest_ctx["close"], honest_ctx.get("spread"),
+                    int(honest_ctx.get("horizon", lookahead_bars)),
+                    bars_per_year=int(honest_ctx.get("bars_per_year", 288 * 260)),
+                )
+                validate_epoch.last_honest = _hm
+                cost_sharpe = _hm["sharpe_net"]
+                print(
+                    f"[Val][honest] net_sharpe={_hm['sharpe_net']:.3f} gross={_hm['sharpe_gross']:.3f} "
+                    f"trades={_hm['n_trades']} win={_hm['win_rate']:.1%} "
+                    f"net={_hm['mean_ret_bps']:.2f}bps cost={_hm['cost_bps']:.2f}bps"
+                )
+            else:
+                print(f"[Val][honest] skipped: {len(_dirs)} predictions vs {len(_sidx)} val indices")
+        except Exception as _he:
+            print(f"[Val][honest] failed: {_he}")
     validate_epoch.last_cost_sharpe = cost_sharpe
     validate_epoch.last_dir_sharpe = sharpe
     validate_epoch.last_ann_factor = ann

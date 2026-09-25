@@ -834,6 +834,12 @@ def supervised_train(
     from training.dataset_builder import _load_scaler_npz
     _global_scaler = _load_scaler_npz(Path(cache_path))
     _scaler = None
+    if _global_scaler is None:
+        # No cache scaler: still fit a train-only RobustScaler rather than training unscaled.
+        from training.dataset_builder import _make_scaler
+
+        _global_scaler = _make_scaler()
+        print("[Data] No cache scaler.npz; fitting a fresh train-only scaler")
     if _global_scaler is not None:
         try:
             from sklearn.base import clone
@@ -857,8 +863,9 @@ def supervised_train(
             else:
                 _scaler = _global_scaler
         except Exception as _se:
-            print(f"[Data] Failed to refit scaler: {_se}. Falling back to global scaler.")
-            _scaler = _global_scaler
+            print(f"[Data] WARN: train-only scaler refit failed ({_se}); falling back to the cache-wide "
+                  f"scaler, whose statistics include validation rows (mild leakage).")
+            _scaler = _global_scaler if hasattr(_global_scaler, "scale_") or hasattr(_global_scaler, "center_") else None
     if use_direction_targets:
         try:
             _direction_preflight(cache_path, train_idx, val_idx, args)
@@ -877,6 +884,25 @@ def supervised_train(
         return_indices=True,
         scaler=_scaler,
     )
+    # Honest validation context: real close/spread for net-of-cost PnL selection.
+    _honest_ctx = None
+    try:
+        from training.honest_eval import fx_bars_per_year, load_price_arrays
+
+        _hc_close, _hc_spread = load_price_arrays(cache_path)
+        if _hc_close is not None:
+            _honest_ctx = {
+                "sample_idx": np.sort(val_idx),
+                "close": _hc_close,
+                "spread": _hc_spread,
+                "horizon": int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30)),
+                "bars_per_year": fx_bars_per_year(str(getattr(args, "bar_freq", None) or "5min")),
+            }
+            print(f"[Val][honest] enabled: {len(_hc_close):,} cached prices, spread={'yes' if _hc_spread is not None else 'no'}")
+        else:
+            print("[Val][honest] WARN: cache has no 'close' array; selection falls back to label-based cost_sharpe")
+    except Exception as _hc_e:
+        print(f"[Val][honest] WARN: price arrays unavailable ({_hc_e})")
     val_ds = ZarrStreamDataset(
         cache_path,
         np.sort(val_idx),
@@ -1210,6 +1236,15 @@ def supervised_train(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / f"{model_name}{fold_suffix}_best.pt"
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
+    # Persist the exact train-only scaler next to the checkpoint so inference
+    # transforms live features identically (it prefers this sidecar).
+    if _scaler is not None:
+        try:
+            from training.dataset_builder import _save_scaler_npz
+
+            _save_scaler_npz(Path(cache_path), _scaler, path=best_path.with_name(best_path.stem + "_scaler.npz"))
+        except Exception as _ss_e:
+            print(f"[Data] WARN: could not save checkpoint scaler sidecar: {_ss_e}")
 
     # Resume (single-split only; skip per-fold resume id)
     start_ep = 0
@@ -2156,6 +2191,7 @@ def supervised_train(
                 direction_only=_direction_warmup_active,
                 tx_cost_bps=float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0,  # ~6 bps round-trip for 1.5-pip spread
                 pip_size=float(LABELING.get("pip_size", 0.0001)),
+                honest_ctx=_honest_ctx,
             )
             _class_counts = getattr(validate_epoch, "last_class_counts", {"pred": [0, 0, 0], "true": [0, 0, 0]})
             _cost_sharpe_val = getattr(validate_epoch, "last_cost_sharpe", None)
@@ -2798,7 +2834,7 @@ def supervised_train(
                 lookahead_bars=_lookahead,
                 sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                 return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
-                direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip,
+                direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
             )
             c_cost = getattr(validate_epoch, "last_cost_sharpe", None)
 
@@ -2819,7 +2855,7 @@ def supervised_train(
                     lookahead_bars=_lookahead,
                     sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                     return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
-                    direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip,
+                    direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
                 )
                 p_cost_i = getattr(validate_epoch, "last_cost_sharpe", None)
                 if stop_on_cost_sharpe and c_cost is not None and p_cost_i is not None:

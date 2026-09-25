@@ -683,7 +683,7 @@ def main():
         wandb.log(
             {
                 "val_sharpe": val_sharpe,
-                "val_dir_acc": val_diраcc,
+                "val_dir_acc": val_diracc,
                 "val_mse": val_mse,
                 "cv_sharpe": cv_sharpe,
             }

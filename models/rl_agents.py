@@ -364,6 +364,7 @@ class ForexTradingEnv:
 
         realised_pnl = 0.0
         cost = 0.0
+        _equity_before = self.equity
 
         # ── Check dynamic stop/TP before executing new action ───────────────
         if self.position != 0:
@@ -485,7 +486,10 @@ class ForexTradingEnv:
             _unrealised = 0.0
         mtm_equity = self.equity + _unrealised
         self.peak = max(self.peak, mtm_equity)
-        self.episode_pnl.append(realised_pnl)
+        # Net of execution costs: _exec_cost() debits equity but not realised_pnl,
+        # so appending realised_pnl gave a gross Sharpe (agents at -122% return
+        # reported Sharpe +13.5).  Record the bar's net equity change instead.
+        self.episode_pnl.append(self.equity - _equity_before)
 
         # A-M2: trade-frequency cost. A fresh entry, scale-in, or flip (position
         # magnitude grew or sign changed) incurs a FIXED penalty per event so the

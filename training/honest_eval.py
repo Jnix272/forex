@@ -1,0 +1,116 @@
+"""Honest validation metric: net PnL on real prices after spread.
+
+The legacy ``dir_sharpe`` / ``cost_sharpe`` in ``loop_epochs.validate_epoch``
+multiply ``sign(pred)`` by the CPAR *label* (a synthetic reward with var ~4.6)
+and subtract ~6e-4 as "cost" - effectively cost-free and not in price units.
+That is how +35 "Sharpe" coexisted with out-of-sample R^2 ~ 0.
+
+This module scores directions against the cache's actual ``close`` and
+``spread`` arrays (price units, sample-aligned with the cache index):
+
+    pnl_i = d_i * (close[i + H] - close[i]) - |d_i| * spread[i]
+
+taking one trade every ``H`` samples (non-overlapping) and annualizing with
+24h FX bars (288 x 5min per day, 260 days).
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import numpy as np
+
+FX_DAYS_PER_YEAR = 260
+_FX_BARS_PER_DAY = {
+    "1m": 1440, "1min": 1440, "5m": 288, "5min": 288, "15m": 96, "15min": 96,
+    "30m": 48, "30min": 48, "1h": 24, "60min": 24, "4h": 6,
+}
+
+
+def fx_bars_per_year(bar_freq: str = "5min") -> int:
+    return _FX_BARS_PER_DAY.get(str(bar_freq or "5min").lower(), 288) * FX_DAYS_PER_YEAR
+
+
+def net_pnl_metrics(
+    directions: np.ndarray,
+    sample_idx: np.ndarray,
+    close: np.ndarray,
+    spread: np.ndarray | None,
+    horizon: int,
+    *,
+    bars_per_year: int = 288 * FX_DAYS_PER_YEAR,
+    min_trades: int = 30,
+) -> dict:
+    """Net-of-spread, non-overlapping per-trade metrics.
+
+    directions : per-sample position in {-1, 0, +1} (or signed scores; sign is used)
+    sample_idx : cache row index for each direction (ascending)
+    close/spread : full cache arrays (price units)
+    """
+    d = np.sign(np.asarray(directions, dtype=np.float64).reshape(-1))
+    idx = np.asarray(sample_idx, dtype=np.int64).reshape(-1)
+    close = np.asarray(close, dtype=np.float64).reshape(-1)
+    h = max(1, int(horizon))
+    out = {"sharpe_net": 0.0, "sharpe_gross": 0.0, "n_trades": 0, "win_rate": 0.0,
+           "mean_ret_bps": 0.0, "cost_bps": 0.0}
+    if len(d) != len(idx) or len(d) == 0:
+        return out
+
+    ok = (idx + h) < len(close)
+    d, idx = d[ok], idx[ok]
+    # Non-overlapping: one decision every h samples.
+    d, idx = d[::h], idx[::h]
+    traded = d != 0
+    d, idx = d[traded], idx[traded]
+    if len(d) < 2:
+        return out
+
+    entry = close[idx]
+    fwd = close[idx + h]
+    valid = np.isfinite(entry) & np.isfinite(fwd) & (entry > 0)
+    d, idx, entry, fwd = d[valid], idx[valid], entry[valid], fwd[valid]
+    gross = d * (fwd - entry) / entry
+    if spread is not None:
+        sp = np.nan_to_num(np.asarray(spread, dtype=np.float64).reshape(-1)[idx], nan=0.0)
+        cost = np.abs(sp) / entry
+    else:
+        cost = np.zeros_like(gross)
+    net = gross - cost
+
+    n = len(net)
+    out["n_trades"] = int(n)
+    if n < 2:
+        return out
+    ann = math.sqrt(bars_per_year / h)
+    sd_n, sd_g = net.std(ddof=1), gross.std(ddof=1)
+    out["sharpe_net"] = float(net.mean() / sd_n * ann) if sd_n > 0 and n >= min_trades else 0.0
+    out["sharpe_gross"] = float(gross.mean() / sd_g * ann) if sd_g > 0 and n >= min_trades else 0.0
+    out["win_rate"] = float((net > 0).mean())
+    out["mean_ret_bps"] = float(net.mean() * 1e4)
+    out["cost_bps"] = float(cost.mean() * 1e4)
+    return out
+
+
+def load_price_arrays(cache_path: str | Path) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Read sample-aligned ``close`` / ``spread`` from a Zarr or NPY cache."""
+    p = Path(cache_path)
+    try:
+        import zarr  # type: ignore
+
+        root = zarr.open(str(p), mode="r")
+        close = np.asarray(root["close"][:]) if "close" in root else None
+        spread = np.asarray(root["spread"][:]) if "spread" in root else None
+        return close, spread
+    except Exception:
+        pass
+    close = spread = None
+    for name in ("close", "spread"):
+        f = p / f"{name}.npy" if p.is_dir() else p.with_name(f"{p.stem}_{name}.npy")
+        if f.is_file():
+            arr = np.load(f, mmap_mode="r")
+            if name == "close":
+                close = arr
+            else:
+                spread = arr
+    return close, spread

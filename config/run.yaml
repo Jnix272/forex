@@ -324,17 +324,17 @@ pip_sizes:
   XAU: 0.1
   default: 0.0001
 # ── Direction-classification head: S/H/B warm-up, mixup, volatility sampler ─
+# Single block: a second `direction_training:` key further down used to override
+# this one wholesale (YAML keeps the last duplicate), silently dropping keys.
+# label_smoothing / use_mixup / use_volatility_sampler live under `training:` only.
 direction_training:
-  label_smoothing: 0.05
-  max_pred_class_share: 1.00
-  min_pred_class_share: 0.00
-  min_recall: 0.00
-  min_true_class_share: 0.15
-  probe: true
+  max_pred_class_share: 1.0
+  min_pred_class_share: 0.0
+  min_recall: 0.0
+  min_true_class_share: 0.02
+  probe: false
   probe_epochs: 2
   probe_samples: 4096
-  use_mixup: true
-  use_volatility_sampler: true
   warmup_epochs: 2
 # ── Knowledge distillation from a larger teacher model (disabled by default) ─
 distillation:
@@ -473,12 +473,6 @@ multitask:
   w_conf: 0.3
   w_ret: 0.5
   w_quantile: 0.2
-direction_training:
-  min_true_class_share: 0.02
-  min_pred_class_share: 0.0
-  max_pred_class_share: 1.0
-  min_recall: 0.0
-  probe: false
 # ── News/sentiment data sources (economic calendar, historical headlines) ───
 news:
   economic_calendar_file: data/raw/eco_calendar/events.csv
