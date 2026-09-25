@@ -96,6 +96,7 @@ def build_pair_feature_cache(
     from features.feature_engineering_pl import FeatureEngineer
 
     mgr = data_mgr or ForexDataManager()
+    fe = None
     if fe is None:
         # Same construction as training/dataset_builder (canonical config).
         from config.settings import FEATURES

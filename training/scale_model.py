@@ -36,6 +36,7 @@ from training.cv_splits import (
     _validation_method,
     walk_forward_splits,
 )
+from training.gpu_losses import _match_target_shape
 from training.dataset_builder import build_dataset_chunked
 from training.direction_control import (
     _class_weights_tensor,
