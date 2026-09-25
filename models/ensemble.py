@@ -119,6 +119,20 @@ if TORCH:
 
     # ── 1. ENSEMBLE META-LEARNER ──────────────────────────────────────────────
 
+    def load_base_scaler(ckpt_path) -> tuple[np.ndarray, np.ndarray] | None:
+        """(center, scale) from the ``<stem>_scaler.npz`` saved beside a base checkpoint."""
+        p = Path(ckpt_path)
+        sc = p.with_name(p.stem + "_scaler.npz")
+        if not sc.is_file():
+            return None
+        z = np.load(str(sc))
+        center = z["center"] if "center" in z.files else (z["mean"] if "mean" in z.files else None)
+        if center is None or "scale" not in z.files:
+            return None
+        scale = np.asarray(z["scale"], dtype=np.float64).copy()
+        scale[scale == 0] = 1.0
+        return np.asarray(center, dtype=np.float64), scale
+
     class EnsembleMetaLearner(nn.Module):
         """
         Learned ensemble of the 6 base architectures.
@@ -162,8 +176,59 @@ if TORCH:
             # Initialize output layer to zero so initial ensemble weights start uniform (1/N)
             nn.init.zeros_(self.meta[2].weight)
             nn.init.zeros_(self.meta[2].bias)
+            # Affine calibration of the blended output. A pure softmax blend is a
+            # convex combination, so it can never rescale under-scaled bases (audit E2).
+            self.out_scale = nn.Parameter(torch.ones(()))
+            self.out_bias = nn.Parameter(torch.zeros(()))
+            # Per-base input scalers (center, scale); see attach_base_scalers().
+            self._base_scaler_n = 0
+
+        def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+            # Checkpoints saved before out_scale/out_bias existed load as identity.
+            for name, default in (("out_scale", 1.0), ("out_bias", 0.0)):
+                state_dict.setdefault(prefix + name, torch.tensor(default))
+            super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+        def attach_base_scalers(self, scalers: list) -> None:
+            """Give each base its own train-time scaler: ``[(center, scale) | None, ...]``.
+
+            Bases were trained on scaled inputs, but the meta-learner used to feed
+            them raw cache rows, so their predictions collapsed toward zero (E1).
+            With scalers attached the meta-learner takes *raw* features; callers
+            must not scale the input again. Buffers are non-persistent: re-attach
+            from the ``*_scaler.npz`` sidecars whenever the ensemble is built.
+            """
+            self._base_scaler_n = 0
+            if not scalers or len(scalers) != self.n_models:
+                return
+            for i, sc in enumerate(scalers):
+                if sc is None:
+                    center, scale = None, None
+                else:
+                    center = torch.as_tensor(np.asarray(sc[0], dtype=np.float32))
+                    scale = torch.as_tensor(np.asarray(sc[1], dtype=np.float32)).clamp_min(1e-12)
+                self.register_buffer(f"_bs_center_{i}", center, persistent=False)
+                self.register_buffer(f"_bs_scale_{i}", scale, persistent=False)
+            self._base_scaler_n = self.n_models
+
+        def _scale_for(self, x: torch.Tensor, idx: int) -> torch.Tensor:
+            if not getattr(self, "_base_scaler_n", 0):
+                return x
+            center = getattr(self, f"_bs_center_{idx}", None)
+            if center is None:
+                return x
+            scale = getattr(self, f"_bs_scale_{idx}")
+            return ((x - center) / scale).clamp(-10.0, 10.0)
+
+        def _context(self, x: torch.Tensor) -> torch.Tensor:
+            # Context encoder sees the first scaled view (raw inputs span 1e-5..1e5).
+            return self.context_enc(self._scale_for(x, 0))
+
+        def _blend(self, weights: torch.Tensor, preds: torch.Tensor) -> torch.Tensor:
+            return self.out_scale * (weights * preds).sum(dim=1) + self.out_bias
 
         def _base_input(self, x: torch.Tensor, idx: int) -> torch.Tensor:
+            x = self._scale_for(x, idx)
             if self._base_seq_lens is None:
                 return x
             seq_len = self._base_seq_lens[idx]
@@ -219,19 +284,19 @@ if TORCH:
             Returns: (prediction, weights) where weights.shape = (B, n_models)
             """
             preds = self._get_base_preds(x)
-            context = self.context_enc(x)  # Temporal attention pooling across full sequence
+            context = self._context(x)  # Temporal attention pooling across full sequence
             meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
             weights = torch.softmax(self.meta(meta_in), dim=1)  # (B, n_models)
-            output = (weights * preds).sum(dim=1)  # (B,)
+            output = self._blend(weights, preds)  # (B,)
             return output, weights
 
         def forward_with_preds(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             """Returns (output, weights, preds) for computing diversity loss during fine-tuning."""
             preds = self._get_base_preds(x)
-            context = self.context_enc(x)
+            context = self._context(x)
             meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
             weights = torch.softmax(self.meta(meta_in), dim=1)
-            output = (weights * preds).sum(dim=1)
+            output = self._blend(weights, preds)
             return output, weights, preds
 
         def model_weights_summary(self, x: torch.Tensor) -> dict[str, float]:
@@ -276,13 +341,14 @@ if TORCH:
                     [_base_pred_to_batch_vector(m(self._base_input(x, i))) for i, m in enumerate(self.bases)], dim=1
                 )  # (B, n_models)
 
-            context = self.context_enc(x)
+            context = self._context(x)
             meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
             weights = torch.softmax(self.meta(meta_in), dim=1)  # (B, n_models)
-            output = (weights * preds).sum(dim=1)  # (B,)
+            output = self._blend(weights, preds)  # (B,)
 
             # Weighted variance: sum(w_i * (x_i - mean)^2)
-            variance = (weights * (preds - output.unsqueeze(1)) ** 2).sum(dim=1)
+            _mix = (weights * preds).sum(dim=1, keepdim=True)
+            variance = (weights * (preds - _mix) ** 2).sum(dim=1)
             disagreement_score = torch.sqrt(variance + 1e-8)
 
             return output, disagreement_score
@@ -353,6 +419,8 @@ if TORCH:
         verbose: bool = True,
         checkpoint_path: str | None = None,
         checkpoint_meta: dict[str, object] | None = None,
+        val_loader: torch.utils.data.DataLoader | None = None,
+        entropy_weight: float = 0.0,
     ) -> list[float]:
         """
         Train EnsembleMetaLearner's context encoder, meta-network, and optionally fine-tune
@@ -361,7 +429,12 @@ if TORCH:
         Objective when unfreeze_base_heads=True:
           L = MSE(weighted_ensemble_output, target)
             + diversity_weight x Corr(base_predictions)  # penalise base model co-linearity
-            - 0.05 x H(weights)                          # maximise weight entropy
+            - entropy_weight x H(weights)
+
+        entropy_weight defaults to 0: rewarding entropy pushed weights to uniform,
+        which is the opposite of what a meta-learner is for. With ``val_loader``,
+        the best checkpoint is chosen on held-out MSE; without it, on training loss
+        (which only ever reflected in-sample fit).
         """
         dev = torch.device(device)
         meta = meta.to(dev)
@@ -395,6 +468,7 @@ if TORCH:
             list(meta.context_enc.parameters())
             + meta_norm_params
             + list(meta.meta.parameters())
+            + [p for p in (getattr(meta, "out_scale", None), getattr(meta, "out_bias", None)) if p is not None]
             + unfrozen_base_params
         )
         opt = torch.optim.Adam(trainable, lr=lr)
@@ -422,11 +496,9 @@ if TORCH:
                 # Weight entropy (avoid collapse to single model)
                 entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
 
+                loss = task_loss - float(entropy_weight) * entropy
                 if unfreeze_base_heads and len(meta.bases) > 1:
-                    corr_loss = meta.diversity_loss(preds)
-                    loss = task_loss + diversity_weight * corr_loss - 0.05 * entropy
-                else:
-                    loss = task_loss - diversity_weight * entropy
+                    loss = loss + diversity_weight * meta.diversity_loss(preds)
                 loss.backward()
                 nn.utils.clip_grad_norm_(trainable, 1.0)
                 opt.step()
@@ -435,15 +507,30 @@ if TORCH:
                 n_batches += 1
 
             avg = ep_loss / max(n_batches, 1)
-            history.append(avg)
+            select = avg
+            if val_loader is not None:
+                meta.eval()
+                v_sum, v_n = 0.0, 0
+                with torch.no_grad():
+                    for vb in val_loader:
+                        vx = vb[0].to(dev, non_blocking=True)
+                        vy = vb[1].to(dev, non_blocking=True).float()
+                        vo, _ = meta(vx)
+                        v_sum += float(((vo - vy) ** 2).sum().item())
+                        v_n += int(vy.numel())
+                meta.train()
+                select = v_sum / max(v_n, 1)
+                if verbose:
+                    print(f"  [MetaTrain] Epoch {ep + 1:3d}/{epochs} | train {avg:.6f} | val_mse {select:.6f}")
+            history.append(select)
 
             if ckpt_path is not None and latest_path is not None:
-                improved = avg < best_loss
+                improved = select < best_loss
                 if improved:
-                    best_loss = avg
-                _save_meta_checkpoint(latest_path, ep + 1, avg, best=False)
+                    best_loss = select
+                _save_meta_checkpoint(latest_path, ep + 1, select, best=False)
                 if improved:
-                    _save_meta_checkpoint(ckpt_path, ep + 1, avg, best=True)
+                    _save_meta_checkpoint(ckpt_path, ep + 1, select, best=True)
 
             if verbose and (ep + 1) % max(1, epochs // 5) == 0:
                 print(f"  [MetaTrain] Epoch {ep + 1:3d}/{epochs} | Loss: {avg:.6f}")

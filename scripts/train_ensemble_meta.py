@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.settings import PATHS
-from models.ensemble import EnsembleMetaLearner, train_meta_learner
+from models.ensemble import EnsembleMetaLearner, load_base_scaler, train_meta_learner
 from training.cache_integrity import _on_disk_sequence_count, _trainable_max_index as _trainable_prefix_end
 from training.gpu_datasets import ZarrStreamDataset
 from training.model_factory import build_model
@@ -313,6 +313,7 @@ def main() -> int:
     configs = {}
     checkpoints = {}
     base_seq_lens = []
+    base_scalers = []
     for name in args.models:
         ckpt = resolve_checkpoint(name, ckpt_dir)
         if ckpt is None:
@@ -329,6 +330,7 @@ def main() -> int:
         configs[name] = cfg.get("_config_path")
         checkpoints[name] = str(ckpt)
         base_seq_lens.append(int(cfg.get("seq_len", seq_len)))
+        base_scalers.append(load_base_scaler(ckpt))
         log(f"  [EnsembleMeta] Loaded {name} from {ckpt}")
 
     if len(bases) < 2:
@@ -344,9 +346,30 @@ def main() -> int:
         pin_memory=False,
     )
 
+    val_idx = np.arange(meta_train_end, _trainable, dtype=np.int64)
+    val_loader = (
+        DataLoader(
+            ZarrStreamDataset(str(cache_path), val_idx, shuffle_chunks=False),
+            batch_size=max(1, int(args.batch_size)),
+            shuffle=False,
+            num_workers=0,
+        )
+        if len(val_idx) >= 100
+        else None
+    )
+
     meta = EnsembleMetaLearner(
         bases, context_dim=32, hidden=64, base_names=names, base_seq_lens=base_seq_lens
-    ).to(device)
+    )
+    if all(sc is not None for sc in base_scalers):
+        meta.attach_base_scalers(base_scalers)
+    else:
+        missing = [n for n, sc in zip(names, base_scalers) if sc is None]
+        log(
+            f"[EnsembleMeta] WARN: no *_scaler.npz beside {missing}; those bases see raw features, "
+            "unlike their training inputs. Retrain them to get scaler sidecars."
+        )
+    meta = meta.to(device)
     log(f"[EnsembleMeta] Training on bases: {names}")
     history = train_meta_learner(
         meta=meta,
@@ -357,8 +380,12 @@ def main() -> int:
         device=str(device),
         verbose=True,
         checkpoint_path=str(out),
+        val_loader=val_loader,
         checkpoint_meta={
             "base_names": names,
+            "base_seq_lens": base_seq_lens,
+            "base_checkpoints": checkpoints,
+            "selection": "val_mse" if val_loader is not None else "train_loss",
             "base_configs": configs,
             "cache_path": str(cache_path),
             "n_features": n_features,
