@@ -3,7 +3,7 @@
 **Scope:** trained checkpoints (TFT, Mamba, HAELT, GNN × 7 walk-forward folds, ensemble meta, RL ensemble) and the training dataset
 `data/processed/dataset_scalping_5m_EURUSD-GBPUSD-USDCAD-USDJPY_..._2008-01-01_2025-12-30.zarr` (185,201 samples × 120 × 584).
 
-**Mode:** findings only, no code changed.
+**Mode:** sections A–M are findings; fixes applied so far are listed in N (fix log).
 
 **Bottom line:** the models show no evidence of learned signal. The "certified for deployment" result rests on an RL Sharpe calculation that leaves out trading costs.
 
@@ -28,6 +28,7 @@
 | K | Roadmap |
 | L | Replacing the CPAR label |
 | M | Code scan by phase: bugs and dead code |
+| N | Fix log |
 
 ---
 
