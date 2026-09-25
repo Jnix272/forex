@@ -367,6 +367,77 @@ def build_inference_agents(
     return fast_agent, slow_engine, meta
 
 
+LIVE_PAIR_ORDER = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]  # slot order in _Wrap._format_obs
+
+
+def _verify_feature_contract(model) -> list[str] | None:
+    """Refuse to trade if the checkpoint's feature order differs from live assembly.
+
+    Live places pairs in LIVE_PAIR_ORDER and each pair's columns in
+    CANONICAL_PAIR_146; a mismatch silently fed one pair's (or feature's) values
+    into another's slot. Needs ``<ckpt>_features.json`` (written at training);
+    without it the contract cannot be checked and a warning is printed.
+    """
+    ckpt = getattr(model, "checkpoint_path", None)
+    if not ckpt:
+        return None
+    side = Path(str(ckpt)).with_name(Path(str(ckpt)).stem + "_features.json")
+    if not side.is_file():
+        print(f"[Live] WARN: {side.name} missing; feature/pair order vs training is UNVERIFIED")
+        return None
+    import json as _json
+
+    names = [str(n) for n in _json.loads(side.read_text(encoding="utf-8"))]
+    if not names or "::" not in names[0]:
+        return None
+    pairs: list[str] = []
+    for n in names:
+        p = n.split("::", 1)[0]
+        if p not in pairs:
+            pairs.append(p)
+    first = [n.split("::", 1)[1] for n in names if n.startswith(pairs[0] + "::")]
+    problems = []
+    if pairs != LIVE_PAIR_ORDER[: len(pairs)]:
+        problems.append(f"pair order {pairs} != live {LIVE_PAIR_ORDER}")
+    # Per-pair column order is taken from the checkpoint (returned to the caller),
+    # so only the pair slot order has to match here.
+    if problems:
+        raise RuntimeError("[Live] Feature contract mismatch with " + side.name + ": " + "; ".join(problems))
+    print(f"[Live] Feature contract OK ({len(pairs)} pairs x {len(first)} features)")
+    return first
+
+
+def _bar_key(bars):
+    """Timestamp of the last completed bar (identifies 'this bar' across pairs)."""
+    try:
+        if _POLARS and pl is not None and isinstance(bars, pl.DataFrame):
+            for c in ("timestamp_utc", "timestamp"):
+                if c in bars.columns:
+                    return str(bars[c][-1])
+            return str(len(bars))
+        return str(bars.index[-1])
+    except Exception:
+        return None
+
+
+def _warmup_bar_count(bar_freq: str, days: int = 14, cap: int = 5000) -> int:
+    """Bars covering ``days`` of 24h FX for ``bar_freq`` (OANDA returns <= 5000)."""
+    try:
+        minutes = max(1.0, pd.Timedelta(str(bar_freq)).total_seconds() / 60.0)
+    except Exception:
+        minutes = 5.0
+    return int(min(cap, max(120, days * 1440 / minutes)))
+
+
+def _min_bars_to_trade(engine) -> int:
+    """Need at least the model window (seq_len) plus room for rolling features."""
+    try:
+        seq = int(getattr(getattr(engine, "_agent_wrap_slow", None), "seq_len", 0) or 0)
+    except Exception:
+        seq = 0
+    return max(70, seq + 60)
+
+
 def _pandas_freq_to_polars(freq: str) -> str:
     mapping = {
         "1min": "1m",
@@ -446,7 +517,7 @@ def _tail_mean(features, col: str, n: int = 20, default: float = 0.0) -> float:
 class LiveTickBuffer:
     """In-memory tick → OHLCV bar aggregator used by LiveTradingEngine."""
 
-    def __init__(self, pair: str, bar_freq: str = "1min", max_bars: int = 500, db_sink=None):
+    def __init__(self, pair: str, bar_freq: str = "1min", max_bars: int = 5000, db_sink=None):
         self.pair = pair
         self.freq = pd.tseries.frequencies.to_offset(bar_freq)
         self.freq_str = str(bar_freq)
@@ -460,6 +531,10 @@ class LiveTickBuffer:
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
         with self._lock:
+            # Polls every 0.1 s repeat the same quote; counting them made "volume"
+            # the poll rate. Keep only quote changes (what OANDA candles count).
+            if self._ticks and self._ticks[-1]["bid"] == float(bid) and self._ticks[-1]["ask"] == float(ask):
+                return
             self._ticks.append(
                 {
                     "timestamp": ts,
@@ -1894,7 +1969,7 @@ class LiveTradingEngine:
                 if is_num_features and int(self.expected_features) == 584 and obs.shape[0] < 584:
                     f_per_pair = 146
                     multi_obs = np.zeros(584, dtype=np.float32)
-                    pair_names = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+                    pair_names = LIVE_PAIR_ORDER
                     for idx, p in enumerate(pair_names):
                         slot_start = idx * f_per_pair
                         if idx == self.pair_idx:
@@ -2043,6 +2118,7 @@ class LiveTradingEngine:
         self._agent_wrap_slow = _Wrap(slow_model, _live_action_adapter(slow_model), shared_pair_features=self.shared_pair_features)
         self.fast = self._agent_wrap_fast
         self.slow = self._agent_wrap_slow
+        self._contract_cols = _verify_feature_contract(slow_model)
         _shadow_raw = self._inference_meta.get("rl_shadow_agent")
         self._agent_wrap_shadow = (
             _Wrap(_shadow_raw, _live_action_adapter(_shadow_raw), shared_pair_features=self.shared_pair_features)
@@ -2113,6 +2189,9 @@ class LiveTradingEngine:
                     print(f"[Live] Loaded feature schema: {len(self._expected_features)} expected features.")
         except Exception as e:
             print(f"[Live] WARN: Failed to load feature schema: {e}")
+        if getattr(self, "_contract_cols", None):
+            # The checkpoint's own per-pair column order wins over the hard-coded list.
+            self._expected_features = list(self._contract_cols)
 
         self._running = False
         self._position = 0.0
@@ -2151,7 +2230,9 @@ class LiveTradingEngine:
 
         if hasattr(self.broker, "get_candles"):
             try:
-                hist_df = self.broker.get_candles(self.pair, count=120, granularity=self.bar_freq)
+                # ~14 days, matching the 14-day feature warm-up used to build the
+                # training cache (was 120 bars; long windows were empty live).
+                hist_df = self.broker.get_candles(self.pair, count=_warmup_bar_count(self.bar_freq), granularity=self.bar_freq)
                 if hist_df is not None and not hist_df.empty:
                     self.buf.seed_bars(hist_df)
                     print(f"[Live] Preloaded {len(hist_df)} historical bars for {self.pair} buffer warmup")
@@ -2200,7 +2281,7 @@ class LiveTradingEngine:
                     continue
                 bar_ts = next_bar_time
                 bars = self.buf.get_bars()
-                if bars is not None and len(bars) >= 70:
+                if bars is not None and len(bars) >= _min_bars_to_trade(self):
                     self._on_new_bar(bars, bar_count)
                 bar_count += 1
                 # Advance by fixed interval so slow processing never skips bars
@@ -2392,29 +2473,12 @@ class LiveTradingEngine:
         except Exception:
             pass
 
-    def _on_new_bar(self, bars, bar_idx: int):
-        self._maybe_hot_reload()
-        today = datetime.now(UTC).timetuple().tm_yday
-        if getattr(self, "_last_trading_day", None) != today:
-            self._last_trading_day = today
-            self._halt_new_orders = False
-            self.safety.new_day(self.equity)
-            self.dae.new_day()
-            if self.risk_engine is not None:
-                try:
-                    self.risk_engine.new_day(self.equity)
-                except Exception:
-                    pass
-        self._reconcile_positions(bars)
-        _pending = getattr(self, "_flatten_pending", None)
-        if _pending:
-            if abs(self._position) > 1e-12:
-                self._flatten(self._current_mid(bars), f"{_pending}_retry")
-            else:
-                self._flatten_pending = None
-            if getattr(self, "_flatten_pending", None):
-                return
-        t0 = time.perf_counter()
+    def _build_features_obs(self, bars):
+        """Features + last-row observation for this bar; publishes obs to peers.
+
+        Returns (features, obs, feature_cols, sentiment_bias) or None on error.
+        """
+        _key0 = _bar_key(bars)  # before conversion, so it matches callers' key
         bars = _ensure_polars_frame(bars)
         try:
             features = _ensure_polars_frame(self.fe.build(bars, cross_asset=self.cross_asset, pair=self.pair))
@@ -2484,13 +2548,7 @@ class LiveTradingEngine:
             features = _apply_fm(features)
         except Exception as e:
             self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
-            return
-
-        if int(bar_idx) % int(MONITORING.get("check_freq_bars", 500)) == 0:
-            try:
-                self._check_drift(features)
-            except Exception as e:
-                self.logger.event("ERROR", "drift", f"[Live] Drift check failed: {e}", pair=self.pair)
+            return None
 
         feature_cols = self._feature_columns(features)
         try:
@@ -2500,11 +2558,73 @@ class LiveTradingEngine:
                 obs = features[feature_cols].tail(1).to_numpy().reshape(-1).astype(np.float32)
         except Exception as e:
             self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
-            return
+            return None
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
         if getattr(self, "shared_pair_features", None) is not None:
-            self.shared_pair_features[str(self.pair).upper().replace("/", "").replace("_", "")] = obs
+            _pk = str(self.pair).upper().replace("/", "").replace("_", "")
+            self.shared_pair_features[_pk] = obs
+            _ts = getattr(self, "shared_pair_ts", None)
+            if _ts is not None:
+                _ts[_pk] = _key0
+        return features, obs, feature_cols, bias
+
+    def publish_features(self, bars) -> None:
+        """Phase 1 of a multi-pair bar: build and publish this pair's features so
+        every pair decides on same-bar peer features (not last bar's or zeros)."""
+        built = self._build_features_obs(bars)
+        self._precomputed = (_bar_key(bars), built) if built is not None else None
+
+    def _peer_features_fresh(self, bars) -> bool:
+        """For multi-pair models, every peer pair must have published this bar."""
+        shared = getattr(self, "shared_pair_features", None)
+        ts = getattr(self, "shared_pair_ts", None)
+        n_exp = getattr(self._agent_wrap_slow, "expected_features", None)
+        if shared is None or ts is None or not isinstance(n_exp, (int, np.integer)) or int(n_exp) <= 146:
+            return True
+        key = _bar_key(bars)
+        return all(ts.get(p) == key for p in LIVE_PAIR_ORDER[: int(n_exp) // 146])
+
+    def _on_new_bar(self, bars, bar_idx: int):
+        self._maybe_hot_reload()
+        today = datetime.now(UTC).timetuple().tm_yday
+        if getattr(self, "_last_trading_day", None) != today:
+            self._last_trading_day = today
+            self._halt_new_orders = False
+            self.safety.new_day(self.equity)
+            self.dae.new_day()
+            if self.risk_engine is not None:
+                try:
+                    self.risk_engine.new_day(self.equity)
+                except Exception:
+                    pass
+        self._reconcile_positions(bars)
+        _pending = getattr(self, "_flatten_pending", None)
+        if _pending:
+            if abs(self._position) > 1e-12:
+                self._flatten(self._current_mid(bars), f"{_pending}_retry")
+            else:
+                self._flatten_pending = None
+            if getattr(self, "_flatten_pending", None):
+                return
+        t0 = time.perf_counter()
+        _pre = getattr(self, "_precomputed", None)
+        self._precomputed = None
+        built = _pre[1] if (_pre is not None and _pre[0] == _bar_key(bars)) else self._build_features_obs(bars)
+        if built is None:
+            return
+        features, obs, feature_cols, bias = built
+        if not self._peer_features_fresh(bars):
+            self._decision_log("BLOCKED", reason="peer_features_stale_or_missing")
+            return
+        self._live_bar_count = getattr(self, "_live_bar_count", 0) + 1
+
+        if int(bar_idx) % int(MONITORING.get("check_freq_bars", 500)) == 0:
+            try:
+                self._check_drift(features)
+            except Exception as e:
+                self.logger.event("ERROR", "drift", f"[Live] Drift check failed: {e}", pair=self.pair)
+
 
         # Instant Warmup: Pre-populate rolling observation buffers if empty and historical features exist
         if hasattr(self._agent_wrap_slow, "warm_up_buffer") and len(self._agent_wrap_slow._obs_buffer) == 0:
@@ -3001,6 +3121,20 @@ class LiveTradingEngine:
             self._decision_log("BLOCKED", reason="halt_new_orders")
             return
 
+        # Multi-pair models: warm-up rows carry the peers' *current* features for
+        # every past step, so the first window is not what training saw. Allow
+        # entries only after a full window of live same-bar observations.
+        _n_exp = getattr(self._agent_wrap_slow, "expected_features", None)
+        _seq = int(getattr(self._agent_wrap_slow, "seq_len", 0) or 0)
+        if (
+            isinstance(_n_exp, (int, np.integer)) and int(_n_exp) > 146
+            and getattr(self, "_live_bar_count", 0) < _seq
+            and action in (int(LiveAction.BUY), int(LiveAction.SELL))
+            and abs(self._position) < 1e-12
+        ):
+            self._decision_log("BLOCKED", reason=f"live_window_warming:{self._live_bar_count}/{_seq}")
+            return
+
         if action not in (int(LiveAction.BUY), int(LiveAction.SELL)) or lots <= 0:
             self._decision_log("NO_ENTRY", action=action, lots=f"{lots:.3f}")
 
@@ -3493,6 +3627,7 @@ class MultiPairLiveTradingEngine:
             print(f"[Live] Shared cross-asset unavailable ({exc}); continuing without it")
 
         self.shared_pair_features = {}
+        self.shared_pair_ts: dict = {}  # pair -> bar key of its published features
         # BUG-RG-12: shared PortfolioVaR for cross-pair covariance. Without
         # this, each LiveTradingEngine instance kept its own returns deque,
         # so parametric_var collapsed to single-asset σ with correlation=0.
@@ -3535,6 +3670,8 @@ class MultiPairLiveTradingEngine:
             )
             for p in self.pairs
         ]
+        for e in self.engines:
+            e.shared_pair_ts = self.shared_pair_ts
         if _shared_pvar is not None:
             for e in self.engines:
                 e.pvar = _shared_pvar
@@ -3565,7 +3702,7 @@ class MultiPairLiveTradingEngine:
         if hasattr(self.broker, "get_candles"):
             for e in self.engines:
                 try:
-                    hist_df = self.broker.get_candles(e.pair, count=120, granularity=self.bar_freq)
+                    hist_df = self.broker.get_candles(e.pair, count=_warmup_bar_count(self.bar_freq), granularity=self.bar_freq)
                     if hist_df is not None and not hist_df.empty:
                         e.buf.seed_bars(hist_df)
                         print(f"[Live] Preloaded {len(hist_df)} historical bars for {e.pair} buffer warmup")
@@ -3581,7 +3718,8 @@ class MultiPairLiveTradingEngine:
                     pos_val = float(active_pos.get(p_clean, active_pos.get(e.pair, 0.0)))
                     if abs(pos_val) > 1e-5:
                         e._position = pos_val
-                        print(f"[Live] Adopted pre-existing broker position for {e.pair}: {e._position} lots")
+                        e._entry_price = e._broker_entry_price(e._current_mid())
+                        print(f"[Live] Adopted pre-existing broker position for {e.pair}: {e._position} lots @ {e._entry_price:.5f}")
             except Exception as exc:
                 print(f"[Live] MultiPair initial position probe failed ({exc})")
 
@@ -3611,11 +3749,24 @@ class MultiPairLiveTradingEngine:
                             e.buf.push_tick(bid, ask)
                     time.sleep(poll_interval)
                     continue
+                # Phase 1: every pair builds and publishes this bar's features.
+                # Phase 2: each pair decides. Deciding in one pass fed pair k the
+                # previous bar's (or zero) features for pairs after it.
+                _bars_by_engine = {}
                 for e in self.engines:
                     try:
                         bars = e.buf.get_bars()
-                        if bars is not None and len(bars) >= 70:
-                            e._on_new_bar(bars, bar_count)
+                        if bars is not None and len(bars) >= _min_bars_to_trade(e):
+                            _bars_by_engine[id(e)] = bars
+                            e.publish_features(bars)
+                    except Exception as bar_err:
+                        print(f"[Live] Feature build failed for {e.pair} (bar {bar_count}): {bar_err}")
+                for e in self.engines:
+                    bars = _bars_by_engine.get(id(e))
+                    if bars is None:
+                        continue
+                    try:
+                        e._on_new_bar(bars, bar_count)
                     except Exception as bar_err:
                         print(f"[Live] Error during bar evaluation for {e.pair} (bar {bar_count}): {bar_err}")
                 bar_count += 1

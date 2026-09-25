@@ -737,6 +737,11 @@ def _promote_best_fold(
         _atomic_copy(src, dst_nested)
     # The train-only scaler must travel with the weights: inference and the
     # ensemble look for ``<stem>_scaler.npz`` beside the promoted checkpoint.
+    for _suffix in ("_features.json",):
+        _src_side = src.with_name(src.stem + _suffix)
+        if _src_side.is_file():
+            for _dst in {dst_flat, dst_nested}:
+                _atomic_copy(_src_side, _dst.with_name(_dst.stem + _suffix))
     _src_scaler = src.with_name(src.stem + "_scaler.npz")
     if _src_scaler.is_file():
         for _dst in {dst_flat, dst_nested}:

@@ -1275,6 +1275,13 @@ def supervised_train(
             from training.dataset_builder import _save_scaler_npz
 
             _save_scaler_npz(Path(cache_path), _scaler, path=best_path.with_name(best_path.stem + "_scaler.npz"))
+            # Ordered feature names ("PAIR::feature"): live asserts its column and
+            # pair order against this before trading.
+            _fnames = _lfs(cache_path, n_features)
+            if _fnames:
+                best_path.with_name(best_path.stem + "_features.json").write_text(
+                    _json_hash.dumps(_fnames), encoding="utf-8"
+                )
         except Exception as _ss_e:
             print(f"[Data] WARN: could not save checkpoint scaler sidecar: {_ss_e}")
 

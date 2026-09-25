@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from training.dataset_builder import PRICE_LEVEL_FEATURES  # noqa: E402
+from training.dataset_builder import PRICE_LEVEL_FEATURES, VENUE_SCALED_FEATURES  # noqa: E402
 from training.honest_eval import fx_bars_per_year, pooled_pair_metrics  # noqa: E402
 
 
@@ -62,7 +62,7 @@ def _load(cache: str):
 def _feature_mask(names: list[str] | None, X: np.ndarray) -> np.ndarray:
     keep = np.nanstd(X, axis=0) > 1e-8  # drop constant columns
     if names:
-        keep &= np.array([n.split("::")[-1] not in PRICE_LEVEL_FEATURES for n in names])
+        keep &= np.array([n.split("::")[-1] not in (PRICE_LEVEL_FEATURES | VENUE_SCALED_FEATURES) for n in names])
     return keep
 
 

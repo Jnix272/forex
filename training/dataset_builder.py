@@ -2630,6 +2630,12 @@ PRICE_LEVEL_FEATURES: frozenset[str] = frozenset(
 )
 
 
+# Absolute-volume features: Dukascopy tick volume (training) and OANDA quote
+# counts (live) are on different scales, so these cannot match live. Neutralised
+# with the price levels. Ratio/share volume features (VPIN, VWAP) are unaffected.
+VENUE_SCALED_FEATURES: frozenset[str] = frozenset({"volume", "amihud_illiq", "kyles_lambda"})
+
+
 def neutralize_price_level_columns(scaler, feature_names: list[str] | None) -> list[str]:
     """Make ``scaler`` map price-level columns to ~0. Returns the names neutralised."""
     if scaler is None or not feature_names or getattr(scaler, "scale_", None) is None:
@@ -2639,7 +2645,7 @@ def neutralize_price_level_columns(scaler, feature_names: list[str] | None) -> l
         return []
     hit = []
     for i, name in enumerate(feature_names):
-        if str(name).split("::")[-1] in PRICE_LEVEL_FEATURES:
+        if str(name).split("::")[-1] in (PRICE_LEVEL_FEATURES | VENUE_SCALED_FEATURES):
             scale[i] = 1e12
             hit.append(str(name))
     return hit
