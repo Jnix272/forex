@@ -1848,14 +1848,19 @@ class LiveTradingEngine:
                         raw_v = float(np.asarray(raw).reshape(-1)[0])
                     else:
                         raw_v = float(raw)
+                    act = self._action_adapter(raw)
+                    if isinstance(raw, (int, np.integer)) or float(raw_v).is_integer():
+                        # Discrete action id (e.g. RL: BUY=0, SELL=2). Using the id as a
+                        # score made SELL look strongly long and BUY look flat to the
+                        # hedge and sizing; use the traded direction instead.
+                        raw_v = 1.0 if act == int(LiveAction.BUY) else (-1.0 if act == int(LiveAction.SELL) else 0.0)
                     self.last_raw = raw_v
                     # Map raw scalar to proba-like for confidence: distance from 0
-                    conf = min(1.0, abs(raw_v) / 0.35)
                     if abs(raw_v) < 0.35:
                         self.last_proba = np.array([0.33, 0.34, 0.33], dtype=np.float32)
                     else:
                         self.last_proba = np.array([0.1, 0.2, 0.7] if raw_v > 0 else [0.7, 0.2, 0.1], dtype=np.float32)
-                    return self._action_adapter(raw)
+                    return act
                 except Exception:
                     self.last_raw = 0.0
                     return self._action_adapter(1)
@@ -1916,6 +1921,12 @@ class LiveTradingEngine:
         self._agent_wrap_slow = _Wrap(slow_model, _live_action_adapter(slow_model), shared_pair_features=self.shared_pair_features)
         self.fast = self._agent_wrap_fast
         self.slow = self._agent_wrap_slow
+        _shadow_raw = self._inference_meta.get("rl_shadow_agent")
+        self._agent_wrap_shadow = (
+            _Wrap(_shadow_raw, _live_action_adapter(_shadow_raw), shared_pair_features=self.shared_pair_features)
+            if _shadow_raw is not None
+            else None
+        )
         self.tip = TIPSearchManager(fast_agent=self.fast, slow_agent=self.slow)
 
         self.buf = LiveTickBuffer(self.pair, bar_freq=bar_freq, db_sink=self.db_sink)
@@ -2321,6 +2332,8 @@ class LiveTradingEngine:
                         warmup_rows = features[feature_cols].iloc[-(n_warmup + 1) : -1].to_numpy().astype(np.float32)
                     self._agent_wrap_fast.warm_up_buffer(warmup_rows)
                     self._agent_wrap_slow.warm_up_buffer(warmup_rows)
+                    if self._agent_wrap_shadow is not None:
+                        self._agent_wrap_shadow.warm_up_buffer(warmup_rows)
                     self.logger.event(
                         "INFO",
                         "buffer_warmed_up",
@@ -2404,6 +2417,9 @@ class LiveTradingEngine:
         }
         self.fast.set_agent_state(**state_kw)
         self.slow.set_agent_state(**state_kw)
+        if self._agent_wrap_shadow is not None:
+            # Shadow RL sees the real position/equity so its calls match what it would do live.
+            self._agent_wrap_shadow.set_agent_state(**state_kw)
 
         prev_equity = self.equity
         try:
@@ -2547,15 +2563,25 @@ class LiveTradingEngine:
             _act_name = LiveAction(action).name
         except ValueError:
             _act_name = str(action)
-        _shadow = self._inference_meta.get("rl_shadow_agent")
-        if _shadow is not None:
+        # TIP runs only one of fast/slow per bar; feed the other this bar too so its
+        # rolling window has no gaps (it was missing every bar it did not trade) and
+        # its score for this bar is available to the hedge.
+        _ran_fast = "fast" in str(model_used)
+        _other = self.slow if _ran_fast else self.fast
+        if _other is not None and _other is not (self.fast if _ran_fast else self.slow):
             try:
-                _sa = int(_shadow.select_action(obs))
+                _other.select_action(obs)
+            except Exception:
+                pass
+        if self._agent_wrap_shadow is not None:
+            try:
+                _sa = int(self._agent_wrap_shadow.select_action(obs))
                 try:
                     _sa_name = LiveAction(_sa).name
                 except ValueError:
                     _sa_name = str(_sa)
-                self._decision_log("SHADOW_RL", action=_sa_name)
+                self._decision_log("SHADOW_RL", action=_sa_name,
+                                   raw=f"{float(self._agent_wrap_shadow.last_raw):+.0f}")
             except Exception as _se:
                 self._decision_log("SHADOW_RL", error=str(_se)[:80])
         self._decision_log(
@@ -2566,29 +2592,19 @@ class LiveTradingEngine:
             fast_raw=f"{float(getattr(self.fast, 'last_raw', 0.0)):+.4f}",
         )
 
-        # Collect individual model signals for Hedge tracking (divergence fix)
+        # Hedge inputs: each model's score for THIS bar (both ran above). In RL shadow
+        # mode fast == slow, so the hedge instead tracks shadow RL vs supervised, giving
+        # a live read on whether RL has earned its way back.
         current_preds = {}
         try:
-            slow_raw = float(getattr(self.slow, 'last_raw', 0.0))
-            fast_raw = float(getattr(self.fast, 'last_raw', 0.0))
-            try:
-                slow_peek = float(self.slow.peek_raw(obs)) if hasattr(self.slow, 'peek_raw') else slow_raw
-                fast_peek = float(self.fast.peek_raw(obs)) if hasattr(self.fast, 'peek_raw') else fast_raw
-                if abs(slow_peek) > 1e-9:
-                    slow_raw = slow_peek
-                if abs(fast_peek) > 1e-9:
-                    fast_raw = fast_peek
-            except Exception:
-                pass
             import math as _math
-            slow_sig = float(_math.tanh(slow_raw * 2.0)) if abs(slow_raw) > 1e-9 else None
-            fast_sig = float(_math.tanh(fast_raw * 2.0)) if abs(fast_raw) > 1e-9 else None
-            if slow_sig is None and fast_sig is None:
-                # No per-model scores: identical signals carry no information for Hedge; skip update.
-                pass
-            else:
-                current_preds["slow_model"] = float(slow_sig) if slow_sig is not None else 0.0
-                current_preds["fast_agent"] = float(fast_sig) if fast_sig is not None else 0.0
+
+            slow_raw = float(getattr(self.slow, "last_raw", 0.0))
+            fast_src = self._agent_wrap_shadow if self._agent_wrap_shadow is not None else self.fast
+            fast_raw = float(getattr(fast_src, "last_raw", 0.0))
+            if abs(slow_raw) > 1e-9 or abs(fast_raw) > 1e-9:
+                current_preds["slow_model"] = float(_math.tanh(slow_raw * 2.0))
+                current_preds["fast_agent"] = float(_math.tanh(fast_raw * 2.0))
         except Exception:
             current_preds = {}
         self._last_bar_preds = current_preds
