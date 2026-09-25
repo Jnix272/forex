@@ -1067,6 +1067,25 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
         }
     )
 
+    # Fold consistency: one lucky fold must not carry promotion. Require the
+    # median fold metric > 0 and most folds positive (fold metric = honest
+    # net Sharpe when validation had price arrays).
+    _fold_vals = [float(v) for v in folds if v is not None and np.isfinite(float(v))]
+    if len(_fold_vals) >= 3:
+        _min_pos = float(getattr(args, "gate_min_positive_fold_frac", 0.7))
+        _med = float(np.median(_fold_vals))
+        _pos = float(np.mean([v > 0 for v in _fold_vals]))
+        result.setdefault("details", {}).update({"fold_median": _med, "fold_positive_frac": _pos})
+        _fold_fail = []
+        if _med <= 0:
+            _fold_fail.append(f"median fold metric {_med:.3f} <= 0")
+        if _pos < _min_pos:
+            _fold_fail.append(f"only {_pos:.0%} folds positive (< {_min_pos:.0%})")
+        if _fold_fail:
+            result["promoted"] = False
+            result.setdefault("reasons", []).extend(_fold_fail)
+            result["summary"] = "REJECT (fold consistency: " + "; ".join(_fold_fail) + ")"
+
     print(f"[PromotionGate] {model_name}: {result.get('summary', '?')} | trades={len(pnls)} | forward_n={n_fwd}")
 
     # M11: emit on_promotion_decision JSONL event for audit trail
