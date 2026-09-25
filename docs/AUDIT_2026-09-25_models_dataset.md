@@ -664,6 +664,30 @@ The config enables some of these (`feature_store.enabled`, `drift_detection.enab
 - The RL and ensemble checkpoints under `checkpoints/` are git-ignored and weren't changed. They can't be deployed because their certifications fail gate v2. Re-run `scripts/auto_optimal_roadmap.py` to re-certify under the new rules; expect a rejection until the dataset is fixed.
 - `tests/test_ppo_greedy_inference.py::test_rl_inference_agent_passes_greedy_true` still fails. It was already failing before these changes (C).
 
+### Day 2: training, dataset, ensemble (branch `claude/audit-fixes`)
+| Area | Fix | Audit refs |
+|---|---|---|
+| Checkpoint selection | Direction-warmup epochs are only a placeholder best. The first full epoch resets the best score, so a warmup epoch can no longer win. | A1 |
+| Early stopping | Removed the SWA guard that held runs open until epoch 30/40, and the SI/EWC "correction" that made the composite improve by itself. | E7 |
+| SACS | Off by default (`training.sacs_enabled: false`). It cost 5 extra validation passes per epoch. | A7 |
+| Features | `ret_{5,20,60}`, `rsi_14`, `macd*` and `vwma_ret` now use log returns (bps) or price-relative values instead of `close_ffd`. They are scale-free, so JPY is correct. `noise_to_signal_60` is bounded. | E3, B2, E4 |
+| Features | `eco_surprise` / `eco_revision` are unit-free, in [−1, 1]. The ±1e6 placeholder values are gone. | B1 |
+| Lookahead | `asia_london_gap` Asia rows no longer see the same day's Asia close. Multi-pair features no longer `bfill`. | E4 |
+| Macro | FRED failure gives missing values (→ constant 0, which gets dropped), not seeded synthetic yields. `FOREX_ALLOW_SYNTHETIC_YIELDS=1` restores the old behaviour. | E4 |
+| Spread / costs | Cached `spread` uses each pair's pip size (JPY was 100× too small). | B2 |
+| Labels | CPAR direction label is BUY/SELL only when that side's CPAR (net of spread) is positive, otherwise HOLD. The MAE penalty reads `cpar_mae_penalty`. | E6 |
+| Cache | New `DATASET_BUILD_VERSION` (`_ba0925`) in the cache tag, so these code changes force a rebuild. | B6 |
+| Scaling | The train-only scaler now fails loudly instead of falling back to the leaky cache-wide scaler, and is fit on last timesteps (memory). `_merge_scalers` merges RobustScalers. The serial path honours `scaler_type`. Scaled inputs are clipped to ±10 in training and inference. | E5, B1 |
+| Price levels | Raw price columns (OHLC, bid/ask, BB bands, VWAP) are neutralised in the train scaler (they transform to ≈0). The 146-column schema is unchanged, and inference gets the same transform through the checkpoint scaler. | B1, E4 |
+| Inference | A single-pair scaler is no longer tiled across 4 pairs; a mismatch raises. | E5 |
+| Ensemble | Each base now scales its own input with its `*_scaler.npz` (bases used to get raw features). Added a learnable output scale and bias. The best checkpoint is chosen on held-out MSE. The entropy push toward uniform weights is removed. The scaler sidecar is copied with the promoted `*_best.pt`, and `fold_selection.json` `secondary_value` is fixed. | E1, E2 |
+| Tests | `tests/test_audit_2026_09_25_fixes.py` (8 tests). | — |
+
+**Still needs you (can't be done from code alone):**
+1. **Rebuild the dataset.** The cache tag changed, so the next training run rebuilds it from ticks. Expect several hours.
+2. **Retrain all bases**, which produces scaler sidecars. Then retrain the ensemble and RL, and re-run the gate.
+3. **Not fixed here:** the news/FinBERT feed (B3, constant features); per-pair/period reweighting (B4); honest non-overlapping Sharpe with CIs (A3/D7); the tabular baseline (D6); RL GPU use; the `cudnn` DLLs missing from `.venv` (PyTorch won't import there; `.venv311` works).
+
 ### Next
 - Wire `trading/preflight_check.py` into the live engine (M4).
-- Days 2–4: dataset fixes, K step 2.
+- Rebuild dataset → baseline model (D6) → retrain.
