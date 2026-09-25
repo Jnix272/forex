@@ -111,6 +111,15 @@ def main() -> int:
             m = net_pnl_metrics(d, idx, close, spread, args.horizon, bars_per_year=bpy)
             for k, v in m.items():
                 res[f"{tag}_{k}"] = round(v, 4) if isinstance(v, float) else v
+        # Live gate is max(proba) >= hold_threshold; report the equivalent cutoffs.
+        pmax = P.max(axis=1)
+        res["hold_thr_top20"] = round(float(np.quantile(pmax, 0.8)), 4)
+        res["hold_thr_top10"] = round(float(np.quantile(pmax, 0.9)), 4)
+        for tag, thr in (("live045", 0.45), ("pmax_top20", res["hold_thr_top20"])):
+            d = np.where((pmax >= thr) & (P.argmax(axis=1) != 1), d_all, 0.0)
+            m = net_pnl_metrics(d, idx, close, spread, args.horizon, bars_per_year=bpy)
+            res[f"{tag}_sharpe_net"] = round(m["sharpe_net"], 4)
+            res[f"{tag}_n_trades"] = m["n_trades"]
         res["pred_buy_frac"] = round(float((d_all > 0).mean()), 3)
         res["edge_std"] = round(float(edge.std()), 5)
         rows.append(res)
@@ -120,6 +129,8 @@ def main() -> int:
             f"top10={res['top10_sharpe_net']:+.2f} | win={res['all_win_rate']:.1%} "
             f"net={res['all_mean_ret_bps']:+.2f}bps cost={res['all_cost_bps']:.2f}bps "
             f"trades={res['all_n_trades']} buy%={res['pred_buy_frac']:.0%} edge_sd={res['edge_std']} "
+            f"| live@0.45={res['live045_sharpe_net']:+.2f} ({res['live045_n_trades']}tr) "
+            f"hold_thr_top20={res['hold_thr_top20']} "
             f"({time.time() - t0:.0f}s)"
         )
 
