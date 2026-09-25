@@ -701,34 +701,39 @@ class CustomRLAdapter(BaseRLAdapter):
         n_episodes = kwargs.get("n_episodes", max(1, total_timesteps // 1000))
 
         if algorithm == "ppo":
+            # PPOAgent expects hidden (int), lam, clip, entropy_coef, value_coef, n_epochs.
+            # RLConfig stores hidden_dims (tuple), gae_lambda, clip_range, ent_coef, vf_coef.
+            _hidden = self.config.hidden_dims[0] if isinstance(self.config.hidden_dims, (tuple, list)) else int(self.config.hidden_dims)
             self._agent = modules["PPOAgent"](
                 obs_size=env.obs_size,
                 n_actions=env.n_actions,
+                hidden=int(_hidden),
+                lr=self.config.learning_rate,
+                gamma=self.config.gamma,
+                lam=self.config.gae_lambda,
+                clip=self.config.clip_range,
+                entropy_coef=self.config.ent_coef,
+                value_coef=self.config.vf_coef,
+                n_epochs=self.config.n_epochs,
                 device=self.config.device
                 if self.config.device != "auto"
                 else ("cuda" if torch.cuda.is_available() else "cpu"),
-                hidden_sizes=self.config.hidden_dims,
-                lr=self.config.learning_rate,
-                gamma=self.config.gamma,
-                gae_lambda=self.config.gae_lambda,
-                clip_range=self.config.clip_range,
-                ent_coef=self.config.ent_coef,
-                vf_coef=self.config.vf_coef,
-                max_grad_norm=self.config.max_grad_norm,
             )
         elif algorithm == "dqn":
+            _hidden = self.config.hidden_dims[0] if isinstance(self.config.hidden_dims, (tuple, list)) else int(self.config.hidden_dims)
             self._agent = modules["DQNAgent"](
                 obs_size=env.obs_size,
                 n_actions=env.n_actions,
+                hidden=int(_hidden),
+                lr=self.config.learning_rate,
+                gamma=self.config.gamma,
+                buf_size=self.config.buffer_size,
+                batch=self.config.batch_size,
+                target_update=self.config.target_update_interval,
+                double_dqn=True,
                 device=self.config.device
                 if self.config.device != "auto"
                 else ("cuda" if torch.cuda.is_available() else "cpu"),
-                hidden_sizes=self.config.hidden_dims,
-                lr=self.config.learning_rate,
-                gamma=self.config.gamma,
-                buffer_size=self.config.buffer_size,
-                batch_size=self.config.batch_size,
-                target_update=self.config.target_update_interval,
             )
         else:
             raise NotImplementedError(f"Custom RL algorithm {algorithm} not supported")

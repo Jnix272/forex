@@ -457,7 +457,7 @@ class TestTrainMetaLearner:
 
         state = torch.load(ckpt, map_location="cpu", weights_only=False)
         assert isinstance(state, dict)
-        assert "context_enc.0.weight" in state
+        assert "context_enc.proj.weight" in state or "context_enc.0.weight" in state
 
         meta = json.loads((tmp_path / "ensemble_meta_best_latest.pt.json").read_text())
         assert meta["epoch"] == len(history)

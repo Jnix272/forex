@@ -6,6 +6,7 @@ model:
   num_layers: 2
   dropout: 0.1
 training:
-  lr: 1.0e-3
-  seq_len: 60
-  early_stop_patience: 6   # TFT converges fast at 1e-3 lr; short patience avoids over-running
+  lr: 1.0e-4
+  grad_clip: 0.5
+  seq_len: 120
+  early_stop_patience: 10   # TFT converges smoothly at 1e-4 lr with 0.5 grad clip

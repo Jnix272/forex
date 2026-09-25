@@ -1,4 +1,4 @@
-﻿\"\"\"Tests for OANDABroker v20 REST interface.\"\"\"
+"""Tests for OANDABroker v20 REST interface."""
 import json
 import os
 import urllib.error

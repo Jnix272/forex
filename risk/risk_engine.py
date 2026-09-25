@@ -58,6 +58,27 @@ logger = logging.getLogger(__name__)
 _PAIRS = ("EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD")
 
 
+def _calc_notional_usd(pair: str, lots: float, price: float, units_per_lot: float = 10_000.0) -> float:
+    """Calculate the dollar notional value of an FX position.
+
+    Matches live broker convention where 1 lot = 10,000 units (mini lot).
+    For pairs with USD as the base currency (e.g. USDJPY, USDCAD, USDCHF),
+    notional is lots * units_per_lot.
+    For pairs with USD as the quote currency (e.g. EURUSD, GBPUSD, AUDUSD),
+    notional is lots * price * units_per_lot.
+    """
+    p = _clip_currency(pair).upper()
+    l = abs(float(lots))
+    px = float(price)
+    u = float(units_per_lot)
+    if p.startswith("USD"):
+        return l * u
+    elif p.endswith("USD"):
+        return l * px * u
+    return l * u
+
+
+
 @dataclass
 class RiskConfig:
     """All engine limits; mirrors LIVE_RISK defaults when not supplied."""
@@ -162,7 +183,9 @@ class RiskEngine:
         allowed decision when all checks pass."""
         now = now or _now_iso()
         pair = _clip_currency(pair)
-        notional_usd = notional_usd if notional_usd is not None else float(lots) * float(price) * 100_000
+        notional_usd = (
+            notional_usd if notional_usd is not None else _calc_notional_usd(pair, lots, price)
+        )
         if position_size_pct is None:
             # Leveraged forex notional is typically 10-30x equity. If position_size_pct
             # is not explicitly passed, scale by max_total_lots so standard orders
@@ -186,7 +209,8 @@ class RiskEngine:
         total_lots = current_lots + abs(lots)
 
         current_notional = sum(
-            abs(p.get("lots", 0.0)) * p.get("entry_price", 1.0) * 100_000 for p in self.positions.values()
+            _calc_notional_usd(p_name, p.get("lots", 0.0), p.get("entry_price", 1.0))
+            for p_name, p in self.positions.items()
         )
         total_notional = current_notional + notional_usd
 
@@ -239,7 +263,12 @@ class RiskEngine:
             ),
         ]
         # order frequency
-        if self._freq_blocked():
+        now_ts = (
+            now.timestamp()
+            if isinstance(now, datetime)
+            else (float(now) if isinstance(now, (int, float)) else time.time())
+        )
+        if self._freq_blocked(now_ts):
             checks.append(
                 RiskDecision(
                     False,
@@ -257,8 +286,8 @@ class RiskEngine:
                 return d
 
         # frequency accounting only counts accepted orders
-        self._order_times.append(time.time())
-        cutoff = time.time() - 60.0
+        self._order_times.append(now_ts)
+        cutoff = now_ts - 60.0
         while self._order_times and self._order_times[0] < cutoff:
             self._order_times.popleft()
 
@@ -278,11 +307,16 @@ class RiskEngine:
         cap = concentration * self.cfg.max_total_lots
         return max(0.0, cap - existing)
 
-    def _freq_blocked(self) -> bool:
-        if len(self._order_times) < self.cfg.max_order_freq_per_min:
-            return False
-        window = self._order_times[-1] - self._order_times[0]
-        return window <= 60.0
+    def _freq_blocked(self, now: float | datetime | None = None) -> bool:
+        now_ts = (
+            now.timestamp()
+            if isinstance(now, datetime)
+            else (float(now) if isinstance(now, (int, float)) else time.time())
+        )
+        cutoff = now_ts - 60.0
+        while self._order_times and self._order_times[0] < cutoff:
+            self._order_times.popleft()
+        return len(self._order_times) >= self.cfg.max_order_freq_per_min
 
     # ── post-trade ─────────────────────────────────────────────────────────
 
@@ -436,13 +470,15 @@ class RiskEngine:
         self._log(d)
         return d.to_audit()
 
-    def resume(self) -> None:
+    def resume(self, reset_peak: bool = True) -> None:
         self._halted = False
         self._soft_reduce = False
         self._order_times.clear()
         self.day_realized_pnl = 0.0
         self.consecutive_losses = 0
         self.daily_start_equity = self.equity
+        if reset_peak:
+            self.peak_equity = self.equity
 
     # ── analytics ──────────────────────────────────────────────────────────
 
@@ -503,16 +539,17 @@ class RiskEngine:
         return {p: float(pos.get("lots", 0.0)) for p, pos in self.positions.items()}
 
     def exposure_by_currency(self) -> dict[str, float]:
-        """Net exposure per currency (base credit, quote debit). Uses simple
-        per-lot 100k notional so tests stay deterministic."""
+        """Net exposure per currency (base credit, quote debit). Uses
+        mini-lot 10k notional to match live OANDA/BrokerBridge execution
+        (BUG-RG-09)."""
         out: dict[str, float] = {}
         for pair, pos in self.positions.items():
             lots = float(pos.get("lots", 0.0))
             direction = pos.get("direction", "long")
             sign = 1.0 if direction == "long" else -1.0
             base, quote = pair[:3], pair[3:]
-            out[base] = out.get(base, 0.0) + sign * lots * 100_000
-            out[quote] = out.get(quote, 0.0) - sign * lots * 100_000
+            out[base] = out.get(base, 0.0) + sign * lots * 10_000
+            out[quote] = out.get(quote, 0.0) - sign * lots * 10_000
         return {k: round(v, 2) for k, v in out.items()}
 
     def _check_gaps(self) -> dict[str, bool]:
@@ -528,7 +565,7 @@ class RiskEngine:
 
     @staticmethod
     def _pnl_to_ret(pnl: float, equity: float, lots: float) -> float:
-        notional = abs(float(lots)) * 100_000.0
+        notional = abs(float(lots)) * 10_000.0
         return float(pnl) / max(notional, 1.0)
 
     def _log(self, decision: RiskDecision, ts: str | None = None) -> None:

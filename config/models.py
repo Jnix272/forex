@@ -49,7 +49,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "nhead": 4,
         "dropout": 0.1,
         "lstm_layers": 2,
-        "seq_len": 60,
+        "seq_len": 120,
         "learning_rate": 1e-3,
     },
     "transformer": {
@@ -61,7 +61,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "num_layers": 3,
         "dim_feedforward": 256,
         "dropout": 0.1,
-        "seq_len": 60,
+        "seq_len": 120,
         "learning_rate": 1e-4,
     },
     "haelt": {
@@ -130,14 +130,15 @@ MODELS: dict[str, dict[str, Any]] = {
         "decision_role": "channel_independent_patching",
         "use_when": "Need to efficiently process long sequences by treating variables as independent channels.",
         "default_use": "Advanced transformer baseline.",
-        "seq_len": 60,
+        "seq_len": 120,
         "learning_rate": 1e-4,
         "patch_len": 12,
         "stride": 12,
-        "d_model": 128,
+        "d_model": 256,
         "nhead": 8,
         "num_layers": 3,
         "dropout": 0.1,
+        "num_classes": 1,
     },
 }
 

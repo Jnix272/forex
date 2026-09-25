@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -6,6 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+# Ensure repository root is on sys.path
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import optuna
 import torch
@@ -15,7 +21,12 @@ ARTIFACT_DIR = Path("logs/optuna")
 OPTUNA_CONFIG_DIR = Path("config/optuna")  # isolated folder for all trial + best configs
 BEST_CONFIG_DIR = OPTUNA_CONFIG_DIR  # kept for compat with helpers that reference it
 ACTIVE_RUN_CONFIG = Path("config/run.yaml")  # applied automatically after study finishes
-DEFAULT_METRIC = "val_sharpe"
+DEFAULT_METRIC = "cost_sharpe"
+
+
+def _metric_direction(metric: str) -> str:
+    """Map metric to Optuna direction (val_loss -> minimize, val_sharpe -> maximize)."""
+    return "minimize" if str(metric).lower() == "val_loss" else "maximize"
 
 
 def _safe_slug(text: str) -> str:
@@ -53,7 +64,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=0, help="Override trial epochs. 0 = mode default.")
     parser.add_argument("--folds", type=int, default=0, help="Override proxy walk-forward folds. 0 = mode default.")
     parser.add_argument(
-        "--metric", default=DEFAULT_METRIC, choices=["val_loss", "val_sharpe"], help="Trial objective metric."
+        "--metric", default=DEFAULT_METRIC, choices=["val_loss", "val_sharpe", "cost_sharpe"], help="Trial objective metric."
     )
     parser.add_argument(
         "--confirm-top-k",
@@ -68,6 +79,7 @@ def parse_args():
         "--full-confirm-epochs", type=int, default=0, help="Epochs for top-K confirmation. 0 = mode default."
     )
     parser.add_argument("--study-name", type=str, default="", help="Optional explicit Optuna study name.")
+    parser.add_argument("--seed", type=int, default=1337, help="Sampler/training seed.")
     parser.add_argument(
         "--hpo-scheduler",
         type=str,
@@ -90,7 +102,7 @@ def parse_args():
         "start a full training.train_gpu run using config/run.yaml.",
     )
     parser.add_argument(
-        "--auto", action="store_true", help="Shorthand for --launch-training (search → apply best → full train)."
+        "--auto", action="store_true", help="Shorthand for --launch-training (search -> apply best -> full train)."
     )
     return parser.parse_args()
 
@@ -186,6 +198,7 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
     val_sharpe = summary.get("best_val_sharpe")
     final_sharpe = summary.get("final_val_sharpe")
     val_loss = summary.get("best_val_loss")
+    cost_sharpe = summary.get("best_cost_sharpe")
     gen_gap = summary.get("gen_gap_final")
     epochs_completed = int(summary.get("epochs_completed") or len(history.get("train_loss", [])) or 0)
     train_mode = summary.get("train_mode", "unknown")
@@ -200,6 +213,9 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
     if val_loss is None:
         loss_hist = history.get("val_loss", [])
         val_loss = min(loss_hist) if loss_hist else None
+    if cost_sharpe is None:
+        cost_hist = history.get("cost_aware_sharpe", history.get("cost_sharpe", history.get("val_cost_sharpe", [])))
+        cost_sharpe = max(cost_hist) if cost_hist else None
     if gen_gap is None:
         loss_hist = history.get("val_loss", [])
         train_hist = history.get("train_loss", [])
@@ -212,6 +228,7 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
         "best_val_sharpe": val_sharpe,
         "final_val_sharpe": final_sharpe,
         "best_val_loss": val_loss,
+        "best_cost_sharpe": cost_sharpe,
         "gen_gap_final": gen_gap,
         "epochs_completed": epochs_completed,
         "train_mode": train_mode,
@@ -221,11 +238,20 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
 
     if metric == "val_loss":
         if val_loss is None:
-            raise RuntimeError("No val_loss found in trial artifacts.")
+            # Fragility fix: return worst score instead of raising -> trial pruned with diagnostics
+            diagnostics["missing_metric"] = "val_loss"
+            return float("inf"), diagnostics
         return float(val_loss), diagnostics
 
+    if metric == "cost_sharpe":
+        if cost_sharpe is None:
+            diagnostics["missing_metric"] = "cost_sharpe"
+            return float("-inf"), diagnostics
+        return float(cost_sharpe), diagnostics
+
     if val_sharpe is None:
-        raise RuntimeError("No val_sharpe found in trial artifacts.")
+        diagnostics["missing_metric"] = "val_sharpe"
+        return float("-inf"), diagnostics
 
     score = float(val_sharpe)
     if final_sharpe is not None:
@@ -241,24 +267,24 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
     seq_advanced = curr_diag["seq_advanced"]
     diff_advanced = curr_diag["diff_advanced"]
 
-    # Penalty: excessive stalls → unstable training (gradient noise / schedule too aggressive)
+    # Penalty: excessive stalls -> unstable training (gradient noise / schedule too aggressive)
     if total_stalls > 2:
         score -= 0.05 * (total_stalls - 2)  # -0.05 per stall above the 2-stall tolerance
 
-    # Penalty: schedule never advanced → curriculum too conservative or model stuck at easy
+    # Penalty: schedule never advanced -> curriculum too conservative or model stuck at easy
     if not seq_advanced and not diff_advanced:
         score -= 0.10
 
-    # Bonus: at least one advance of each kind → healthy progression
+    # Bonus: at least one advance of each kind -> healthy progression
     if seq_advanced:
         score += 0.03
     if diff_advanced:
         score += 0.03
-    # Bonus: multiple advances → curriculum is actually progressing
+    # Bonus: multiple advances -> curriculum is actually progressing
     if advance_count > 2:
         score += min(0.05, 0.01 * (advance_count - 2))
 
-    return -score, diagnostics
+    return score, diagnostics
 
 
 def _trial_report_path(study_name: str, trial_number: int) -> Path:
@@ -431,9 +457,9 @@ def _build_difficulty_schedule(
     """Convert difficulty params into a concrete difficulty_schedule list.
 
     Structure:
-      epoch 0                   → stage 0 (easy bars only)
-      cur_diff_ramp_epoch       → stage 1 (medium bars introduced)
-      cur_diff_ramp_epoch + 4   → stage cur_diff_final_stage (hard bars if final_stage == 2)
+      epoch 0                   -> stage 0 (easy bars only)
+      cur_diff_ramp_epoch       -> stage 1 (medium bars introduced)
+      cur_diff_ramp_epoch + 4   -> stage cur_diff_final_stage (hard bars if final_stage == 2)
     """
     schedule = [{"epoch_start": 0, "max_difficulty": 0}]
     schedule.append({"epoch_start": int(cur_diff_ramp_epoch), "max_difficulty": 1})
@@ -456,9 +482,9 @@ def _build_seq_schedule(
     """Convert curriculum params into a concrete seq_schedule list.
 
     Structure:
-      - epoch 0              → cur_seq_start
-      - cur_seq_ramp_epoch   → midpoint between start and target
-      - cur_ramp_epoch + gap → cur_seq_target
+      - epoch 0              -> cur_seq_start
+      - cur_seq_ramp_epoch   -> midpoint between start and target
+      - cur_ramp_epoch + gap -> cur_seq_target
     """
     if cur_seq_target <= cur_seq_start:
         return [{"epoch_start": 0, "seq_len": int(cur_seq_start)}]
@@ -500,8 +526,8 @@ def _sample_params(
             raise FileNotFoundError(f"Base config {path} not found (required for --curriculum-only).")
         return {**_read_arch_params_from_config(path), **curriculum}
 
-    # Use cur_seq_target as the representative seq_len for batch-size safety
-    representative_seq = curriculum["cur_seq_target"]
+    # Use ceiling (max) seq_len for batch-size safety, not cur_seq_target (60 vs 120 -> 5% underestimate -> 512 OOM after 2D reshape)
+    representative_seq = _seq_len_ceiling(model_name)
 
     if model_name == "tft":
         d_model = trial.suggest_categorical("d_model", [64, 128, 256])
@@ -659,8 +685,9 @@ def _build_trial_config(
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     OPTUNA_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # Trial configs are ephemeral -> ARTIFACT_DIR, not OPTUNA_CONFIG_DIR (which is for best only)
     trial_cfg_path = (
-        OPTUNA_CONFIG_DIR / f"run_optuna_{_safe_slug(args.model)}_{getattr(args, '_trial_suffix', 'trial')}.yaml"
+        ARTIFACT_DIR / f"run_optuna_{_safe_slug(args.model)}_{getattr(args, '_trial_suffix', 'trial')}.yaml"
     )
     return cfg, trial_cfg_path
 
@@ -738,17 +765,15 @@ def _run_trial_process(
             if m_loss:
                 latest_loss = float(m_loss.group(1))
 
-            m_sh = re.search(
-                r"(?:val(?:_sharpe| sharpe)|sharpe_proxy|sharpe)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE
-            )
+            m_sh = re.search(r"(?:val[_ ]sharpe|sharpe_proxy)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE)
             if m_sh:
                 latest_sharpe = float(m_sh.group(1))
 
             report_value = None
             if args.metric == "val_loss" and latest_loss is not None:
                 report_value = latest_loss
-            elif args.metric == "val_sharpe" and latest_sharpe is not None:
-                report_value = -latest_sharpe
+            elif args.metric in ("val_sharpe", "cost_sharpe") and latest_sharpe is not None:
+                report_value = latest_sharpe
             if report_value is not None and live_epoch > 0:
                 yield_payload = {
                     "epoch": live_epoch,
@@ -818,9 +843,15 @@ def _sorted_trial_rows(study: optuna.Study) -> list[dict[str, Any]]:
             }
         )
 
+    # Sort according to study direction (val_loss -> asc, val_sharpe -> desc)
+    is_maximize = str(getattr(study.direction, "name", "")).upper() == "MAXIMIZE"
+
     def _sort_key(row):
         value = row.get("value")
-        return float("inf") if value is None else float(value)
+        if value is None:
+            return float("inf") if not is_maximize else float("-inf")
+        v = float(value)
+        return -v if is_maximize else v
 
     return sorted(rows, key=_sort_key)
 
@@ -832,6 +863,7 @@ def _write_ranked_report(study: optuna.Study, study_name: str, args) -> None:
         "model": args.model,
         "mode": args.mode,
         "metric": args.metric,
+        "metric_direction": _metric_direction(args.metric),
         "trials_requested": args.trials,
         "rows": rows,
         "best_trial": study.best_trial.number if study.best_trial else None,
@@ -900,7 +932,7 @@ def _export_best_config(args, study: optuna.Study) -> None:
     # next training run immediately uses Optuna's best settings.
     # ------------------------------------------------------------------
     scope = "curriculum" if curriculum_only else "full"
-    print(f"[Optuna] ✓ Best {scope} config archived → {export_path}")
+    print(f"[Optuna] [OK] Best {scope} config archived -> {export_path}")
     print(f"[Optuna]   To apply: copy {export_path} {ACTIVE_RUN_CONFIG}")
     # ------------------------------------------------------------------
 
@@ -957,9 +989,6 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
             else:
                 checkpoint_dir = Path(checkpoint_dir)
             confirm = _evaluate_trial_artifacts(checkpoint_dir, args.model, int(args.full_confirm_folds), args.metric)
-        except (subprocess.CalledProcessError, optuna.exceptions.TrialPruned) as _ce:
-            print(f"[Optuna] Confirmation trial {t.number} failed/pruned ({type(_ce).__name__}); skipping.")
-            continue
             confirm_rows.append(
                 {
                     "trial": int(t.number),
@@ -969,6 +998,9 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
                     "params": params,
                 }
             )
+        except (subprocess.CalledProcessError, optuna.exceptions.TrialPruned) as _ce:
+            print(f"[Optuna] Confirmation trial {t.number} failed/pruned ({type(_ce).__name__}); skipping.")
+            continue
         finally:
             if trial_cfg_path and Path(trial_cfg_path).exists():
                 Path(trial_cfg_path).unlink()
@@ -1023,6 +1055,8 @@ def objective(trial, args):
         trial.set_user_attr("diagnostics", result["diagnostics"])
         trial.set_user_attr("train_summary", result["summary"])
         trial.set_user_attr("mode", args.mode)
+        trial.set_user_attr("metric_direction", _metric_direction(args.metric))
+        trial.set_user_attr("stdout_tail", live_lines[-40:])
         _write_trial_report(
             args.study_name,
             int(trial.number),
@@ -1040,11 +1074,22 @@ def objective(trial, args):
     except subprocess.CalledProcessError as exc:
         print(f"[Optuna] Trial {trial.number} failed with exit code {exc.returncode}")
         trial.set_user_attr("stdout_tail", live_lines[-40:])
-        raise optuna.exceptions.TrialPruned()
+        raise
+    except Exception as exc:
+        # Fragility fix: store tail for any failure (e.g. missing checkpoint/history) before pruning
+        print(f"[Optuna] Trial {trial.number} failed ({type(exc).__name__}: {exc})")
+        trial.set_user_attr("stdout_tail", live_lines[-40:])
+        trial.set_user_attr("diagnostics", {"error": str(exc), "missing_metric": True})
+        raise
     finally:
-        cleanup_cfg = OPTUNA_CONFIG_DIR / f"run_optuna_{_safe_slug(args.model)}_proxy_{int(trial.number)}.yaml"
-        if cleanup_cfg.exists():
-            cleanup_cfg.unlink()
+        # Trial configs now live in ARTIFACT_DIR (not OPTUNA_CONFIG_DIR) to avoid polluting best dir
+        for base in (ARTIFACT_DIR, OPTUNA_CONFIG_DIR):
+            cleanup_cfg = base / f"run_optuna_{_safe_slug(args.model)}_proxy_{int(trial.number)}.yaml"
+            if cleanup_cfg.exists():
+                try:
+                    cleanup_cfg.unlink()
+                except Exception:
+                    pass
 
 
 def main():
@@ -1070,7 +1115,9 @@ def main():
         args.full_confirm_epochs = int(defaults["full_confirm_epochs"])
     if not args.study_name:
         suffix = "_curriculum" if args.curriculum_only else ""
-        args.study_name = f"optuna_{args.model}_{args.mode}_{args.metric}{suffix}"
+        cfg_bytes = Path("config/run.yaml").read_bytes() if Path("config/run.yaml").exists() else b""
+        cfg_hash = hashlib.sha256(cfg_bytes).hexdigest()[:10]
+        args.study_name = f"optuna_{args.model}_{args.mode}_{args.metric}{suffix}_{cfg_hash}"
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     study_db_path = ARTIFACT_DIR / f"{_safe_slug(args.study_name)}.db"
@@ -1081,7 +1128,7 @@ def main():
     hpo_scheduler = str(getattr(args, "hpo_scheduler", "tpe") or "tpe").lower()
     sampler, pruner = build_optuna_search(
         hpo_scheduler,
-        seed=42,
+        seed=int(args.seed),
         min_resource=2,
         max_resource=max(int(args.epochs), 2),
     )
@@ -1090,7 +1137,7 @@ def main():
     study = optuna.create_study(
         study_name=args.study_name,
         storage=storage,
-        direction="minimize",
+        direction=_metric_direction(args.metric),
         load_if_exists=True,
         sampler=sampler,
         pruner=pruner,
@@ -1104,11 +1151,18 @@ def main():
     if args.curriculum_only:
         print("[Optuna] Architecture/training hyperparams fixed from config/run.yaml")
     print(f"[Optuna] Study stored in {study_db_path}")
-    study.optimize(lambda trial: objective(trial, args), n_trials=args.trials)
+    study.optimize(
+        lambda trial: objective(trial, args),
+        n_trials=args.trials,
+        catch=(RuntimeError, subprocess.CalledProcessError),
+    )
 
+    if not study.best_trials:
+        raise RuntimeError("Optuna produced no completed trials; refusing to export a configuration")
+
+    _confirm_top_trials(args, study)
     _write_ranked_report(study, args.study_name, args)
     _export_best_config(args, study)
-    _confirm_top_trials(args, study)
 
     print("\n=== OPTUNA STUDY FINISHED ===")
     print(f"Best Trial: {study.best_trial.number}")

@@ -591,7 +591,8 @@ rl:
     drawdown: 1.5
     overtrade: 0.0005
     pnl: 1.0
-    tx_cost: 0.3
+    tx_cost: 1.0
+    churn: 0.001
   val_frac: 0.15
   framework: "custom"  # custom|cleanrl|sb3
 # ── Trading strategy parameters ────────────────────────────────────────────

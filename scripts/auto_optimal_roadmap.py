@@ -36,6 +36,12 @@ QUEUE_STATUS_FILE = ROOT / "checkpoints" / "model_queue_status.json"
 TFT_DIR = ROOT / "checkpoints" / "forex_4pair_2015_2025_tft" / "tft"
 ENSEMBLE_DIR = ROOT / "checkpoints" / "ensemble"
 
+# Conservative deployment limits.  These are deliberately stricter than the
+# old positive-return/positive-Sharpe-only gate.
+MAX_EVAL_DRAWDOWN_PCT = 20.0
+MAX_CONFLICT_RATE = 0.50
+MIN_AGREEMENT_SCORE = 0.50
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [OptimalRoadmap] %(message)s",
@@ -255,17 +261,52 @@ def run_stage_4_certification() -> dict:
         n_trades = int(cons.get("n_trades", 0))
         sharpe = float(cons.get("sharpe", 0.0))
         eval_return_pct = float(cons.get("eval_return_pct", 0.0))
+        max_drawdown_pct = float(cons.get("max_drawdown_pct", float("inf")))
+        conflict_rate = float(cons.get("conflict_rate", float("inf")))
+        agreement_score = float(cons.get("mean_agreement_score", 0.0))
     else:
         n_trades = int(rl_metrics.get("n_trades", 0))
         sharpe = float(rl_metrics.get("sharpe", 0.0))
         eval_return_pct = float(rl_metrics.get("eval_return_pct", rl_metrics.get("train_return_pct", 0.0)))
+        max_drawdown_pct = float(rl_metrics.get("max_drawdown_pct", float("inf")))
+        conflict_rate = float(rl_metrics.get("conflict_rate", float("inf")))
+        agreement_score = float(rl_metrics.get("mean_agreement_score", 0.0))
 
-    # Hard Quality Gate evaluation
     reasons = []
+    # 7-fold averaged promotion: reject single-fold lottery (e.g. gnn 38 vs -19, tft 41 vs -26)
+    try:
+        import glob as _glob
+        fold_sharpes=[]
+        for pat in ["checkpoints/forex_4pair_2015_2025_*/**/*_fold*_config.json", "checkpoints/ensemble/*_fold*_config.json"]:
+            for fp in _glob.glob(pat, recursive=True):
+                try:
+                    import json as _j; _d=_j.load(open(fp))
+                    v=float(_d.get("best_val_sharpe_proxy", _d.get("best_val_sharpe", 0)))
+                    if abs(v)<100: fold_sharpes.append(v)
+                except: pass
+        if len(fold_sharpes)>=7:
+            avg_sh=float(sum(fold_sharpes)/len(fold_sharpes))
+            var_sh=float(max(fold_sharpes)-min(fold_sharpes))
+            if var_sh>30:
+                reasons.append(f"High fold variance {var_sh:.1f} (max {max(fold_sharpes):.1f} min {min(fold_sharpes):.1f}) single-fold lottery")
+            if avg_sh<2.0:
+                reasons.append(f"7-fold avg Sharpe {avg_sh:.2f} <2.0")
+            if any(v < -15 for v in fold_sharpes):
+                reasons.append(f"Fold crash < -15 Sharpe present {min(fold_sharpes):.1f}")
+    except Exception as _e:
+        pass
+    # Hard Quality Gate evaluation
     if n_trades == 0:
         cert_status = "FAILED_ZERO_TRADES"
         reasons.append("Model/Ensemble took zero trades during evaluation (inaction collapse)")
-    elif n_trades < 10 or eval_return_pct <= 0.0 or sharpe <= 0.0:
+    elif (
+        n_trades < 10
+        or eval_return_pct <= 0.0
+        or sharpe <= 0.0
+        or max_drawdown_pct > MAX_EVAL_DRAWDOWN_PCT
+        or conflict_rate > MAX_CONFLICT_RATE
+        or agreement_score < MIN_AGREEMENT_SCORE
+    ):
         cert_status = "REJECTED_INACTION_COLLAPSE"
         if n_trades < 10:
             reasons.append(f"Insufficient trade count: {n_trades} < 10 required")
@@ -273,6 +314,12 @@ def run_stage_4_certification() -> dict:
             reasons.append(f"Non-positive evaluation return: {eval_return_pct:+.2f}% <= 0.0%")
         if sharpe <= 0.0:
             reasons.append(f"Non-positive Sharpe ratio: {sharpe:.2f} <= 0.0")
+        if max_drawdown_pct > MAX_EVAL_DRAWDOWN_PCT:
+            reasons.append(f"Evaluation drawdown: {max_drawdown_pct:.2f}% > {MAX_EVAL_DRAWDOWN_PCT:.2f}%")
+        if conflict_rate > MAX_CONFLICT_RATE:
+            reasons.append(f"Policy conflict rate: {conflict_rate:.1%} > {MAX_CONFLICT_RATE:.1%}")
+        if agreement_score < MIN_AGREEMENT_SCORE:
+            reasons.append(f"Policy agreement: {agreement_score:.1%} < {MIN_AGREEMENT_SCORE:.1%}")
     elif n_trades >= 10 and sharpe > 0.5 and eval_return_pct > 0.0:
         cert_status = "CERTIFIED_READY_FOR_DEPLOYMENT"
     else:
@@ -296,6 +343,9 @@ def run_stage_4_certification() -> dict:
             "min_trades_required": 10,
             "min_sharpe_required": 0.5,
             "min_return_required": 0.0,
+            "max_drawdown_pct": MAX_EVAL_DRAWDOWN_PCT,
+            "max_conflict_rate": MAX_CONFLICT_RATE,
+            "min_agreement_score": MIN_AGREEMENT_SCORE,
         },
         "architecture_stack": {
             "base_models": ["haelt", "mamba", "gnn", "tft"],

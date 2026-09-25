@@ -55,7 +55,17 @@ import pandas as pd
 
 from infrastructure.logging_utils import log_data_load
 
-_log = logging.getLogger(__name__)
+# Windows DLL Order Hardening: PyTorch must load before PyArrow/Pandas
+# to ensure modern MSVCP140.dll (VS 2022) is bound into the process address space.
+try:
+    import torch as _torch
+    if _torch.cuda.is_available():
+        _ = _torch.zeros(1, device="cuda:0")
+except Exception:
+    pass
+
+import numpy as np
+import pandas as pd
 
 # ── Cache paths ────────────────────────────────────────────────────────────────
 # Canonical location.  The stale root-level cache is merged in on first load.
@@ -82,69 +92,80 @@ LABEL_MAP = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
+_SHARED_CACHE: dict | None = None
+_SHARED_CACHE_LOCK = threading.Lock()
+
+
 def _load_cache() -> dict:
     """
     Load the canonical cache, merging the stale root-level file if present.
-    After merging the stale file is deleted so it won't be read again.
+    Cached as a singleton in memory across instances.
     """
-    cache: dict = {}
-    _t0 = time.perf_counter()
+    global _SHARED_CACHE
+    with _SHARED_CACHE_LOCK:
+        if _SHARED_CACHE is not None:
+            return _SHARED_CACHE
 
-    # Load canonical cache
-    if CACHE_FILE.exists():
-        try:
-            with open(CACHE_FILE, "rb") as f:
-                cache = pickle.load(f)
-            log_data_load(
-                "finbert_cache_load",
-                str(CACHE_FILE),
-                n_rows=len(cache),
-                status="ok",
-                t0=_t0,
-                note=f"size_mb={CACHE_FILE.stat().st_size / 1e6:.1f}",
-            )
-        except Exception as _e:
-            log_data_load(
-                "finbert_cache_load",
-                str(CACHE_FILE),
-                n_rows=0,
-                status="corrupt",
-                t0=_t0,
-                exc=_e,
-                note="cache will be re-scored live",
-            )
-            cache = {}
-    else:
-        log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0, status="skip_missing")
+        cache: dict = {}
+        _t0 = time.perf_counter()
 
-    # Merge stale root cache if it exists
-    if _STALE_CACHE_FILE.exists() and _STALE_CACHE_FILE != CACHE_FILE:
-        try:
-            with open(_STALE_CACHE_FILE, "rb") as f:
-                stale = pickle.load(f)
-            before = len(cache)
-            cache.update({k: v for k, v in stale.items() if k not in cache})
-            merged = len(cache) - before
-            if merged:
-                print(
-                    f"[Sentiment] Merged {merged} entries from stale cache {_STALE_CACHE_FILE}",
-                    flush=True,
+        # Load canonical cache
+        if CACHE_FILE.exists():
+            try:
+                with open(CACHE_FILE, "rb") as f:
+                    cache = pickle.load(f)
+                log_data_load(
+                    "finbert_cache_load",
+                    str(CACHE_FILE),
+                    n_rows=len(cache),
+                    status="ok",
+                    t0=_t0,
+                    note=f"size_mb={CACHE_FILE.stat().st_size / 1e6:.1f}",
                 )
-            _STALE_CACHE_FILE.unlink(missing_ok=True)
-            log_data_load(
-                "finbert_cache_stale_merge",
-                str(_STALE_CACHE_FILE),
-                n_rows=merged,
-                status="ok",
-                note=f"into {len(cache)} total entries",
-            )
-        except Exception as _e:
-            log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE), n_rows=0, status="error", exc=_e)
+            except Exception as _e:
+                log_data_load(
+                    "finbert_cache_load",
+                    str(CACHE_FILE),
+                    n_rows=0,
+                    status="corrupt",
+                    t0=_t0,
+                    exc=_e,
+                    note="cache will be re-scored live",
+                )
+                cache = {}
+        else:
+            log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0, status="skip_missing")
 
-    return cache
+        # Merge stale root cache if it exists
+        if _STALE_CACHE_FILE.exists() and _STALE_CACHE_FILE != CACHE_FILE:
+            try:
+                with open(_STALE_CACHE_FILE, "rb") as f:
+                    stale = pickle.load(f)
+                before = len(cache)
+                cache.update({k: v for k, v in stale.items() if k not in cache})
+                merged = len(cache) - before
+                if merged:
+                    print(
+                        f"[Sentiment] Merged {merged} entries from stale cache {_STALE_CACHE_FILE}",
+                        flush=True,
+                    )
+                _STALE_CACHE_FILE.unlink(missing_ok=True)
+                log_data_load(
+                    "finbert_cache_stale_merge",
+                    str(_STALE_CACHE_FILE),
+                    n_rows=merged,
+                    status="ok",
+                    note=f"into {len(cache)} total entries",
+                )
+            except Exception as _e:
+                log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE), n_rows=0, status="error", exc=_e)
+
+        _SHARED_CACHE = cache
+        return _SHARED_CACHE
 
 
 def _save_cache(cache: dict) -> None:
+    global _SHARED_CACHE
     _t0 = time.perf_counter()
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -152,6 +173,8 @@ def _save_cache(cache: dict) -> None:
         with open(tmp, "wb") as f:
             pickle.dump(cache, f)
         os.replace(tmp, CACHE_FILE)
+        with _SHARED_CACHE_LOCK:
+            _SHARED_CACHE = cache
         log_data_load(
             "finbert_cache_save",
             str(CACHE_FILE),
@@ -425,6 +448,16 @@ class SentimentPipeline:
         if not self._backend:
             self._detect_backend()
         return self._backend or "unknown"
+
+    def warmup(self) -> None:
+        """Eagerly warm up the active backend on startup to eliminate cold-start latency & runtime DLL crashes."""
+        backend = self.active_backend()
+        if backend == "finbert":
+            try:
+                _get_finbert()
+                _ = self.score_headlines(["Market update warmup"])
+            except Exception as _e:
+                _log.warning(f"FinBERT warmup failed: {_e}")
 
     def score_headlines_batch(self, headlines: list[str]) -> list[float]:
         """

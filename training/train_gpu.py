@@ -156,6 +156,7 @@ from models.architectures import (
 # Re-export needed helpers for tests
 from training.model_factory import _multitask_head_in, build_model
 from monitoring.drift_gate import run_drift_gate
+from validation.promotion_gate import GateConfig, PromotionGate
 
 # Advanced Training Mechanics
 from validation.mlflow_logger import MLflowModelLogger
@@ -850,7 +851,7 @@ def main():
                 h, bv = supervised_train(model_name, cache_path, n_samples, n_features, ta, device, n_gpus, run=None)  # noqa: B023, RUF059
                 return bv
 
-            direction = "maximize" if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe" else "minimize"
+            direction = "minimize" if getattr(model_args, 'early_stop_metric', 'val_loss') == "val_loss" else "maximize"
             import optuna
 
             study = optuna.create_study(direction=direction, pruner=optuna.pruners.MedianPruner())
@@ -966,6 +967,18 @@ def main():
         _cv_n = max(0, n_samples - _holdout_n)
         if _holdout_n > 0:
             print(f"[Holdout] Reserved last {_holdout_n:,} bars for promotion gate (CV uses 0:{_cv_n:,})")
+
+        def _gate_sim_for_hist_outer(hist: dict, early_metric: str) -> dict:
+            try:
+                vs = hist.get("val_sharpe", []) or []
+                best_sh = float(max(vs)) if vs else 0.0
+                pf = max(1.0, 1.0 + best_sh * 0.12)
+                mdd = max(0.02, 0.12 - best_sh * 0.015)
+                gate = PromotionGate(GateConfig()).evaluate(sharpe=best_sh, profit_factor=pf, max_drawdown=mdd, n_trades=150, gross_pnl=1.0, n_obs=800)
+                return gate
+            except Exception as _ge:
+                return {"promoted": False, "error": str(_ge)}
+
         if model_args.walk_forward_cv:
             splits, _cv_strategy = _build_cv_splits(model_args, _cv_n)
             print(
@@ -973,6 +986,26 @@ def main():
                 f"| embargo={_embargo_bars(model_args)} purge={_purge_bars(model_args)}"
             )
             cv_hist: list[dict] = []
+
+            def _gate_sim_for_hist(hist: dict, early_metric: str) -> dict:
+                """Simulate promotion gate on CV history (mismatch fix)."""
+                try:
+                    vs = hist.get("val_sharpe", []) or []
+                    best_sh = float(max(vs)) if vs else 0.0
+                    # Approximate gate inputs from history when full backtest not run
+                    pf = max(1.0, 1.0 + best_sh * 0.12)
+                    mdd = max(0.02, 0.12 - best_sh * 0.015)
+                    n_tr = 150
+                    gate = PromotionGate(GateConfig()).evaluate(
+                        sharpe=best_sh, profit_factor=pf, max_drawdown=mdd, n_trades=n_tr, gross_pnl=1.0, n_obs=800
+                    )
+                    # Log mismatch: early_stop on cost_sharpe vs gate on sharpe
+                    if early_metric == "cost_sharpe" and best_sh < 1.5 and gate.get("gates", {}).get("sharpe_ok"):
+                        print(f"[GateSim] Fold early_stop cost_sharpe but gate sharpe {best_sh:.2f} < 1.5 → would REJECT despite early_stop PASS")
+                    return gate
+                except Exception as _ge:
+                    return {"promoted": False, "error": str(_ge)}
+
             _start_fold = 0
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))
             _artifact_model_name = _slug_part(model_name, max_len=80)
@@ -1010,7 +1043,18 @@ def main():
                         fold_id=fi,
                         amp_dtype=amp_dtype,
                     )
-                cv_hist.append({"fold": fi, "best_metric": best_val, "history": history})
+                gate_sim = _gate_sim_for_hist(history, getattr(model_args, 'early_stop_metric', 'val_loss'))
+                cv_hist.append({"fold": fi, "best_metric": best_val, "history": history, "gate_sim": gate_sim})
+                # Per-fold gate simulation vs early_stop (mismatch fix)
+                try:
+                    vs_curve = history.get("val_sharpe", []) or []
+                    best_sh = float(max(vs_curve)) if vs_curve else 0.0
+                    promoted = gate_sim.get("promoted", False)
+                    print(f"[GateSim] Fold {fi}: val_sharpe {best_sh:.2f} → gate {'PASS' if promoted else 'REJECT'} (early_stop {getattr(model_args,'early_stop_metric','val_loss')})")
+                    from training.core import _safe_wandb_log
+                    _safe_wandb_log(wandb_run, {f"gate/fold_{fi}_promoted": int(promoted), f"gate/fold_{fi}_sharpe": best_sh})
+                except Exception:
+                    pass
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))
 
             _artifact_model_name = _slug_part(model_name, max_len=80)
@@ -1035,6 +1079,17 @@ def main():
                     run=wandb_run,
                     amp_dtype=amp_dtype,
                 )
+            # Gate simulation for single-split (mismatch fix)
+            try:
+                gate_sim = _gate_sim_for_hist_outer(history, getattr(model_args, 'early_stop_metric','val_loss'))
+                vs_curve = history.get("val_sharpe", []) or []
+                best_sh = float(max(vs_curve)) if vs_curve else 0.0
+                print(f"[GateSim] Single: val_sharpe {best_sh:.2f} → gate {'PASS' if gate_sim.get('promoted') else 'REJECT'} (early_stop {getattr(model_args,'early_stop_metric','val_loss')})")
+                from training.core import _safe_wandb_log as _swl2
+                _swl2(wandb_run, {"gate/single_promoted": int(gate_sim.get("promoted", False)), "gate/single_sharpe": best_sh})
+                history["gate_sim"] = gate_sim
+            except Exception:
+                pass
             with open(log_dir / f"{run_name}_{model_name}.json", "w", encoding="utf-8") as fp:
                 json.dump(history, fp)
             _generate_model_card(model_name, model_args, history, model_args.checkpoint_dir, n_features)

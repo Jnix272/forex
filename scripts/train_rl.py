@@ -254,7 +254,29 @@ def main():
     signals = None
     raw_x = None
 
-    if sig_cache_file.exists():
+    # Cached signals/features are only valid for the exact supervised
+    # checkpoints that produced them.  Invalidate them when any relevant
+    # checkpoint is newer; shape-only validation was allowing stale signals
+    # after retraining.
+    relevant_ckpts = []
+    if is_ensemble:
+        relevant_ckpts.append(ckpt_dir / "ensemble" / "ensemble_meta_best.pt")
+        relevant_ckpts.extend(resolve_checkpoint(name, ckpt_dir) for name in args.ensemble_bases)
+    elif not is_dummy:
+        resolved = resolve_checkpoint(args.model_name, ckpt_dir)
+        if resolved:
+            relevant_ckpts.append(resolved)
+    relevant_ckpts = [Path(p) for p in relevant_ckpts if p and Path(p).exists()]
+    cache_is_stale = bool(relevant_ckpts) and any(
+        p.stat().st_mtime > cache.stat().st_mtime
+        for p in relevant_ckpts
+        for cache in (sig_cache_file, feat_cache_file)
+        if cache.exists()
+    )
+    if cache_is_stale:
+        logging.info("Invalidating supervised signal/feature caches: checkpoint is newer")
+
+    if sig_cache_file.exists() and not cache_is_stale:
         try:
             cached_sig = np.load(sig_cache_file)
             if len(cached_sig) == num_samples:
@@ -263,7 +285,7 @@ def main():
         except Exception as e:
             logging.warning(f"Could not load cached signals: {e}")
 
-    if feat_cache_file.exists():
+    if feat_cache_file.exists() and not cache_is_stale:
         try:
             cached_feat = np.load(feat_cache_file)
             if len(cached_feat) == num_samples:
@@ -373,19 +395,44 @@ def main():
     # Enrich the RL state: supervised signal + raw market features
     enriched_features = np.concatenate([signals, raw_x], axis=1)
 
-    logging.info(f"Initializing ForexTradingEnv with {min_len} bars...")
+    # Keep RL training and evaluation strictly chronological.  The previous
+    # implementation trained and evaluated random episodes from the same full
+    # history, which made the reported RL metrics in-sample.
+    train_end = max(2, int(min_len * 0.70))
+    eval_start = min_len - max(2, int(min_len * 0.20))
+    embargo = max(1, int(getattr(args, "hist_len", 32)))
+    eval_start = max(train_end + embargo, eval_start)
+    if eval_start >= min_len - 1:
+        raise ValueError("RL dataset is too short for chronological train/evaluation split")
+    logging.info(
+        f"Initializing chronological RL environments: train=[0,{train_end}), "
+        f"eval=[{eval_start},{min_len})"
+    )
     env = ForexTradingEnv(
-        features=enriched_features,
-        prices=prices,
-        atr=atr,
-        spreads=spreads,
+        features=enriched_features[:train_end],
+        prices=prices[:train_end],
+        atr=atr[:train_end],
+        spreads=spreads[:train_end],
         initial_equity=10_000.0,
         lot_size=10_000.0,
         max_lots=3.0,
         commission_per_lot=3.5,
         slippage_pips=0.5,
         random_reset=True,
-        episode_len=min(5000, min_len - 1),
+        episode_len=min(5000, train_end - 1),
+    )
+    eval_env = ForexTradingEnv(
+        features=enriched_features[eval_start:],
+        prices=prices[eval_start:],
+        atr=atr[eval_start:],
+        spreads=spreads[eval_start:],
+        initial_equity=10_000.0,
+        lot_size=10_000.0,
+        max_lots=3.0,
+        commission_per_lot=3.5,
+        slippage_pips=0.5,
+        random_reset=False,
+        episode_len=eval_start and min(5000, min_len - eval_start - 1),
     )
 
     if not args.multi_agent:
@@ -409,9 +456,9 @@ def main():
         logging.info(f"Training single {args.agent.upper()} agent for {args.episodes} episodes...")
         returns = train_agent(agent, env, n_episodes=args.episodes, agent_type=args.agent, curriculum=curriculum)
 
-        eval_episodes = max(1, min(5, args.episodes))
+        eval_episodes = max(10, min(20, args.episodes))
         logging.info(f"Evaluating single {args.agent.upper()} agent over {eval_episodes} evaluation episodes...")
-        eval_returns, final_summary = evaluate_agent(agent, env, n_episodes=eval_episodes, agent_type=args.agent, greedy=True)
+        eval_returns, final_summary = evaluate_agent(agent, eval_env, n_episodes=eval_episodes, agent_type=args.agent, greedy=True)
         eval_ret_avg = float(np.mean(eval_returns))
 
         report = {
@@ -497,9 +544,9 @@ def main():
             sub_returns = train_agent(
                 sub_agent, env, n_episodes=args.episodes, agent_type=atype, curriculum=curriculum
             )
-            eval_episodes = max(1, min(5, args.episodes))
+            eval_episodes = max(10, min(20, args.episodes))
             sub_eval_returns, sub_summary = evaluate_agent(
-                sub_agent, env, n_episodes=eval_episodes, agent_type=atype, greedy=True
+                sub_agent, eval_env, n_episodes=eval_episodes, agent_type=atype, greedy=True
             )
             ret_avg = float(np.mean(sub_eval_returns))
             train_ret_avg = float(np.mean(sub_returns[-10:]) if len(sub_returns) >= 10 else np.mean(sub_returns))
@@ -533,9 +580,9 @@ def main():
         )
 
         # Consensus Evaluation
-        eval_episodes = max(1, min(5, args.episodes))
+        eval_episodes = max(10, min(20, args.episodes))
         logging.info(f"Evaluating RLEnsemble consensus policy over {eval_episodes} evaluation episodes...")
-        ens_returns, ens_summary, ens_diag = ensemble.evaluate(env, n_episodes=eval_episodes, greedy=True)
+        ens_returns, ens_summary, ens_diag = ensemble.evaluate(eval_env, n_episodes=eval_episodes, greedy=True)
         ens_ret_avg = float(np.mean(ens_returns))
         logging.info(
             f"RLEnsemble Evaluation complete | Return: {ens_ret_avg:+.2f}% | "
@@ -544,6 +591,21 @@ def main():
             f"Policy Uncertainty: {ens_diag['mean_policy_uncertainty']:.3f} | "
             f"Conflict Rate: {ens_diag['conflict_rate']:.1%}"
         )
+        # Prune bankrupt/high-conflict ensemble: if 2/3 agents bankrupt or conflict >50%, rebuild with eligible only
+        if float(ens_diag["conflict_rate"]) > 0.50 or float(ens_diag["mean_agreement_score"]) < 0.20:
+            eligible_idx = [
+                i for i, m in enumerate(agent_metrics)
+                if float(m.get("eval_return_pct", 0.0)) > -10.0 and float(m.get("max_drawdown_pct", 100.0)) < 50.0
+            ]
+            if 1 <= len(eligible_idx) < len(trained_agents):
+                logging.warning(f"Pruning {len(trained_agents)-len(eligible_idx)} bankrupt agent(s) due to conflict {ens_diag['conflict_rate']:.1%}")
+                from models.rl_advanced import RLEnsemble as _RE
+                pruned_agents = [trained_agents[i] for i in eligible_idx]
+                pruned_types = [agent_types[i] for i in eligible_idx]
+                ensemble = _RE(pruned_agents, pruned_types, consensus_mode=args.consensus_mode)
+                ens_returns, ens_summary, ens_diag = ensemble.evaluate(eval_env, n_episodes=eval_episodes, greedy=True)
+                ens_ret_avg = float(np.mean(ens_returns))
+                logging.info(f"Pruned ensemble re-eval | Return {ens_ret_avg:+.2f}% Sharpe {ens_summary['sharpe']:.2f} Conflict {ens_diag['conflict_rate']:.1%}")
 
         # Save Artifact 1: RLEnsemble checkpoint
         ens_ckpt_path = out_dir / "rl_ensemble_best.pt"
@@ -563,7 +625,23 @@ def main():
         logging.info(f"Saved RLEnsemble checkpoint to {ens_ckpt_path}")
 
         # Save Artifact 2: Top individual agent as rl_best.pt (for backward compatibility)
-        best_idx = int(np.argmax([m["sharpe"] for m in agent_metrics]))
+        # Sharpe alone can select a catastrophic policy when it is computed
+        # from a noisy/annualised P&L stream. Prefer positive-return agents
+        # with controlled drawdown; use Sharpe only as the tie-breaker.
+        eligible = [
+            i for i, m in enumerate(agent_metrics)
+            if float(m.get("eval_return_pct", m.get("total_return_pct", 0.0))) > 0.0
+            and float(m.get("max_drawdown_pct", m.get("max_dd_pct", float("inf")))) <= 20.0
+        ]
+        ranked = eligible or list(range(len(agent_metrics)))
+        best_idx = max(
+            ranked,
+            key=lambda i: (
+                float(agent_metrics[i].get("eval_return_pct", agent_metrics[i].get("total_return_pct", 0.0))),
+                -float(agent_metrics[i].get("max_drawdown_pct", agent_metrics[i].get("max_dd_pct", float("inf")))),
+                float(agent_metrics[i].get("sharpe", 0.0)),
+            ),
+        )
         best_agent = trained_agents[best_idx]
         best_atype = agent_types[best_idx]
         rl_ckpt_path = out_dir / "rl_best.pt"
@@ -594,6 +672,7 @@ def main():
                 "mean_disagreement_score": float(ens_diag["mean_disagreement_score"]),
                 "mean_policy_uncertainty": float(ens_diag["mean_policy_uncertainty"]),
                 "conflict_rate": float(ens_diag["conflict_rate"]),
+                "evaluation_episodes": eval_episodes,
             },
         }
         report_path = out_dir / "rl_report.json"

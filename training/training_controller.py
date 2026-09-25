@@ -28,11 +28,10 @@ class TrainingController:
         self.val_sharpe_ema_history: list[float] = []
         self.val_sharpe_ema: float | None = None
         self.dir_acc_history: list[float] = []
+        _adap = adaptation or {}
         # How many consecutive epochs dir_acc must stay below 0.50 before acting.
         self.dir_acc_below_random_window: int = int(_adap.get("dir_acc_below_random_window", 2))
         self.dir_acc_random_threshold: float = float(_adap.get("dir_acc_random_threshold", 0.50))
-
-        _adap = adaptation or {}
         self.collapse_drop: float = float(_adap.get("collapse_drop", 0.50))
         self.collapse_min_peak: float = float(_adap.get("collapse_min_peak", 0.50))
         self.collapse_lr_mult: float = float(_adap.get("collapse_lr_mult", 0.50))

@@ -83,7 +83,7 @@ def test_extract_model_temperature():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_forex_env_reward_weights_default():
-    """Verify that ForexTradingEnv defaults overtrade penalty to 0.0005."""
+    """Verify that ForexTradingEnv defaults overtrade penalty to 0.0005, tx_cost to 1.0, and churn to 0.001."""
     prices = np.array([1.1000, 1.1005, 1.1010, 1.1008, 1.1015], dtype=np.float32)
     features = np.zeros((5, 10), dtype=np.float32)
     atr = np.full(5, 0.0010, dtype=np.float32)
@@ -92,10 +92,13 @@ def test_forex_env_reward_weights_default():
     env = ForexTradingEnv(prices=prices, features=features, atr=atr, spreads=spreads)
     assert env.rw["overtrade"] == pytest.approx(0.0005)
     assert env.rw["idle"] == pytest.approx(1.0)
+    assert env.rw["tx_cost"] == pytest.approx(1.0)
+    assert env.rw["churn"] == pytest.approx(0.001)
+    assert env.enable_idle_penalty is False
 
 
 def test_forex_env_idle_penalty_on_directional_signal():
-    """Verify that choosing HOLD while flat during a strong signal incurs an idle penalty."""
+    """Verify that choosing HOLD while flat during a strong signal incurs an idle penalty when enabled."""
     prices = np.array([1.1000, 1.1005, 1.1010, 1.1015, 1.1020], dtype=np.float32)
     # Put strong directional signal in first feature column (s = +0.30 > 0.15)
     features = np.zeros((5, 10), dtype=np.float32)
@@ -103,15 +106,66 @@ def test_forex_env_idle_penalty_on_directional_signal():
     atr = np.full(5, 0.0010, dtype=np.float32)
     spreads = np.full(5, 0.0001, dtype=np.float32)
 
-    env = ForexTradingEnv(prices=prices, features=features, atr=atr, spreads=spreads, random_reset=False)
+    env = ForexTradingEnv(
+        prices=prices,
+        features=features,
+        atr=atr,
+        spreads=spreads,
+        random_reset=False,
+        enable_idle_penalty=True,
+    )
     env.reset()
 
     # Step with HOLD (action 0) while position is 0
     obs, reward, done, info = env.step(ScalingAction.HOLD.value)
     # Expected idle penalty: 0.001 * 0.30 = 0.0003
-    # Flat position means mtm_pnl = 0, cost = 0, dd = 0, overtrade = 0
+    # Flat position means mtm_pnl = 0, cost = 0, dd = 0, overtrade = 0, churn = 0
     assert reward < 0.0, f"Expected negative reward from idle penalty, got {reward}"
     assert np.isclose(reward, -0.0003, atol=1e-5)
+
+
+def test_forex_env_default_flat_inaction_no_penalty():
+    """Verify that holding flat by default does NOT incur idle penalty (eliminating overtrading churn)."""
+    prices = np.array([1.1000, 1.1005, 1.1010, 1.1015, 1.1020], dtype=np.float32)
+    features = np.zeros((5, 10), dtype=np.float32)
+    features[:, 0] = 0.30  # even with directional signal, idle penalty is False by default
+    atr = np.full(5, 0.0010, dtype=np.float32)
+    spreads = np.full(5, 0.0001, dtype=np.float32)
+
+    env = ForexTradingEnv(prices=prices, features=features, atr=atr, spreads=spreads, random_reset=False)
+    env.reset()
+
+    obs, reward, done, info = env.step(ScalingAction.HOLD.value)
+    assert np.isclose(reward, 0.0, atol=1e-6), f"Expected 0 penalty for flat HOLD, got {reward}"
+
+
+def test_forex_env_churn_penalty_on_position_flip():
+    """Verify that flipping position incurs churn penalty proportional to delta_pos."""
+    prices = np.array([1.1000, 1.1000, 1.1000, 1.1000, 1.1000], dtype=np.float32)
+    features = np.zeros((5, 10), dtype=np.float32)
+    atr = np.full(5, 0.0010, dtype=np.float32)
+    spreads = np.full(5, 0.0, dtype=np.float32)  # 0 spread to isolate churn
+
+    env = ForexTradingEnv(
+        prices=prices,
+        features=features,
+        atr=atr,
+        spreads=spreads,
+        commission_per_lot=0.0,
+        slippage_pips=0.0,
+        random_reset=False,
+    )
+    env.reset()
+
+    # Step 1: Open Long (delta_pos = 1.0)
+    _, r1, _, _ = env.step(ScalingAction.OPEN_LONG.value)
+    # Expected: churn_penalty = 0.001 * 1.0 = 0.001, overtrade = 0.0005 * 4 = 0.002
+    assert r1 < -0.0025
+
+    # Step 2: Flip to Short (delta_pos = 2.0: from +1.0 to -1.0)
+    _, r2, _, _ = env.step(ScalingAction.OPEN_SHORT.value)
+    # churn_penalty = 0.001 * 2.0 = 0.002
+    assert r2 < -0.0035
 
 
 def test_forex_env_active_trading_incentive():
@@ -127,8 +181,74 @@ def test_forex_env_active_trading_incentive():
 
     # Enter long on strong signal
     obs, reward, done, info = env.step(ScalingAction.OPEN_LONG.value)
-    # Penalty is ~0.0005 overtrade + execution cost, not -0.20!
-    assert reward > -0.05, f"Reward {reward} indicates excessive overtrading penalty"
+    # Penalty is ~0.0005 overtrade + ATR-normalized execution cost (~0.40) + churn, not -1.0 or -0.20!
+    assert reward > -0.50, f"Reward {reward} indicates excessive overtrading penalty"
+
+
+def test_forex_env_atr_normalized_tx_cost():
+    """Verify that transaction friction is normalized by bar ATR in USD."""
+    prices = np.array([1.1000, 1.1000, 1.1000], dtype=np.float32)
+    features = np.zeros((3, 10), dtype=np.float32)
+    # ATR = 0.0010 (10 pips). On lot_size 10,000, bar ATR in USD = 0.0010 * 10,000 = $10.00
+    atr = np.full(3, 0.0010, dtype=np.float32)
+    spreads = np.zeros(3, dtype=np.float32)
+
+    env = ForexTradingEnv(
+        prices=prices,
+        features=features,
+        atr=atr,
+        spreads=spreads,
+        commission_per_lot=2.0,
+        slippage_pips=0.0,
+        lot_size=10_000.0,
+        random_reset=False,
+    )
+    env.reset()
+
+    # Open Long 1 lot: cost = 1.0 * 2.0 = $2.00
+    # bar_atr_usd = 0.0010 * 10,000 = $10.00
+    # tx_cost_norm = $2.00 / $10.00 = 0.20
+    _, reward, _, _ = env.step(ScalingAction.OPEN_LONG.value)
+    # Total reward components:
+    # mtm_pnl = 0
+    # tx_cost = -0.20
+    # overtrade = -0.0005 * 4 = -0.002
+    # churn = -0.001 * 1.0 = -0.001
+    # total expected ~ -0.203
+    assert np.isclose(reward, -0.203, atol=1e-3)
+
+
+def test_forex_env_action_flip_penalty():
+    """Verify that changing actions across consecutive steps incurs an action flip penalty."""
+    prices = np.array([1.1000, 1.1000, 1.1000, 1.1000], dtype=np.float32)
+    features = np.zeros((4, 10), dtype=np.float32)
+    atr = np.full(4, 0.0010, dtype=np.float32)
+    spreads = np.zeros(4, dtype=np.float32)
+
+    env = ForexTradingEnv(
+        prices=prices,
+        features=features,
+        atr=atr,
+        spreads=spreads,
+        commission_per_lot=0.0,
+        slippage_pips=0.0,
+        random_reset=False,
+    )
+    env.reset()
+
+    # Step 1: HOLD (prev_action is initialized to None, no flip penalty on step 1)
+    _, r1, _, _ = env.step(ScalingAction.HOLD.value)
+    assert np.isclose(r1, 0.0, atol=1e-6)
+
+    # Step 2: HOLD again (same action, no flip penalty)
+    _, r2, _, _ = env.step(ScalingAction.HOLD.value)
+    assert np.isclose(r2, 0.0, atol=1e-6)
+
+    # Step 3: Switch action to OPEN_LONG (action 1 != action 0, incurs action_flip penalty = 0.002)
+    _, r3, _, _ = env.step(ScalingAction.OPEN_LONG.value)
+    # Expected flip penalty 0.002, churn 0.001, overtrade 0.002 -> reward ~ -0.005
+    assert r3 < -0.004
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

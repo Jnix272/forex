@@ -55,18 +55,35 @@ class HPOConfig:
     n_trials: int = 100
     seed: int = 42
 
+    def __post_init__(self):
+        # Enforce metric-direction consistency (val_loss → minimize, val_sharpe → maximize)
+        # Prevents confusion where mode field stores args.mode (e.g. "deep") not metric direction.
+        metric = str(self.metric).lower()
+        expected = "minimize" if metric == "val_loss" else "maximize"
+        if self.mode != expected:
+            # Auto-correct to avoid silent direction mismatch that corrupts DEFAULT_METRICS fallback
+            self.mode = expected
+
     max_concurrent_trials: int = 4
     time_budget_sec: int | None = None
 
     checkpoint_dir: str = "checkpoints/hpo"
     checkpoint_interval: int = 5
 
-    # Default search space used by HyperBand / BOHB suggest_params
+    # Default search space for dry-run / HPOManager tests.
+    # Real Optuna study uses per-model spaces in scripts/optuna_tune.py:_sample_params
+    # (tft: lr 1e-5..1e-3, dropout 0.05..0.35, d_model 64/128/256, nhead 4/8;
+    #  haelt: lr 5e-5..2e-3, dropout 0.1..0.45, d_model 128/256/512, nhead 4/8, layers 2..6;
+    #  transformer: lr 1e-4..3e-3, dropout 0.1..0.4, d_model 128/256/512, nhead 4/8/16, layers 2..8).
+    # This generic union covers all models for HPOConfig direct use.
     search_space: dict[str, Any] = field(
         default_factory=lambda: {
-            "lr": {"type": "loguniform", "low": 1e-5, "high": 1e-2},
-            "dropout": {"type": "uniform", "low": 0.1, "high": 0.5},
-            "hidden_size": {"type": "choice", "values": [128, 256, 512]},
+            "lr": {"type": "loguniform", "low": 1e-5, "high": 3e-3},
+            "dropout": {"type": "uniform", "low": 0.05, "high": 0.45},
+            "hidden_size": {"type": "choice", "values": [64, 128, 256, 512]},
+            "d_model": {"type": "choice", "values": [64, 128, 256, 512]},
+            "nhead": {"type": "choice", "values": [4, 8, 16]},
+            "num_layers": {"type": "int", "low": 2, "high": 8},
             "batch_size": {"type": "choice", "values": [64, 128, 256, 512]},
             "weight_decay": {"type": "loguniform", "low": 1e-6, "high": 1e-2},
         }
@@ -530,40 +547,52 @@ class HPOManager:
         if not OPTUNA_AVAILABLE:
             raise ImportError("Optuna not available")
 
-        if sampler == "tpe":
-            sampler_obj = TPESampler(seed=self.config.seed)
-        elif sampler == "random":
-            from optuna.samplers import RandomSampler
+        # Delegate to single-source build_optuna_search to avoid sampler/pruner drift
+        # vs scripts/optuna_tune.py:1082 (which also calls build_optuna_search).
+        # Keep legacy sampler=="random"/"cmaes" paths for direct HPOManager tests.
+        if sampler in ("random", "cmaes"):
+            if sampler == "random":
+                from optuna.samplers import RandomSampler
 
-            sampler_obj = RandomSampler(seed=self.config.seed)
-        elif sampler == "cmaes":
-            from optuna.samplers import CmaEsSampler
+                sampler_obj = RandomSampler(seed=self.config.seed)
+            else:
+                from optuna.samplers import CmaEsSampler
 
-            sampler_obj = CmaEsSampler(seed=self.config.seed)
+                sampler_obj = CmaEsSampler(seed=self.config.seed)
+            if pruner == "hyperband":
+                pruner_obj = HyperbandPruner(
+                    min_resource=self.config.min_budget,
+                    max_resource=self.config.max_budget,
+                    reduction_factor=self.config.eta,
+                )
+            elif pruner == "median":
+                pruner_obj = MedianPruner(n_warmup_steps=5)
+            elif pruner == "asha":
+                pruner_obj = HyperbandPruner(
+                    min_resource=self.config.min_budget,
+                    max_resource=self.config.max_budget,
+                    reduction_factor=self.config.reduction_factor,
+                )
+            elif pruner == "none":
+                pruner_obj = NopPruner()
+            else:
+                raise ValueError(f"Unknown pruner: {pruner}")
         else:
-            raise ValueError(f"Unknown sampler: {sampler}")
-
-        if pruner == "hyperband":
-            pruner_obj = HyperbandPruner(
+            # Unified mapping: tpe/asha/bohb/pbt → build_optuna_search (single source)
+            # Map legacy "hyperband" pruner alias to bohb scheduler for compatibility.
+            sched = sampler if sampler in ("tpe", "asha", "bohb", "pbt") else "tpe"
+            if pruner == "hyperband" and sched == "tpe":
+                sched = "bohb"
+            sampler_obj, pruner_obj = build_optuna_search(
+                scheduler=sched,
+                seed=self.config.seed,
                 min_resource=self.config.min_budget,
                 max_resource=self.config.max_budget,
                 reduction_factor=self.config.eta,
             )
-        elif pruner == "median":
-            pruner_obj = MedianPruner(n_warmup_steps=5)
-        elif pruner == "asha":
-            pruner_obj = HyperbandPruner(
-                min_resource=self.config.min_budget,
-                max_resource=self.config.max_budget,
-                reduction_factor=self.config.reduction_factor,
-            )
-        elif pruner == "none":
-            pruner_obj = NopPruner()
-        else:
-            raise ValueError(f"Unknown pruner: {pruner}")
 
         study = optuna.create_study(
-            direction="maximize" if self.config.mode == "maximize" else "minimize",
+            direction=direction if direction in ("maximize", "minimize") else ("maximize" if self.config.mode == "maximize" else "minimize"),
             sampler=sampler_obj,
             pruner=pruner_obj,
             study_name=f"hpo_{int(time.time())}",

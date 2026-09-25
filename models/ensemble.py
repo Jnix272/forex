@@ -22,6 +22,7 @@ import pandas as pd
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     TORCH = True
 except ImportError:
@@ -80,6 +81,42 @@ if TORCH:
             t = t.mean(dim=tuple(range(1, t.dim())))
         return t.reshape(-1)
 
+    class TemporalAttentionPooling(nn.Module):
+        """
+        Temporal attention pooling over sequence (B, S, F).
+        Computes normalized attention weights over all S bars, pools features,
+        and concatenates with the current (last) bar to preserve both temporal
+        context and immediate microstructure.
+        """
+
+        def __init__(self, hidden: int = 64, out_dim: int = 32):
+            super().__init__()
+            self.proj = nn.LazyLinear(hidden)
+            self.query = nn.Parameter(torch.randn(hidden))
+            self.out_proj = nn.LazyLinear(out_dim)
+            self.act = nn.ReLU()
+
+        def forward(self, x: torch.Tensor, return_attention: bool = False):
+            # Normalize feature dimension so macro features (e.g. volume ~ 10^5) don't dominate
+            x_norm = F.layer_norm(x, (x.shape[-1],))
+            if x.dim() == 2:
+                out = self.out_proj(self.act(self.proj(x_norm)))
+                if return_attention:
+                    return out, torch.ones(x.shape[0], 1, device=x.device)
+                return out
+            # x: (B, S, F)
+            h = torch.tanh(self.proj(x_norm))  # (B, S, hidden)
+            scale = max(float(h.shape[-1]) ** 0.5, 1e-4)
+            scores = torch.matmul(h, self.query) / scale  # (B, S)
+            weights = torch.softmax(scores, dim=1)  # (B, S)
+            pooled = (weights.unsqueeze(-1) * h).sum(dim=1)  # (B, hidden)
+            last_bar = x_norm[:, -1, :]  # (B, F)
+            combined = torch.cat([pooled, last_bar], dim=-1)  # (B, hidden + F)
+            out = self.out_proj(combined)
+            if return_attention:
+                return out, weights
+            return out
+
     # ── 1. ENSEMBLE META-LEARNER ──────────────────────────────────────────────
 
     class EnsembleMetaLearner(nn.Module):
@@ -113,18 +150,18 @@ if TORCH:
                 else None
             )
 
-            # Context encoder: maps last bar features -> context vector
-            self.context_enc = nn.Sequential(
-                nn.LazyLinear(hidden),
-                nn.ReLU(),
-                nn.Linear(hidden, context_dim),
-            )
-            # Meta-network: context + n_model predictions -> weights
+            # Context encoder: temporal attention pooling across sequence
+            self.context_enc = TemporalAttentionPooling(hidden=hidden, out_dim=context_dim)
+            # Meta-network: normalized context + n_model predictions -> weights
+            self.meta_norm = nn.LayerNorm(context_dim + self.n_models)
             self.meta = nn.Sequential(
                 nn.Linear(context_dim + self.n_models, hidden),
                 nn.ReLU(),
                 nn.Linear(hidden, self.n_models),
             )
+            # Initialize output layer to zero so initial ensemble weights start uniform (1/N)
+            nn.init.zeros_(self.meta[2].weight)
+            nn.init.zeros_(self.meta[2].bias)
 
         def _base_input(self, x: torch.Tensor, idx: int) -> torch.Tensor:
             if self._base_seq_lens is None:
@@ -134,21 +171,68 @@ if TORCH:
                 return x[:, -seq_len:, :]
             return x
 
+        def unfreeze_base_heads(self, unfreeze: bool = True) -> list[nn.Parameter]:
+            """Unfreeze only the final projection head of each base model for diversity fine-tuning."""
+            self._base_heads_unfrozen = bool(unfreeze)
+            unfrozen_params = []
+            for m in self.bases:
+                for p in m.parameters():
+                    p.requires_grad = False
+                if unfreeze:
+                    head_found = False
+                    if hasattr(m, "task_head"):
+                        for p in m.task_head.parameters():
+                            p.requires_grad = True
+                            unfrozen_params.append(p)
+                        head_found = True
+                    elif hasattr(m, "backbone") and hasattr(m.backbone, "task_head"):
+                        for p in m.backbone.task_head.parameters():
+                            p.requires_grad = True
+                            unfrozen_params.append(p)
+                        head_found = True
+                    elif hasattr(m, "head"):
+                        for p in m.head.parameters():
+                            p.requires_grad = True
+                            unfrozen_params.append(p)
+                        head_found = True
+                    if not head_found:
+                        linears = [mod for mod in m.modules() if isinstance(mod, nn.Linear)]
+                        if linears:
+                            for p in linears[-1].parameters():
+                                p.requires_grad = True
+                                unfrozen_params.append(p)
+            return unfrozen_params
+
+        def _get_base_preds(self, x: torch.Tensor) -> torch.Tensor:
+            if getattr(self, "_base_heads_unfrozen", False) and torch.is_grad_enabled():
+                return torch.stack(
+                    [_base_pred_to_batch_vector(m(self._base_input(x, i))) for i, m in enumerate(self.bases)], dim=1
+                )
+            with torch.no_grad():
+                return torch.stack(
+                    [_base_pred_to_batch_vector(m(self._base_input(x, i))) for i, m in enumerate(self.bases)], dim=1
+                )
+
         def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """
             x: (B, seq_len, n_features)
             Returns: (prediction, weights) where weights.shape = (B, n_models)
             """
-            with torch.no_grad():
-                preds = torch.stack(
-                    [_base_pred_to_batch_vector(m(self._base_input(x, i))) for i, m in enumerate(self.bases)], dim=1
-                )  # (B, n_models)
-
-            context = self.context_enc(x[:, -1, :])  # Last bar as context
-            meta_in = torch.cat([context, preds], dim=1)
+            preds = self._get_base_preds(x)
+            context = self.context_enc(x)  # Temporal attention pooling across full sequence
+            meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
             weights = torch.softmax(self.meta(meta_in), dim=1)  # (B, n_models)
             output = (weights * preds).sum(dim=1)  # (B,)
             return output, weights
+
+        def forward_with_preds(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """Returns (output, weights, preds) for computing diversity loss during fine-tuning."""
+            preds = self._get_base_preds(x)
+            context = self.context_enc(x)
+            meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
+            weights = torch.softmax(self.meta(meta_in), dim=1)
+            output = (weights * preds).sum(dim=1)
+            return output, weights, preds
 
         def model_weights_summary(self, x: torch.Tensor) -> dict[str, float]:
             """Return avg weight per model - useful for monitoring which models dominate."""
@@ -192,8 +276,8 @@ if TORCH:
                     [_base_pred_to_batch_vector(m(self._base_input(x, i))) for i, m in enumerate(self.bases)], dim=1
                 )  # (B, n_models)
 
-            context = self.context_enc(x[:, -1, :])
-            meta_in = torch.cat([context, preds], dim=1)
+            context = self.context_enc(x)
+            meta_in = getattr(self, "meta_norm", nn.Identity())(torch.cat([context, preds], dim=1))
             weights = torch.softmax(self.meta(meta_in), dim=1)  # (B, n_models)
             output = (weights * preds).sum(dim=1)  # (B,)
 
@@ -264,27 +348,20 @@ if TORCH:
         epochs: int = 10,
         lr: float = 1e-3,
         diversity_weight: float = 0.1,
+        unfreeze_base_heads: bool = False,
         device: str = "cpu",
         verbose: bool = True,
         checkpoint_path: str | None = None,
         checkpoint_meta: dict[str, object] | None = None,
     ) -> list[float]:
         """
-        Train only the EnsembleMetaLearner's context encoder and meta-network.
-        Base model weights are frozen - only the weighting mechanism is learned.
+        Train EnsembleMetaLearner's context encoder, meta-network, and optionally fine-tune
+        unfrozen base model projection heads with diversity regularization.
 
-        Objective:
+        Objective when unfreeze_base_heads=True:
           L = MSE(weighted_ensemble_output, target)
-            - diversity_weight x H(weights)        # maximise weight entropy
-
-        The entropy term prevents the meta-learner from collapsing to a single
-        model (degenerate 'ensemble of one'). Base-model correlation is
-        informational only (bases are frozen; no gradient through them).
-
-        When checkpoint_path is provided, writes a resumable "latest" checkpoint
-        after every epoch and updates checkpoint_path whenever loss improves.
-
-        Returns loss history (one value per epoch).
+            + diversity_weight x Corr(base_predictions)  # penalise base model co-linearity
+            - 0.05 x H(weights)                          # maximise weight entropy
         """
         dev = torch.device(device)
         meta = meta.to(dev)
@@ -310,12 +387,16 @@ if TORCH:
                 encoding="utf-8",
             )
 
-        # Freeze base models
-        for base in meta.bases:
-            for p in base.parameters():
-                p.requires_grad_(False)
+        # Base model head unfreezing
+        unfrozen_base_params = meta.unfreeze_base_heads(unfreeze_base_heads)
 
-        trainable = list(meta.context_enc.parameters()) + list(meta.meta.parameters())
+        meta_norm_params = list(meta.meta_norm.parameters()) if hasattr(meta, "meta_norm") else []
+        trainable = (
+            list(meta.context_enc.parameters())
+            + meta_norm_params
+            + list(meta.meta.parameters())
+            + unfrozen_base_params
+        )
         opt = torch.optim.Adam(trainable, lr=lr)
         criterion = nn.MSELoss()
         history: list[float] = []
@@ -333,19 +414,19 @@ if TORCH:
                 yb = yb.to(dev, non_blocking=True).float()
                 opt.zero_grad(set_to_none=True)
 
-                # Use meta.forward() so training and inference share one code path.
-                # Base models are frozen inside forward via no_grad; only
-                # context_enc and meta params receive gradients.
-                output, weights = meta(xb)
+                output, weights, preds = meta.forward_with_preds(xb)
 
                 # Task loss
                 task_loss = criterion(output, yb)
 
-                # Diversity: maximise weight entropy (avoid collapse to one model)
-                # Gradients flow through `weights` → meta-learner params (TM-004).
+                # Weight entropy (avoid collapse to single model)
                 entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
 
-                loss = task_loss - diversity_weight * entropy
+                if unfreeze_base_heads and len(meta.bases) > 1:
+                    corr_loss = meta.diversity_loss(preds)
+                    loss = task_loss + diversity_weight * corr_loss - 0.05 * entropy
+                else:
+                    loss = task_loss - diversity_weight * entropy
                 loss.backward()
                 nn.utils.clip_grad_norm_(trainable, 1.0)
                 opt.step()
@@ -733,7 +814,12 @@ else:
         def compute_adjacency(self, *a, **kw):
             return np.zeros((6, 6))
 
+    class _FallbackTemporalAttentionPooling:
+        def __init__(self, **kw):
+            pass
+
     EnsembleMetaLearner = _FallbackEnsembleMetaLearner
+    TemporalAttentionPooling = _FallbackTemporalAttentionPooling
     EnsembleRiskFilter = _FallbackEnsembleRiskFilter
     MCDropoutWrapper = _FallbackMCDropoutWrapper
     DeepEnsembleUQ = _FallbackDeepEnsembleUQ

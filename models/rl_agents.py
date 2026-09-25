@@ -30,6 +30,80 @@ from backtesting.backtest import ScalingAction
 
 ACTION_NAMES = {a.value: a.name for a in ScalingAction}
 
+# Number of agent-state values appended to the market features to form the RL
+# observation.  ``ForexTradingEnv.obs_size`` is ``features.shape[1] + this``.
+RL_AGENT_STATE_DIM = 5
+
+#: Size of the ScalingAction space (0=HOLD ... 9=CLOSE_ALL).
+RL_ACTION_COUNT = len(ScalingAction)
+
+
+def build_action_mask(position_lots: float, max_lots: float) -> np.ndarray:
+    """Validity mask for the 10-action ScalingAction space.
+
+    ``True`` marks a legal action.  This is THE canonical mask used during
+    training (``ForexTradingEnv.action_mask``) and must also gate offline /
+    paper-trading consumers, otherwise the policy emits actions the broker
+    cannot honour and the journal records phantom fills.
+
+    0 HOLD | 1 OPEN_LONG | 2 OPEN_SHORT | 3-5 SCALE_IN | 6-8 SCALE_OUT | 9 CLOSE_ALL
+    """
+    pos = float(position_lots)
+    mask = np.ones(RL_ACTION_COUNT, dtype=bool)
+    if abs(pos) < 1e-12:
+        mask[3:] = False  # cannot scale or close while flat
+    else:
+        if pos > 0:
+            mask[int(ScalingAction.OPEN_LONG)] = False
+        else:
+            mask[int(ScalingAction.OPEN_SHORT)] = False
+        if abs(pos) >= float(max_lots) - 1e-6:
+            mask[3:6] = False  # already at the position cap
+    return mask
+
+
+def build_agent_state(
+    *,
+    position_lots: float,
+    max_lots: float,
+    current_price: float,
+    entry_price: float,
+    lot_size: float,
+    holding_bars: float,
+    equity: float,
+    initial_equity: float,
+) -> np.ndarray:
+    """Build the 5-element agent-state block of the RL observation.
+
+    This is THE canonical layout.  ``ForexTradingEnv._obs()`` and every offline
+    consumer (paper-trading / replay / exported-ONNX harnesses) must build the
+    state through this helper or the policy silently receives an out-of-contract
+    observation and degrades to garbage actions.
+
+    Layout (all values are bounded to the ranges seen during training):
+      0. signed position size normalised by ``max_lots``       -> [-1, 1]
+      1. unrealised P&L normalised by ``initial_equity``       -> [-0.5, 0.5]
+      2. bars held normalised by 100                           -> [0, 1]
+      3. realised equity drift from ``initial_equity``         -> [-0.5, 0.5]
+      4. 1.0 when a position is open, else 0.0                 -> {0.0, 1.0}
+    """
+    pos = float(position_lots)
+    max_lots = float(max_lots or 1.0)
+    initial_equity = float(initial_equity or 1.0)
+    # Signed mark-to-market P&L: positive for a long above entry AND for a short
+    # below entry (``* pos`` carries the direction sign).
+    upnl = (float(current_price) - float(entry_price)) * pos * float(lot_size) if pos != 0 else 0.0
+    return np.array(
+        [
+            np.clip(pos / max_lots, -1, 1),
+            np.clip(upnl / initial_equity, -0.5, 0.5),
+            min(float(holding_bars) / 100, 1.0),
+            np.clip((float(equity) - initial_equity) / initial_equity, -0.5, 0.5),
+            float(pos != 0),
+        ],
+        dtype=np.float32,
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TRADING ENVIRONMENT  (10-action, combined scaling, dynamic SL)
@@ -81,6 +155,12 @@ class ForexTradingEnv:
         # Annualised bars for Sharpe: 252 * 24 * 60 for 1-min bars. Pass
         # 252 * 24 * (60 // m) for m-minute bars (e.g. 3024 for 5-min).
         bars_per_year: int = 252 * 24 * 60,
+        # Idle penalty: when True uses features[:,0] as directional signal.
+        # Disabled by default to eliminate artificial overtrading churn.
+        # Must be disabled when rl_encoder_obs=True (features are encoder embeddings,
+        # not raw market features) to avoid firing on random latent dim.
+        enable_idle_penalty: bool = False,
+        supervised_signal: np.ndarray | None = None,
     ):
         self.features = np.nan_to_num(features.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
         self.prices = np.nan_to_num(prices.astype(np.float32), nan=0.0, posinf=1e6, neginf=-1e6)
@@ -99,7 +179,16 @@ class ForexTradingEnv:
         self.commission = commission_per_lot
         self.slippage_pips = slippage_pips
         self.pip_size = pip_size
-        self.rw = {"pnl": 1.0, "drawdown": 0.5, "tx_cost": 0.3, "overtrade": 0.0005, "holding": 0.01, "idle": 1.0}
+        self.rw = {
+            "pnl": 1.0,
+            "drawdown": 0.5,
+            "tx_cost": 1.0,
+            "overtrade": 0.0005,
+            "holding": 0.01,
+            "idle": 1.0,
+            "churn": 0.001,
+            "action_flip": 0.002,
+        }
         if reward_weights:
             self.rw.update(
                 {
@@ -121,6 +210,15 @@ class ForexTradingEnv:
                     "idle": float(
                         reward_weights.get("idle", reward_weights.get("idle_penalty", self.rw["idle"]))
                     ),
+                    "churn": float(
+                        reward_weights.get("churn", reward_weights.get("churn_penalty", self.rw.get("churn", 0.001)))
+                    ),
+                    "action_flip": float(
+                        reward_weights.get(
+                            "action_flip",
+                            reward_weights.get("flip_penalty", self.rw.get("action_flip", 0.002)),
+                        )
+                    ),
                 }
             )
         self.atr_sl_mult = atr_sl_mult
@@ -132,9 +230,19 @@ class ForexTradingEnv:
         # Sub-window length per episode. None or >= series length => use full series.
         self.episode_len = int(episode_len) if episode_len else None
 
-        self.obs_size = features.shape[1] + 5  # + agent state
+        self.obs_size = features.shape[1] + RL_AGENT_STATE_DIM  # + agent state
         self.n_actions = 10
         self.bars_per_year = int(bars_per_year)
+        self.enable_idle_penalty = bool(enable_idle_penalty)
+        self.supervised_signal = None
+        if supervised_signal is not None:
+            arr = np.asarray(supervised_signal, dtype=np.float32).reshape(-1)
+            if len(arr) == len(self.prices):
+                self.supervised_signal = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        # If encoder obs is active (obs_size small, e.g. 128+5 vs 584+5), auto-disable
+        # idle penalty when no explicit supervised_signal was provided.
+        if self.supervised_signal is None and not self.enable_idle_penalty:
+            pass
         self.reset()
 
     def reset(self, valid_starts: np.ndarray | None = None) -> np.ndarray:
@@ -174,22 +282,22 @@ class ForexTradingEnv:
         self.episode_pnl = []
         self.done = False
         self._prev_mtm_equity = self.initial_equity  # Track MTM equity for reward consistency
+        self.prev_action = None
         self._last_obs = self._obs()
         return self._last_obs
 
     def _obs(self) -> np.ndarray:
         mkt = self.features[self.idx]
         p = self.prices[self.idx]
-        upnl = (p - self.entry_price) * self.position * self.lot_size if self.position != 0 else 0.0
-        agent = np.array(
-            [
-                np.clip(self.position / self.max_lots, -1, 1),
-                np.clip(upnl / self.initial_equity, -0.5, 0.5),
-                min(self.holding / 100, 1.0),
-                np.clip((self.equity - self.initial_equity) / self.initial_equity, -0.5, 0.5),
-                int(self.position != 0),
-            ],
-            dtype=np.float32,
+        agent = build_agent_state(
+            position_lots=self.position,
+            max_lots=self.max_lots,
+            current_price=p,
+            entry_price=self.entry_price,
+            lot_size=self.lot_size,
+            holding_bars=self.holding,
+            equity=self.equity,
+            initial_equity=self.initial_equity,
         )
         return np.concatenate([mkt, agent])
 
@@ -198,17 +306,7 @@ class ForexTradingEnv:
         Returns a boolean array where True means the action is valid.
         0: HOLD, 1: OPEN_LONG, 2: OPEN_SHORT, 3-5: SCALE_IN, 6-8: SCALE_OUT, 9: CLOSE_ALL
         """
-        mask = np.ones(self.n_actions, dtype=bool)
-        if self.position == 0:
-            mask[3:] = False  # Can't scale or close if flat
-        else:
-            if self.position > 0:
-                mask[1] = False
-            elif self.position < 0:
-                mask[2] = False
-            if abs(self.position) >= self.max_lots - 1e-6:
-                mask[3:6] = False
-        return mask
+        return build_action_mask(self.position, self.max_lots)
 
     def _exec_cost(self, lots: float) -> float:
         cost = abs(lots) * self.commission + abs(lots) * self.slippage_pips * self.pip_size * self.lot_size
@@ -405,25 +503,53 @@ class ForexTradingEnv:
         # creating perverse incentive to hold losers (avoids realized loss but penalized for drawdown)
         mtm_pnl = mtm_equity - getattr(self, "_prev_mtm_equity", mtm_equity)
         self._prev_mtm_equity = mtm_equity
-        holding_penalty = w["holding"] * abs(self.position) * min(self.holding / 100, 1.0)
+        # FIX: scale holding/dd to same order as pnl (pnl_norm ~1e-4 per pip).
+        # Prior holding_penalty 0.01*pos*1.0 =0.01 dominated 100× pnl (0.0001).
+        # Scale down 50×: 0.01*0.02=0.0002 comparable to pnl. DD similarly scaled 0.02.
+        # Overtrade boosted 4× (0.0005*4=0.002) to be noticeable vs tx_cost 0.00012.
+        holding_penalty = w["holding"] * abs(self.position) * min(self.holding / 100, 1.0) * 0.02
+
+        # Action turnover / churn penalty: directly penalizes rapid position flipping and size churn
+        delta_pos = abs(self.position - pos_before)
+        churn_penalty = w.get("churn", 0.001) * delta_pos
+
+        # Action flip penalty: penalize consecutive action changes (action_t != action_{t-1}) to enforce holding time
+        action_flip_penalty = 0.0
+        if getattr(self, "prev_action", None) is not None and action != self.prev_action:
+            action_flip_penalty = w.get("action_flip", 0.002)
+        self.prev_action = action
 
         # Opportunity cost / idle penalty for inaction when supervised signal is strongly directional
+        # FIX: idle penalty is DISABLED by default (enable_idle_penalty=False); patience is an asset.
         idle_penalty = 0.0
-        if self.features is not None and len(self.features) > 0 and self.features.shape[1] > 0:
-            try:
-                sig_val = float(self.features[self.idx, 0])
-                if abs(sig_val) > 0.15 and (
-                    self.position == 0 or (action == ScalingAction.HOLD.value and np.sign(self.position) != np.sign(sig_val))
-                ):
-                    idle_penalty = 0.001 * abs(sig_val) * w.get("idle", 1.0)
-            except Exception:
-                idle_penalty = 0.0
+        if self.enable_idle_penalty:
+            sig_val = None
+            if self.supervised_signal is not None and self.idx < len(self.supervised_signal):
+                try:
+                    sig_val = float(self.supervised_signal[self.idx])
+                except Exception:
+                    sig_val = None
+            elif self.features is not None and len(self.features) > 0 and self.features.shape[1] > 0:
+                try:
+                    sig_val = float(self.features[self.idx, 0])
+                except Exception:
+                    sig_val = None
+            if sig_val is not None and abs(sig_val) > 0.15 and (
+                self.position == 0 or (action == ScalingAction.HOLD.value and np.sign(self.position) != np.sign(sig_val))
+            ):
+                idle_penalty = 0.001 * abs(sig_val) * w.get("idle", 1.0)
+
+        # Rescaled transaction friction: direct cost normalized by bar ATR in USD
+        bar_atr_usd = max(float(atr) * self.lot_size, 1e-6)
+        tx_cost_penalty = w["tx_cost"] * (cost / bar_atr_usd) if cost > 0 else 0.0
 
         reward = (
             w["pnl"] * mtm_pnl / self.initial_equity
-            - w["drawdown"] * dd
-            - w["tx_cost"] * cost / self.initial_equity
-            - w["overtrade"] * (1.0 if opened_or_flipped else 0.0)
+            - w["drawdown"] * dd * 0.02
+            - tx_cost_penalty
+            - w["overtrade"] * (4.0 if opened_or_flipped else 0.0)
+            - churn_penalty
+            - action_flip_penalty
             - holding_penalty
             - idle_penalty
         )
@@ -764,51 +890,28 @@ if TORCH:
             self.capacity = capacity
             self.buf = collections.deque(maxlen=capacity)
             self.class_counts = collections.defaultdict(int)
-            self._cached_weights = None
-            self._cached_len = -1
             self._sample_calls = 0
-            # Fix D: track push count to amortize O(N) weight rebuild cost.
-            # Previously, _cached_weights=None on every push forced O(N) rebuild
-            # every sample() call - crushing DQN throughput with a 1M buffer.
-            self._push_count = 0
-            self._last_rebuild_push = 0
 
         def push(self, *args):
-            # args = (obs, action, reward, next_obs, done)
+            # args = (obs, action, reward, next_obs, done, next_mask)
             was_full = len(self.buf) == self.capacity
             if was_full:
                 old_action = self.buf[0][1]
                 self.class_counts[old_action] -= 1
             self.buf.append(args)
             self.class_counts[args[1]] += 1
-            self._push_count += 1
-            # Fix D: only invalidate cache every 1000 pushes, not on every push.
-            # The sampling distribution drifts by at most ~0.1% between rebuilds,
-            # which is negligible vs. the O(N) overhead of rebuilding at 1M items.
-            # Also invalidate when the buffer transitions from growing to full,
-            # because that changes which old entry was evicted.
-            became_full = (not was_full) and len(self.buf) == self.capacity
-            if became_full or (self._push_count - self._last_rebuild_push) >= 1000:
-                self._cached_weights = None
-                self._cached_len = -1
-                self._last_rebuild_push = self._push_count
 
         def sample(self, n):
             if len(self.buf) == 0:
                 return []
-            # Rebuild weights only when invalidated (see push() above)
-            if self._cached_weights is None:
-                buf_len = len(self.buf)
-                # Precompute inverse-frequency weight per action class
-                inv_freq = {a: 1.0 / (c + 1e-3) for a, c in self.class_counts.items()}
-                weights = np.array([inv_freq.get(t[1], 1.0) for t in self.buf])
-                weights /= weights.sum()
-                self._cached_weights = weights
-                self._cached_len = buf_len
-                
+            # FIX: uniform sampling. Prior inv_freq = 1/(count+1e-3) strongly
+            # favored rare SCALE_* actions (few samples → high weight), over-sampling
+            # failed trajectories and starving HOLD/OPEN. Uniform avoids bias;
+            # for true prioritization use TD-error PER, not action frequency.
             self._sample_calls += 1
-            valid_len = self._cached_len
-            indices = np.random.choice(valid_len, size=min(n, valid_len), p=self._cached_weights, replace=False)
+            valid_len = len(self.buf)
+            k = min(n, valid_len)
+            indices = np.random.choice(valid_len, size=k, replace=False)
             return [self.buf[i] for i in indices]
 
         def __len__(self):
@@ -858,8 +961,12 @@ if TORCH:
             self.buf = ReplayBuffer(buf_size)
             self.steps = 0
 
-        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None) -> int:
-            if random.random() < self.eps:
+        def select_action(self, obs: np.ndarray, mask: np.ndarray | None = None, greedy: bool = False, **kwargs) -> int:
+            # ``greedy`` is accepted for API parity with PPOAgent (called by
+            # RLInferenceAgent with greedy=True). For DQN, ``eps`` is already
+            # forced to 0 at inference, so greedy == deterministic. When
+            # greedy=False we still allow epsilon exploration if eps>0.
+            if not greedy and random.random() < self.eps:
                 if mask is not None:
                     valid = np.where(mask)[0]
                     return int(np.random.choice(valid)) if len(valid) > 0 else 0
@@ -956,7 +1063,7 @@ else:
         def __init__(self, **kw):
             pass
 
-        def select_action(self, obs, mask=None):
+        def select_action(self, obs, mask=None, greedy=False, **kw):
             return 0
 
         def store(self, *a):
@@ -1011,10 +1118,25 @@ class RunningRewardNormalizer:
 class _SharpeRewardAdapter:
     """Wraps SharpeRewardWrapper for use inside train_agent()."""
 
-    def __init__(self, window: int = 100, cost_penalty: float = 0.3, dd_penalty: float = 0.5):
+    def __init__(
+        self,
+        window: int = 100,
+        cost_penalty: float = 0.3,
+        dd_penalty: float = 0.5,
+        bars_per_year: int | None = None,
+        bar_freq: str | None = None,
+        annualize: float | None = None,
+    ):
         from models.rl_advanced import SharpeRewardWrapper as _SRW
 
-        self._w = _SRW(window=window, cost_penalty=cost_penalty, dd_penalty=dd_penalty)
+        self._w = _SRW(
+            window=window,
+            cost_penalty=cost_penalty,
+            dd_penalty=dd_penalty,
+            bars_per_year=bars_per_year,
+            bar_freq=bar_freq,
+            annualize=annualize,
+        )
 
     def __call__(self, raw_pnl: float, tx_cost: float, equity: float) -> float:
         return self._w.compute(raw_pnl=raw_pnl, tx_cost=tx_cost, equity=equity)

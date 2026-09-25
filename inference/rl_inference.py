@@ -23,11 +23,63 @@ from trading.live_actions import LiveAction, scaling_action_to_live_action
 
 
 def _resolve_rl_checkpoint(checkpoint_dir: Path, algo: str = "dqn") -> Path | None:
+    """Locate RL checkpoint with broad fallback across checkpoint tree.
+
+    The active checkpoint dir (e.g. ``checkpoints/forex_4pair_2015_2025_haelt``)
+    historically contained no ``rl_*`` files while TFT/ensemble sub-trees did.
+    We now search in priority order:
+      1. exact ``checkpoint_dir``
+      2. ``checkpoint_dir / model_subdir`` and sibling model dirs
+      3. ``checkpoints/ensemble`` (consensus policy)
+      4. any ``checkpoints/*/rl_*`` recursively (last resort)
+    """
     algo = str(algo).lower()
+    ckpt_dir = Path(checkpoint_dir)
+    # 1. Direct hits in the requested dir
     for name in (f"rl_{algo}_best.pt", f"rl_{algo}_last.pt", f"rl_{algo}.pt", f"{algo}_best.pt"):
-        p = checkpoint_dir / name
+        p = ckpt_dir / name
         if p.is_file():
             return p
+
+    # 2. One level of sibling model subdirs (e.g. .../haelt vs .../tft)
+    try:
+        from config.settings import PROJECT_ROOT
+    except Exception:
+        PROJECT_ROOT = ckpt_dir.parent.parent if ckpt_dir.parent.name == "checkpoints" else Path("checkpoints")
+    # Check parent's immediate children (sibling model dirs)
+    parent = ckpt_dir.parent if ckpt_dir.parent else ckpt_dir
+    for sibling in parent.iterdir() if parent.is_dir() else []:
+        if not sibling.is_dir():
+            continue
+        for name in (f"rl_{algo}_best.pt", f"rl_{algo}_last.pt"):
+            p = sibling / name
+            if p.is_file():
+                return p
+
+    # 3. Canonical ensemble dir (holds PPO consensus)
+    for ens_name in ("rl_ensemble_best.pt", f"rl_{algo}_best.pt", "rl_best.pt"):
+        for cand in (
+            PROJECT_ROOT / "checkpoints" / "ensemble" / ens_name,
+            Path("checkpoints") / "ensemble" / ens_name,
+        ):
+            if cand.is_file():
+                return cand
+
+    # 4. Recursive glob over checkpoints (last resort, deterministic sort)
+    try:
+        roots = [PROJECT_ROOT / "checkpoints", Path("checkpoints")]
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for p in sorted(root.rglob(f"rl_{algo}_best.pt")):
+                if p.is_file():
+                    return p
+            # generic fallback: any rl_*_best.pt
+            for p in sorted(root.rglob("rl_*_best.pt")):
+                if p.is_file():
+                    return p
+    except Exception:
+        pass
     return None
 
 
@@ -96,6 +148,18 @@ class RLInferenceAgent(BaseInferenceEngine):
             obs_size = self._infer_obs_size() + 5
         if n_actions is None:
             n_actions = self._infer_n_actions(ckpt)
+        # Guard: degenerate obs (e.g. 6 = 1+5) indicates wrong encoder head (ensemble meta-learner)
+        # Fall back to raw feature dim +5 to keep live in-distribution with training (which was raw when encoder failed).
+        if obs_size is not None and obs_size < 20:
+            _fallback = int(self.n_features) + 5 if self.n_features else 589
+            print(f"[RLInference] WARN: degenerate obs_size {obs_size} (<20) from {Path(rl_checkpoint).name}; falling back to raw { _fallback} (n_feat {self.n_features}+5)")
+            obs_size = _fallback
+            # Force raw path
+            self._encoder_obs = False
+            self._expected_emb_dim = _fallback - 5
+        # Ensure n_actions at least 3 (BUY/HOLD/SELL) even if checkpoint corrupt
+        if n_actions is not None and n_actions < 3:
+            n_actions = 10
 
         algo_kw = dict(RL.get(self.algo, {}))
         if self.algo == "ensemble" or (isinstance(ckpt, dict) and ckpt.get("model_type") == "RLEnsemble"):
@@ -114,6 +178,27 @@ class RLInferenceAgent(BaseInferenceEngine):
             agent_any = cast(Any, self._agent)
             agent_any.net.load_state_dict(ckpt, strict=False)
 
+        # ── Encoder vs raw contract detection ──────────────────────────────
+        # Training with rl_encoder_obs=True produces obs = encoder_emb + 5.
+        # If the persisted obs_size does not match encoder_emb+5, training fell
+        # back to raw features (e.g. encoder load failed). We auto-detect and
+        # feed raw observations at live time to stay in-distribution.
+        try:
+            _inferred_emb = self._infer_obs_size()
+        except Exception:
+            _inferred_emb = None
+        if _inferred_emb is not None and obs_size is not None:
+            self._encoder_obs = int(obs_size) == int(_inferred_emb) + 5
+            self._expected_emb_dim = int(obs_size) - 5
+            if not self._encoder_obs:
+                print(
+                    f"[RLInference] WARN: obs_size {obs_size} != encoder { _inferred_emb}+5 "
+                    f"→ training used RAW features; live will feed raw (no encoder)."
+                )
+        else:
+            self._encoder_obs = True
+            self._expected_emb_dim = int(_inferred_emb) if _inferred_emb is not None else int(obs_size) - 5 if obs_size else 0
+
         from collections import deque
 
         self._feat_buffer: deque[np.ndarray] = deque(maxlen=self.seq_len)
@@ -124,7 +209,8 @@ class RLInferenceAgent(BaseInferenceEngine):
         self._last_price = 0.0
         print(
             f"[RLInference] Loaded {Path(rl_checkpoint).name} | "
-            f"encoder={self.arch_name} | obs={obs_size} | actions={n_actions}"
+            f"encoder={self.arch_name} | obs={obs_size} | actions={n_actions} | "
+            f"encoder_obs={self._encoder_obs}"
         )
 
     def _infer_obs_size(self) -> int:
@@ -182,12 +268,24 @@ class RLInferenceAgent(BaseInferenceEngine):
         # Apply the training-time scaler (if available) - matches ZarrStreamDataset
         if self._scaler is not None:
             window = apply_inference_scaler(self._scaler, window)
-        xb = torch.as_tensor(window[np.newaxis], dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            h = self._encoder(xb)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            emb = h.float().cpu().numpy().reshape(-1)
+
+        # Raw training fallback: feed the last scaled row directly (no encoder)
+        if not getattr(self, "_encoder_obs", True):
+            emb = np.asarray(window[-1], dtype=np.float32).reshape(-1)
+            # Ensure emb dim matches agent's expected obs_size-5
+            exp = int(getattr(self, "_expected_emb_dim", emb.shape[0]))
+            if emb.shape[0] != exp:
+                if emb.shape[0] < exp:
+                    emb = np.pad(emb, (0, exp - emb.shape[0])).astype(np.float32)
+                else:
+                    emb = emb[:exp].astype(np.float32)
+        else:
+            xb = torch.as_tensor(window[np.newaxis], dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                h = self._encoder(xb)
+                if h.ndim == 3:
+                    h = h[:, -1, :]
+                emb = h.float().cpu().numpy().reshape(-1)
 
         price = float(self._last_price) if getattr(self, "_last_price", 0) else 0.0
         # Must match ForexTradingEnv default (10_000), NOT the standard FX lot (100_000).
@@ -224,16 +322,16 @@ class RLInferenceAgent(BaseInferenceEngine):
             mask[1] = False    # can't open long while short
 
         # I3 fix (2026-08-07): live inference must be deterministic.
-        # The PPO actor used to always sample, injecting stochasticity into
-        # position-sizing decisions. Pass greedy=True for PPO (DQN already
-        # has eps=0 set in __init__ at line 99, so it doesn't need this kwarg).
+        # Both agents now accept greedy+mask; fallback preserves mask even if
+        # an agent signature is outdated.
         try:
-            # PPO exposes `greedy=` and `mask=` kwargs; DQN does not.
             action_t = self._agent.select_action(full_obs, greedy=True, mask=mask)
-            # PPO returns (action, log_prob, value); DQN-style returns scalar
             action_int = int(action_t[0]) if isinstance(action_t, tuple) else int(action_t)
         except TypeError:
-            action_int = int(self._agent.select_action(full_obs))
+            try:
+                action_int = int(self._agent.select_action(full_obs, mask=mask))
+            except TypeError:
+                action_int = int(self._agent.select_action(full_obs))
         action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)
 
@@ -245,15 +343,50 @@ def build_rl_fast_agent(
     n_features: int | None = None,
     algo: str = "dqn",
 ) -> RLInferenceAgent | None:
-    """Return RLInferenceAgent if rl_* checkpoint exists, else None."""
+    """Return RLInferenceAgent if rl_* checkpoint exists, else None.
+
+    Supervised checkpoint is resolved via the canonical
+    ``resolve_checkpoint_paths`` (handles nested ``haelt/haelt_best.pt`` etc.)
+    with additional fallbacks for the historic double-nested layout.
+    RL checkpoint falls back across sibling dirs / ensemble if the exact
+    ``algo`` is missing (e.g. haelt requests dqn but only ensemble PPO exists).
+    """
     ckpt_dir = Path(checkpoint_dir)
     rl_path = _resolve_rl_checkpoint(ckpt_dir, algo=algo)
+    # Fallback algos: dqn↔ppo↔ensemble soft-vote
+    if rl_path is None:
+        for fallback in ("ensemble", "ppo", "dqn"):
+            if fallback == str(algo).lower():
+                continue
+            rl_path = _resolve_rl_checkpoint(ckpt_dir, algo=fallback)
+            if rl_path is not None:
+                algo = fallback
+                break
     if rl_path is None:
         return None
-    sup = ckpt_dir / f"{model_name}_best.pt"
-    if not sup.is_file():
-        sup = ckpt_dir.parent / f"{model_name}_best.pt"
-    if not sup.is_file():
+    # Resolve supervised checkpoint canonically (handles nested, production, etc.)
+    sup: Path | None = None
+    try:
+        from config.settings import resolve_checkpoint_paths
+
+        paths = resolve_checkpoint_paths(model_name, ckpt_dir)
+        if paths.pt_path is not None and paths.pt_path.is_file():
+            sup = paths.pt_path
+    except Exception:
+        pass
+    if sup is None or not sup.is_file():
+        # Legacy / double-nested fallbacks
+        for cand in (
+            ckpt_dir / f"{model_name}_best.pt",
+            ckpt_dir / model_name / f"{model_name}_best.pt",
+            ckpt_dir / model_name / model_name / f"{model_name}_best.pt",
+            ckpt_dir.parent / f"{model_name}_best.pt",
+            ckpt_dir.parent / model_name / f"{model_name}_best.pt",
+        ):
+            if cand.is_file():
+                sup = cand
+                break
+    if sup is None or not sup.is_file():
         return None
     try:
         return RLInferenceAgent(

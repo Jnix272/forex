@@ -75,16 +75,16 @@ class MultiAgentCoordinator:
 
     PAIR_CORRELATIONS = {
         ("EURUSD", "GBPUSD"): 0.85,
-        ("EURUSD", "AUDUSD"): 0.72,
-        ("GBPUSD", "AUDUSD"): 0.68,
         ("USDJPY", "USDCAD"): 0.61,
+        # AUDUSD entries removed – not in DATA.pairs [EURUSD,GBPUSD,USDJPY,USDCAD] (config/run.yaml:285-289)
+        # Other cross pairs (EURUSD-USDJPY, GBPUSD-USDJPY, EURUSD-USDCAD, GBPUSD-USDCAD) <0.6 threshold, omitted
     }
 
     def __init__(
         self,
         agents: dict[str, Any],  # pair -> DQNAgent | PPOAgent
         pairs: list[str],
-        max_corr_exposure: float = 1.5,  # Max sum of correlated lots
+        max_corr_exposure: float = 3.0,  # Max sum of correlated lots (was 1.5 blocked after 1 lot)
         global_feat_dim: int = 20,
         context_dim: int = 32,
         device: str = "cpu",
@@ -912,13 +912,40 @@ class SharpeRewardWrapper:
         self,
         window: int = 100,
         risk_free: float = 0.05 / 252,  # Daily risk-free rate
-        annualize: float = np.sqrt(252),
+        annualize: float | None = None,
         cost_penalty: float = 0.3,
         dd_penalty: float = 0.5,
+        bars_per_year: int | None = None,
+        bar_freq: str | None = None,
     ):
         self.window = window
         self.rf = risk_free
-        self.ann = annualize
+        # FIX: annualize must reflect 5-min (or 1-min) bars, not daily sqrt(252).
+        # Env uses bars_per_year=252*24*60 // bar_minutes (e.g. 72576 for 5m full-day).
+        # Caller should pass bars_per_year or bar_freq; legacy annualize is kept for compat.
+        if annualize is not None:
+            self.ann = float(annualize)
+            self.bars_per_year = int(bars_per_year) if bars_per_year is not None else None
+        else:
+            if bars_per_year is not None:
+                self.bars_per_year = int(bars_per_year)
+            elif bar_freq is not None:
+                # Parse "5m", "1m", "15m", "1h"
+                try:
+                    bf = str(bar_freq).strip().lower()
+                    if bf.endswith("m"):
+                        mins = int(bf[:-1])
+                        self.bars_per_year = 252 * 24 * 60 // mins
+                    elif bf.endswith("h"):
+                        hrs = int(bf[:-1])
+                        self.bars_per_year = 252 * 24 // hrs
+                    else:
+                        self.bars_per_year = 252 * 24 * 60 // 5
+                except Exception:
+                    self.bars_per_year = 252 * 24 * 60 // 5
+            else:
+                self.bars_per_year = 252 * 24 * 60 // 5  # default 5m full-day FX
+            self.ann = float(np.sqrt(self.bars_per_year))
         self.cost_pen = cost_penalty
         self.dd_pen = dd_penalty
         self._returns: collections.deque = collections.deque(maxlen=window)

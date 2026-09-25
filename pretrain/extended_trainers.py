@@ -41,6 +41,7 @@ if TORCH:
         lalign,
         lunif,
     )
+    from pretrain.loss_scaling import compute_target_scale, normalized_mse_loss
 
     def _encode_last(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
         h = encoder(x)
@@ -120,7 +121,7 @@ if TORCH:
             self._scaler = torch.amp.GradScaler(enabled=False)
             self._total_epochs = 0
 
-        def _forward(self, x: torch.Tensor):
+        def _forward(self, x: torch.Tensor, scale: torch.Tensor | None = None):
             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
             h = _encode_last(self.encoder, x)
             mu = self.mu_head(h)
@@ -129,6 +130,8 @@ if TORCH:
             eps = torch.randn_like(std)
             z = mu + eps * std
             recon = self.decoder(z).contiguous().view(-1, self.seq_len, self.n_features)
+            if scale is not None:
+                recon = recon * scale
             return recon, mu, logvar
 
         @torch.no_grad()
@@ -140,8 +143,9 @@ if TORCH:
             try:
                 sample = X_ref[: min(int(max_samples), len(X_ref))]
                 x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
-                recon, mu, logvar = self._forward(x)
-                recon_loss = F.mse_loss(recon, x).item()
+                scale = compute_target_scale(x)
+                recon, mu, logvar = self._forward(x, scale=scale)
+                recon_loss = normalized_mse_loss(recon, x).item()
                 kl = (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()).item()
                 std = mu.std(dim=0).mean().item()
                 out = {
@@ -200,8 +204,9 @@ if TORCH:
                     if len(batch_idx) < 4:
                         continue
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
-                    recon, mu, logvar = self._forward(x)
-                    recon_loss = F.mse_loss(recon, x, reduction="none").sum(dim=list(range(1, recon.ndim))).mean()
+                    scale = compute_target_scale(x)
+                    recon, mu, logvar = self._forward(x, scale=scale)
+                    recon_loss = normalized_mse_loss(recon, x, reduction="sum_features_mean_batch")
                     kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
                     loss = recon_loss + self.beta * kl
                     if not torch.isfinite(loss):
@@ -477,9 +482,10 @@ if TORCH:
                 sample = X_ref[: min(int(max_samples), len(X_ref))]
                 x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
                 prefix, target = self._split(x)
+                scale = compute_target_scale(target)
                 h = _encode_last(self.encoder, prefix)
-                pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features)
-                mse = F.mse_loss(pred, target).item()
+                pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features) * scale
+                mse = normalized_mse_loss(pred, target).item()
                 std = h.std(dim=0).mean().item()
                 out = {
                     "forecast_mse": float(mse),
@@ -521,9 +527,10 @@ if TORCH:
                         continue
                     x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
                     prefix, target = self._split(x)
+                    scale = compute_target_scale(target)
                     h = _encode_last(self.encoder, prefix)
-                    pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features)
-                    loss = F.mse_loss(pred, target)
+                    pred = self.head(h).contiguous().view(-1, self.horizon, self.n_features) * scale
+                    loss = normalized_mse_loss(pred, target)
                     if not torch.isfinite(loss):
                         continue
                     self.opt.zero_grad(set_to_none=True)
@@ -883,14 +890,15 @@ if TORCH:
                     
                     x_corrupted = x_patched.masked_fill(mask_expanded, 0.0).view(B, self.effective_seq_len, self.n_features)
                     
+                    scale = compute_target_scale(x_patched)
                     h = _encode_last(self.encoder, x_corrupted)
-                    recon = self.decoder(h).view(B, self.n_patches, self.patch_size, self.n_features)
+                    recon = (self.decoder(h).view(B, self.n_patches, self.patch_size, self.n_features)) * scale
                     
                     if not mask.any():
                         continue
                         
                     # Calculate MSE only on masked patches
-                    loss = F.mse_loss(recon[mask_expanded], x_patched[mask_expanded])
+                    loss = normalized_mse_loss(recon, x_patched, mask=mask_expanded)
                     
                     if not torch.isfinite(loss):
                         continue

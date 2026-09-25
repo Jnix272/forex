@@ -166,12 +166,19 @@ def _wrap_logits_output(model):
     return _DirectionLogits(model)
 
 
-def _scalar_to_direction_logits(score, threshold: float = 0.15):
+def _scalar_to_direction_logits(score, threshold: float | None = None):
     """
     Convert a scalar return/edge score into C++-compatible [sell, hold, buy]
     logits. Hold wins inside [-threshold, +threshold].
     """
+    import os
     import torch
+
+    if threshold is None:
+        try:
+            threshold = float(os.getenv("PREDICTION_THRESHOLD", "0.35"))
+        except Exception:
+            threshold = 0.35
 
     score = score.reshape(-1)
     hold = torch.zeros_like(score)
@@ -208,7 +215,7 @@ def _policy_to_direction_logits(policy_out):
     return torch.stack([sell, hold, buy], dim=-1)
 
 
-def _wrap_ensemble_logits(model, threshold: float = 0.15):
+def _wrap_ensemble_logits(model, threshold: float | None = None):
     """Wrap EnsembleMetaLearner scalar output as 3-class direction logits."""
     import torch
 
@@ -1114,11 +1121,11 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         # Regression head: single value -> convert to buy/hold/sell proba
         if logits.shape[-1] == 1 or logits.ndim == 0:
             v = float(logits.flat[0])
-            if v > 0.15:
-                return np.array([0.1, 0.2, 0.7], dtype=np.float32)
-            if v < -0.15:
-                return np.array([0.7, 0.2, 0.1], dtype=np.float32)
-            return np.array([0.1, 0.8, 0.1], dtype=np.float32)
+            thresh = float(os.getenv("PREDICTION_THRESHOLD", "0.35"))
+            sell = -v - thresh
+            hold = 0.0
+            buy = v - thresh
+            logits = np.array([sell, hold, buy], dtype=np.float64)
 
         # Softmax
         logits = logits.astype(np.float64)

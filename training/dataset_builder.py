@@ -2260,6 +2260,37 @@ def _scaler_npz_path_pair(cache_path: Path, pair: str) -> Path:
     return Path(_base_path(str(cache_path)) + f"_scaler_{pair}")
 
 
+class MultiPairChunk(tuple):
+    """Structured tuple subclass preserving backward compatibility with 9-value unpacking
+    while exposing per-pair targets via named attributes and 11-value indexing.
+    """
+
+    y_pairs: np.ndarray | None
+    ycls_pairs: np.ndarray | None
+
+    def __new__(
+        cls,
+        elements: tuple | list,
+        y_pairs: np.ndarray | None = None,
+        ycls_pairs: np.ndarray | None = None,
+    ):
+        obj = super().__new__(cls, elements)
+        obj.y_pairs = y_pairs
+        obj.ycls_pairs = ycls_pairs
+        return obj
+
+    def __getitem__(self, idx: Any) -> Any:
+        if isinstance(idx, int):
+            if idx == 9:
+                return self.y_pairs
+            if idx == 10:
+                return self.ycls_pairs
+        return super().__getitem__(idx)
+
+    def to_11_tuple(self) -> tuple:
+        return (*self, self.y_pairs, self.ycls_pairs)
+
+
 def _build_multipair_chunk(
     pair_ticks: dict,
     fe: FeatureEngineer,
@@ -2282,7 +2313,8 @@ def _build_multipair_chunk(
     cot_data: Any = None,
     max_bad_frac: float | None = None,
     max_zero_frac: float | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    return_pair_targets: bool = False,
+) -> tuple:
     """
     Process raw ticks for P pairs into joint sequences.
 
@@ -2366,14 +2398,20 @@ def _build_multipair_chunk(
         np.array([], dtype=np.float32),
         np.array([], dtype=np.float32),
     )
+
+    def _make_return(t9: tuple, yp: np.ndarray | None = None, ycp: np.ndarray | None = None):
+        if return_pair_targets:
+            return (*t9, yp, ycp)
+        return MultiPairChunk(t9, y_pairs=yp, ycls_pairs=ycp)
+
     if not pair_Xs:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
 
     missing = [p for p in pair_ticks if p not in pair_Xs]
     if missing:
         print(f"Warning: Required pair(s) produced no usable sequences: {missing}. Continuing with available pairs.")
     if not pair_Xs:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
 
     # Timestamp inner join. Build explicit timestamp -> row index maps instead
     # of boolean masks so duplicate or out-of-order timestamps cannot leave
@@ -2420,7 +2458,7 @@ def _build_multipair_chunk(
 
     common_keys: list[TimeKey] = sorted(common_keys_set or set())
     if len(common_keys) == 0:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
 
     _sample = next(iter(pair_Xs.values()))
     n_feat_per_pair = _sample.shape[2]
@@ -2449,14 +2487,14 @@ def _build_multipair_chunk(
     elif pair_ticks:
         first_pair = next(iter(pair_ticks.keys()))
     else:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
     if first_pair not in time_maps:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
     market_idx = np.asarray([time_maps[first_pair][k] for k in common_keys if k in time_maps[first_pair]], dtype=np.int64)
     if len(market_idx) == 0:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
     if market_close is None or market_atr is None or market_spread is None:
-        return *_empty8, 0
+        return _make_return((*_empty8, 0))
     market_close = market_close[market_idx]
     market_atr = market_atr[market_idx]
     market_spread = market_spread[market_idx]
@@ -2525,18 +2563,20 @@ def _build_multipair_chunk(
             pair_Xs[pair] = None
         gc.collect()
 
-    y_multi = np.mean(np.stack(y_list, axis=1), axis=1).astype(np.float32)  # (N,)
-    cls_mean = np.mean(np.stack(ycls_list, axis=1), axis=1)
+    y_pairs = np.stack(y_list, axis=1).astype(np.float32) if y_list else None
+    ycls_pairs = np.stack(ycls_list, axis=1).astype(np.int64) if ycls_list else None
+    y_multi = np.mean(y_pairs, axis=1).astype(np.float32) if y_pairs is not None else np.array([], dtype=np.float32)  # (N,)
+    cls_mean = np.mean(ycls_pairs, axis=1) if ycls_pairs is not None else np.array([], dtype=np.float32)
     consensus_threshold = float(LABELING.get("consensus_threshold", 0.33))
     y_cls_multi = np.where(
         np.abs(cls_mean) < consensus_threshold,
         0.0,
         np.sign(cls_mean),
     ).astype(np.float32)
-    pq_multi = np.mean(np.stack(pq_list, axis=1), axis=1).astype(np.float32)
-    diff_multi = np.max(np.stack(diff_list, axis=1), axis=1).astype(np.uint8)
+    pq_multi = np.mean(np.stack(pq_list, axis=1), axis=1).astype(np.float32) if pq_list else np.array([], dtype=np.float32)
+    diff_multi = np.max(np.stack(diff_list, axis=1), axis=1).astype(np.uint8) if diff_list else np.array([], dtype=np.uint8)
     n_min = X_multi.shape[0]
-    return (
+    out_9 = (
         X_multi,
         y_multi,
         y_cls_multi,
@@ -2547,6 +2587,7 @@ def _build_multipair_chunk(
         market_spread[:n_min],
         X_multi.shape[2],
     )
+    return _make_return(out_9, yp=y_pairs, ycp=ycls_pairs)
 
 
 def _merge_scalers(scaler_list: list) -> StandardScaler | RobustScaler:
@@ -2900,7 +2941,7 @@ def _build_multipair_dataset(
         diff = diff_seq if diff_seq is not None else np.zeros(n_rows, dtype=np.uint8)
         return pq, diff
 
-    def _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq):
+    def _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs=None, ycls_pairs=None):
         nonlocal z_store, total_samples
         n_rows = len(X_seq)
         pq_arr, diff_arr = _sidecar_or_default(pq_seq, diff_seq, n_rows)
@@ -2929,6 +2970,10 @@ def _build_multipair_dataset(
                             _zs["pq"].append(pq_arr)
                         if "diff" in _zs:
                             _zs["diff"].append(diff_arr)
+                    if y_pairs is not None and "y_pairs" in _zs:
+                        _zs["y_pairs"].append(y_pairs)
+                    if ycls_pairs is not None and "ycls_pairs" in _zs:
+                        _zs["ycls_pairs"].append(ycls_pairs)
                 else:
                     if __import__("pathlib").Path(cache_path).exists():
                         for _retry in range(10):
@@ -2971,6 +3016,14 @@ def _build_multipair_dataset(
                         _zarr_create(
                             _zs, "diff", shape=(0,), chunks=(c0[0],), dtype="uint8", compressor=_compressor
                         )
+                    if y_pairs is not None and hasattr(y_pairs, "shape") and len(y_pairs.shape) > 1:
+                        _zarr_create(
+                            _zs, "y_pairs", shape=(0, y_pairs.shape[1]), chunks=(c0[0], y_pairs.shape[1]), dtype=ZARR_LABEL_DTYPE, compressor=_compressor
+                        )
+                    if ycls_pairs is not None and hasattr(ycls_pairs, "shape") and len(ycls_pairs.shape) > 1:
+                        _zarr_create(
+                            _zs, "ycls_pairs", shape=(0, ycls_pairs.shape[1]), chunks=(c0[0], ycls_pairs.shape[1]), dtype=ZARR_LABEL_DTYPE, compressor=_compressor
+                        )
                     _zs["X"].append(np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE))
                     _zs["y"].append(y_seq)
                     _zs["y_cls"].append(y_cls_seq)
@@ -2980,6 +3033,10 @@ def _build_multipair_dataset(
                     if store_rl_sidecars:
                         _zs["pq"].append(pq_arr)
                         _zs["diff"].append(diff_arr)
+                    if y_pairs is not None and "y_pairs" in _zs:
+                        _zs["y_pairs"].append(y_pairs)
+                    if ycls_pairs is not None and "ycls_pairs" in _zs:
+                        _zs["ycls_pairs"].append(ycls_pairs)
             else:
                 _zs["X"].append(np.asarray(X_seq, dtype=ZARR_FEATURE_DTYPE))
                 _zs["y"].append(y_seq)
@@ -2992,6 +3049,10 @@ def _build_multipair_dataset(
                         _zs["pq"].append(pq_arr)
                     if "diff" in _zs:
                         _zs["diff"].append(diff_arr)
+                if y_pairs is not None and "y_pairs" in _zs:
+                    _zs["y_pairs"].append(y_pairs)
+                if ycls_pairs is not None and "ycls_pairs" in _zs:
+                    _zs["ycls_pairs"].append(ycls_pairs)
         else:
             if not bin_state["opened"]:
                 bin_state["x_f"] = open(str(_x_path(cache_path)) + ".bin", "wb")  # noqa: SIM115

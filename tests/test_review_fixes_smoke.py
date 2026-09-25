@@ -232,6 +232,7 @@ def test_oanda_env_alias_and_net_short_exposure(monkeypatch):
     from trading.live_engine import OANDABroker
 
     monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+    monkeypatch.delenv("OANDA_API_KEY", raising=False)
     monkeypatch.setenv("OANDA_BEARER_TOKEN", "dummy-token")
     monkeypatch.setenv("OANDA_ACCOUNT_ID", "dummy-account")
     broker = OANDABroker()

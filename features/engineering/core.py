@@ -541,9 +541,14 @@ class FeatureEngineer:
                     self._warned_finbert_placeholder = True
                 F = F.with_columns(embedding_placeholders(8))
         else:
-            if not self._warned_finbert_placeholder:
-                print("[FeatureEngineering] WARNING: no FinBERT embeddings provided; using zero placeholders")
-                self._warned_finbert_placeholder = True
+            # Live paper trading intentionally uses zero placeholders for fb_0..7;
+            # directional sentiment is injected separately as `finbert_sentiment` scalar
+            # by LiveTradingEngine (see trading/live_engine.py). Silence per-pair spam
+            # after first instance (global flag).
+            if not getattr(self.__class__, "_global_warned_fb", False):
+                print("[FeatureEngineering] INFO: fb_0..7 zero placeholders (live sentiment via finbert_sentiment scalar)")
+                self.__class__._global_warned_fb = True
+            self._warned_finbert_placeholder = True
             F = F.with_columns(embedding_placeholders(8))
 
         # Cross asset

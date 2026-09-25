@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 try:
     import torch.optim as optim
+    from pretrain.loss_scaling import compute_target_scale, normalized_mse_loss
 
     TORCH = True
 except ImportError:
@@ -381,10 +382,8 @@ def masked_reconstruction_loss(
     target: torch.Tensor,
     mask: torch.Tensor,
 ) -> torch.Tensor:
-    """MSE loss only on masked positions."""
-    masked_recon = recon[mask]
-    masked_target = target[mask]
-    return F.mse_loss(masked_recon, masked_target)
+    """Normalized MSE loss only on masked positions."""
+    return normalized_mse_loss(recon, target, mask=mask)
 
 
 def vae_loss(
@@ -397,10 +396,10 @@ def vae_loss(
     """VAE loss: reconstruction + KL with matched reductions.
 
     Both terms: sum over feature/latent dims, mean over batch.
-    This prevents the KL term from dominating when the reconstruction MSE uses
-    the global element-wise mean (which is ~latent_dim smaller than the KL sum).
+    Reconstruction term is normalized across feature channels to avoid
+    disparate magnitude collapse.
     """
-    recon_loss = F.mse_loss(recon, target, reduction="none").sum(dim=list(range(1, recon.ndim))).mean()
+    recon_loss = normalized_mse_loss(recon, target, reduction="sum_features_mean_batch")
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
     loss = recon_loss + beta * kl
     return loss, recon_loss, kl
@@ -410,8 +409,8 @@ def forecast_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
 ) -> torch.Tensor:
-    """Forecast MSE loss."""
-    return F.mse_loss(pred, target)
+    """Normalized forecast MSE loss."""
+    return normalized_mse_loss(pred, target)
 
 
 def drift_loss(
@@ -583,7 +582,7 @@ class MultiTaskPretrainer(nn.Module):
 
         self._total_epochs = 0
         self._rng = np.random.default_rng(config.seed)
-        self._use_amp = config.device.startswith("cuda") and torch.cuda.is_available()
+        self._use_amp = str(config.device).startswith("cuda") and torch.cuda.is_available()
         self._amp_dtype = torch.float16
         self._scaler = torch.amp.GradScaler(device="cuda", enabled=self._use_amp) if self._use_amp else None
 
@@ -625,28 +624,31 @@ class MultiTaskPretrainer(nn.Module):
     def _compute_masked_recon_loss(self, x: torch.Tensor) -> torch.Tensor:
         """Compute masked reconstruction loss."""
         masked_x, mask = self._mask_input(x, self.config.mask_prob)
+        scale = compute_target_scale(x)
         h = self._forward_encoder(masked_x)
-        recon = self.heads["masked_decoder"](h).view(-1, self.config.seq_len, self.config.n_features)
+        recon = self.heads["masked_decoder"](h).view(-1, self.config.seq_len, self.config.n_features) * scale
         return masked_reconstruction_loss(recon, x, mask)
 
     def _compute_forecast_loss(self, x: torch.Tensor) -> torch.Tensor:
         """Compute forecast pretext loss."""
         prefix = x[:, : self.config.prefix_len, :]
         target = x[:, self.config.prefix_len :, :]
+        scale = compute_target_scale(target)
 
         h = self._forward_encoder(prefix)
-        pred = self.heads["forecast"](h).view(-1, self.config.forecast_horizon, self.config.n_features)
+        pred = self.heads["forecast"](h).view(-1, self.config.forecast_horizon, self.config.n_features) * scale
         return forecast_loss(pred, target)
 
     def _compute_vae_loss(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute VAE loss."""
+        scale = compute_target_scale(x)
         h = self._forward_encoder(x)
         mu = self.heads["vae_mu"](h)
         logvar = self.heads["vae_logvar"](h).clamp(-8, 8)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mu + eps * std
-        recon = self.heads["vae_decoder"](z).view(-1, self.config.seq_len, self.config.n_features)
+        recon = self.heads["vae_decoder"](z).view(-1, self.config.seq_len, self.config.n_features) * scale
         return vae_loss(recon, x, mu, logvar, self.config.vae_beta)
 
     def _compute_drift_loss(self, x: torch.Tensor) -> torch.Tensor:
@@ -1035,7 +1037,7 @@ def adapt_encoder_to_target(
                     head = nn.Linear(ctx.shape[-1], tgt.shape[-1]).to(device)
                     opt_h = optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=lr)
             pred = head(ctx)
-            loss = F.mse_loss(pred, tgt.detach())
+            loss = normalized_mse_loss(pred, tgt.detach())
             opt_h.zero_grad()
             loss.backward()
             opt_h.step()

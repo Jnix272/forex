@@ -270,12 +270,12 @@ TRAINING = {
     # Defaults mirrored from config/run.yaml (YAML wins when --config is used).
     "batch_size": 512,
     "epochs": 40,
-    "loss": "sharpe_huber",  # matches config/run.yaml
+    "loss": "huber",  # matches config/run.yaml
     "sharpe_weight": 0.5,
-    "huber_delta": 1.0,
+    "huber_delta": 1.5,
     "asymmetric_sign_weight": 2.0,
-    "grad_clip": 0.75,
-    "weight_decay": 0.001,
+    "grad_clip": 0.5,
+    "weight_decay": 0.01,
     "amp": True,
     "val_split": 0.2,
     "seq_len": 120,  # matches config/run.yaml + curriculum
@@ -299,7 +299,7 @@ TRAINING = {
     # Stochastic Weight Averaging: averages weights over last 25% of training
     "swa_enabled": True,
     "swa_start_frac": 0.75,  # start at 75% of total epochs
-    "swa_lr": 1e-5,  # constant LR during SWA phase
+    "swa_lr": 5e-6,  # constant LR during SWA phase
 }
 
 # Presets for local machines (use: python training/train_gpu.py --hardware-profile <name>)
@@ -508,9 +508,10 @@ RL = {
     "reward": {
         "pnl_weight": 1.0,
         "drawdown_penalty": 0.5,
-        "transaction_cost_penalty": 0.3,
+        "transaction_cost_penalty": 1.0,
         "overtrade": 0.0005,  # matches config/run.yaml
         "holding_cost": 0.01,
+        "churn": 0.001,
     },
 }
 

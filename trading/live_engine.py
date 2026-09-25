@@ -25,6 +25,22 @@ import subprocess
 import sys
 import time
 import warnings
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+except Exception:
+    pass
+
+# Windows DLL Order Hardening: PyTorch must load before Polars/PyArrow/Pandas
+# to ensure modern MSVCP140.dll (VS 2022) is bound into the process address space.
+try:
+    import torch as _torch
+    if _torch.cuda.is_available():
+        _ = _torch.zeros(1, device="cuda:0")
+except Exception:
+    pass
 
 import numpy as np
 
@@ -124,6 +140,8 @@ NoTradeZoneGate = _LazySymbol("trading.live_guards", "NoTradeZoneGate")
 RegimeRouter = _LazySymbol("trading.live_guards", "RegimeRouter")
 SpreadVolatilityGuard = _LazySymbol("trading.live_guards", "SpreadVolatilityGuard")
 TradeJournal = _LazySymbol("trading.live_guards", "TradeJournal")
+LiveDuckDBSink = _LazySymbol("trading.live_db_sink", "LiveDuckDBSink")
+OnlineHedgeEnsemble = _LazySymbol("models.online_hedge", "OnlineHedgeEnsemble")
 
 
 def consume_reload_flag(flag_path) -> bool:
@@ -307,10 +325,27 @@ def build_inference_agents(
                 seq_len=seq_len,
                 n_features=n_features or getattr(slow_engine, "n_features", None),
             )
+            # Fallback across algos (DQN checkpoint missing but PPO/ensemble exists)
+            if rl_agent is None:
+                for _fallback_algo in (a for a in ("ensemble", "ppo", "dqn") if a != str(rl_algo).lower()):
+                    rl_agent = build_rl_fast_agent(
+                        checkpoint_dir=str(paths.checkpoint_dir),
+                        model_name=arch_name,
+                        algo=_fallback_algo,
+                        seq_len=seq_len,
+                        n_features=n_features or getattr(slow_engine, "n_features", None),
+                    )
+                    if rl_agent is not None:
+                        rl_algo = _fallback_algo
+                        meta["rl_algo"] = _fallback_algo
+                        print(f"[Live] Fast agent fallback algo={_fallback_algo}")
+                        break
             if rl_agent is not None:
                 fast_agent = rl_agent
                 meta["rl_fast"] = True
-                print("[Live] Fast agent: RL policy (TIP fast path)")
+                print(f"[Live] Fast agent: RL policy ({rl_algo} TIP fast path)")
+            else:
+                print(f"[Live] RL fast agent not found (algo={rl_algo}) in {paths.checkpoint_dir}; using supervised for both paths")
         except Exception as exc:
             print(f"[Live] RL fast agent unavailable ({exc}); using supervised for both paths")
 
@@ -383,11 +418,12 @@ def _tail_mean(features, col: str, n: int = 20, default: float = 0.0) -> float:
 class LiveTickBuffer:
     """In-memory tick → OHLCV bar aggregator used by LiveTradingEngine."""
 
-    def __init__(self, pair: str, bar_freq: str = "1min", max_bars: int = 500):
+    def __init__(self, pair: str, bar_freq: str = "1min", max_bars: int = 500, db_sink=None):
         self.pair = pair
         self.freq = pd.tseries.frequencies.to_offset(bar_freq)
         self.freq_str = str(bar_freq)
         self.max_bars = int(max_bars)
+        self.db_sink = db_sink
         self._ticks: deque = deque(maxlen=50_000)
         self._lock = threading.Lock()
 
@@ -405,6 +441,18 @@ class LiveTickBuffer:
                     "volume": float(volume),
                 }
             )
+        if self.db_sink is not None:
+            try:
+                py_ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else None
+                self.db_sink.record_tick(
+                    pair=self.pair,
+                    bid=float(bid),
+                    ask=float(ask),
+                    volume=float(volume),
+                    timestamp=py_ts,
+                )
+            except Exception:
+                pass
 
     def seed_bars(self, ohlcv_df: pd.DataFrame) -> None:
         """Seed the buffer with historical OHLCV bars so the engine starts warm."""
@@ -417,29 +465,48 @@ class LiveTickBuffer:
         with self._lock:
             ticks = list(self._ticks)
             seeded = getattr(self, "_seeded_bars", None)
+            # Incremental cache to avoid pd.concat each bar (latency fix)
+            if not hasattr(self, "_combined_cache"):
+                self._combined_cache = None
+                self._combined_cache_seeded = False
+            if seeded is not None and len(seeded) > 0 and not self._combined_cache_seeded:
+                # Initialize cache from seeded bars once
+                if _POLARS and pl is not None and isinstance(seeded, pl.DataFrame):
+                    self._combined_cache = seeded.to_pandas() if hasattr(seeded, "to_pandas") else seeded
+                    if "timestamp" in self._combined_cache.columns:
+                        self._combined_cache = self._combined_cache.set_index("timestamp").sort_index()
+                else:
+                    self._combined_cache = seeded.copy() if hasattr(seeded, "copy") else seeded
+                self._combined_cache_seeded = True
         live_bars = None
         if len(ticks) >= 2:
             live_bars = self._aggregate_ticks(ticks)
-        has_seeded = seeded is not None and len(seeded) > 0
-        has_live = live_bars is not None and len(live_bars) > 0
-        if has_seeded:
-            if has_live:
-                if _POLARS and pl is not None and isinstance(live_bars, pl.DataFrame):
-                    lb_pd = live_bars.to_pandas()
-                    if "timestamp" in lb_pd.columns:
-                        lb_pd = lb_pd.set_index("timestamp").sort_index()
+        if live_bars is not None and len(live_bars) > 0:
+            if _POLARS and pl is not None and isinstance(live_bars, pl.DataFrame):
+                lb_pd = live_bars.to_pandas()
+                if "timestamp" in lb_pd.columns:
+                    lb_pd = lb_pd.set_index("timestamp").sort_index()
+            else:
+                lb_pd = live_bars
+            with self._lock:
+                if self._combined_cache is None:
+                    self._combined_cache = lb_pd.tail(self.max_bars)
                 else:
-                    lb_pd = live_bars
-                s_pd = (
-                    seeded.to_pandas()
-                    if (_POLARS and pl is not None and isinstance(seeded, pl.DataFrame))
-                    else seeded
-                )
-                combined = pd.concat([s_pd[~s_pd.index.isin(lb_pd.index)], lb_pd]).sort_index()
-                return combined.tail(self.max_bars)
-            return seeded.tail(self.max_bars)
-        if has_live:
-            return live_bars.tail(self.max_bars) if hasattr(live_bars, "tail") else live_bars
+                    # Only append new indices
+                    try:
+                        new_idx = lb_pd.index.difference(self._combined_cache.index)
+                        if len(new_idx) > 0:
+                            self._combined_cache = pd.concat([self._combined_cache, lb_pd.loc[new_idx]]).sort_index().tail(self.max_bars)
+                    except Exception:
+                        # Fallback to full concat on error
+                        try:
+                            self._combined_cache = pd.concat([self._combined_cache, lb_pd]).sort_index().tail(self.max_bars)
+                        except Exception:
+                            self._combined_cache = lb_pd.tail(self.max_bars)
+                return self._combined_cache.tail(self.max_bars)
+        with self._lock:
+            if self._combined_cache is not None and len(self._combined_cache) > 0:
+                return self._combined_cache.tail(self.max_bars)
         return None
 
     def _aggregate_ticks(self, ticks):
@@ -552,6 +619,7 @@ class LiveSafetyGate:
         ask: float,
         equity: float,
         now: float | None = None,
+        record: bool = True,
     ) -> dict[str, object]:
         if self.halted:
             return {"ok": False, "reason": "halted"}
@@ -579,8 +647,17 @@ class LiveSafetyGate:
         if len(self._order_times) >= int(self.config.max_orders_per_minute):
             return {"ok": False, "reason": "order_rate_limit"}
 
-        self._order_times.append(ts)
+        if record:
+            self._order_times.append(ts)
         return {"ok": True, "reason": "", "pair": pair, "side": side, "lots": lots}
+
+    def record_order(self, now: float | None = None) -> None:
+        """Record an order timestamp upon actual order execution."""
+        ts = float(time.time() if now is None else now)
+        window_start = ts - 60.0
+        while self._order_times and self._order_times[0] < window_start:
+            self._order_times.popleft()
+        self._order_times.append(ts)
 
 
 class PaperBroker(BrokerInterface):
@@ -588,9 +665,39 @@ class PaperBroker(BrokerInterface):
     In-memory broker for paper trading and unit tests.
     Tracks mark-to-market positions, fills orders at current bid/ask,
     and updates balance and equity on price changes and position closes.
+
+    Money conventions
+    -----------------
+    ``lots`` are *mini lots* of ``UNITS_PER_LOT`` (10,000) units, matching
+    ``OANDABroker.units_per_lot`` (``OANDA_UNITS_PER_LOT``) and the RL training
+    environment's ``lot_size``.  P&L is accumulated in the pair's quote currency
+    and converted to USD (by dividing out the prevailing rate) when the quote
+    currency is not USD, so USDJPY/USDCAD are not silently mis-scaled.
+
+    Market data
+    -----------
+    By default the broker is a passive book: quotes only move when the caller
+    pushes them through :meth:`update_quote`.  ``synthetic=True`` additionally
+    generates a deterministic per-pair random walk so ``--broker paper`` has a
+    moving market (and warmup candles via :meth:`get_candles`) instead of
+    evaluating a frozen price forever.
     """
 
-    def __init__(self, initial_equity: float = 10_000.0):
+    UNITS_PER_LOT = 10_000.0
+    _PIP_SIZE = {"JPY": 0.01, "USD": 0.0001}
+    _BASE_PRICE = {"USDJPY": 150.00, "USDCAD": 1.35000, "GBPUSD": 1.30000}
+    _DEFAULT_BASE_PRICE = 1.10000
+
+    def __init__(
+        self,
+        initial_equity: float = 10_000.0,
+        *,
+        synthetic: bool = False,
+        seed: int = 42,
+        tick_interval_s: float = 0.25,
+        tick_vol_pips: float = 0.6,
+        spread_pips: float = 1.0,
+    ):
         self.initial_equity = float(initial_equity)
         self.balance = float(initial_equity)
         self.equity = float(initial_equity)
@@ -600,6 +707,14 @@ class PaperBroker(BrokerInterface):
         self._connected = False
         self._positions: dict[str, float] = {}  # pair -> signed lots
         self._position_entry: dict[str, float] = {}  # pair -> average entry price
+        # Synthetic market feed (opt-in).
+        self.synthetic = bool(synthetic)
+        self._rng = np.random.default_rng(int(seed))
+        self._tick_interval_s = float(tick_interval_s)
+        self._tick_vol_pips = float(tick_vol_pips)
+        self._spread_pips = float(spread_pips)
+        self._synth_price: dict[str, float] = {}
+        self._synth_last_ts: dict[str, float] = {}
 
     def connect(self) -> bool:
         self._connected = True
@@ -608,28 +723,116 @@ class PaperBroker(BrokerInterface):
     def disconnect(self) -> None:
         self._connected = False
 
+    # ── synthetic market helpers ─────────────────────────────────────────────
+
+    def _pip_size(self, pair: str) -> float:
+        p = str(pair).upper()
+        return self._PIP_SIZE["JPY"] if "JPY" in p else self._PIP_SIZE["USD"]
+
+    def _quote_currency(self, pair: str) -> str:
+        p = "".join(ch for ch in str(pair).upper() if ch.isalpha())
+        return p[3:6] if len(p) == 6 else "USD"
+
+    def _base_price(self, pair: str) -> float:
+        key = str(pair).upper()
+        return self._BASE_PRICE.get(key, self._DEFAULT_BASE_PRICE)
+
+    def _synth_mid(self, pair: str) -> float:
+        """Return the current synthetic mid price, seeding it on first use."""
+        p = str(pair).upper()
+        if p not in self._synth_price:
+            self._synth_price[p] = self._base_price(p)
+        return self._synth_price[p]
+
+    def _advance_synthetic(self, pair: str) -> None:
+        """Advance the synthetic mid, rate limited to one step per tick interval."""
+        p = str(pair).upper()
+        now = time.monotonic()
+        last = self._synth_last_ts.get(p)
+        if last is not None and (now - last) < self._tick_interval_s:
+            return
+        self._synth_last_ts[p] = now
+        pip = self._pip_size(p)
+        self._synth_price[p] = self._synth_mid(p) + float(self._rng.normal(0.0, self._tick_vol_pips * pip))
+
+    def get_candles(self, pair: str, count: int = 120, granularity: str = "M5") -> pd.DataFrame | None:
+        """Synthetic OHLCV history so paper mode is warm on its first bar.
+
+        Mirrors ``OANDABroker.get_candles``: a DatetimeIndex named ``timestamp``
+        with open/high/low/close/volume/bid_close/ask_close columns.
+        """
+        if not self.synthetic:
+            return None
+        pair_key = str(pair).upper()
+        pip = self._pip_size(pair_key)
+        try:
+            freq = pd.tseries.frequencies.to_offset(granularity)
+        except Exception:
+            freq = pd.tseries.frequencies.to_offset("5min")
+        end = pd.Timestamp.utcnow().floor(freq)
+        idx = pd.date_range(end=end, periods=int(count), freq=freq)
+        # Walk backwards from the live synthetic price so seeded history joins
+        # the live feed without a discontinuity.
+        anchor = self._synth_mid(pair_key)
+        steps = self._rng.normal(0.0, self._tick_vol_pips * pip * 2.0, size=int(count))
+        closes = anchor + np.cumsum(steps)[::-1]
+        opens = np.concatenate([[closes[0] - steps[0]], closes[:-1]])
+        span = np.abs(self._rng.normal(0.0, pip * 0.4, size=int(count)))
+        half = self._spread_pips * pip * 0.5
+        return pd.DataFrame(
+            {
+                "open": opens,
+                "high": np.maximum(opens, closes) + span,
+                "low": np.minimum(opens, closes) - span,
+                "close": closes,
+                "volume": np.full(int(count), 100.0, dtype=np.float64),
+                "bid_close": closes - half,
+                "ask_close": closes + half,
+            },
+            index=pd.Index(idx, name="timestamp"),
+        )
+
     def update_quote(self, bid: float, ask: float, pair: str | None = None) -> None:
         self._bid = float(bid)
         self._ask = float(ask)
         if pair:
             p = str(pair).upper()
             self._quotes[p] = (float(bid), float(ask))
+            # An externally pushed quote always wins over the synthetic walk.
+            self._synth_price.pop(p, None)
+            self._synth_last_ts.pop(p, None)
         self._update_equity()
 
     def get_bid_ask(self, pair: str) -> tuple[float, float]:
         p = str(pair).upper()
         if p in self._quotes:
             return self._quotes[p]
+        if self.synthetic:
+            self._advance_synthetic(p)
+            mid = self._synth_mid(p)
+            half = self._spread_pips * self._pip_size(p) * 0.5
+            return mid - half, mid + half
         return self._bid, self._ask
 
     def get_positions(self) -> dict[str, float]:
         return {p: float(v) for p, v in self._positions.items() if abs(v) > 1e-12}
 
+    def _units_per_lot(self, pair: str) -> float:
+        """Contract size in units per lot (matches the live OANDA convention)."""
+        return float(self.UNITS_PER_LOT)
+
     def _get_multiplier(self, pair: str) -> float:
-        p = str(pair).upper()
-        if "JPY" in p:
-            return 1000.0
-        return 100_000.0
+        """Backwards-compatible alias for :meth:`_units_per_lot`."""
+        return self._units_per_lot(pair)
+
+    def _to_usd(self, amount_quote: float, pair: str, rate: float) -> float:
+        """Convert a quote-currency P&L amount into USD."""
+        if self._quote_currency(pair) == "USD":
+            return float(amount_quote)
+        rate = float(rate)
+        if rate <= 0:
+            return float(amount_quote)
+        return float(amount_quote) / rate
 
     def _update_equity(self) -> None:
         unrealized = 0.0
@@ -640,11 +843,13 @@ class PaperBroker(BrokerInterface):
             if entry <= 0:
                 continue
             bid, ask = self.get_bid_ask(pair)
-            mult = self._get_multiplier(pair)
+            units = self._units_per_lot(pair)
             if lots > 0:
-                unrealized += (bid - entry) * mult * lots
+                mark = (bid - entry) * units * lots
+                unrealized += self._to_usd(mark, pair, bid)
             else:
-                unrealized += (entry - ask) * mult * abs(lots)
+                mark = (entry - ask) * units * abs(lots)
+                unrealized += self._to_usd(mark, pair, ask)
         self.equity = round(self.balance + unrealized, 2)
 
     def get_account(self) -> dict:
@@ -662,15 +867,15 @@ class PaperBroker(BrokerInterface):
         signed_order = order_lots if is_buy else -order_lots
 
         curr_pos = self._positions.get(pair_key, 0.0)
-        mult = self._get_multiplier(pair_key)
+        units = self._units_per_lot(pair_key)
 
         if curr_pos != 0 and ((curr_pos > 0 and not is_buy) or (curr_pos < 0 and is_buy)):
             entry = self._position_entry.get(pair_key, fill_price)
             closing_lots = min(abs(curr_pos), order_lots)
             if curr_pos > 0:
-                realized = (fill_price - entry) * mult * closing_lots
+                realized = self._to_usd((fill_price - entry) * units * closing_lots, pair_key, fill_price)
             else:
-                realized = (entry - fill_price) * mult * closing_lots
+                realized = self._to_usd((entry - fill_price) * units * closing_lots, pair_key, fill_price)
             self.balance += realized
             new_pos = curr_pos + signed_order
             self._positions[pair_key] = new_pos
@@ -704,11 +909,11 @@ class PaperBroker(BrokerInterface):
         if abs(curr_pos) > 1e-12 and entry > 0:
             bid, ask = self.get_bid_ask(pair_key)
             fill_price = bid if curr_pos > 0 else ask
-            mult = self._get_multiplier(pair_key)
+            units = self._units_per_lot(pair_key)
             if curr_pos > 0:
-                realized = (fill_price - entry) * mult * curr_pos
+                realized = self._to_usd((fill_price - entry) * units * curr_pos, pair_key, fill_price)
             else:
-                realized = (entry - fill_price) * mult * abs(curr_pos)
+                realized = self._to_usd((entry - fill_price) * units * abs(curr_pos), pair_key, fill_price)
             self.balance += realized
             self._update_equity()
         return {"ok": True, "pair": pair}
@@ -927,10 +1132,11 @@ class OANDABroker(BrokerInterface):
     _TICK_STRUCT = None  # struct.Struct, lazily built
 
     def __init__(self):
+        self.venue = "oanda"
         self._token = (
-            os.environ.get("OANDA_BEARER_TOKEN")
+            os.environ.get("OANDA_API_KEY")
+            or os.environ.get("OANDA_BEARER_TOKEN")
             or os.environ.get("OANDA_API_TOKEN")
-            or os.environ.get("OANDA_API_KEY")
         )
         self._account_id = os.environ.get("OANDA_ACCOUNT_ID")
         env = (os.environ.get("OANDA_ENV") or "practice").strip().lower()
@@ -1168,6 +1374,12 @@ class OANDABroker(BrokerInterface):
             print(f"[OANDABroker] Warning: historical candles fetch failed for {inst} ({exc})")
             return None
 
+    @staticmethod
+    def _format_price(price: float, pair: str) -> str:
+        clean = str(pair).upper().replace("_", "").replace("/", "")
+        decimals = 3 if "JPY" in clean else 5
+        return f"{float(price):.{decimals}f}"
+
     def market_order(
         self, pair: str, side: str, lots: float, *, stop_loss: float | None = None, take_profit: float | None = None
     ) -> dict:
@@ -1176,6 +1388,8 @@ class OANDABroker(BrokerInterface):
         import urllib.error
 
         units = round(float(lots) * self.units_per_lot)
+        if units == 0:
+            return {"ok": False, "reason": "zero_units", "error": "Order size 0 units"}
         if str(side).lower() in ("sell", "short"):
             units = -abs(units)
         else:
@@ -1188,9 +1402,9 @@ class OANDABroker(BrokerInterface):
             "positionFill": "DEFAULT",
         }
         if stop_loss is not None:
-            order_body["stopLossOnFill"] = {"price": f"{float(stop_loss):.5f}"}
+            order_body["stopLossOnFill"] = {"price": self._format_price(stop_loss, pair)}
         if take_profit is not None:
-            order_body["takeProfitOnFill"] = {"price": f"{float(take_profit):.5f}"}
+            order_body["takeProfitOnFill"] = {"price": self._format_price(take_profit, pair)}
         body = _json.dumps({"order": order_body}).encode("utf-8")
         url = f"{self._host}/v3/accounts/{self._account_id}/orders"
         req = urllib.request.Request(url, data=body, headers=self._headers(), method="POST")
@@ -1245,20 +1459,51 @@ class OANDABroker(BrokerInterface):
         import urllib.request
         import urllib.error
 
-        url = f"{self._host}/v3/accounts/{self._account_id}/positions/{self._instrument(pair)}/close"
-        body = _json.dumps({"longUnits": "ALL", "shortUnits": "ALL"}).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers=self._headers(), method="PUT")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read())
-            if "longOrderCancelTransaction" in data and "shortOrderCancelTransaction" in data:
-                return {"ok": False, "reason": "close_cancelled", "details": data}
-            return {"ok": True, "raw": data}
-        except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="ignore")
-            return {"ok": False, "reason": f"http_error_{exc.code}", "error": err_body}
-        except Exception as exc:
-            return {"ok": False, "reason": "network_error", "error": str(exc)}
+        inst = self._instrument(pair)
+        url = f"{self._host}/v3/accounts/{self._account_id}/positions/{inst}/close"
+
+        # Determine if long or short units are currently open to avoid HTTP 400
+        # (OANDA rejects CLOSEOUT_POSITION_DOESNT_EXIST if ALL is requested for a side that doesn't exist)
+        pair_clean = str(pair).upper().replace("/", "").replace("_", "")
+        pos_map = self.get_positions()
+        pos = 0.0
+        if pos_map is not None:
+            pos = pos_map.get(pair_clean, pos_map.get(inst.replace("_", ""), 0.0))
+
+        sides_to_try = []
+        if pos > 1e-6:
+            sides_to_try = [{"longUnits": "ALL"}]
+        elif pos < -1e-6:
+            sides_to_try = [{"shortUnits": "ALL"}]
+        else:
+            # Try longUnits first, then shortUnits if long doesn't exist
+            sides_to_try = [{"longUnits": "ALL"}, {"shortUnits": "ALL"}]
+
+        last_err = None
+        for payload in sides_to_try:
+            body = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers=self._headers(), method="PUT")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = _json.loads(resp.read())
+                if "longOrderCancelTransaction" in data and "shortOrderCancelTransaction" in data:
+                    return {"ok": False, "reason": "close_cancelled", "details": data}
+                return {"ok": True, "raw": data}
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="ignore")
+                # If already closed or side doesn't exist
+                if exc.code == 404 or "does not have an open position" in err_body.lower():
+                    return {"ok": True, "closed": 0, "reason": "already_closed", "raw": err_body}
+                if "CLOSEOUT_POSITION_DOESNT_EXIST" in err_body:
+                    last_err = err_body
+                    continue  # try other side if in fallback list
+                return {"ok": False, "reason": f"http_error_{exc.code}", "error": err_body, "status_code": exc.code}
+            except Exception as exc:
+                return {"ok": False, "reason": "network_error", "error": str(exc)}
+
+        if last_err and "CLOSEOUT_POSITION_DOESNT_EXIST" in last_err:
+            return {"ok": True, "closed": 0, "reason": "already_closed", "raw": last_err}
+        return {"ok": False, "reason": "close_failed", "error": str(last_err)}
 
     def get_positions(self):
         import json as _json
@@ -1272,8 +1517,11 @@ class OANDABroker(BrokerInterface):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = _json.loads(resp.read())
-        except Exception:
-            return {}
+        except Exception as exc:
+            # Never convert an unknown broker state into an empty position map.
+            # Callers that are about to place orders must fail closed.
+            self._last_position_error = str(exc)
+            return None
 
         pos = {}
         for p in data.get("positions", []):
@@ -1302,6 +1550,39 @@ def _align_next_bar(freq_str: str, now: datetime | None = None) -> datetime:
         return now_clean.replace(second=0) + pd.Timedelta(minutes=1)
 
 
+CANONICAL_PAIR_146 = [
+    "open", "high", "low", "close", "volume", "bid_close", "ask_close", "session_label",
+    "asia_london", "london_ny", "obi_proxy", "tar", "ofi", "atr_6", "atr_20", "atr_60",
+    "vol_6", "vol_20", "vol_60", "bb_upper", "bb_lower", "bb_width", "bb_pct", "rsi_14",
+    "macd", "macd_sig", "macd_hist", "ret_5", "ret_20", "ret_60", "kyles_lambda",
+    "amihud_illiq", "realized_spread", "vpin", "ofi_l2", "ofi_z", "atr_ratio_6_20",
+    "atr_ratio_20_60", "vol_ratio_6_20", "vol_ratio_20_60", "breakout_pressure",
+    "liquidity_vacuum", "vol_of_vol", "price_ofi_div", "spread_pips", "spread_zscore",
+    "spread_percentile", "spread_widening_5m", "spread_widening_20m", "cost_to_atr",
+    "adx_14", "chop_index", "trend_regime", "range_regime", "volatility_regime",
+    "hurst_exponent", "noise_to_signal_60", "trailing_volatility_60",
+    "realized_vol_regime", "trend_quality", "ret_5m", "rsi_5m", "atr_5m",
+    "trend_slope_5m", "distance_to_vwap_5m", "volatility_regime_5m", "ret_15m",
+    "rsi_15m", "atr_15m", "trend_slope_15m", "distance_to_vwap_15m",
+    "volatility_regime_15m", "ret_1h", "rsi_1h", "atr_1h", "trend_slope_1h",
+    "distance_to_vwap_1h", "volatility_regime_1h", "vp_poc_pos", "vp_poc_dist",
+    "vp_poc_share", "vp_vw_pos", "vp_skew", "vp_in_va", "vol_clock_pos",
+    "vol_clock_ratio", "vol_clock_z", "vol_clock_pace", "vol_clock_hot",
+    "regime_label", "regime_class", "fb_0", "fb_1", "fb_2", "fb_3", "fb_4", "fb_5",
+    "fb_6", "fb_7", "spread_us_de", "spread_us_jp", "spread_us_gb", "spread_us_au",
+    "spread_us_ca", "spread_us_nz", "spread_de_gb", "spread_de_jp", "spread_us_ch",
+    "yield_curve_slope", "carry_eur", "carry_jpy", "carry_gbp", "carry_aud",
+    "carry_cad", "carry_nzd", "carry_eurgbp", "carry_eurjpy", "carry_chf",
+    "yield_momentum_5d", "yield_momentum_20d", "yield_vol_20d", "cot_hf_mom_4w",
+    "cot_net_hf", "cot_net_comm", "cot_extreme", "news_ok", "sentiment_raw",
+    "sentiment_decayed", "eco_surprise", "eco_revision", "cat_central_bank",
+    "cat_inflation", "cat_labor", "cat_growth", "cat_geopolitical", "cat_commentary",
+    "time_sin", "time_cos", "day_sin", "day_cos", "sentiment_decayed_missing",
+    "sentiment_decayed_staleness", "eco_surprise_missing", "eco_surprise_staleness",
+    "expected_latency_ms", "no_trade_score",
+]
+
+
 class LiveTradingEngine:
     """Single-pair live loop: ticks → features → guards → size → broker."""
 
@@ -1319,7 +1600,7 @@ class LiveTradingEngine:
         prometheus_enabled: bool = True,
         calendar_file: str | None = None,
         journal_path: str | None = None,
-        max_spread_pips: float = 2.5,
+        max_spread_pips: float | None = None,
         guard_min_confidence: float = 0.45,
         bar_freq: str = "1min",
         inference_meta: dict | None = None,
@@ -1330,9 +1611,14 @@ class LiveTradingEngine:
         allow_paper_fallback: bool = False,
         risk_engine=None,
         cross_asset=None,
+        db_sink=None,
+        db_enabled: bool = True,
+        db_path: str | Path | None = None,
+        shared_pair_features: dict | None = None,
     ):
         self.broker = broker
         self.pair = str(pair).upper()
+        self.shared_pair_features = shared_pair_features
         self.equity = float(equity)
         self.max_lots = float(max_lots)
         self.conf_thr = float(confidence_thresh if confidence_thresh is not None else guard_min_confidence)
@@ -1342,6 +1628,17 @@ class LiveTradingEngine:
         self.bar_freq = str(bar_freq)
         self._inference_meta = dict(inference_meta or {})
         self._equity_fetch_failures = 0
+
+        if db_sink is not None:
+            self.db_sink = db_sink
+            self._owns_db_sink = False
+        elif db_enabled:
+            sink_path = Path(db_path) if db_path else Path(PATHS.get("store", "data/store")) / "live_trading.duckdb"
+            self.db_sink = LiveDuckDBSink(db_path=sink_path)
+            self._owns_db_sink = True
+        else:
+            self.db_sink = None
+            self._owns_db_sink = False
 
         try:
             from risk.risk_engine import RiskEngine
@@ -1406,8 +1703,15 @@ class LiveTradingEngine:
             self._sent_backend = mode
         else:
             self.sentiment = DualStreamSentiment(prefer_backend=mode, use_cache=True)
-            self.finbert = SentimentPipeline()
+            self.finbert = SentimentPipeline(prefer_backend=mode)
             self._sent_backend = mode
+            if hasattr(self.finbert, "warmup"):
+                try:
+                    self.finbert.warmup()
+                except Exception as _w_err:
+                    self.logger.event(
+                        "WARN", "sentiment_warmup_err", f"[Live] FinBERT warmup notice: {_w_err}", pair=self.pair
+                    )
         self.logger.event(
             "INFO", "sentiment_backend", f"[Live] Sentiment mode={mode}", pair=self.pair, mode=mode, backend=mode
         )
@@ -1423,24 +1727,170 @@ class LiveTradingEngine:
         self.disagreement_gate = DisagreementGate(min_confidence=guard_min_confidence)
         self.no_trade_zone_gate = NoTradeZoneGate(threshold=no_trade_threshold, enabled=no_trade_gate_enabled)
         journal = journal_path or str(self.log_dir / f"trade_journal_{self.pair.lower()}.jsonl")
-        self.trade_journal = TradeJournal(journal)
+        self.trade_journal = TradeJournal(journal, db_sink=self.db_sink, default_pair=self.pair)
+
+        pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
+        # Canonical schema pair mapping matching training dataset order (EURUSD, USDJPY, GBPUSD, USDCAD)
+        pair_map = {"EURUSD": 0, "USDJPY": 1, "GBPUSD": 2, "USDCAD": 3}
+        _pair_slot = pair_map.get(pair_clean, 0)
+        _pair_seq_len = int(inference_meta.get("seq_len", 120)) if inference_meta else 120
 
         class _Wrap:
-            def __init__(self, m, action_adapter):
+            def __init__(
+                self,
+                m,
+                action_adapter,
+                seq_len: int = _pair_seq_len,
+                pair_idx: int = _pair_slot,
+                shared_pair_features: dict | None = None,
+            ):
+                from collections import deque as _deque
+
                 self.m = m
                 self._action_adapter = action_adapter
+                self.seq_len = int(getattr(m, "seq_len", seq_len) or seq_len)
+                self.expected_features = getattr(m, "n_features", None)
+                self.pair_idx = int(pair_idx)
+                self.shared_pair_features = shared_pair_features
+                self._obs_buffer = _deque(maxlen=self.seq_len)
+                self.last_raw = 0.0
+                self.last_proba = np.array([0.33, 0.34, 0.33], dtype=np.float32)
+
+            def _format_obs(self, o):
+                obs = np.asarray(o, dtype=np.float32).reshape(-1)
+                obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
+                # MultiPair model handling: 4 pairs x 146 features = 584 features
+                is_num_features = isinstance(self.expected_features, (int, float, np.integer))
+                if is_num_features and int(self.expected_features) == 584 and obs.shape[0] < 584:
+                    f_per_pair = 146
+                    multi_obs = np.zeros(584, dtype=np.float32)
+                    pair_names = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+                    for idx, p in enumerate(pair_names):
+                        slot_start = idx * f_per_pair
+                        if idx == self.pair_idx:
+                            n_copy = min(obs.shape[0], f_per_pair)
+                            multi_obs[slot_start : slot_start + n_copy] = obs[:n_copy]
+                        elif self.shared_pair_features and p in self.shared_pair_features:
+                            other_o = self.shared_pair_features[p]
+                            n_copy = min(other_o.shape[0], f_per_pair)
+                            multi_obs[slot_start : slot_start + n_copy] = other_o[:n_copy]
+                    obs = multi_obs
+                elif is_num_features:
+                    # Enforce strict length matching against expected model dimensions
+                    exp_len = int(self.expected_features)
+                    if obs.shape[0] < exp_len:
+                        obs = np.pad(obs, (0, exp_len - obs.shape[0]))
+                    elif obs.shape[0] > exp_len:
+                        obs = obs[:exp_len]
+                elif len(self._obs_buffer) > 0 and obs.shape[0] != self._obs_buffer[0].shape[0]:
+                    target_len = self._obs_buffer[0].shape[0]
+                    if obs.shape[0] < target_len:
+                        obs = np.pad(obs, (0, target_len - obs.shape[0]))
+                    else:
+                        obs = obs[:target_len]
+                return obs
+
+            def warm_up_buffer(self, obs_matrix: np.ndarray) -> None:
+                """Pre-populate the observation buffer from historical candles."""
+                for row in obs_matrix:
+                    fmt = self._format_obs(row)
+                    self._obs_buffer.append(fmt)
+                    # Keep the underlying RL agent's private rolling buffer in
+                    # sync so its seq_len countdown does not stay empty after
+                    # a historical warm-up (otherwise TIP stays HOLD for seq_len bars).
+                    try:
+                        m = self.m
+                        if hasattr(m, "_feat_buffer") and hasattr(m._feat_buffer, "append"):
+                            # RLInferenceAgent expects the already-formatted row
+                            # (scaler is applied internally on window assembly).
+                            m._feat_buffer.append(fmt)
+                    except Exception:
+                        pass
 
             def select_action(self, o):
-                return self._action_adapter(self.m.select_action(o))
+                obs = self._format_obs(o)
+                self._obs_buffer.append(obs)
+                if len(self._obs_buffer) < self.seq_len:
+                    self.last_raw = 0.0
+                    self.last_proba = np.array([0.33, 0.34, 0.33], dtype=np.float32)
+                    return self._action_adapter(1)
+
+                # Isolated buffer evaluation on model
+                window = np.stack(self._obs_buffer, axis=0)
+                from unittest.mock import MagicMock as _MagicMock
+
+                if hasattr(self.m, "predict_proba") and not isinstance(self.m, _MagicMock):
+                    try:
+                        proba = self.m.predict_proba(window)
+                        if isinstance(proba, np.ndarray):
+                            proba = np.asarray(proba, dtype=np.float32).reshape(-1)
+                            if proba.size == 3:
+                                self.last_proba = proba
+                                self.last_raw = float(proba[2] - proba[0])
+                            hold_thresh = getattr(self.m, "hold_threshold", 0.45)
+                            act = 1 if proba.max() < hold_thresh else int(proba.argmax())
+                            return self._action_adapter(act)
+                    except Exception:
+                        pass
+
+                try:
+                    raw = self.m.select_action(obs)
+                    # Try to extract raw scalar if model returns continuous value
+                    if isinstance(raw, (list, np.ndarray)):
+                        raw_v = float(np.asarray(raw).reshape(-1)[0])
+                    else:
+                        raw_v = float(raw)
+                    self.last_raw = raw_v
+                    # Map raw scalar to proba-like for confidence: distance from 0
+                    conf = min(1.0, abs(raw_v) / 0.35)
+                    if abs(raw_v) < 0.35:
+                        self.last_proba = np.array([0.33, 0.34, 0.33], dtype=np.float32)
+                    else:
+                        self.last_proba = np.array([0.1, 0.2, 0.7] if raw_v > 0 else [0.7, 0.2, 0.1], dtype=np.float32)
+                    return self._action_adapter(raw)
+                except Exception:
+                    self.last_raw = 0.0
+                    return self._action_adapter(1)
+
+            def peek_raw(self, o):
+                """Get raw prediction without mutating buffer (for hedge)."""
+                obs = self._format_obs(o)
+                if len(self._obs_buffer) + 1 < self.seq_len:
+                    return 0.0
+                # Use current buffer + new obs as window
+                window = np.stack(list(self._obs_buffer) + [obs], axis=0)[-self.seq_len :]
+                try:
+                    if hasattr(self.m, "predict_proba"):
+                        proba = self.m.predict_proba(window)
+                        proba = np.asarray(proba, dtype=np.float32).reshape(-1)
+                        if proba.size == 3:
+                            return float(proba[2] - proba[0])
+                    # Fallback to last_raw
+                    return float(self.last_raw)
+                except Exception:
+                    return float(self.last_raw)
 
             def set_model(self, m, action_adapter):
                 self.m = m
                 self._action_adapter = action_adapter
+                self.seq_len = int(getattr(m, "seq_len", self.seq_len) or self.seq_len)
+                self.expected_features = getattr(m, "n_features", self.expected_features)
 
             def set_agent_state(self, *args, **kwargs):
                 if hasattr(self.m, "set_agent_state"):
                     return self.m.set_agent_state(*args, **kwargs)
                 return None
+
+            def reset_buffer(self):
+                self._obs_buffer.clear()
+                try:
+                    if hasattr(self.m, "_feat_buffer") and hasattr(self.m._feat_buffer, "clear"):
+                        self.m._feat_buffer.clear()
+                    elif hasattr(self.m, "reset_buffer"):
+                        self.m.reset_buffer()
+                except Exception:
+                    pass
 
             def __getattr__(self, item):
                 return getattr(self.m, item)
@@ -1455,13 +1905,13 @@ class LiveTradingEngine:
             return _adapt
 
         self._live_action_adapter = _live_action_adapter
-        self._agent_wrap_fast = _Wrap(fast_agent, _live_action_adapter(fast_agent))
-        self._agent_wrap_slow = _Wrap(slow_model, _live_action_adapter(slow_model))
+        self._agent_wrap_fast = _Wrap(fast_agent, _live_action_adapter(fast_agent), shared_pair_features=self.shared_pair_features)
+        self._agent_wrap_slow = _Wrap(slow_model, _live_action_adapter(slow_model), shared_pair_features=self.shared_pair_features)
         self.fast = self._agent_wrap_fast
         self.slow = self._agent_wrap_slow
         self.tip = TIPSearchManager(fast_agent=self.fast, slow_agent=self.slow)
 
-        self.buf = LiveTickBuffer(self.pair, bar_freq=bar_freq)
+        self.buf = LiveTickBuffer(self.pair, bar_freq=bar_freq, db_sink=self.db_sink)
         self.safety = LiveSafetyGate(LiveSafetyConfig(max_spread_pips=max_spread_pips), starting_equity=self.equity)
         self.drift = DriftDetector()
         self.shadow = ShadowModeDeployer()
@@ -1478,6 +1928,20 @@ class LiveTradingEngine:
                 port=int(ALERTS.get("prometheus_port", 8000)),
                 initial_equity=float(equity),
             )
+
+        # Online Adaptive Ensemble (Hedge / Exp3)
+        hedge_state_file = self.log_dir / f"hedge_weights_{self.pair.lower()}.json"
+        hedge_models = ["slow_model", "fast_agent"]
+        self.hedge_ensemble = OnlineHedgeEnsemble(
+            model_names=hedge_models,
+            learning_rate=0.1,
+            discount_factor=0.98,
+            min_weight_floor=0.05,
+            state_path=hedge_state_file,
+            initial_sharpes={"slow_model": 1.25, "fast_agent": 0.85},
+        )
+        self._last_bar_preds: dict[str, float] = {}
+        self._last_bar_close: float = 0.0
 
         self._model_name = str(self._inference_meta.get("model_name") or "haelt")
         self._runtime = str(self._inference_meta.get("runtime") or "pytorch")
@@ -1529,7 +1993,7 @@ class LiveTradingEngine:
                     "or --allow-paper-fallback only for intentional paper testing."
                 )
             print("[Live] Broker connection failed - using PaperBroker (explicit fallback)")
-            self.broker = PaperBroker(initial_equity=self.equity)
+            self.broker = PaperBroker(initial_equity=self.equity, synthetic=True)
             if not self.broker.connect():
                 raise RuntimeError("PaperBroker fallback failed to connect")
         else:
@@ -1542,7 +2006,7 @@ class LiveTradingEngine:
                         "Pass --allow-paper-fallback to continue on PaperBroker."
                     ) from e
                 print(f"[Live] Broker pricing probe failed ({e}) - falling back to PaperBroker")
-                self.broker = PaperBroker(initial_equity=self.equity)
+                self.broker = PaperBroker(initial_equity=self.equity, synthetic=True)
                 self.broker.connect()
 
         if hasattr(self.broker, "get_candles"):
@@ -1553,6 +2017,16 @@ class LiveTradingEngine:
                     print(f"[Live] Preloaded {len(hist_df)} historical bars for {self.pair} buffer warmup")
             except Exception as exc:
                 print(f"[Live] Warning: Historical candle preload failed for {self.pair} ({exc})")
+
+        # Adopt any pre-existing open position from the broker
+        if hasattr(self.broker, "get_positions"):
+            try:
+                active_pos = self.broker.get_positions() or {}
+                if self.pair in active_pos and abs(float(active_pos[self.pair])) > 1e-5:
+                    self._position = float(active_pos[self.pair])
+                    print(f"[Live] Adopted pre-existing broker position for {self.pair}: {self._position} lots")
+            except Exception as exc:
+                print(f"[Live] Initial position probe failed for {self.pair} ({exc})")
 
         self._running = True
         signal.signal(signal.SIGINT, lambda *_: self.stop())
@@ -1566,31 +2040,71 @@ class LiveTradingEngine:
         print(f"[Live] Engine started for {self.pair}")
         bar_count = 0
         next_bar_time = self._next_bar()
-        while self._running:
-            if max_bars is not None and bar_count >= max_bars:
-                break
-            now = datetime.now(UTC)
-            if now < next_bar_time:
-                try:
-                    bid, ask = self.broker.get_bid_ask(self.pair)
-                    if bid and ask:
-                        self.buf.push_tick(bid, ask)
-                except Exception:
-                    pass
-                time.sleep(0.1)
-                continue
-            bar_ts = next_bar_time
-            bars = self.buf.get_bars()
-            if bars is not None and len(bars) >= 70:
-                self._on_new_bar(bars, bar_count)
-            bar_count += 1
-            # Advance by fixed interval so slow processing never skips bars
-            import pandas as _pd_bar
-            _interval = _pd_bar.Timedelta(self.bar_freq)
-            next_bar_time = bar_ts + _interval
-            while next_bar_time <= datetime.now(UTC):
-                next_bar_time += _interval
-        self.stop()
+        try:
+            while self._running:
+                if max_bars is not None and bar_count >= max_bars:
+                    break
+                now = datetime.now(UTC)
+                if now < next_bar_time:
+                    try:
+                        bid, ask = self.broker.get_bid_ask(self.pair)
+                        if bid and ask:
+                            self.buf.push_tick(bid, ask)
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                    continue
+                bar_ts = next_bar_time
+                bars = self.buf.get_bars()
+                if bars is not None and len(bars) >= 70:
+                    self._on_new_bar(bars, bar_count)
+                bar_count += 1
+                # Advance by fixed interval so slow processing never skips bars
+                import pandas as _pd_bar
+                _interval = _pd_bar.Timedelta(self.bar_freq)
+                next_bar_time = bar_ts + _interval
+                while next_bar_time <= datetime.now(UTC):
+                    next_bar_time += _interval
+        finally:
+            self.stop()
+
+    def _reconcile_positions(self, bars=None) -> None:
+        """Reconcile in-memory position against live broker open positions."""
+        if not hasattr(self.broker, "get_positions"):
+            return
+        try:
+            positions = self.broker.get_positions()
+            if not isinstance(positions, dict):
+                return
+            pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
+            broker_pos = float(positions.get(pair_clean, positions.get(self.pair, 0.0)))
+            # External close detected: engine has open position, but broker is flat
+            if abs(broker_pos) < 1e-5 and abs(self._position) > 1e-5:
+                bid, ask = self.broker.get_bid_ask(self.pair)
+                mid = (float(bid) + float(ask)) / 2.0 if bid and ask else _last_float(bars, "close", self._entry_price)
+                self.logger.event(
+                    "WARN",
+                    "reconcile_external_close",
+                    f"[Reconcile] Broker position flat for {self.pair} (internal {self._position} -> 0.0)",
+                    pair=self.pair,
+                    prev_position=self._position,
+                )
+                self._risk_trade_closed(mid, "external_close_reconciliation")
+                self._position = 0.0
+                self._entry_price = 0.0
+                self._holding_bars = 0
+            elif abs(broker_pos - self._position) > 0.01:
+                self.logger.event(
+                    "WARN",
+                    "reconcile_size_mismatch",
+                    f"[Reconcile] Syncing {self.pair} internal lots {self._position} -> broker lots {broker_pos}",
+                    pair=self.pair,
+                    internal_lots=self._position,
+                    broker_lots=broker_pos,
+                )
+                self._position = broker_pos
+        except Exception as exc:
+            self.logger.event("DEBUG", "reconcile_err", f"Reconcile error: {exc}", pair=self.pair)
 
     def _risk_trade_closed(self, mid: float, reason: str) -> None:
         """Feed a realised closed trade into RiskEngine so its daily-loss,
@@ -1618,6 +2132,34 @@ class LiveTradingEngine:
                 / max(pip, 1e-12)
                 * pos
             )
+            pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
+            if len(pair_clean) == 6:
+                base = pair_clean[:3]
+                quote = pair_clean[3:]
+                if base == "USD" and quote != "USD":
+                    # E.g. USDJPY, USDCAD, USDCHF: divide by mid to convert quote currency to USD
+                    pnl = pnl / max(float(mid), 1e-6)
+                elif quote != "USD":
+                    # Cross-pair where quote is not USD (e.g. EURGBP, EURJPY, GBPJPY):
+                    conv_rate = None
+                    if hasattr(self.broker, "get_bid_ask"):
+                        try:
+                            qb, qa = self.broker.get_bid_ask(f"{quote}USD")
+                            if qb and qa:
+                                conv_rate = (float(qb) + float(qa)) / 2.0
+                        except Exception:
+                            pass
+                        if conv_rate is None:
+                            try:
+                                ub, ua = self.broker.get_bid_ask(f"USD{quote}")
+                                if ub and ua:
+                                    u_mid = (float(ub) + float(ua)) / 2.0
+                                    if u_mid > 1e-6:
+                                        conv_rate = 1.0 / u_mid
+                            except Exception:
+                                pass
+                    if conv_rate is not None:
+                        pnl = pnl * conv_rate
             direction = "long" if self._position > 0 else "short"
             self.risk_engine.close_position(self.pair)
             self.risk_engine.on_trade_closed(
@@ -1645,6 +2187,7 @@ class LiveTradingEngine:
         today = datetime.now(UTC).timetuple().tm_yday
         if getattr(self, "_last_trading_day", None) != today:
             self._last_trading_day = today
+            self._halt_new_orders = False
             self.safety.new_day(self.equity)
             self.dae.new_day()
             if self.risk_engine is not None:
@@ -1652,6 +2195,7 @@ class LiveTradingEngine:
                     self.risk_engine.new_day(self.equity)
                 except Exception:
                     pass
+        self._reconcile_positions(bars)
         t0 = time.perf_counter()
         bars = _ensure_polars_frame(bars)
         try:
@@ -1689,10 +2233,20 @@ class LiveTradingEngine:
                     else:
                         headlines = get_latest_headlines(limit=12) or ["Market update"]
                         bias = float(self.finbert.score_headlines(headlines))
+                        if abs(bias) < 1e-6:
+                            try:
+                                bias = float(self.sentiment.get_bias())
+                            except Exception:
+                                pass
                 except Exception:
                     try:
                         headlines = get_latest_headlines(limit=12) or ["Market update"]
                         bias = float(self.finbert.score_headlines(headlines))
+                        if abs(bias) < 1e-6:
+                            try:
+                                bias = float(self.sentiment.get_bias())
+                            except Exception:
+                                pass
                         self._sent_backend = "finbert"
                         self.logger.event(
                             "WARN",
@@ -1708,6 +2262,8 @@ class LiveTradingEngine:
                 features = features.with_columns(pl.lit(bias).cast(pl.Float64).alias("finbert_sentiment"))
             else:
                 features["finbert_sentiment"] = bias
+            from config.feature_mask import apply_feature_mask as _apply_fm
+            features = _apply_fm(features)
         except Exception as e:
             self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
             return
@@ -1729,36 +2285,97 @@ class LiveTradingEngine:
             return
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+        if getattr(self, "shared_pair_features", None) is not None:
+            self.shared_pair_features[str(self.pair).upper().replace("/", "").replace("_", "")] = obs
+
+        # Instant Warmup: Pre-populate rolling observation buffers if empty and historical features exist
+        if hasattr(self._agent_wrap_slow, "warm_up_buffer") and len(self._agent_wrap_slow._obs_buffer) == 0:
+            n_warmup = min(len(features) - 1, self._agent_wrap_slow.seq_len - 1)
+            if n_warmup > 0:
+                try:
+                    if _POLARS and isinstance(features, pl.DataFrame):
+                        warmup_rows = (
+                            features.select(feature_cols)
+                            .slice(len(features) - 1 - n_warmup, n_warmup)
+                            .to_numpy()
+                            .astype(np.float32)
+                        )
+                    else:
+                        warmup_rows = features[feature_cols].iloc[-(n_warmup + 1) : -1].to_numpy().astype(np.float32)
+                    self._agent_wrap_fast.warm_up_buffer(warmup_rows)
+                    self._agent_wrap_slow.warm_up_buffer(warmup_rows)
+                    self.logger.event(
+                        "INFO",
+                        "buffer_warmed_up",
+                        f"[Live] Warmed up {len(warmup_rows)} historical observation steps for {self.pair}",
+                        pair=self.pair,
+                        count=len(warmup_rows),
+                    )
+                except Exception as _w_err:
+                    self.logger.event("WARN", "warmup_failed", f"[Live] Buffer warmup skipped: {_w_err}", pair=self.pair)
 
         atr = _last_float(features, "atr_6", _last_float(features, f"atr_{FEATURES.get('atr_window', 14)}", 0.0005))
         bid, ask = self.broker.get_bid_ask(self.pair)
         mid = (float(bid) + float(ask)) / 2.0 if bid and ask else _last_float(features, "close", 0.0)
 
-        # ATR stop-loss: flatten when adverse move exceeds stop_loss_atr * ATR
+        # Online Adaptive Ensemble (Hedge/Exp3) Weight Update
+        current_close = _last_float(features, "close", mid)
+        if hasattr(self, "hedge_ensemble") and self._last_bar_close > 0 and self._last_bar_preds:
+            bar_ret = (current_close - self._last_bar_close) / self._last_bar_close
+            try:
+                updated_weights = self.hedge_ensemble.update(
+                    model_predictions=self._last_bar_preds,
+                    realized_return=bar_ret,
+                    current_atr=atr,
+                )
+                self.logger.event(
+                    "INFO",
+                    "hedge_update",
+                    f"[Live] Hedge weights ({self.pair}): {updated_weights}",
+                    pair=self.pair,
+                    weights=updated_weights,
+                )
+            except Exception as _hedge_err:
+                self.logger.event("WARN", "hedge_err", f"Hedge update failed: {_hedge_err}", pair=self.pair)
+        self._last_bar_close = current_close
+
+        # Software Stop-Loss & Take-Profit:
         if abs(self._position) > 0 and atr > 0 and self._entry_price > 0:
             stop_dist = float(self.stop_loss_atr) * float(atr)
+            tp_dist = float(getattr(self, "take_profit_atr", 1.5)) * float(atr)
             hit_sl = (self._position > 0 and mid <= self._entry_price - stop_dist) or (
                 self._position < 0 and mid >= self._entry_price + stop_dist
             )
-            if hit_sl:
+            hit_tp = (self._position > 0 and mid >= self._entry_price + tp_dist) or (
+                self._position < 0 and mid <= self._entry_price - tp_dist
+            )
+            if hit_sl or hit_tp:
+                exit_reason = "atr_stop" if hit_sl else "atr_take_profit"
                 _close_ok = self.broker.close_position(self.pair)
                 self.trade_journal.record(
                     {
-                        "event": "stop_loss",
-                        "reason": "atr_stop",
+                        "event": "stop_loss" if hit_sl else "take_profit",
+                        "reason": exit_reason,
                         "stop_loss_atr": self.stop_loss_atr,
+                        "take_profit_atr": getattr(self, "take_profit_atr", 1.5),
                         "atr": atr,
                         "entry": self._entry_price,
                         "mid": mid,
                         "position": self._position,
                     }
                 )
-                if not (isinstance(_close_ok, dict) and _close_ok.get("ok") is False):
-                    self._risk_trade_closed(mid, "atr_stop")
+                _is_closed = True
+                if isinstance(_close_ok, dict) and _close_ok.get("ok") is False:
+                    if _close_ok.get("reason") not in ("already_closed", "no_position", "no_such_position", "http_error_404"):
+                        _is_closed = False
+                if _is_closed:
+                    self._risk_trade_closed(mid, exit_reason)
                     self._position = 0.0
-                self._holding_bars = 0
-                self._entry_price = 0.0
-                return
+                    self._holding_bars = 0
+                    self._entry_price = 0.0
+                    return
+                else:
+                    self.logger.event("ERROR", "close_failed", f"Software exit ({exit_reason}) failed on {self.pair}: {_close_ok}", pair=self.pair)
 
         state_kw = {
             "position_lots": self._position,
@@ -1866,8 +2483,20 @@ class LiveTradingEngine:
                 }
             )
             return
+        elif self._halt_new_orders:
+            self.logger.event(
+                "INFO",
+                "drawdown_recovered",
+                f"[Live] Drawdown recovered, clearing _halt_new_orders",
+                pair=self.pair,
+            )
+            self._halt_new_orders = False
 
         calendar_result = self.calendar_guard.check(now=datetime.now(UTC))
+        # Graduated tail: calendar no longer blocked but size 0.5× for 15m after window
+        graduated_tail = bool(calendar_result.details and calendar_result.details.get("graduated_tail"))
+        if graduated_tail:
+            self.logger.event("INFO", "calendar_graduated_tail", "[Live] Post-news graduated 0.5× size", pair=self.pair)
         if calendar_result.blocked:
             self.logger.event("WARN", "calendar_guard", "[Live] Economic calendar block -> HOLD", pair=self.pair)
             self.trade_journal.record(
@@ -1881,6 +2510,8 @@ class LiveTradingEngine:
                 self._risk_trade_closed(mid, "calendar_flatten")
                 self.broker.close_position(self.pair)
                 self._position = 0.0
+                self._entry_price = 0.0
+                self._holding_bars = 0
             return
 
         tip_out = (
@@ -1894,6 +2525,37 @@ class LiveTradingEngine:
         else:
             action = int(tip_out)
             model_used = "fast"
+
+        # Collect individual model signals for Hedge tracking (divergence fix)
+        current_preds = {}
+        try:
+            slow_raw = float(getattr(self.slow, 'last_raw', 0.0))
+            fast_raw = float(getattr(self.fast, 'last_raw', 0.0))
+            try:
+                slow_peek = float(self.slow.peek_raw(obs)) if hasattr(self.slow, 'peek_raw') else slow_raw
+                fast_peek = float(self.fast.peek_raw(obs)) if hasattr(self.fast, 'peek_raw') else fast_raw
+                if abs(slow_peek) > 1e-9:
+                    slow_raw = slow_peek
+                if abs(fast_peek) > 1e-9:
+                    fast_raw = fast_peek
+            except Exception:
+                pass
+            import math as _math
+            slow_sig = float(_math.tanh(slow_raw * 2.0)) if abs(slow_raw) > 1e-9 else None
+            fast_sig = float(_math.tanh(fast_raw * 2.0)) if abs(fast_raw) > 1e-9 else None
+            if slow_sig is None and fast_sig is None:
+                sig = 1.0 if action == int(LiveAction.BUY) else (-1.0 if action == int(LiveAction.SELL) else 0.0)
+                current_preds["slow_model"] = sig
+                current_preds["fast_agent"] = sig
+            else:
+                current_preds["slow_model"] = float(slow_sig) if slow_sig is not None else 0.0
+                current_preds["fast_agent"] = float(fast_sig) if fast_sig is not None else 0.0
+        except Exception:
+            sig = 1.0 if action == int(LiveAction.BUY) else (-1.0 if action == int(LiveAction.SELL) else 0.0)
+            current_preds["slow_model"] = sig
+            current_preds["fast_agent"] = sig
+        self._last_bar_preds = current_preds
+
         # BUG-010: Track predictions for concept drift detection
         if not hasattr(self, "_recent_predictions"):
             from collections import deque
@@ -1905,6 +2567,34 @@ class LiveTradingEngine:
         if hasattr(self.sentiment, "filter_signal"):
             action = int(self.sentiment.filter_signal(action, bias))
 
+        # Currency Basis Normalization (Track A):
+        # A single consensus model predicting BUY represents Risk-On / Dollar-Bearish.
+        # For quote-USD pairs (EURUSD, GBPUSD), BUY = Long base, Short USD.
+        # For base-USD pairs (USDCAD, USDJPY), BUY = Long USD, Short quote.
+        # To avoid opposing USD exposure, invert the action for base-USD pairs:
+        pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
+        is_inverted = False
+        orig_action = action
+        if pair_clean.startswith("USD") and not pair_clean.endswith("USD"):
+            if action == int(LiveAction.BUY):
+                action = int(LiveAction.SELL)
+                is_inverted = True
+            elif action == int(LiveAction.SELL):
+                action = int(LiveAction.BUY)
+                is_inverted = True
+            if is_inverted:
+                # Synchronize hedge learner prediction sign with actual inverted trade position
+                if hasattr(self, "_last_bar_preds") and isinstance(self._last_bar_preds, dict):
+                    self._last_bar_preds = {k: -float(v) for k, v in self._last_bar_preds.items()}
+                self.logger.event(
+                    "INFO",
+                    "basis_normalization",
+                    f"[Live] Normalized currency basis for {self.pair}: action {orig_action} -> {action}",
+                    pair=self.pair,
+                    orig_action=orig_action,
+                    normalized_action=action,
+                )
+
         spread_result = self.spread_vol_guard.check(features, bid=bid, ask=ask)
         if spread_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": spread_result.reason})
@@ -1912,12 +2602,13 @@ class LiveTradingEngine:
         regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
         disagreement_result = self.disagreement_gate.check(
-            action,
+            orig_action if is_inverted else action,
             obs,
             fast_model=self.fast,
             slow_model=self.slow,
             confidence=None,
-            bypass_disagreement=is_tip,
+            bypass_disagreement=is_tip or is_inverted,
+            fast_action=orig_action if is_inverted else action,
         )
         if disagreement_result.blocked:
             self.trade_journal.record({"event": "blocked", "reason": disagreement_result.reason})
@@ -1928,14 +2619,20 @@ class LiveTradingEngine:
             self.trade_journal.record({"event": "blocked", "reason": no_trade_result.reason})
             return
 
-        safety = self.safety.allow_order(
-            pair=self.pair,
-            side="buy" if action == int(LiveAction.BUY) else "sell",
-            lots=self.max_lots,
-            bid=float(bid or mid),
-            ask=float(ask or mid),
-            equity=self.equity,
-        )
+        safety = {"ok": True, "reason": ""}
+        if action in (int(LiveAction.BUY), int(LiveAction.SELL)):
+            # Only real order submissions may consume the rate-limit budget, and
+            # the side must reflect the requested action (HOLD must not be
+            # validated as a max-lots sell).
+            safety = self.safety.allow_order(
+                pair=self.pair,
+                side="buy" if action == int(LiveAction.BUY) else "sell",
+                lots=self.max_lots,
+                bid=float(bid or mid),
+                ask=float(ask or mid),
+                equity=self.equity,
+                record=False,
+            )
         if not safety.get("ok"):
             self.trade_journal.record({"event": "blocked", "reason": safety.get("reason")})
             return
@@ -1987,9 +2684,32 @@ class LiveTradingEngine:
         else:
             regime_size_mult = float(getattr(regime_result, "size_multiplier", 1.0) or 1.0)
         dae_mult = float(dae.get("size_multiplier", 1.0) or 1.0)
-        lots = float(min(sizing.get("lots", 0.0) * regime_size_mult * size_adj * dae_mult, self.max_lots))
+        # Graduated re-entry after news: 0.5× for 15m tail (live_guards.py graduated_tail)
+        grad_mult = 0.5 if 'graduated_tail' in locals() and graduated_tail else 1.0
+        lots = float(min(sizing.get("lots", 0.0) * regime_size_mult * size_adj * dae_mult * grad_mult, self.max_lots))
         if self.risk_engine is not None and getattr(self.risk_engine, "_soft_reduce", False):
             lots *= 0.5
+        # Confidence-scaled sizing (fix fixed 0.05 lots)
+        try:
+            slow_conf = min(1.0, abs(float(getattr(self.slow, 'last_raw', 0.0))) / 0.35)
+            fast_conf = min(1.0, abs(float(getattr(self.fast, 'last_raw', 0.0))) / 0.35)
+            avg_conf = (slow_conf + fast_conf) / 2.0
+            hedge_weights = {}
+            try:
+                hedge_weights = self.hedge_ensemble.get_weights() if hasattr(self.hedge_ensemble, 'get_weights') else {}
+            except Exception:
+                hedge_weights = {}
+            hw = 1.0
+            if isinstance(hedge_weights, dict) and hedge_weights:
+                key = "slow_model" if "slow" in str(model_used) else "fast_agent" if "fast" in str(model_used) else None
+                if key and key in hedge_weights:
+                    hw = float(hedge_weights[key]) * 2.0
+                else:
+                    hw = float(max(hedge_weights.values())) * 2.0 if hedge_weights else 1.0
+                hw = max(0.6, min(1.4, hw))
+            lots = float(np.clip(lots * (0.6 + 0.8 * avg_conf) * hw, 0.02, self.max_lots))
+        except Exception:
+            pass
 
         if lots > 0 and action in (int(LiveAction.BUY), int(LiveAction.SELL)):
             # P3: session exposure caps (DST SoT via SessionLimitsEnforcer)
@@ -2036,6 +2756,41 @@ class LiveTradingEngine:
         if lots > 0 and action in (int(LiveAction.BUY), int(LiveAction.SELL)):
             buy = action == int(LiveAction.BUY)
 
+            # Prevent duplicate order submissions and OANDA FIFO cancellations when already holding position
+            pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
+            effective_pos = self._position
+            if hasattr(self.broker, "get_positions"):
+                try:
+                    bp = self.broker.get_positions()
+                    if bp is None:
+                        self.trade_journal.record(
+                            {
+                                "event": "blocked",
+                                "reason": "position_sync_failed",
+                                "details": getattr(self.broker, "_last_position_error", "unknown broker position error"),
+                            }
+                        )
+                        self.logger.event(
+                            "ERROR",
+                            "position_sync_failed",
+                            "[Live] Blocking order: OANDA position state is unknown",
+                            pair=self.pair,
+                        )
+                        return
+                    if isinstance(bp, dict):
+                        b_lot = float(bp.get(pair_clean, bp.get(self.pair, 0.0)))
+                        if abs(b_lot) > 1e-5:
+                            effective_pos = b_lot
+                except Exception:
+                    pass
+
+            if buy and effective_pos > 0:
+                self._holding_bars += 1
+                return
+            if not buy and effective_pos < 0:
+                self._holding_bars += 1
+                return
+
             # Broker-side protective stops (P0 M1): attach SL/TP on a market order
             # so a crash/feed-gap cannot leave a naked position. Mirrors the
             # in-process ATR stop so both agree on the adverse-move distance.
@@ -2048,16 +2803,18 @@ class LiveTradingEngine:
                 sl = (mid + stop_dist) if stop_dist > 0 else None
                 tp = (mid - tp_dist) if tp_dist > 0 else None
 
-            # M2: only update engine state once the broker confirms the fill.
-            # Some venues (BridgeBrokerAdapter) return {"ok": False} on reject;
-            # others (OANDA direct) raise or return fill data without an ok key.
-            def _place(side: str, qty: float) -> bool:
+            is_oanda = getattr(self.broker, "venue", "") == "oanda"
+
+            def _place(side: str, qty: float, *, with_stops: bool = True) -> bool:
+                # OANDA accounts subject to NFA Rule 2-43(b) FIFO reject orders with attached brackets
+                # (FIFO_VIOLATION_SAFEGUARD_VIOLATION). Live engine tracks ATR stops in software (lines 2234-2262).
+                attach_stops = with_stops and not is_oanda
                 r = self.broker.market_order(
                     self.pair,
                     side,
                     float(qty),
-                    stop_loss=sl,
-                    take_profit=tp,
+                    stop_loss=sl if attach_stops else None,
+                    take_profit=tp if attach_stops else None,
                 )
                 if isinstance(r, dict) and r.get("ok") is False:
                     self.trade_journal.record(
@@ -2066,26 +2823,40 @@ class LiveTradingEngine:
                             "side": side,
                             "lots": float(qty),
                             "venue": r.get("venue") or getattr(self.broker, "venue", "?"),
+                            "reason": r.get("reason", "unknown"),
+                            "details": r.get("details") or r.get("error") or {},
                         }
                     )
                     return False
+                # BUG-RG-05: only consume rate-limiter slot on an actual filled
+                # order (allow_order was called with record=False during
+                # pre-trade gate). This keeps HOLD bars from starving the bucket.
+                try:
+                    self.safety.record_order()
+                except Exception:
+                    pass
                 return True
 
             # BUG-004: close an existing opposite position before flipping.
-            if buy and self._position < 0:
-                if not _place("buy", abs(float(self._position))):
-                    return
+            # Position-reducing order must NOT attach new SL/TP brackets (OANDA rejects STOP_LOSS_ON_FILL_NOT_ALLOWED_ON_REDUCE)
+            if buy and effective_pos < 0:
+                _close_ok = self.broker.close_position(self.pair)
+                if isinstance(_close_ok, dict) and _close_ok.get("ok") is False:
+                    if not _place("buy", abs(float(effective_pos)), with_stops=False):
+                        return
                 self._risk_trade_closed(mid, "signal_flip")
                 self._position = 0.0
                 self._entry_price = 0.0
-            elif not buy and self._position > 0:
-                if not _place("sell", abs(float(self._position))):
-                    return
+            elif not buy and effective_pos > 0:
+                _close_ok = self.broker.close_position(self.pair)
+                if isinstance(_close_ok, dict) and _close_ok.get("ok") is False:
+                    if not _place("sell", abs(float(effective_pos)), with_stops=False):
+                        return
                 self._risk_trade_closed(mid, "signal_flip")
                 self._position = 0.0
                 self._entry_price = 0.0
-            # Open the new leg.
-            if not _place("buy" if buy else "sell", lots):
+            # Open the new leg with brackets.
+            if not _place("buy" if buy else "sell", lots, with_stops=True):
                 return
             self._position = lots if buy else -lots
             self._entry_price = mid
@@ -2094,10 +2865,38 @@ class LiveTradingEngine:
                 self.risk_engine.open_position(
                     self.pair, abs(self._position), self._entry_price, direction="long" if buy else "short"
                 )
+            self.logger.event(
+                "INFO",
+                "order_filled",
+                f"[Live] ORDER FILLED: {('BUY' if buy else 'SELL')} {lots:.4f} lots {self.pair} @ {mid:.5f} (SL: {sl}, TP: {tp})",
+                pair=self.pair,
+                side="buy" if buy else "sell",
+                lots=lots,
+                price=mid,
+                sl=sl,
+                tp=tp,
+            )
+            print(f"[Live] >>> ORDER FILLED: {('BUY' if buy else 'SELL')} {lots:.4f} lots {self.pair} @ {mid:.5f} (SL: {sl}, TP: {tp}) <<<")
+            self.trade_journal.record(
+                {
+                    "event": "order_filled",
+                    "side": "buy" if buy else "sell",
+                    "action": "BUY" if buy else "SELL",
+                    "lots": lots,
+                    "price": mid,
+                    "sl": sl,
+                    "tp": tp,
+                    "venue": getattr(self.broker, "venue", "oanda"),
+                }
+            )
         elif action in (int(LiveAction.CLOSE), int(LiveAction.SCALE_OUT_100)):
             if abs(self._position) > 1e-12:
                 _sc_ok = self.broker.close_position(self.pair)
-                if not (isinstance(_sc_ok, dict) and _sc_ok.get("ok") is False):
+                _is_closed = True
+                if isinstance(_sc_ok, dict) and _sc_ok.get("ok") is False:
+                    if _sc_ok.get("reason") not in ("already_closed", "no_position", "no_such_position", "http_error_404"):
+                        _is_closed = False
+                if _is_closed:
                     self._risk_trade_closed(mid, "signal_close")
                     self._position = 0.0
                     self._holding_bars = 0
@@ -2150,9 +2949,35 @@ class LiveTradingEngine:
                 "sentiment": round(float(bias), 4),
                 "latency_ms": round(lat_total, 2),
                 "var_pct": float(var_result.get("var_pct", 0.0) or 0.0),
+                "weights": self.hedge_ensemble.get_weights() if hasattr(self, "hedge_ensemble") else {},
                 "ts": datetime.now(UTC).isoformat(),
             }
         )
+        if self.db_sink is not None:
+            try:
+                o_val = _last_float(bars, "open", _last_float(bars, "Open", mid))
+                h_val = _last_float(bars, "high", _last_float(bars, "High", mid))
+                l_val = _last_float(bars, "low", _last_float(bars, "Low", mid))
+                c_val = _last_float(bars, "close", _last_float(bars, "Close", mid))
+                self.db_sink.record_bar(
+                    pair=self.pair,
+                    bar_idx=int(bar_idx),
+                    open_=o_val,
+                    high=h_val,
+                    low=l_val,
+                    close=c_val,
+                    action=int(action),
+                    model=str(model_used),
+                    lots=round(lots, 4),
+                    equity=round(self.equity, 2),
+                    sentiment=round(float(bias), 4),
+                    latency_ms=round(lat_total, 2),
+                    var_pct=float(var_result.get("var_pct", 0.0) or 0.0),
+                    model_weights=self.hedge_ensemble.get_weights() if hasattr(self, "hedge_ensemble") else None,
+                    timestamp=datetime.now(UTC),
+                )
+            except Exception as _e_sink:
+                self.logger.event("WARN", "db_sink_bar_err", f"DB sink bar record failed: {_e_sink}", pair=self.pair)
         if len(self._bar_log) % 60 == 0:
             self._save_log()
 
@@ -2204,11 +3029,15 @@ class LiveTradingEngine:
                 self.logger.event("FATAL", "schema_mismatch", err_msg, pair=self.pair)
                 raise RuntimeError(err_msg)
             return list(self._expected_features)
-        return [
-            c
-            for c, dtype in zip(features.columns, features.dtypes, strict=False)
-            if c != "timestamp_utc" and _is_numeric_dtype(dtype)
-        ]
+        cols = [c for c in CANONICAL_PAIR_146 if c in features.columns]
+        if len(cols) < 146:
+            remaining = [
+                c
+                for c, dtype in zip(features.columns, features.dtypes, strict=False)
+                if c not in cols and c != "timestamp_utc" and _is_numeric_dtype(dtype)
+            ]
+            cols.extend(remaining[: 146 - len(cols)])
+        return cols[:146]
 
     def _check_drift(self, features) -> None:
         feature_cols = self._feature_columns(features)
@@ -2330,10 +3159,22 @@ class LiveTradingEngine:
         except Exception:
             pass
         self._save_log()
+        if self.db_sink is not None and getattr(self, "_owns_db_sink", True):
+            try:
+                self.db_sink.close()
+            except Exception:
+                pass
         try:
             self.logger.close()
         except Exception:
             pass
+
+    def __del__(self):
+        if getattr(self, "_owns_db_sink", False) and getattr(self, "db_sink", None) is not None:
+            try:
+                self.db_sink.close()
+            except Exception:
+                pass
 
 
 class MultiPairLiveTradingEngine:
@@ -2358,11 +3199,25 @@ class MultiPairLiveTradingEngine:
         take_profit_atr: float = 1.5,
         allow_paper_fallback: bool = False,
         risk_engine=None,
+        db_sink=None,
+        db_enabled: bool = True,
+        db_path: str | Path | None = None,
     ):
         self.broker = broker
         self.pairs = [p.upper() for p in pairs]
         self.allow_paper_fallback = bool(allow_paper_fallback)
         per_pair = float(max_lots) / max(1, len(self.pairs))
+
+        if db_sink is not None:
+            self.db_sink = db_sink
+            self._owns_db_sink = False
+        elif db_enabled:
+            sink_path = Path(db_path) if db_path else Path(PATHS.get("store", "data/store")) / "live_trading.duckdb"
+            self.db_sink = LiveDuckDBSink(db_path=sink_path)
+            self._owns_db_sink = True
+        else:
+            self.db_sink = None
+            self._owns_db_sink = False
 
         shared_cross_asset = None
         try:
@@ -2379,6 +3234,16 @@ class MultiPairLiveTradingEngine:
         except Exception as exc:
             print(f"[Live] Shared cross-asset unavailable ({exc}); continuing without it")
 
+        self.shared_pair_features = {}
+        # BUG-RG-12: shared PortfolioVaR for cross-pair covariance. Without
+        # this, each LiveTradingEngine instance kept its own returns deque,
+        # so parametric_var collapsed to single-asset σ with correlation=0.
+        try:
+            from risk.execution import PortfolioVaR as _SharedPVAR  # type: ignore
+
+            _shared_pvar = _SharedPVAR()
+        except Exception:
+            _shared_pvar = None
         self.engines = [
             LiveTradingEngine(
                 broker=broker,
@@ -2406,9 +3271,15 @@ class MultiPairLiveTradingEngine:
                 allow_paper_fallback=allow_paper_fallback,
                 risk_engine=risk_engine,
                 cross_asset=shared_cross_asset,
+                db_sink=self.db_sink,
+                db_enabled=bool(self.db_sink is not None),
+                shared_pair_features=self.shared_pair_features,
             )
             for p in self.pairs
         ]
+        if _shared_pvar is not None:
+            for e in self.engines:
+                e.pvar = _shared_pvar
         self.prom = None
         if bool(ALERTS.get("prometheus_enabled", True)):
             self.prom = ForexPrometheusExporter(
@@ -2425,7 +3296,9 @@ class MultiPairLiveTradingEngine:
                     "[Live] Broker connection failed. Pass --allow-paper-fallback only for intentional paper testing."
                 )
             print("[Live] Broker connection failed - using PaperBroker (explicit fallback)")
-            self.broker = PaperBroker(initial_equity=self.engines[0].equity if self.engines else 10_000.0)
+            self.broker = PaperBroker(
+                initial_equity=self.engines[0].equity if self.engines else 10_000.0, synthetic=True
+            )
             if not self.broker.connect():
                 raise RuntimeError("PaperBroker fallback failed to connect")
             for e in self.engines:
@@ -2441,6 +3314,19 @@ class MultiPairLiveTradingEngine:
                 except Exception as exc:
                     print(f"[Live] Warning: Historical candle preload failed for {e.pair} ({exc})")
 
+        # Adopt any pre-existing open positions across all pairs from broker
+        if hasattr(self.broker, "get_positions"):
+            try:
+                active_pos = self.broker.get_positions() or {}
+                for e in self.engines:
+                    p_clean = str(e.pair).upper().replace("/", "").replace("_", "")
+                    pos_val = float(active_pos.get(p_clean, active_pos.get(e.pair, 0.0)))
+                    if abs(pos_val) > 1e-5:
+                        e._position = pos_val
+                        print(f"[Live] Adopted pre-existing broker position for {e.pair}: {e._position} lots")
+            except Exception as exc:
+                print(f"[Live] MultiPair initial position probe failed ({exc})")
+
         self._running = True
         for e in self.engines:
             e._running = True
@@ -2455,24 +3341,29 @@ class MultiPairLiveTradingEngine:
             if (getattr(self.broker, "_zmq_sub", None) is not None or isinstance(self.broker, PaperBroker))
             else 0.5
         )
-        while self._running:
-            if max_bars and bar_count >= max_bars:
-                break
-            now = datetime.now(UTC)
-            if now < next_bar_time:
+        try:
+            while self._running:
+                if max_bars and bar_count >= max_bars:
+                    break
+                now = datetime.now(UTC)
+                if now < next_bar_time:
+                    for e in self.engines:
+                        bid, ask = self.broker.get_bid_ask(e.pair)
+                        if bid and ask:
+                            e.buf.push_tick(bid, ask)
+                    time.sleep(poll_interval)
+                    continue
                 for e in self.engines:
-                    bid, ask = self.broker.get_bid_ask(e.pair)
-                    if bid and ask:
-                        e.buf.push_tick(bid, ask)
-                time.sleep(poll_interval)
-                continue
-            for e in self.engines:
-                bars = e.buf.get_bars()
-                if bars is not None and len(bars) >= 70:
-                    e._on_new_bar(bars, bar_count)
-            bar_count += 1
-            next_bar_time = _align_next_bar(self.bar_freq)
-        self.stop()
+                    try:
+                        bars = e.buf.get_bars()
+                        if bars is not None and len(bars) >= 70:
+                            e._on_new_bar(bars, bar_count)
+                    except Exception as bar_err:
+                        print(f"[Live] Error during bar evaluation for {e.pair} (bar {bar_count}): {bar_err}")
+                bar_count += 1
+                next_bar_time = _align_next_bar(self.bar_freq)
+        finally:
+            self.stop()
 
     def stop(self):
         self._running = False
@@ -2484,7 +3375,19 @@ class MultiPairLiveTradingEngine:
                 self.prom.stop()
             except Exception:
                 pass
+        if self.db_sink is not None and getattr(self, "_owns_db_sink", True):
+            try:
+                self.db_sink.close()
+            except Exception:
+                pass
         self.broker.disconnect()
+
+    def __del__(self):
+        if getattr(self, "_owns_db_sink", False) and getattr(self, "db_sink", None) is not None:
+            try:
+                self.db_sink.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2591,9 +3494,27 @@ if __name__ == "__main__":
         "(off by default - prevents silent paper trading on real runs)",
     )
     p.add_argument(
+        "--paper-static",
+        action="store_true",
+        default=False,
+        help="With --broker paper, disable the built-in synthetic market feed and "
+        "trade a static quote book (only moves via external update_quote calls)",
+    )
+    p.add_argument(
         "--risk-config",
         default=None,
         help="Optional JSON/YAML RiskEngine overrides (same schema as train_gpu --risk-config)",
+    )
+    p.add_argument(
+        "--no-db",
+        action="store_true",
+        default=False,
+        help="Disable asynchronous DuckDB persistence (live_trading.duckdb)",
+    )
+    p.add_argument(
+        "--db-path",
+        default=None,
+        help="Custom database file path for live DuckDB persistence (default: data/store/live_trading.duckdb)",
     )
     args = p.parse_args()
     prof = strategy_profile(args.strategy_mode)
@@ -2662,6 +3583,22 @@ if __name__ == "__main__":
                 import json as _json
 
                 _pg = _json.loads(_cand.read_text(encoding="utf-8"))
+                # A promotion artifact must describe the current ensemble
+                # checkpoints.  Otherwise an old PASS can authorize a newer,
+                # unvalidated model after retraining.
+                _stale = False
+                if args.model.lower() == "ensemble" and _cand.name == "optimal_roadmap_certification.json":
+                    _artifact_paths = [
+                        _cand.parent / "ensemble_meta_best.pt",
+                        _cand.parent / "rl_ensemble_best.pt",
+                    ]
+                    _stale = any(
+                        _p.exists() and _p.stat().st_mtime > _cand.stat().st_mtime
+                        for _p in _artifact_paths
+                    )
+                    if _stale:
+                        _prom_reasons.append(f"{_cand.name}: stale relative to current ensemble checkpoint")
+                        continue
                 if (
                     bool(_pg.get("promoted"))
                     or bool(_pg.get("quality_gate_passed"))
@@ -2727,7 +3664,9 @@ if __name__ == "__main__":
         print(f"[Live] BrokerBridge adapter: {venue}")
     else:
         broker = (
-            broker_map[args.broker](initial_equity=args.equity) if args.broker == "paper" else broker_map[args.broker]()
+            PaperBroker(initial_equity=args.equity, synthetic=not args.paper_static)
+            if args.broker == "paper"
+            else broker_map[args.broker]()
         )
     # Paper broker is an intentional choice - allow its own "fallback" path trivially.
     allow_paper = bool(args.allow_paper_fallback) or args.broker == "paper"
@@ -2775,6 +3714,8 @@ if __name__ == "__main__":
             take_profit_atr=take_profit_atr,
             allow_paper_fallback=allow_paper,
             risk_engine=risk_engine,
+            db_enabled=not args.no_db,
+            db_path=args.db_path,
         )
         print(
             f"\n[Live] Starting {args.broker.upper()} multi-pair engine | {pair_list} | max {args.max_lots:.4f} lots total"
@@ -2798,6 +3739,8 @@ if __name__ == "__main__":
             take_profit_atr=take_profit_atr,
             allow_paper_fallback=allow_paper,
             risk_engine=risk_engine,
+            db_enabled=not args.no_db,
+            db_path=args.db_path,
         )
         print(f"\n[Live] Starting {args.broker.upper()} engine | {pair_list[0]} | max {args.max_lots:.4f} lots")
     print(f"       Runtime: {args.runtime.upper()} | Strategy: {args.strategy_mode} | Bars: {args.bar_freq}")

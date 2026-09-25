@@ -33,9 +33,12 @@ from training.gpu_datasets import ZarrStreamDataset
 from training.model_factory import build_model
 
 def _find_default_cache() -> Path:
-    caches = sorted((ROOT / "data" / "processed").glob("dataset_scalping_*.zarr"))
-    if caches:
-        return caches[0]
+    proc_dir = ROOT / "data" / "processed"
+    if proc_dir.exists():
+        import os
+        for entry in os.scandir(proc_dir):
+            if entry.name.startswith("dataset_scalping_") and entry.name.endswith(".zarr") and entry.is_dir():
+                return Path(entry.path)
     return (
         ROOT
         / "data"
@@ -59,7 +62,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--samples", type=int, default=200_000, help="Random cached samples to use")
+    p.add_argument("--samples", type=int, default=200_000, help="Maximum chronological meta-training samples")
+    p.add_argument(
+        "--meta-validation-frac", type=float, default=0.20,
+        help="Chronological suffix of the trainable prefix reserved from meta-training",
+    )
+    p.add_argument(
+        "--allow-in-sample-meta", action="store_true",
+        help="Allow legacy in-sample base predictions; unsafe for deployment",
+    )
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--div-weight", type=float, default=0.1)
@@ -239,6 +250,12 @@ def infer_cache_shape(cache_path: Path) -> tuple[int, int, int]:
 
 def main() -> int:
     args = parse_args()
+    if not args.allow_in_sample_meta:
+        raise SystemExit(
+            "Refusing unsafe meta-training: base checkpoints do not provide out-of-fold "
+            "predictions. Retrain base folds and add OOF predictions, or explicitly pass "
+            "--allow-in-sample-meta for research-only use."
+        )
     cache_path = Path(args.cache)
     ckpt_dir = Path(args.checkpoint_dir)
     if args.output:
@@ -270,9 +287,13 @@ def main() -> int:
             "cache or a smaller --promote-forward-frac."
         )
         return 1
-    n_meta = min(int(args.samples), int(_trainable))
-    rng = np.random.default_rng(int(args.seed))
-    meta_idx = np.sort(rng.choice(_trainable, n_meta, replace=False))
+    # Use a chronological meta-training prefix.  Randomly sampling the entire
+    # trainable prefix made the meta learner's data distribution overlap every
+    # base model's training history and hid regime drift.
+    meta_val_frac = min(max(float(args.meta_validation_frac), 0.05), 0.5)
+    meta_train_end = max(100, int(_trainable * (1.0 - meta_val_frac)))
+    n_meta = min(int(args.samples), meta_train_end)
+    meta_idx = np.arange(meta_train_end - n_meta, meta_train_end, dtype=np.int64)
     _holdout = total - _trainable - int(getattr(args, "validation_embargo_bars", 0) or 0)
     _embargo = int(getattr(args, "validation_embargo_bars", 0) or 0) if args.embargo_bars is not None else 0
 
@@ -280,7 +301,8 @@ def main() -> int:
     log(f"[EnsembleMeta] cache={cache_path}")
     log(f"[EnsembleMeta] samples={n_meta:,}/{total:,} | seq_len={seq_len} | n_features={n_features}")
     log(
-        f"[EnsembleMeta] trainable_prefix=[0,{_trainable}) | holdout_tail=[{_trainable},"
+        f"[EnsembleMeta] meta_train=[{meta_train_end - n_meta},{meta_train_end}) | "
+        f"meta_validation=[{meta_train_end},{_trainable}) | holdout_tail=[{_trainable},"
         f"{total}) | device={args.device} | output={out}"
     )
     if _embargo:
@@ -342,6 +364,9 @@ def main() -> int:
             "n_features": n_features,
             "seq_len": seq_len,
             "samples": n_meta,
+            "meta_train_end": meta_train_end,
+            "meta_validation_frac": meta_val_frac,
+            "sampling": "chronological_prefix",
         },
     )
 

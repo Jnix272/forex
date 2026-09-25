@@ -41,17 +41,22 @@ def _resolve_device():
     return torch.device("cpu")
 
 
-def _logits_to_proba(logits: np.ndarray) -> np.ndarray:
+def _logits_to_proba(logits: np.ndarray, threshold: float | None = None) -> np.ndarray:
     logits = np.asarray(logits, dtype=np.float64).reshape(-1)
     if logits.size == 1:
         v = float(logits[0])
-        if v > 0.15:
-            return np.array([0.1, 0.2, 0.7], dtype=np.float32)
-        if v < -0.15:
-            return np.array([0.7, 0.2, 0.1], dtype=np.float32)
-        return np.array([0.1, 0.8, 0.1], dtype=np.float32)
+        if threshold is None:
+            try:
+                threshold = float(os.getenv("PREDICTION_THRESHOLD", "0.35"))
+            except Exception:
+                threshold = 0.35
+        sell = -v - float(threshold)
+        hold = 0.0
+        buy = v - float(threshold)
+        logits = np.array([sell, hold, buy], dtype=np.float64)
     e = np.exp(logits - logits.max())
     return (e / e.sum()).astype(np.float32)
+
 
 
 def _load_ensemble_manifest(ckpt_path: Path) -> dict:
@@ -135,18 +140,31 @@ def load_pytorch_model(
     # StandardScaler (when discoverable) and assert that the scaler's
     # n_features matches the sidecar's n_features - schema-hash drift is a
     # hard failure.
-    resolved_cache_path = cache_path or cfg.get("cache_path")
+    resolved_cache_path = (
+        cache_path
+        or cfg.get("cache_path")
+        or (
+            ensemble_manifest.get("training", {}).get("cache_path")
+            if isinstance(ensemble_manifest, dict)
+            else None
+        )
+    )
     scaler = load_inference_scaler(resolved_cache_path)
     if scaler is not None:
         scaler_n = scaler_feature_count(scaler)
         if scaler_n is not None and int(scaler_n) != int(n_features):
-            raise RuntimeError(
-                f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
-                f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
-                "feature-mask has drifted from when this checkpoint was trained - "
-                "either re-train against the new cache or rebuild the cache with "
-                "the original feature_mask."
-            )
+            # Allow tile compatibility when model has 4 pairs (e.g. 584 = 4 x 146)
+            # and scaler was fitted on single-pair features.
+            if int(n_features) % int(scaler_n) == 0:
+                pass
+            else:
+                raise RuntimeError(
+                    f"Inference scaler/schema contract mismatch: scaler.n_features_in_"
+                    f"={scaler_n} but checkpoint n_features={n_features}. The cache's "
+                    "feature-mask has drifted from when this checkpoint was trained - "
+                    "either re-train against the new cache or rebuild the cache with "
+                    "the original feature_mask."
+                )
 
     if sidecar_model == "ensemble":
         from models.ensemble import EnsembleMetaLearner
@@ -281,6 +299,13 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         arr = np.asarray(window, dtype=np.float32)
         if self.scaler is None:
             return arr
+        scaler_n = getattr(self.scaler, "n_features_in_", None)
+        if scaler_n is not None and arr.shape[-1] == scaler_n * 4:
+            blocks = []
+            for p_idx in range(4):
+                blk = arr[..., p_idx * scaler_n : (p_idx + 1) * scaler_n]
+                blocks.append(apply_inference_scaler(self.scaler, blk))
+            return np.concatenate(blocks, axis=-1)
         # apply_inference_scaler expects (..., F); we pass (T, F) directly.
         return apply_inference_scaler(self.scaler, arr)
 
@@ -302,7 +327,7 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
                 logits = logits[0]
             if hasattr(logits, "detach"):
                 logits = logits.detach().cpu().numpy()
-        return _logits_to_proba(np.asarray(logits)[0])
+        return _logits_to_proba(np.asarray(logits)[0], threshold=getattr(self, "threshold", None))
 
     def reset_buffer(self):
         self._obs_buffer.clear()

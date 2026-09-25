@@ -197,6 +197,7 @@ _MASK_ALLOWLIST: frozenset[str] = frozenset(
         "asia_london",
         "london_ny",
         "time_idx",
+        "finbert_sentiment",
     }
 )
 

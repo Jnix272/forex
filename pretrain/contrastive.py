@@ -35,6 +35,7 @@ try:
     import torch.nn.functional as F
 
     from training.ema import ExponentialMovingAverage  # noqa: F401
+    from pretrain.loss_scaling import compute_target_scale, normalized_mse_loss
 
     TORCH = True
 except ImportError:
@@ -1271,13 +1272,16 @@ class MaskedReconstructionTrainer:
             flat[int(self._rng.integers(0, flat.numel()))] = True
         return x.masked_fill(mask, 0.0), mask
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward(self, x: torch.Tensor, scale: torch.Tensor | None = None) -> torch.Tensor:
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1e4, 1e4)
         h = self.encoder(x)
         if h.ndim == 3:
             h = h[:, -1, :]
         h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-50, 50).float()
-        return self.decoder(h).view(-1, self.seq_len, self.n_features)
+        recon = self.decoder(h).view(-1, self.seq_len, self.n_features)
+        if scale is not None:
+            recon = recon * scale
+        return recon
 
     @torch.no_grad()
     def diagnostics(self, X_ref: np.ndarray, max_samples: int = 128) -> dict:
@@ -1290,8 +1294,9 @@ class MaskedReconstructionTrainer:
             sample = X_ref[: min(int(max_samples), len(X_ref))]
             x = torch.as_tensor(sample, dtype=torch.float32, device=self.device)
             corrupted, mask = self._mask(x)
-            recon = self._forward(corrupted)
-            mse = F.mse_loss(recon[mask], x[mask]).item()
+            scale = compute_target_scale(x)
+            recon = self._forward(corrupted, scale=scale)
+            mse = normalized_mse_loss(recon, x, mask=mask).item()
             h = self.encoder(corrupted)
             if h.ndim == 3:
                 h = h[:, -1, :]
@@ -1371,10 +1376,11 @@ class MaskedReconstructionTrainer:
                     continue
                 x = torch.as_tensor(X[batch_idx], dtype=torch.float32, device=self.device)
                 corrupted, mask = self._mask(x)
+                scale = compute_target_scale(x)
                 with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
-                    recon = self._forward(corrupted)
-                    loss = F.mse_loss(recon[mask], x[mask])
-                del corrupted, recon
+                    recon = self._forward(corrupted, scale=scale)
+                    loss = normalized_mse_loss(recon, x, mask=mask)
+                del corrupted, recon, scale
                 if not torch.isfinite(loss):
                     continue
 

@@ -4,6 +4,8 @@ model:
   d_model: 128
   nhead: 8
   num_layers: 4
+  use_conv_ffn: true
+  no_pos_encoding: false
   dropout: 0.1
 training:
   lr: 1.0e-4

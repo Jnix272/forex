@@ -74,8 +74,16 @@ def _normalize_architecture_profile(profile: dict, model_name: str) -> dict:
             out["nhead"] = int(profile["heads"])
         if "node_features" in profile:
             out["node_features"] = int(profile["node_features"])
+    elif key == "patchtst":
+        if "patch_len" in profile:
+            out["patch_len"] = int(profile["patch_len"])
+        if "stride" in profile:
+            out["stride"] = int(profile["stride"])
+        for field in ("d_model", "nhead", "num_layers", "hidden_size", "num_classes"):
+            if field in profile:
+                out[field] = int(profile[field])
     else:
-        for field in ("d_model", "nhead", "num_layers", "hidden_size"):
+        for field in ("d_model", "nhead", "num_layers", "hidden_size", "num_classes"):
             if field in profile:
                 out[field] = int(profile[field])
     return out

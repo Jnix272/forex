@@ -291,6 +291,21 @@ def build_adamw(
     ``fused=False`` to force the eager path (CPU / unsupported param layouts).
     """
     param_list = list(params)
+    # Decay weights, but not bias or normalization parameters. This avoids
+    # shrinking LayerNorm scale/bias and improves stability for transformers.
+    if param_list and isinstance(param_list[0], tuple):
+        decay, no_decay = [], []
+        for name, param in param_list:
+            if not getattr(param, "requires_grad", True):
+                continue
+            if name.endswith(".bias") or "norm" in name.lower() or "layernorm" in name.lower():
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        param_list = [
+            {"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
     want_fused = bool(torch.cuda.is_available()) if fused is None else bool(fused)
 
     def _log(msg: str, *, warn: bool = False) -> None:

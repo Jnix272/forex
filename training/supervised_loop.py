@@ -21,10 +21,33 @@ import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
+import hashlib
+import json as _json_hash
+
 from config.settings import (
     LABELING,
     PATHS,
 )
+
+
+def _resolve_schema_hash(args) -> str:
+    h = getattr(args, "feature_schema_hash", None)
+    if h and h != "unknown":
+        return str(h)
+    # Fallback: compute from feature names if available, else n_features
+    try:
+        names = getattr(args, "_feat_names", None) or getattr(args, "feature_names", None) or []
+        if names and len(names) > 0:
+            return hashlib.md5(_json_hash.dumps(list(map(str, names)), sort_keys=True).encode()).hexdigest()[:12]
+    except Exception:
+        pass
+    try:
+        n = getattr(args, "_n_features", None) or getattr(args, "n_features", None)
+        if n:
+            return hashlib.md5(str(int(n)).encode()).hexdigest()[:12]
+    except Exception:
+        pass
+    return "unknown"
 from models.architectures import (
     AsymmetricDirectionalLoss,
     DiversityLoss,
@@ -1028,7 +1051,7 @@ def supervised_train(
         cache_path=cache_path if (classification or multitask) else None,
         train_idx=train_idx if (classification or multitask) else None,
     )
-    direction_crit = nn.HuberLoss().to(device)  # type: ignore
+    direction_crit = nn.HuberLoss(delta=float(getattr(args, "huber_delta", 1.5))).to(device)  # type: ignore
     # D: OverconfidencePenalty -- active for regression modes only.
     # R5: state lives in training.loop_losses (read by _compute_loss there).
     if not classification and getattr(args, "overconf_penalty", True):
@@ -1037,7 +1060,7 @@ def supervised_train(
         _loop_losses._OVERCONF_PENALTY = OverconfidencePenalty(conf_threshold=_oc_t, weight=_oc_w).to(device)  # type: ignore
     else:
         _loop_losses._OVERCONF_PENALTY = None
-    opt = build_adamw(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    opt = build_adamw(model.named_parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Gradient accumulation: effective batch = batch_size x accum_steps
     _accum = max(1, int(getattr(args, "grad_accum_steps", 1)))
     # OneCycleLR must be stepped once per OPTIMIZER UPDATE (not per batch).
@@ -1586,6 +1609,12 @@ def supervised_train(
     if getattr(args, "enable_si", False):
         try:
             print("[SI] Initializing Synaptic Intelligence tracking...")
+            if hasattr(model, "initialize_parameters"):
+                try:
+                    dummy_in = torch.zeros(2, int(getattr(args, "seq_len", 90) or 90), int(n_features), device=device)
+                    model.initialize_parameters(dummy_in)
+                except Exception:
+                    pass
             _si = SynapticIntelligence(model, epsilon=1e-3)
             print("[SI] Initialized successfully. Tracking path integral.")
         except Exception as e:
@@ -1654,6 +1683,7 @@ def supervised_train(
     _train_ctrl = TrainingController(report_dir=str(ckpt_dir), adaptation=_adaptation_cfg or {})
     _train_ctrl.set_recipe(str(model_name))
     _ctrl_stop_early = False
+    _ctrl_stop_counter = 0  # consecutive stop_early epochs before hard early-stop
 
     # -- Unified CurriculumManager (Improvement #4) ---------------------------
     # Opt-in extra curriculum layer. Mirrors n_samples on the *train* fold so
@@ -2072,7 +2102,7 @@ def supervised_train(
                 adversarial_gen=_adversarial,
                 adversarial_feature_names=_adv_feature_names or None,
                 ewc_module=_ewc,
-                ewc_lambda=float(getattr(args, "ewc_lambda", 1000.0)),
+                ewc_lambda=float(getattr(args, "ewc_lambda", 400.0)) * (1.0 + float(ep) / max(1, int(getattr(args, "epochs", 40)))),
                 si_module=_si,
                 si_lambda=epoch_si_lambda,
                 sample_weight_lookup=_cm_wl,
@@ -2156,7 +2186,13 @@ def supervised_train(
             _seq_frozen = True
         if _ctrl_applied.get("stop_early"):
             _ctrl_stop_early = True
-            print(f"[TrainingController] Early-stop flag set at epoch {ep + 1}")
+            _ctrl_stop_counter += 1
+            print(f"[TrainingController] Early-stop flag set at epoch {ep + 1} (streak {_ctrl_stop_counter})")
+            if _ctrl_stop_counter >= 3:
+                print(f"[TrainingController] Hard early-stop after 3 consecutive collapses at epoch {ep + 1}")
+                break
+        else:
+            _ctrl_stop_counter = 0
 
         # ── Online miner: end epoch (update forgetting tracker) ──────────
         if _online_miner is not None:
@@ -2447,7 +2483,7 @@ def supervised_train(
                 "model_name": model_name,
                 "n_features": n_features,
                 "seq_len": int(curr_seq_len),
-                "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
+                "schema_hash": _resolve_schema_hash(args),
                 "timestamp": datetime.now(UTC).isoformat(),
                 "fold_id": fold_id,
             }
@@ -2497,7 +2533,7 @@ def supervised_train(
                     "model_name": model_name,
                     "n_features": n_features,
                     "seq_len": int(curr_seq_len),
-                    "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
+                    "schema_hash": _resolve_schema_hash(args),
                     "epoch": ep + 1,
                     "fold_id": fold_id,
                 },
@@ -2530,7 +2566,7 @@ def supervised_train(
                 "model_name": model_name,
                 "n_features": n_features,
                 "seq_len": int(curr_seq_len),
-                "schema_hash": getattr(args, "feature_schema_hash", "unknown"),
+                "schema_hash": _resolve_schema_hash(args),
                 "epoch": ep + 1,
                 "fold_id": fold_id,
                 "checkpoint_type": "resume",
@@ -2655,7 +2691,7 @@ def supervised_train(
         if history.get("val_loss") and history.get("train_loss")
         else 0.0
     )
-    _early_stopped = False
+    _early_stopped = bool(_ctrl_stop_early and _ctrl_stop_counter >= 3)
     _best_idx = int(_best_ep) if _best_ep is not None and _best_ep >= 0 else 0
 
     def _hist_at(key: str, default=None):

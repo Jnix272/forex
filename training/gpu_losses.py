@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.architectures import HuberLoss
 
@@ -49,12 +50,19 @@ def soft_direction(pred: torch.Tensor) -> torch.Tensor:
 
 
 class DirectionalHuberLoss(nn.Module):
-    """Huber magnitude loss + extra penalty when direction is wrong."""
+    """Huber magnitude loss + extra penalty when direction is wrong + auxiliary directional BCE loss."""
 
-    def __init__(self, delta: float = 1.0, direction_weight: float = 0.5, reduction: str = "mean"):
+    def __init__(
+        self,
+        delta: float = 1.0,
+        direction_weight: float = 0.5,
+        bce_weight: float = 0.5,
+        reduction: str = "mean",
+    ):
         super().__init__()
         self.huber = HuberLoss(delta=delta, reduction=reduction)
         self.direction_weight = float(direction_weight)
+        self.bce_weight = float(bce_weight)
         self.reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -62,9 +70,20 @@ class DirectionalHuberLoss(nn.Module):
         base = self.huber(pred, target)
         wrong_sign = (pred * target) < 0
         dir_pen = wrong_sign.float() * (pred - target).abs()
+
+        # Auxiliary directional BCE loss: penalizes positive drift when market moves downward
+        if self.bce_weight > 0:
+            tgt_dir = (target > 0).float()
+            tgt_dir = torch.where(target == 0, torch.full_like(tgt_dir, 0.5), tgt_dir)
+            scale = 10.0 if pred.abs().max() < 1.0 else 1.0
+            bce_pen = F.binary_cross_entropy_with_logits(pred * scale, tgt_dir, reduction="none")
+            loss = base + self.direction_weight * dir_pen + self.bce_weight * bce_pen
+        else:
+            loss = base + self.direction_weight * dir_pen
+
         if self.reduction == "none":
-            return base + self.direction_weight * dir_pen
-        return base + self.direction_weight * dir_pen.mean()
+            return loss
+        return loss.mean()
 
 
 class SharpeProxyLoss(nn.Module):

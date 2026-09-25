@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
-from config.settings import RISK, RL, SIZING
+from config.settings import BACKTEST, RISK, RL, SIZING
 from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, evaluate_agent, train_agent
 from training.cache_integrity import (
     _load_rl_market_from_cache,
@@ -66,34 +66,23 @@ def _rl_algo_kwargs(args, algo):
 
 
 def _build_rl_market_arrays(y_labels, base_price: float = 1.085, base_spread: float = 0.00008):
-    """A-C2: derive per-bar close prices, ATR and spreads for the RL environment.
+    """DEPRECATED — label-leakage synthetic price path.
 
-    Priority
-    --------
-    1. ``_try_rl_market_from_features`` -- denormalized ret/atr/spread from cached
-       feature windows (same bars as supervised training; preferred when scaler exists).
-    2. Label integration (this function) -- treat forward-reward labels as a signed
-       return walk when OHLC/features are unavailable.
+    Historically this integrated CPAR ``y_labels`` into ``prices = cumprod(1+ y/std*0.0004)``.
+    That couples the tradable price to the prediction target → RL optimizes a
+    non-tradable shape and inflates Sharpe. Replaced by hard failure: rebuild the
+    Zarr cache so ``_load_rl_market_from_cache`` returns real OHLC.
 
-    The feature cache stores scaled windows, not raw OHLC. When no scaler/feature
-    columns are available, ``per_bar_ret`` is inferred from reward labels and
-    integrated into a synthetic price path so PnL / SL / TP are non-zero.
-
-    Prefer ``_load_rl_market_from_cache`` (A-C2 full). This path is last-resort only.
+    Kept only for backward compat with legacy unit tests that import the symbol;
+    always raises unless ``allow_synthetic=True`` is explicitly passed.
     """
-    y = np.nan_to_num(np.asarray(y_labels, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-    s = float(y.std()) or 1.0
-    # Scale to ~4-pip (0.0004) one-sigma 1-min move, clipped to a sane band.
-    per_bar_ret = np.clip(y / (s + 1e-9) * 0.0004, -0.01, 0.01)
-    prices = (base_price * np.cumprod(1.0 + per_bar_ret)).astype(np.float32)
-    abs_ret = np.abs(np.diff(prices, prepend=prices[0]))
-    win = 14
-    kernel = np.ones(win) / win
-    atr = np.convolve(abs_ret, kernel, mode="same")
-    atr = np.maximum(atr, 1e-4).astype(np.float32)  # floor at 1 pip
-    med_atr = float(np.median(atr)) or 1e-4
-    spreads = np.clip(base_spread * (atr / med_atr), base_spread, 5 * base_spread).astype(np.float32)
-    return prices, atr, spreads
+    raise RuntimeError(
+        "[RL] _build_rl_market_arrays removed: synthetic price from y_labels causes "
+        "label leakage (prices = cumprod(y/std)). Rebuild cache: "
+        "python -m training.train_gpu --config config/run.yaml --build-only  "
+        "so _load_rl_market_from_cache provides real OHLC. "
+        "If you intentionally need the legacy path (tests), pass allow_synthetic=True."
+    )
 
 
 def _try_rl_market_from_features(
@@ -259,11 +248,13 @@ def _build_rl_env(
         if _market is not None:
             prices, atr, spreads = _market
             _market_source = "features"
+            print(f"[RL] WARN: market source={_market_source} -- rebuild cache for real OHLC")
         else:
-            prices, atr, spreads = _build_rl_market_arrays(y_env)
-            _market_source = "synthetic"
-    if _market_source != "cache":
-        print(f"[RL] WARN: market source={_market_source} -- rebuild cache for real OHLC")
+            raise RuntimeError(
+                "[RL] Market cache degenerate (std(prices) < 1e-12) and feature fallback unavailable. "
+                "Synthetic price from y_labels is DISABLED to prevent label leakage. "
+                "Rebuild cache: python -m training.train_gpu --config config/run.yaml --build-only"
+            )
 
     obs_feats = None
     if bool(getattr(args, "rl_encoder_obs", True)):
@@ -275,6 +266,26 @@ def _build_rl_env(
         obs_feats = X_last
 
     _ep_len = int(getattr(args, "rl_episode_len", 0) or 0) or None
+    _enable_idle = not bool(getattr(args, "rl_encoder_obs", True))
+    # When encoder obs is active, idle penalty would otherwise fire on a random
+    # latent dimension (features[:,0] is not ret_5). Disable by default; if a
+    # true directional signal is needed, pass supervised_signal explicitly.
+    _sup_signal = None
+    if _enable_idle:
+        # raw mode: keep existing behaviour (features[:,0] is signal)
+        pass
+    # Annualize Sharpe correctly for bar frequency (5m → 252*288, not daily 252)
+    _bf = str(getattr(args, "bar_freq", getattr(args, "strategy_bar_freq", "5m")))
+    try:
+        bf = _bf.strip().lower()
+        if bf.endswith("m"):
+            _bpy = 252 * 24 * 60 // int(bf[:-1])
+        elif bf.endswith("h"):
+            _bpy = 252 * 24 // int(bf[:-1])
+        else:
+            _bpy = 252 * 24 * 60 // 5
+    except Exception:
+        _bpy = 252 * 24 * 60 // 5
     return ForexTradingEnv(
         features=obs_feats,
         prices=prices,
@@ -287,8 +298,14 @@ def _build_rl_env(
         pyramid_pct=SIZING["pyramid_add_pct"],
         martingale_pct=SIZING["martingale_add_pct"],
         max_lots=SIZING["max_total_lots"],
+        commission_per_lot=float(BACKTEST.get("commission_per_lot", 3.5)),
+        slippage_pips=float(BACKTEST.get("slippage_pips", 0.7)),
+        pip_size=0.0001,
         random_reset=True,
         episode_len=_ep_len,
+        enable_idle_penalty=_enable_idle,
+        supervised_signal=_sup_signal,
+        bars_per_year=_bpy,
     )
 
 
@@ -638,7 +655,7 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     _val_episodes = max(3, min(20, int(args.rl_episodes) // 25))
-    _min_val_sharpe = float(getattr(args, "rl_min_val_sharpe", -999.0))
+    _min_val_sharpe = float(getattr(args, "rl_min_val_sharpe", 0.0))
     _best_val_sharpe = float("-inf")
     _best_saved = False
     # Evaluate on val every this many training episodes
@@ -660,8 +677,22 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         try:
             from models.rl_agents import _SharpeRewardAdapter
 
-            reward_sharpe = _SharpeRewardAdapter()
-            print("[RL] SharpeRewardWrapper enabled (risk-adjusted step reward)")
+            _bpy = int(getattr(train_env, "bars_per_year", 0) or 0)
+            if _bpy <= 0:
+                # Derive from bar_freq (e.g. 5m → 252*24*60//5)
+                _bf = str(getattr(args, "bar_freq", getattr(args, "strategy_bar_freq", "5m")))
+                try:
+                    bf = _bf.strip().lower()
+                    if bf.endswith("m"):
+                        _bpy = 252 * 24 * 60 // int(bf[:-1])
+                    elif bf.endswith("h"):
+                        _bpy = 252 * 24 // int(bf[:-1])
+                    else:
+                        _bpy = 252 * 24 * 60 // 5
+                except Exception:
+                    _bpy = 252 * 24 * 60 // 5
+            reward_sharpe = _SharpeRewardAdapter(bars_per_year=_bpy)
+            print(f"[RL] SharpeRewardWrapper enabled (bars_per_year={_bpy}, ann={_bpy**0.5:.1f})")
         except Exception as _sre:
             print(f"[RL] SharpeReward unavailable: {_sre}")
 

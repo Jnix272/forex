@@ -16,6 +16,7 @@ from config.settings import TRAINING
 from models.architectures import (
     AsymmetricDirectionalLoss,
     HuberLoss,
+    MultiPairMultiTaskLoss,
     MultiTaskLoss,
     OverconfidencePenalty,
 )
@@ -76,9 +77,10 @@ def _compute_loss(
             # Warmup/probe: Huber on direction logits only.
             # MultiTaskLoss.forward expects (logits, ret, conf, y_cls, y_cont, ...);
             # calling it with 2 args would TypeError or mis-bind.
-            if isinstance(crit, MultiTaskLoss):
-                # MultiTaskLoss.hub uses reduction="none" - apply bet_size and mean for a scalar loss.
-                l_hub = cast(Any, crit).hub(logits.reshape(-1), yb.reshape(-1))
+            if isinstance(crit, (MultiTaskLoss, MultiPairMultiTaskLoss)):
+                # Keep batch and pair dimensions intact for proper bet_size broadcast
+                y_cont = _match_target_shape(logits, yb)
+                l_hub = cast(Any, crit).hub(logits, y_cont)
                 return _apply_bet_size(l_hub, bet_size).mean()
             try:
                 if isinstance(crit, nn.CrossEntropyLoss):
@@ -99,8 +101,56 @@ def _compute_loss(
                 return cast(Any, crit)(logits, ret_hat, conf, y_cls_idx, y_cont, None, bet_size=bet_size)
             return _apply_bet_size(base, bet_size).mean() if base.numel() > 1 else base
 
+        if isinstance(crit, MultiPairMultiTaskLoss):
+            y_cont = _match_target_shape(ret_hat, yb)
+            q_low = model_out[3] if len(model_out) > 3 else None
+            q_high = model_out[4] if len(model_out) > 4 else None
+            return crit(
+                logits=logits,
+                ret_hat=ret_hat,
+                conf=conf,
+                y_cls=y_cls_idx,
+                y_cont=y_cont,
+                y_conf=y_conf,
+                bet_size=bet_size,
+                q_low=q_low,
+                q_high=q_high,
+            )
+
         if multitask or isinstance(crit, MultiTaskLoss):
             y_cont = _match_target_shape(ret_hat, yb)
+            # Detect multi-pair target or prediction shape (B, P)
+            if (logits.ndim == 2 and logits.shape[1] > 1) or (isinstance(y_cont, torch.Tensor) and y_cont.ndim == 2 and y_cont.shape[1] > 1):
+                P = logits.shape[1] if (logits.ndim == 2 and logits.shape[1] > 1) else y_cont.shape[1]
+                q_low = model_out[3] if len(model_out) > 3 else None
+                q_high = model_out[4] if len(model_out) > 4 else None
+                pair_losses = []
+                for p in range(P):
+                    l_p = logits[:, p] if logits.ndim == 2 else logits
+                    r_p = ret_hat[:, p] if ret_hat.ndim == 2 else ret_hat
+                    c_p = conf[:, p] if conf is not None and conf.ndim == 2 else conf
+                    yc_idx_p = y_cls_idx[:, p] if y_cls_idx.ndim == 2 else y_cls_idx
+                    y_cont_p = y_cont[:, p] if y_cont.ndim == 2 else y_cont
+                    y_conf_p = y_conf[:, p] if y_conf is not None and y_conf.ndim == 2 else y_conf
+                    ql_p = q_low[:, p] if q_low is not None and q_low.ndim == 2 else q_low
+                    qh_p = q_high[:, p] if q_high is not None and q_high.ndim == 2 else q_high
+                    pair_losses.append(
+                        cast(Any, crit)(
+                            l_p, r_p, c_p, yc_idx_p, y_cont_p, y_conf_p, None, None, None, None, bet_size, ql_p, qh_p
+                        )
+                    )
+                return torch.stack(pair_losses).mean()
+
+            # Quantile heads (optional 4th/5th outputs)
+            q_low = model_out[3] if len(model_out) > 3 else None
+            q_high = model_out[4] if len(model_out) > 4 else None
+            # Handle aux heads shifting quantile positions when return_aux=True
+            # In that case model_out = (logits, ret, conf, q_low, q_high, recon, vol)
+            # Detect recon as 3D/2D tensor with feature dim >1
+            if isinstance(crit, MultiTaskLoss) and getattr(crit, "w_quantile", 0) > 0:
+                return cast(Any, crit)(
+                    logits, ret_hat, conf, y_cls_idx, y_cont, y_conf, None, None, None, None, bet_size, q_low, q_high
+                )
             return cast(Any, crit)(
                 logits, ret_hat, conf, y_cls_idx, y_cont, y_conf, None, None, None, None, bet_size
             )
@@ -354,6 +404,17 @@ def build_criterion(
     multitask = getattr(args, "multitask", False)
     d = float(TRAINING.get("huber_delta", 1.0))
 
+    per_pair_heads = getattr(args, "per_pair_heads", False)
+    if per_pair_heads:
+        return MultiPairMultiTaskLoss(
+            w_dir=1.0,
+            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
+            w_conf=float(getattr(args, "mt_w_conf", 0.3)),
+            huber_delta=d,
+            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
+            quantiles=(0.05, 0.95),
+        ).to(device)
+
     if multitask:
         cw = None
         cp = None
@@ -388,6 +449,8 @@ def build_criterion(
             w_sharpe=w_sharpe,
             sharpe_ann=sharpe_ann,
             label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
+            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
+            quantiles=(0.05, 0.95),
         ).to(device)  # type: ignore
 
     if args.loss == "cross_entropy":
@@ -408,6 +471,11 @@ def build_criterion(
         ann = _sharpe_ann_factor(args)
         return SharpeProxyLoss(delta=d, sharpe_weight=float(getattr(args, "sharpe_weight", 0.2)), ann=ann, reduction="none").to(device)  # type: ignore
     return HuberLoss(delta=d, reduction="none").to(device)  # type: ignore
+
+
+# Public / backward-compatible alias for batch loss calculation
+compute_batch_loss = _compute_loss
+
 
 
 

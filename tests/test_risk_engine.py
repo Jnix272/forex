@@ -211,3 +211,16 @@ def test_risk_decision_to_audit_shape():
     assert entry["value"] == 1.5
     assert entry["limit"] == 1.0
     assert entry["allowed"] is False
+
+
+def test_usdjpy_notional_usd_base_pairs(engine):
+    """USDJPY has USD as base currency, so 0.05 lots = $5,000 notional, NOT $786,900."""
+    # 0.05 lots of USDJPY at 157.38 must evaluate to $5,000 notional, well under 250,000 limit
+    d = engine.check_order(pair="USDJPY", lots=0.05, price=157.38)
+    assert d.allowed is True
+
+    # Check cumulative notional with USDJPY position open
+    engine.open_position("USDJPY", lots=0.05, entry_price=157.38)
+    d2 = engine.check_order(pair="EURUSD", lots=0.05, price=1.14)
+    assert d2.allowed is True
+

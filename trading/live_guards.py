@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,10 @@ from data.historical_news import _filter_relevant, _load_events
 # Shared guard value types now live in contracts (risk <-> trading decoupling).
 from contracts.execution_risk import GuardResult, HOLD  # noqa: F401  # re-export
 
-_SPECIAL_EVENTS = ("nfp", "nonfarm", "non-farm", "cpi", "fomc", "ecb", "boe", "boj", "rate")
+_SPECIAL_EVENT_REGEX = re.compile(
+    r"\b(nfp|nonfarm|non-farm|cpi|fomc|ecb|boe|boj|interest rate|fed|central bank|gdp|retail sales|retail|pmi|ism)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_polars_frame(frame: Any) -> bool:
@@ -61,16 +65,25 @@ def _tail_median(features: Any, col: str, lookback: int, default: float = 0.0) -
 
 
 class EconomicCalendarGuard:
+    # Tiered windows: critical (NFP) 60/30 flatten, high (CPI/GDP/Retail/FOMC) 30/15, medium 15/10
+    TIER_WINDOWS = {
+        "critical": (60, 30, True),
+        "high": (30, 15, False),
+        "medium": (15, 10, False),
+        "low": (0, 0, False),
+    }
+
     def __init__(
         self,
         pair: str,
         *,
         calendar_file: str | None = None,
-        block_before_min: int = 0,
-        block_after_min: int = 0,
-        special_before_min: int = 2,
-        special_after_min: int = 2,
+        block_before_min: int = 15,
+        block_after_min: int = 10,
+        special_before_min: int = 30,
+        special_after_min: int = 15,
         flatten_before_event: bool = False,
+        tier_windows: dict | None = None,
     ):
         self.pair = pair
         self.calendar_file = (
@@ -81,6 +94,13 @@ class EconomicCalendarGuard:
         self.special_before_min = int(special_before_min)
         self.special_after_min = int(special_after_min)
         self.flatten_before_event = bool(flatten_before_event)
+        # Allow run.yaml news.tiers override: {"critical":[60,30],"high":[30,15]}
+        if tier_windows:
+            try:
+                for k, v in tier_windows.items():
+                    self.TIER_WINDOWS[str(k).lower()] = tuple(v)  # type: ignore
+            except Exception:
+                pass
         self._events = pd.DataFrame()
         self._loaded_at = pd.Timestamp(0, tz="UTC")
 
@@ -107,28 +127,70 @@ class EconomicCalendarGuard:
         if getattr(events_df, "empty", True):
             return GuardResult(False, details={"events_loaded": 0})
 
+        # Build sorted, merged windows to avoid double-counting overlapping 08:30 CPI + 08:50 FOMC
+        candidates: list[tuple[pd.Timestamp, pd.Timestamp, dict]] = []
         for _, row in events_df.iterrows():
-            event_time = pd.Timestamp(row["timestamp_utc"]).tz_convert("UTC")
+            ts = pd.Timestamp(row["timestamp_utc"])
+            event_time = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
             name = str(row.get("headline", row.get("event", "")))
             low_name = name.lower()
-            special = any(token in low_name for token in _SPECIAL_EVENTS)
-            before = self.special_before_min if special else self.block_before_min
-            after = self.special_after_min if special else self.block_after_min
+            impact_raw = str(row.get("impact", "")).strip().lower()
+            # Tiered impact
+            if impact_raw in ("critical", "3", "red") or "crit" in impact_raw:
+                tier = "critical"
+            elif impact_raw in ("high", "high impact") or "high" in impact_raw:
+                tier = "high"
+            elif impact_raw in ("medium", "moderate"):
+                tier = "medium"
+            else:
+                tier = "low"
+            if tier == "low":
+                continue
+            # Legacy special regex now only upgrades high→critical for NFP-style
+            special = bool(_SPECIAL_EVENT_REGEX.search(low_name))
+            if tier == "high" and special and "nfp" in low_name:
+                tier = "critical"
+            before, after, tier_flatten = self.TIER_WINDOWS.get(tier, (15, 10, False))
+            # Env/config can still force flatten for critical only and only if position is in event currency
+            flatten = bool(self.flatten_before_event or tier_flatten)
+            # Currency-specific flatten: only flatten if engine pair holds the event currency
+            # (ECB EUR → EURUSD/GBPUSD not USDJPY), otherwise just HOLD
+            if flatten:
+                ccy = str(row.get("currency", "")).upper().strip()
+                if ccy and ccy not in self.pair.upper():
+                    flatten = False
+            if before == 0 and after == 0:
+                continue
             start = event_time - pd.Timedelta(minutes=before)
             end = event_time + pd.Timedelta(minutes=after)
-            if start <= now_ts <= end:
-                return GuardResult(
-                    True,
-                    reason="economic_calendar_block",
-                    details={
-                        "event": name,
-                        "currency": str(row.get("currency", "")),
-                        "impact": str(row.get("impact", "")),
-                        "event_time": event_time.isoformat(),
-                        "minutes_to_event": (event_time - now_ts).total_seconds() / 60.0,
-                        "flatten_before_event": self.flatten_before_event,
-                    },
-                )
+            candidates.append((start, end, {
+                "event": name, "currency": str(row.get("currency","")), "impact": str(row.get("impact","")),
+                "event_time": event_time.isoformat(), "tier": tier, "special": special,
+                "flatten_before_event": flatten, "before": before, "after": after,
+                "minutes_to_event": (event_time - now_ts).total_seconds()/60.0,
+            }))
+        if not candidates:
+            return GuardResult(False, details={"events_loaded": len(self._events)})
+        # Sort and merge overlapping windows for graduated re-entry (0.5× size next 15m)
+        candidates.sort(key=lambda x: x[0])
+        merged: list[tuple[pd.Timestamp, pd.Timestamp, dict]] = []
+        for s, e, d in candidates:
+            if not merged or s > merged[-1][1]:
+                merged.append((s, e, d))
+            else:
+                # Overlap: extend end, keep earliest event details but mark merged
+                prev_s, prev_e, prev_d = merged[-1]
+                new_e = max(prev_e, e)
+                prev_d = {**prev_d, "merged": True, "merged_count": int(prev_d.get("merged_count",1))+1}
+                merged[-1] = (prev_s, new_e, prev_d)
+        for s, e, d in merged:
+            if s <= now_ts <= e:
+                # Graduated re-entry: after event, size 0.5× for 15m already encoded via RegimeRouter; economics just blocks
+                return GuardResult(True, reason="economic_calendar_block", details=d)
+            # 15m graduated tail: 0.5× not blocked but logged for live_engine to size 0.5
+            tail_end = e + pd.Timedelta(minutes=15)
+            if e < now_ts <= tail_end:
+                return GuardResult(False, details={**d, "graduated_tail": True, "size_multiplier": 0.5})
         return GuardResult(False, details={"events_loaded": len(self._events)})
 
 
@@ -136,15 +198,23 @@ class SpreadVolatilityGuard:
     def __init__(
         self,
         *,
-        max_spread_pips: float = 2.5,
-        spread_median_mult: float = 2.5,
+        max_spread_pips: float | None = None,
+        spread_median_mult: float | None = None,
         atr_median_mult: float = 3.0,
         vol_median_mult: float = 3.0,
         lookback: int = 60,
         pair: str = "EURUSD",
     ):
-        self.max_spread_pips = float(max_spread_pips)
-        self.spread_median_mult = float(spread_median_mult)
+        pair_u = str(pair).upper()
+        # Pair-specific defaults: CAD/JPY naturally wider (2.1pips normal for USDCAD vs 1.3 EURUSD)
+        if "JPY" in pair_u:
+            def_max, def_mult = 3.0, 3.0
+        elif "CAD" in pair_u:
+            def_max, def_mult = 3.0, 3.5
+        else:
+            def_max, def_mult = 2.5, 2.5
+        self.max_spread_pips = float(max_spread_pips if max_spread_pips is not None else def_max)
+        self.spread_median_mult = float(spread_median_mult if spread_median_mult is not None else def_mult)
         self.atr_median_mult = float(atr_median_mult)
         self.vol_median_mult = float(vol_median_mult)
         self.lookback = int(lookback)
@@ -168,9 +238,12 @@ class SpreadVolatilityGuard:
             if med > 0 and spread > self.spread_median_mult * med:
                 return GuardResult(True, "spread_spike", {"spread_pips": spread, "median": med, "mult": spread / med})
 
-        atr_cols = [c for c in features.columns if str(c).startswith("atr_")]
-        if atr_cols and len(features) >= self.lookback:
-            atr_col = atr_cols[0]
+        atr_cand = [c for c in ("atr_6", "atr_14", "atr_20") if c in features.columns]
+        atr_col = atr_cand[0] if atr_cand else None
+        if not atr_col:
+            atr_cols = [c for c in features.columns if str(c).startswith("atr_") and not str(c).startswith("atr_ratio")]
+            atr_col = atr_cols[0] if atr_cols else None
+        if atr_col and len(features) >= self.lookback:
             atr = self._last(features, atr_col)
             med = _tail_median(features, atr_col, self.lookback)
             if med > 0 and atr > self.atr_median_mult * med:
@@ -186,7 +259,7 @@ class SpreadVolatilityGuard:
 
 
 class RegimeRouter:
-    def __init__(self, *, rollover_start_utc: int = 21, rollover_end_utc: int = 1):
+    def __init__(self, *, rollover_start_utc: int = 21, rollover_end_utc: int = 22):
         self.rollover_start_utc = int(rollover_start_utc)
         self.rollover_end_utc = int(rollover_end_utc)
 
@@ -197,7 +270,10 @@ class RegimeRouter:
             return GuardResult(
                 True, "news_block", {"regime": "news_block"}, size_multiplier=0.0, confidence_threshold=1.0
             )
-        in_rollover = hour >= self.rollover_start_utc or hour < self.rollover_end_utc
+        if self.rollover_start_utc <= self.rollover_end_utc:
+            in_rollover = self.rollover_start_utc <= hour < self.rollover_end_utc
+        else:
+            in_rollover = hour >= self.rollover_start_utc or hour < self.rollover_end_utc
         if in_rollover:
             return GuardResult(
                 True,
@@ -227,6 +303,8 @@ class DisagreementGate:
     @staticmethod
     def _safe_action(model, obs) -> int | None:
         try:
+            if hasattr(model, "peek_raw"):
+                return int(model.peek_raw(obs))
             return int(model.select_action(obs))
         except Exception:
             return None
@@ -240,23 +318,34 @@ class DisagreementGate:
         slow_model=None,
         confidence: float | None = None,
         bypass_disagreement: bool = False,
+        fast_action: int | None = None,
     ) -> GuardResult:
         if confidence is not None and float(confidence) < self.min_confidence:
             return GuardResult(
                 True, "low_confidence", {"confidence": float(confidence), "min_confidence": self.min_confidence}
             )
-        if not self.enabled or bypass_disagreement or fast_model is None or slow_model is None:
+        if not self.enabled or bypass_disagreement:
             return GuardResult(False, details={"confidence": confidence})
-        fast_action = self._safe_action(fast_model, obs)
+        if fast_action is not None:
+            resolved_fast = int(fast_action)
+        elif action is not None:
+            resolved_fast = int(action)
+        elif fast_model is not None:
+            resolved_fast = self._safe_action(fast_model, obs)
+        else:
+            resolved_fast = None
+
+        if slow_model is None:
+            return GuardResult(False, details={"confidence": confidence})
         slow_action = self._safe_action(slow_model, obs)
-        votes = [a for a in (int(action), fast_action, slow_action) if a is not None]
+        votes = [a for a in (int(action), resolved_fast, slow_action) if a is not None]
         disagreement = len(set(votes)) > 1
         if disagreement and int(action) != HOLD:
             return GuardResult(
-                True, "model_disagreement", {"action": int(action), "fast": fast_action, "slow": slow_action}
+                True, "model_disagreement", {"action": int(action), "fast": resolved_fast, "slow": slow_action}
             )
         return GuardResult(
-            False, details={"action": int(action), "fast": fast_action, "slow": slow_action, "confidence": confidence}
+            False, details={"action": int(action), "fast": resolved_fast, "slow": slow_action, "confidence": confidence}
         )
 
 
@@ -323,11 +412,28 @@ class NoTradeZoneGate:
 
 
 class TradeJournal:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, db_sink: Any = None, default_pair: str = ""):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_sink = db_sink
+        self.default_pair = str(default_pair)
 
     def record(self, payload: dict[str, Any]) -> None:
         safe = json.loads(json.dumps(payload, default=str))
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(safe, separators=(",", ":")) + "\n")
+        if self.db_sink is not None:
+            try:
+                self.db_sink.record_trade(
+                    pair=str(safe.get("pair") or self.default_pair or ""),
+                    event=str(safe.get("event") or ""),
+                    action=str(safe.get("action") or safe.get("side") or ""),
+                    lots=float(safe.get("lots") or safe.get("qty") or 0.0),
+                    price=float(safe.get("price") or safe.get("mid") or safe.get("entry") or 0.0),
+                    order_id=str(safe.get("order_id") or safe.get("id") or ""),
+                    reason=str(safe.get("reason") or ""),
+                    pnl=float(safe.get("pnl") or 0.0),
+                    details=safe,
+                )
+            except Exception:
+                pass

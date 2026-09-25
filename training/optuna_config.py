@@ -15,7 +15,7 @@ except ImportError:
     _YAML = False
 
 OPTUNA_CONFIG_DIR = Path("config/optuna")
-DEFAULT_METRICS = ("val_loss", "val_sharpe")
+DEFAULT_METRICS = ("val_sharpe", "val_loss")
 
 
 def _slug(text: str) -> str:

@@ -26,8 +26,23 @@ import numpy as np
 
 
 def _scaler_npz_path(cache_path: str | Path) -> Path:
-    """Mirror :func:`training.dataset_builder._scaler_npz_path` without importing it."""
-    return Path(cache_path) / "scaler.npz"
+    """Mirror :func:`training.dataset_builder._scaler_npz_path` with robust sidecar fallback."""
+    p = Path(cache_path)
+    if (p / "scaler.npz").exists():
+        return p / "scaler.npz"
+    s = str(cache_path)
+    base_s = s[:-5] if s.endswith(".zarr") else s
+    for cand in (
+        Path(base_s + "_scaler.npz"),
+        Path(s + "_scaler.npz"),
+        p.parent / "scaler.npz",
+        p.parent / f"{p.stem}_scaler.npz",
+        Path(base_s + "_scaler_EURUSD.npz"),
+        Path(base_s + "_scaler_eurusd.npz"),
+    ):
+        if cand.exists():
+            return cand
+    return p / "scaler.npz"
 
 
 def load_inference_scaler(cache_path: str | Path | None) -> Any | None:

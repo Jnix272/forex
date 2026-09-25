@@ -1,10 +1,14 @@
 # Production overrides for PatchTST (patched time-series transformer).
 model:
   name: patchtst
-  d_model: 128
-  num_layers: 4
+  d_model: 256
+  nhead: 8
+  num_layers: 3
+  patch_len: 12
+  stride: 12
   dropout: 0.1
+  num_classes: 1
 training:
   lr: 1.0e-4
-  seq_len: 60
+  seq_len: 120
   early_stop_patience: 10  # medium-cap transformer; standard patience at 1e-4 lr
