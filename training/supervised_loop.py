@@ -834,6 +834,12 @@ def supervised_train(
     from training.dataset_builder import _load_scaler_npz
     _global_scaler = _load_scaler_npz(Path(cache_path))
     _scaler = None
+    if _global_scaler is None:
+        # No cache scaler: still fit a train-only RobustScaler rather than training unscaled.
+        from training.dataset_builder import _make_scaler
+
+        _global_scaler = _make_scaler()
+        print("[Data] No cache scaler.npz; fitting a fresh train-only scaler")
     if _global_scaler is not None:
         try:
             from sklearn.base import clone
@@ -857,8 +863,9 @@ def supervised_train(
             else:
                 _scaler = _global_scaler
         except Exception as _se:
-            print(f"[Data] Failed to refit scaler: {_se}. Falling back to global scaler.")
-            _scaler = _global_scaler
+            print(f"[Data] WARN: train-only scaler refit failed ({_se}); falling back to the cache-wide "
+                  f"scaler, whose statistics include validation rows (mild leakage).")
+            _scaler = _global_scaler if hasattr(_global_scaler, "scale_") or hasattr(_global_scaler, "center_") else None
     if use_direction_targets:
         try:
             _direction_preflight(cache_path, train_idx, val_idx, args)
@@ -1229,6 +1236,15 @@ def supervised_train(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / f"{model_name}{fold_suffix}_best.pt"
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
+    # Persist the exact train-only scaler next to the checkpoint so inference
+    # transforms live features identically (it prefers this sidecar).
+    if _scaler is not None:
+        try:
+            from training.dataset_builder import _save_scaler_npz
+
+            _save_scaler_npz(Path(cache_path), _scaler, path=best_path.with_name(best_path.stem + "_scaler.npz"))
+        except Exception as _ss_e:
+            print(f"[Data] WARN: could not save checkpoint scaler sidecar: {_ss_e}")
 
     # Resume (single-split only; skip per-fold resume id)
     start_ep = 0

@@ -149,7 +149,13 @@ def load_pytorch_model(
             else None
         )
     )
-    scaler = load_inference_scaler(resolved_cache_path)
+    # Prefer the train-only scaler saved beside the checkpoint (exact training transform).
+    scaler = None
+    _ckpt_scaler = ckpt_path.with_name(ckpt_path.stem + "_scaler.npz")
+    if _ckpt_scaler.is_file():
+        scaler = load_inference_scaler(_ckpt_scaler)
+    if scaler is None:
+        scaler = load_inference_scaler(resolved_cache_path)
     if scaler is not None:
         scaler_n = scaler_feature_count(scaler)
         if scaler_n is not None and int(scaler_n) != int(n_features):

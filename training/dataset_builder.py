@@ -617,12 +617,12 @@ def _fit_scaler_from_cache(cache_path: Path, scaler, max_sample: int = 50000) ->
     print(f"[Scaler] Fitted {scaler.__class__.__name__} on {len(X_finite):,} samples x {X_finite.shape[1]} features")
 
 
-def _save_scaler_npz(cache_path: Path, scaler) -> None:
+def _save_scaler_npz(cache_path: Path, scaler, path: Path | None = None) -> None:
     has_center = hasattr(scaler, "center_") and scaler.center_ is not None
     has_mean = hasattr(scaler, "mean_") and scaler.mean_ is not None
     if not has_center and not has_mean:
         return
-    p = _scaler_npz_path(cache_path)
+    p = Path(path) if path is not None else _scaler_npz_path(cache_path)
     scaler_type = "robust" if isinstance(scaler, RobustScaler) else "standard"
     payload = {
         "scaler_type": np.array(scaler_type, dtype=str),

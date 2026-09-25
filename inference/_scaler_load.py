@@ -30,6 +30,8 @@ import numpy as np
 def _scaler_npz_path(cache_path: str | Path) -> Path:
     """Mirror :func:`training.dataset_builder._scaler_npz_path` with robust sidecar fallback."""
     p = Path(cache_path)
+    if p.suffix == ".npz" and p.is_file():
+        return p
     if (p / "scaler.npz").exists():
         return p / "scaler.npz"
     s = str(cache_path)
