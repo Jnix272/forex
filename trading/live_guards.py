@@ -259,16 +259,46 @@ class SpreadVolatilityGuard:
 
 
 class RegimeRouter:
-    def __init__(self, *, rollover_start_utc: int = 21, rollover_end_utc: int = 22):
+    def __init__(
+        self,
+        *,
+        rollover_start_utc: int = 21,
+        rollover_end_utc: int = 22,
+        friday_cutoff_utc: str = "20:30",
+        sunday_open_utc: int = 22,
+    ):
         self.rollover_start_utc = int(rollover_start_utc)
         self.rollover_end_utc = int(rollover_end_utc)
+        # No new entries from Friday cutoff until the Sunday reopen (weekend gap risk).
+        h, m = str(friday_cutoff_utc).split(":")
+        self.friday_cutoff_min = int(h) * 60 + int(m)
+        self.sunday_open_utc = int(sunday_open_utc)
+
+    def _in_weekend_close(self, now_ts: pd.Timestamp) -> bool:
+        wd = now_ts.weekday()  # Mon=0 .. Sun=6
+        if wd == 4:
+            return now_ts.hour * 60 + now_ts.minute >= self.friday_cutoff_min
+        if wd == 5:
+            return True
+        if wd == 6:
+            return now_ts.hour < self.sunday_open_utc
+        return False
 
     def route(self, features, *, now=None, calendar_blocked: bool = False) -> GuardResult:
         now_ts = pd.Timestamp(now or pd.Timestamp.utcnow())
+        now_ts = now_ts.tz_localize("UTC") if now_ts.tzinfo is None else now_ts.tz_convert("UTC")
         hour = int(now_ts.hour)
         if calendar_blocked:
             return GuardResult(
                 True, "news_block", {"regime": "news_block"}, size_multiplier=0.0, confidence_threshold=1.0
+            )
+        if self._in_weekend_close(now_ts):
+            return GuardResult(
+                True,
+                "weekend_close",
+                {"regime": "weekend_close", "weekday": now_ts.weekday(), "hour_utc": hour},
+                size_multiplier=0.0,
+                confidence_threshold=1.0,
             )
         if self.rollover_start_utc <= self.rollover_end_utc:
             in_rollover = self.rollover_start_utc <= hour < self.rollover_end_utc

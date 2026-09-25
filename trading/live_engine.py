@@ -2682,11 +2682,21 @@ class LiveTradingEngine:
                     normalized_action=action,
                 )
 
+        # Routed before the spread guard so a wide spread can't skip the Friday flatten.
+        regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
+        if regime_result.blocked:
+            if regime_result.reason == "weekend_close" and abs(self._position) > 0:
+                self._risk_trade_closed(mid, "weekend_square_off")
+                self.broker.close_position(self.pair)
+                self._position = 0.0
+                self._entry_price = 0.0
+                self._holding_bars = 0
+            self._journal_record({"event": "blocked", "reason": regime_result.reason, **(regime_result.details or {})})
+            return
         spread_result = self.spread_vol_guard.check(features, bid=bid, ask=ask)
         if spread_result.blocked:
             self._journal_record({"event": "blocked", "reason": spread_result.reason, **(spread_result.details or {})})
             return
-        regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
         disagreement_result = self.disagreement_gate.check(
             orig_action if is_inverted else action,
