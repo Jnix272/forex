@@ -1206,6 +1206,7 @@ class OANDABroker(BrokerInterface):
         self._quotes: dict[str, tuple[float, float]] = {}
 
         # Optional ZMQ tick cache (populated by C++ oanda_stream process)
+        self._avg_prices: dict[str, float] = {}  # instrument -> broker average entry price
         self._zmq_endpoint: str | None = os.environ.get("OANDA_ZMQ_ENDPOINT")
         self._zmq_ctx = None
         self._zmq_sub = None
@@ -1448,12 +1449,18 @@ class OANDABroker(BrokerInterface):
             units = -abs(units)
         else:
             units = abs(units)
+        import uuid as _uuid
+
+        # Client id makes the order findable if the HTTP call times out after
+        # OANDA accepted it (a POST retry would double the position).
+        client_id = f"fx-{_uuid.uuid4().hex[:24]}"
         order_body = {
             "type": "MARKET",
             "instrument": self._instrument(pair),
             "units": str(units),
             "timeInForce": "FOK",
             "positionFill": "DEFAULT",
+            "clientExtensions": {"id": client_id},
         }
         if stop_loss is not None:
             order_body["stopLossOnFill"] = {"price": self._format_price(stop_loss, pair)}
@@ -1478,6 +1485,18 @@ class OANDABroker(BrokerInterface):
                 }
             if "orderCancelTransaction" in data:
                 cancel = data["orderCancelTransaction"]
+                _why = str(cancel.get("reason", ""))
+                if (stop_loss is not None or take_profit is not None) and (
+                    "FIFO" in _why or "ON_FILL" in _why or "LOSS" in _why
+                ):
+                    # Brackets rejected (FIFO / on-fill rules): place the plain order,
+                    # then attach SL/TP to the opened trade so the stop still lives
+                    # at the broker, not only in this process.
+                    plain = self.market_order(pair, side, lots)
+                    tid = ((plain.get("fill") or {}).get("tradeOpened") or {}).get("tradeID")
+                    if plain.get("ok") and tid:
+                        plain["stops"] = self.set_trade_stops(str(tid), pair, stop_loss, take_profit)
+                    return plain
                 return {
                     "ok": False,
                     "reason": cancel.get("reason", "ORDER_CANCELLED"),
@@ -1506,7 +1525,57 @@ class OANDABroker(BrokerInterface):
                 "status_code": exc.code,
             }
         except Exception as exc:
-            return {"ok": False, "reason": "network_error", "error": str(exc)}
+            # The order may still have filled. Look it up by client id before
+            # reporting failure; "unknown" makes the engine reconcile, not assume.
+            return self._resolve_unconfirmed_order(client_id, pair, str(exc))
+
+    def set_trade_stops(self, trade_id: str, pair: str, stop_loss: float | None, take_profit: float | None) -> dict:
+        """Attach broker-side SL/TP to an open trade (PUT /trades/{id}/orders)."""
+        import json as _json
+        import urllib.request
+
+        body: dict = {}
+        if stop_loss is not None:
+            body["stopLoss"] = {"price": self._format_price(stop_loss, pair), "timeInForce": "GTC"}
+        if take_profit is not None:
+            body["takeProfit"] = {"price": self._format_price(take_profit, pair), "timeInForce": "GTC"}
+        if not body:
+            return {"ok": True}
+        url = f"{self._host}/v3/accounts/{self._account_id}/trades/{trade_id}/orders"
+        req = urllib.request.Request(url, data=_json.dumps(body).encode("utf-8"), headers=self._headers(), method="PUT")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return {"ok": True, "raw": _json.loads(resp.read())}
+        except Exception as exc:
+            return {"ok": False, "reason": "set_stops_failed", "error": str(exc)}
+
+    def _resolve_unconfirmed_order(self, client_id: str, pair: str, err: str) -> dict:
+        import json as _json
+        import time as _time
+        import urllib.request
+
+        url = f"{self._host}/v3/accounts/{self._account_id}/orders/@{client_id}"
+        for _attempt in range(3):
+            _time.sleep(1.0 + _attempt)
+            try:
+                req = urllib.request.Request(url, headers=self._headers())
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    order = _json.loads(resp.read()).get("order", {})
+            except Exception:
+                continue
+            state = str(order.get("state", "")).upper()
+            if state == "FILLED":
+                self.get_positions()  # refresh average prices
+                inst = self._instrument(pair).replace("_", "")
+                return {
+                    "ok": True,
+                    "unconfirmed": True,
+                    "price": float(self._avg_prices.get(inst, 0.0) or 0.0),
+                    "client_id": client_id,
+                }
+            if state in ("CANCELLED", "REJECTED"):
+                return {"ok": False, "reason": f"order_{state.lower()}", "client_id": client_id}
+        return {"ok": False, "reason": "order_state_unknown", "error": err, "client_id": client_id, "unknown": True}
 
     def close_position(self, pair: str) -> dict:
         import json as _json
@@ -1578,10 +1647,16 @@ class OANDABroker(BrokerInterface):
             return None
 
         pos = {}
+        self._avg_prices = {}
         for p in data.get("positions", []):
             inst = p["instrument"].replace("_", "")
             long_u = float(p.get("long", {}).get("units", 0))
             short_u = float(p.get("short", {}).get("units", 0))
+            _side = p.get("long", {}) if abs(long_u) > abs(short_u) else p.get("short", {})
+            try:
+                self._avg_prices[inst] = float(_side.get("averagePrice") or 0.0)
+            except (TypeError, ValueError):
+                self._avg_prices[inst] = 0.0
             # OANDA usually returns short units as negative; abs() also covers
             # feeds/fixtures that report short size as a positive magnitude.
             net = long_u - abs(short_u)
@@ -2089,7 +2164,11 @@ class LiveTradingEngine:
                 active_pos = self.broker.get_positions() or {}
                 if self.pair in active_pos and abs(float(active_pos[self.pair])) > 1e-5:
                     self._position = float(active_pos[self.pair])
-                    print(f"[Live] Adopted pre-existing broker position for {self.pair}: {self._position} lots")
+                    self._entry_price = self._broker_entry_price(self._current_mid())
+                    print(
+                        f"[Live] Adopted pre-existing broker position for {self.pair}: "
+                        f"{self._position} lots @ {self._entry_price:.5f}"
+                    )
             except Exception as exc:
                 print(f"[Live] Initial position probe failed for {self.pair} ({exc})")
 
@@ -2133,6 +2212,53 @@ class LiveTradingEngine:
         finally:
             self.stop()
 
+    def _flatten(self, mid: float, reason: str) -> bool:
+        """Close this pair at the broker; clear internal state only if confirmed.
+
+        Flatten paths used to zero ``_position`` regardless of the close result,
+        so a failed close left a real position the engine believed was flat.
+        """
+        res = self.broker.close_position(self.pair)
+        ok = not (
+            isinstance(res, dict)
+            and res.get("ok") is False
+            and res.get("reason") not in ("already_closed", "no_position", "no_such_position", "http_error_404")
+        )
+        if ok:
+            self._risk_trade_closed(mid, reason)
+            self._position = 0.0
+            self._entry_price = 0.0
+            self._holding_bars = 0
+            self._flatten_pending = None
+        else:
+            self._halt_new_orders = True
+            self._flatten_pending = reason  # retried every bar; blocks new orders
+            self.logger.event(
+                "ERROR", "flatten_failed",
+                f"[Live] {reason}: close failed on {self.pair} ({res}); position kept, new orders halted",
+                pair=self.pair,
+            )
+        return ok
+
+    def _broker_entry_price(self, fallback: float) -> float:
+        """Broker average entry for this pair, else ``fallback`` (current mid).
+
+        An entry of 0 disabled the software stop entirely (it requires entry > 0),
+        so adopted/reconciled positions were never protected.
+        """
+        inst = str(self.pair).upper().replace("/", "").replace("_", "")
+        avg = float((getattr(self.broker, "_avg_prices", {}) or {}).get(inst, 0.0) or 0.0)
+        return avg if avg > 0 else float(fallback or 0.0)
+
+    def _current_mid(self, bars=None) -> float:
+        try:
+            bid, ask = self.broker.get_bid_ask(self.pair)
+            if bid and ask:
+                return (float(bid) + float(ask)) / 2.0
+        except Exception:
+            pass
+        return _last_float(bars, "close", 0.0) if bars is not None else 0.0
+
     def _reconcile_positions(self, bars=None) -> None:
         """Reconcile in-memory position against live broker open positions."""
         if not hasattr(self.broker, "get_positions"):
@@ -2167,6 +2293,10 @@ class LiveTradingEngine:
                     internal_lots=self._position,
                     broker_lots=broker_pos,
                 )
+                if abs(self._position) < 1e-5 or self._entry_price <= 0:
+                    # Position appeared at the broker (e.g. a timed-out order that
+                    # filled): give it an entry so the software stop protects it.
+                    self._entry_price = self._broker_entry_price(self._current_mid(bars))
                 self._position = broker_pos
         except Exception as exc:
             self.logger.event("DEBUG", "reconcile_err", f"Reconcile error: {exc}", pair=self.pair)
@@ -2276,6 +2406,14 @@ class LiveTradingEngine:
                 except Exception:
                     pass
         self._reconcile_positions(bars)
+        _pending = getattr(self, "_flatten_pending", None)
+        if _pending:
+            if abs(self._position) > 1e-12:
+                self._flatten(self._current_mid(bars), f"{_pending}_retry")
+            else:
+                self._flatten_pending = None
+            if getattr(self, "_flatten_pending", None):
+                return
         t0 = time.perf_counter()
         bars = _ensure_polars_frame(bars)
         try:
@@ -2483,12 +2621,7 @@ class LiveTradingEngine:
             if self.risk_engine is not None:
                 _risk_mon = self.risk_engine.update_equity(self.equity)
                 if _risk_mon.get("circuit_breaker") and abs(self._position) > 0:
-                    _cb_ok = self.broker.close_position(self.pair)
-                    if not (isinstance(_cb_ok, dict) and _cb_ok.get("ok") is False):
-                        self._risk_trade_closed(mid, "risk_circuit_breaker")
-                        self._position = 0.0
-                        self._entry_price = 0.0
-                        self._holding_bars = 0
+                    self._flatten(mid, "risk_circuit_breaker")
                     self._journal_record(
                         {
                             "event": "blocked",
@@ -2554,11 +2687,7 @@ class LiveTradingEngine:
         if str(dae.get("action", "")).upper() in ("FLATTEN", "HALT", "CLOSE_ALL"):
             self._halt_new_orders = True
             if abs(self._position) > 0:
-                self._risk_trade_closed(mid, "drawdown_guard")
-                self.broker.close_position(self.pair)
-                self._position = 0.0
-                self._entry_price = 0.0
-                self._holding_bars = 0
+                self._flatten(mid, "drawdown_guard")
             self._journal_record(
                 {
                     "event": "blocked",
@@ -2569,7 +2698,7 @@ class LiveTradingEngine:
                 }
             )
             return
-        elif self._halt_new_orders:
+        elif self._halt_new_orders and not getattr(self, "_flatten_pending", None):
             self.logger.event(
                 "INFO",
                 "drawdown_recovered",
@@ -2593,11 +2722,7 @@ class LiveTradingEngine:
                 and calendar_result.details.get("flatten_before_event")
                 and abs(self._position) > 0
             ):
-                self._risk_trade_closed(mid, "calendar_flatten")
-                self.broker.close_position(self.pair)
-                self._position = 0.0
-                self._entry_price = 0.0
-                self._holding_bars = 0
+                self._flatten(mid, "calendar_flatten")
             return
 
         tip_out = (
@@ -2713,11 +2838,7 @@ class LiveTradingEngine:
         regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         if regime_result.blocked:
             if regime_result.reason == "weekend_close" and abs(self._position) > 0:
-                self._risk_trade_closed(mid, "weekend_square_off")
-                self.broker.close_position(self.pair)
-                self._position = 0.0
-                self._entry_price = 0.0
-                self._holding_bars = 0
+                self._flatten(mid, "weekend_square_off")
             self._journal_record({"event": "blocked", "reason": regime_result.reason, **(regime_result.details or {})})
             return
         spread_result = self.spread_vol_guard.check(features, bid=bid, ask=ask)
@@ -2830,7 +2951,10 @@ class LiveTradingEngine:
                 else:
                     hw = float(max(hedge_weights.values())) * 2.0 if hedge_weights else 1.0
                 hw = max(0.6, min(1.4, hw))
-            lots = float(np.clip(lots * (0.6 + 0.8 * avg_conf) * hw, 0.02, self.max_lots))
+            # Sizing that returned 0 (Kelly/VaR/drawdown/regime) means "don't trade";
+            # the old clip floor of 0.02 lots turned every 0 into a trade.
+            if lots > 0:
+                lots = float(np.clip(lots * (0.6 + 0.8 * avg_conf) * hw, 0.02, self.max_lots))
         except Exception:
             pass
 
@@ -2929,12 +3053,10 @@ class LiveTradingEngine:
                 sl = (mid + stop_dist) if stop_dist > 0 else None
                 tp = (mid - tp_dist) if tp_dist > 0 else None
 
-            is_oanda = getattr(self.broker, "venue", "") == "oanda"
-
             def _place(side: str, qty: float, *, with_stops: bool = True) -> bool:
-                # OANDA accounts subject to NFA Rule 2-43(b) FIFO reject orders with attached brackets
-                # (FIFO_VIOLATION_SAFEGUARD_VIOLATION). Live engine tracks ATR stops in software (lines 2234-2262).
-                attach_stops = with_stops and not is_oanda
+                # Always ask for broker-side brackets. If OANDA rejects them (FIFO),
+                # OANDABroker re-places the order and attaches SL/TP to the trade.
+                attach_stops = with_stops
                 r = self.broker.market_order(
                     self.pair,
                     side,
@@ -2954,6 +3076,15 @@ class LiveTradingEngine:
                         }
                     )
                     return False
+                if isinstance(r, dict) and isinstance(r.get("stops"), dict) and r["stops"].get("ok") is False:
+                    self.logger.event(
+                        "ERROR", "broker_stops_missing",
+                        f"[Live] Filled but broker SL/TP not attached on {self.pair}: {r['stops']}; "
+                        "software stop only",
+                        pair=self.pair,
+                    )
+                _fp = float(r.get("price", 0.0) or 0.0) if isinstance(r, dict) else 0.0
+                self._last_fill_price = _fp if _fp > 0 else mid
                 # BUG-RG-05: only consume rate-limiter slot on an actual filled
                 # order (allow_order was called with record=False during
                 # pre-trade gate). This keeps HOLD bars from starving the bucket.
@@ -2985,7 +3116,8 @@ class LiveTradingEngine:
             if not _place("buy" if buy else "sell", lots, with_stops=True):
                 return
             self._position = lots if buy else -lots
-            self._entry_price = mid
+            # Fill price, not the pre-trade mid (off by >= half the spread).
+            self._entry_price = float(getattr(self, "_last_fill_price", 0.0) or mid)
             self._holding_bars = 0
             if self.risk_engine is not None:
                 self.risk_engine.open_position(
@@ -3692,8 +3824,14 @@ if __name__ == "__main__":
             _maturity = "paper"
     print(f"[Live] Maturity stage     : {_maturity}")
 
+    # --demo trades a random-action placeholder; never point it at a real account.
+    if args.demo and args.broker != "paper":
+        raise SystemExit(
+            f"[Live] --demo uses random actions and skips the promotion gate; it is only "
+            f"allowed with --broker paper (got --broker {args.broker})."
+        )
     # Non-paper live runs require a passed promotion gate artifact (fail-closed).
-    if args.broker != "paper" and not args.demo:
+    if args.broker != "paper":
         _promoted = False
         _prom_reasons: list[str] = []
         for _cand in (
