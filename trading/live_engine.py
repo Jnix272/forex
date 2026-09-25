@@ -2566,16 +2566,13 @@ class LiveTradingEngine:
             slow_sig = float(_math.tanh(slow_raw * 2.0)) if abs(slow_raw) > 1e-9 else None
             fast_sig = float(_math.tanh(fast_raw * 2.0)) if abs(fast_raw) > 1e-9 else None
             if slow_sig is None and fast_sig is None:
-                sig = 1.0 if action == int(LiveAction.BUY) else (-1.0 if action == int(LiveAction.SELL) else 0.0)
-                current_preds["slow_model"] = sig
-                current_preds["fast_agent"] = sig
+                # No per-model scores: identical signals carry no information for Hedge; skip update.
+                pass
             else:
                 current_preds["slow_model"] = float(slow_sig) if slow_sig is not None else 0.0
                 current_preds["fast_agent"] = float(fast_sig) if fast_sig is not None else 0.0
         except Exception:
-            sig = 1.0 if action == int(LiveAction.BUY) else (-1.0 if action == int(LiveAction.SELL) else 0.0)
-            current_preds["slow_model"] = sig
-            current_preds["fast_agent"] = sig
+            current_preds = {}
         self._last_bar_preds = current_preds
 
         # BUG-010: Track predictions for concept drift detection
