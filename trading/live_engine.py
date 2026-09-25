@@ -1934,8 +1934,8 @@ class LiveTradingEngine:
         hedge_models = ["slow_model", "fast_agent"]
         self.hedge_ensemble = OnlineHedgeEnsemble(
             model_names=hedge_models,
-            learning_rate=0.1,
-            discount_factor=0.98,
+            learning_rate=0.3,
+            discount_factor=0.97,
             min_weight_floor=0.05,
             state_path=hedge_state_file,
             initial_sharpes={"slow_model": 1.25, "fast_agent": 0.85},
@@ -2336,7 +2336,8 @@ class LiveTradingEngine:
                 updated_weights = self.hedge_ensemble.update(
                     model_predictions=self._last_bar_preds,
                     realized_return=bar_ret,
-                    current_atr=atr,
+                    # bar_ret is fractional; ATR must be too, else JPY rewards shrink ~100x
+                    current_atr=(atr / self._last_bar_close) if atr > 0 else 0.0005,
                 )
                 self.logger.event(
                     "INFO",
