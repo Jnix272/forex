@@ -2106,6 +2106,16 @@ class LiveTradingEngine:
         except Exception as exc:
             self.logger.event("DEBUG", "reconcile_err", f"Reconcile error: {exc}", pair=self.pair)
 
+    def _decision_log(self, verdict: str, **fields) -> None:
+        """One console line per bar outcome so HOLD/blocked/order is visible live."""
+        extra = " ".join(f"{k}={v}" for k, v in fields.items() if v not in (None, ""))
+        self.logger.event("INFO", "decision", f"[Decision] {self.pair} {verdict} {extra}".rstrip(), pair=self.pair, **fields)
+
+    def _journal_record(self, rec: dict) -> None:
+        if isinstance(rec, dict) and rec.get("event") in ("blocked", "order_rejected"):
+            self._decision_log(str(rec.get("event")).upper(), reason=rec.get("reason"))
+        self.trade_journal.record(rec)
+
     def _risk_trade_closed(self, mid: float, reason: str) -> None:
         """Feed a realised closed trade into RiskEngine so its daily-loss,
         consecutive-loss and return-series gates actually fire on the live path.
@@ -2169,7 +2179,7 @@ class LiveTradingEngine:
                 lots=pos,
                 direction=direction,
             )
-            self.trade_journal.record(
+            self._journal_record(
                 {
                     "event": "trade_closed",
                     "reason": reason,
@@ -2352,7 +2362,7 @@ class LiveTradingEngine:
             if hit_sl or hit_tp:
                 exit_reason = "atr_stop" if hit_sl else "atr_take_profit"
                 _close_ok = self.broker.close_position(self.pair)
-                self.trade_journal.record(
+                self._journal_record(
                     {
                         "event": "stop_loss" if hit_sl else "take_profit",
                         "reason": exit_reason,
@@ -2403,7 +2413,7 @@ class LiveTradingEngine:
                         self._position = 0.0
                         self._entry_price = 0.0
                         self._holding_bars = 0
-                    self.trade_journal.record(
+                    self._journal_record(
                         {
                             "event": "blocked",
                             "reason": "risk_circuit_breaker",
@@ -2473,7 +2483,7 @@ class LiveTradingEngine:
                 self._position = 0.0
                 self._entry_price = 0.0
                 self._holding_bars = 0
-            self.trade_journal.record(
+            self._journal_record(
                 {
                     "event": "blocked",
                     "reason": "drawdown_guard",
@@ -2499,7 +2509,7 @@ class LiveTradingEngine:
             self.logger.event("INFO", "calendar_graduated_tail", "[Live] Post-news graduated 0.5× size", pair=self.pair)
         if calendar_result.blocked:
             self.logger.event("WARN", "calendar_guard", "[Live] Economic calendar block -> HOLD", pair=self.pair)
-            self.trade_journal.record(
+            self._journal_record(
                 {"event": "blocked", "reason": calendar_result.reason, "details": calendar_result.to_dict()}
             )
             if (
@@ -2525,6 +2535,17 @@ class LiveTradingEngine:
         else:
             action = int(tip_out)
             model_used = "fast"
+        try:
+            _act_name = LiveAction(action).name
+        except ValueError:
+            _act_name = str(action)
+        self._decision_log(
+            "SIGNAL",
+            action=_act_name,
+            model=model_used,
+            slow_raw=f"{float(getattr(self.slow, 'last_raw', 0.0)):+.4f}",
+            fast_raw=f"{float(getattr(self.fast, 'last_raw', 0.0)):+.4f}",
+        )
 
         # Collect individual model signals for Hedge tracking (divergence fix)
         current_preds = {}
@@ -2597,7 +2618,7 @@ class LiveTradingEngine:
 
         spread_result = self.spread_vol_guard.check(features, bid=bid, ask=ask)
         if spread_result.blocked:
-            self.trade_journal.record({"event": "blocked", "reason": spread_result.reason})
+            self._journal_record({"event": "blocked", "reason": spread_result.reason})
             return
         regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
@@ -2611,12 +2632,12 @@ class LiveTradingEngine:
             fast_action=orig_action if is_inverted else action,
         )
         if disagreement_result.blocked:
-            self.trade_journal.record({"event": "blocked", "reason": disagreement_result.reason})
+            self._journal_record({"event": "blocked", "reason": disagreement_result.reason})
             return
 
         no_trade_result = self.no_trade_zone_gate.check(features)
         if no_trade_result.blocked:
-            self.trade_journal.record({"event": "blocked", "reason": no_trade_result.reason})
+            self._journal_record({"event": "blocked", "reason": no_trade_result.reason})
             return
 
         safety = {"ok": True, "reason": ""}
@@ -2634,7 +2655,7 @@ class LiveTradingEngine:
                 record=False,
             )
         if not safety.get("ok"):
-            self.trade_journal.record({"event": "blocked", "reason": safety.get("reason")})
+            self._journal_record({"event": "blocked", "reason": safety.get("reason")})
             return
 
         ret = _last_float(features, "ret_5", 0.0)
@@ -2725,7 +2746,7 @@ class LiveTradingEngine:
                 now=datetime.now(UTC),
             )
             if not sess_chk.get("allowed", True):
-                self.trade_journal.record(
+                self._journal_record(
                     {
                         "event": "blocked",
                         "reason": "session_limits",
@@ -2741,7 +2762,7 @@ class LiveTradingEngine:
                     price=mid,
                 )
                 if not _rd.allowed:
-                    self.trade_journal.record(
+                    self._journal_record(
                         {
                             "event": "blocked",
                             "reason": f"risk_engine:{_rd.rule}",
@@ -2751,7 +2772,11 @@ class LiveTradingEngine:
                     return
 
         if self._halt_new_orders:
+            self._decision_log("BLOCKED", reason="halt_new_orders")
             return
+
+        if action not in (int(LiveAction.BUY), int(LiveAction.SELL)) or lots <= 0:
+            self._decision_log("NO_ENTRY", action=action, lots=f"{lots:.3f}")
 
         if lots > 0 and action in (int(LiveAction.BUY), int(LiveAction.SELL)):
             buy = action == int(LiveAction.BUY)
@@ -2763,7 +2788,7 @@ class LiveTradingEngine:
                 try:
                     bp = self.broker.get_positions()
                     if bp is None:
-                        self.trade_journal.record(
+                        self._journal_record(
                             {
                                 "event": "blocked",
                                 "reason": "position_sync_failed",
@@ -2784,12 +2809,11 @@ class LiveTradingEngine:
                 except Exception:
                     pass
 
-            if buy and effective_pos > 0:
+            if (buy and effective_pos > 0) or (not buy and effective_pos < 0):
                 self._holding_bars += 1
+                self._decision_log("HOLD", reason="already_positioned", pos=f"{effective_pos:+.3f}")
                 return
-            if not buy and effective_pos < 0:
-                self._holding_bars += 1
-                return
+            self._decision_log("ORDER", side="buy" if buy else "sell", lots=f"{lots:.3f}")
 
             # Broker-side protective stops (P0 M1): attach SL/TP on a market order
             # so a crash/feed-gap cannot leave a naked position. Mirrors the
@@ -2817,7 +2841,7 @@ class LiveTradingEngine:
                     take_profit=tp if attach_stops else None,
                 )
                 if isinstance(r, dict) and r.get("ok") is False:
-                    self.trade_journal.record(
+                    self._journal_record(
                         {
                             "event": "order_rejected",
                             "side": side,
@@ -2877,7 +2901,7 @@ class LiveTradingEngine:
                 tp=tp,
             )
             print(f"[Live] >>> ORDER FILLED: {('BUY' if buy else 'SELL')} {lots:.4f} lots {self.pair} @ {mid:.5f} (SL: {sl}, TP: {tp}) <<<")
-            self.trade_journal.record(
+            self._journal_record(
                 {
                     "event": "order_filled",
                     "side": "buy" if buy else "sell",
