@@ -21,7 +21,7 @@ from torch.amp import autocast
 from torch.utils.data import DataLoader
 
 from models.architectures import MODEL_REGISTRY
-from models.ensemble import EnsembleMetaLearner, train_meta_learner
+from models.ensemble import EnsembleMetaLearner, _base_pred_to_batch_vector, train_meta_learner
 from training.cache_integrity import _get_pairs, _on_disk_sequence_count, _promotion_holdout_n
 from training.core import _TRAIN_LOGGER, _log_info
 from training.cv_splits import _embargo_bars
@@ -112,6 +112,37 @@ def run_ensemble_meta(
         )
         return
 
+    # Drop collapsed bases (near-constant output, e.g. TFT sigma=0.0012): they add
+    # no information and distort the softmax-weighted average.
+    try:
+        _probe_n = min(2048, max(64, (_on_disk_sequence_count(cache_path) or 2048) // 50))
+        _probe_idx = np.linspace(0, max(0, (_on_disk_sequence_count(cache_path) or _probe_n) - 1), _probe_n).astype(int)
+        _probe_dl = DataLoader(ZarrStreamDataset(cache_path, np.unique(_probe_idx), shuffle_chunks=False),
+                               batch_size=256, shuffle=False, num_workers=0)
+        _stds = {n: [] for n in loaded_names}
+        with torch.no_grad():
+            for _pb in _probe_dl:
+                _px = _pb[0].to(device)
+                for _bn, _bm, _bs in zip(loaded_names, loaded_bases, loaded_seq_lens, strict=False):
+                    _inp = _px[:, -_bs:, :] if _bs and _px.shape[1] > _bs else _px
+                    _stds[_bn].append(_base_pred_to_batch_vector(_bm.to(device)(_inp)).float().cpu())
+        _min_std = float(getattr(args, "ensemble_min_pred_std", 0.01))
+        _keep = []
+        for _i, _bn in enumerate(loaded_names):
+            _sd = float(torch.cat(_stds[_bn]).std()) if _stds[_bn] else 0.0
+            print(f"  [EnsembleMeta] {_bn}: prediction std={_sd:.4f}")
+            if _sd >= _min_std:
+                _keep.append(_i)
+            else:
+                print(f"  [EnsembleMeta] Dropping {_bn}: collapsed output (std {_sd:.4f} < {_min_std})")
+        if len(_keep) >= 2 and len(_keep) < len(loaded_names):
+            loaded_bases = [loaded_bases[i] for i in _keep]
+            loaded_names = [loaded_names[i] for i in _keep]
+            loaded_ckpts = [loaded_ckpts[i] for i in _keep]
+            loaded_seq_lens = [loaded_seq_lens[i] for i in _keep]
+    except Exception as _pe:
+        print(f"  [EnsembleMeta] Collapse probe skipped: {_pe}")
+
     print(f"\n[EnsembleMeta] Training meta-learner on {len(loaded_bases)} bases: {loaded_names}")
 
     meta = EnsembleMetaLearner(
@@ -130,8 +161,14 @@ def run_ensemble_meta(
     if _trainable < 100:
         print(f"[Ensemble] Trainable prefix too small ({_trainable}); skipping meta training.")
         return
-    n_meta = min(200_000, max(1, int(0.1 * _trainable)))
-    meta_idx = np.random.choice(_trainable, n_meta, replace=False)
+    # Stacking must see out-of-sample base predictions: random rows from the
+    # prefix are mostly base-model *training* rows (in-sample, overfit), which
+    # teaches the meta-learner to trust whichever base overfit most. Use the
+    # most recent slice before the holdout (the bases' validation region in
+    # chronological splits) instead.
+    _meta_frac = float(getattr(args, "ensemble_meta_frac", 0.15))
+    n_meta = min(200_000, max(1, int(_meta_frac * _trainable)))
+    meta_idx = np.arange(_trainable - n_meta, _trainable)
     meta_ds = ZarrStreamDataset(cache_path, meta_idx, shuffle_chunks=True)
     meta_dl = DataLoader(
         meta_ds,
