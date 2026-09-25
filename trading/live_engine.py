@@ -1411,6 +1411,19 @@ class OANDABroker(BrokerInterface):
         self._zmq_running = False
         if self._zmq_endpoint:
             self._init_zmq_subscriber()
+        # Pure-Python pricing stream (no C++ bridge). On by default when no ZMQ
+        # endpoint is configured; OANDA_STREAM=0 disables it.
+        self._stream_enabled = (
+            self._zmq_sub is None
+            and str(os.environ.get("OANDA_STREAM", "1")).strip().lower() not in ("0", "false", "no", "off")
+        )
+        self._stream_instruments: set[str] = set()
+        self._stream_cache: dict[str, tuple[float, float, float, bool]] = {}  # inst -> bid, ask, recv_t, tradeable
+        self._stream_last_line = 0.0  # monotonic time of last PRICE/HEARTBEAT line
+        self._stream_thread = None
+        self._stream_stop = None
+        self._stream_lock = None
+        self._rest_quote_time: dict[str, float] = {}
 
     @property
     def _bid(self) -> float | None:
@@ -1490,6 +1503,102 @@ class OANDABroker(BrokerInterface):
             return None  # stale or desynced — fall back to REST
         return float(bid), float(ask)
 
+    # -- Pricing stream --------------------------------------------------------
+    @property
+    def streaming(self) -> bool:
+        """True while the pricing stream is delivering lines (prices or heartbeats)."""
+        import time as _time
+
+        return bool(self._stream_thread is not None and _time.monotonic() - self._stream_last_line < 15.0)
+
+    def _stream_host(self) -> str:
+        explicit = os.environ.get("OANDA_STREAM_URL")
+        if explicit:
+            return explicit.rstrip("/")
+        # api-fxpractice.oanda.com -> stream-fxpractice.oanda.com (same for fxtrade)
+        return self._host.replace("://api-", "://stream-")
+
+    def ensure_stream(self, pair: str) -> None:
+        """Subscribe ``pair`` to the pricing stream, (re)starting it if needed."""
+        if not self._stream_enabled or not (self._token and self._account_id):
+            return
+        import threading
+
+        inst = self._instrument(pair)
+        if self._stream_lock is None:
+            self._stream_lock = threading.Lock()
+        with self._stream_lock:
+            if inst in self._stream_instruments and self._stream_thread is not None and self._stream_thread.is_alive():
+                return
+            self._stream_instruments.add(inst)
+            if self._stream_stop is not None:
+                self._stream_stop.set()  # old thread exits; the new one covers the full set
+            self._stream_stop = threading.Event()
+            self._stream_thread = threading.Thread(
+                target=self._stream_loop,
+                args=(sorted(self._stream_instruments), self._stream_stop),
+                daemon=True,
+                name="oanda-price-stream",
+            )
+            self._stream_thread.start()
+
+    def _stream_loop(self, instruments: list[str], stop) -> None:
+        """Read the v20 pricing stream (one JSON object per line), reconnecting
+        with exponential backoff. HEARTBEAT lines arrive about every 5 s."""
+        import json as _json
+        import time as _time
+        import urllib.request
+
+        url = (
+            f"{self._stream_host()}/v3/accounts/{self._account_id}/pricing/stream"
+            f"?instruments={','.join(instruments)}"
+        )
+        backoff = 1.0
+        while not stop.is_set():
+            try:
+                req = urllib.request.Request(url, headers=self._headers())
+                # Read timeout > heartbeat interval: a silent socket raises and reconnects.
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    print(f"[OANDABroker] Pricing stream connected ({','.join(instruments)})")
+                    backoff = 1.0
+                    while not stop.is_set():
+                        line = resp.readline()
+                        if not line:
+                            break  # server closed the stream
+                        line = line.strip()
+                        if not line:
+                            continue
+                        msg = _json.loads(line)
+                        now = _time.monotonic()
+                        self._stream_last_line = now
+                        if msg.get("type") != "PRICE":
+                            continue  # HEARTBEAT
+                        bids, asks = msg.get("bids") or [], msg.get("asks") or []
+                        if not bids or not asks:
+                            continue
+                        b, a = float(bids[0]["price"]), float(asks[0]["price"])
+                        if b > 0 and a >= b:
+                            self._stream_cache[str(msg.get("instrument"))] = (
+                                b, a, now, bool(msg.get("tradeable", True))
+                            )
+            except Exception as exc:
+                if stop.is_set():
+                    break
+                print(f"[OANDABroker] Pricing stream dropped ({exc}); reconnecting in {backoff:.0f}s")
+            if stop.wait(backoff):
+                break
+            backoff = min(backoff * 2.0, 30.0)
+
+    def _stream_bid_ask(self, pair: str) -> tuple[float, float] | None:
+        """Latest streamed quote while the stream is alive (heartbeats count), so a
+        quiet market with no new prices is not mistaken for a dead feed."""
+        if not self.streaming:
+            return None
+        entry = self._stream_cache.get(self._instrument(pair))
+        if entry is None:
+            return None
+        return float(entry[0]), float(entry[1])
+
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self._token}",
@@ -1510,6 +1619,8 @@ class OANDABroker(BrokerInterface):
         return bool(self._token and self._account_id)
 
     def disconnect(self) -> None:
+        if getattr(self, "_stream_stop", None) is not None:
+            self._stream_stop.set()
         if self._zmq_sub is not None:
             try:
                 self._zmq_running = False
@@ -1526,6 +1637,12 @@ class OANDABroker(BrokerInterface):
         if cached is not None:
             self._quotes[inst] = cached
             return cached
+        # Python pricing stream (started on the first request for this pair).
+        self.ensure_stream(pair)
+        streamed = self._stream_bid_ask(pair)
+        if streamed is not None:
+            self._quotes[inst] = streamed
+            return streamed
 
         import json as _json
         import urllib.request
@@ -1537,7 +1654,10 @@ class OANDABroker(BrokerInterface):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = _json.loads(resp.read())
         except Exception as exc:
-            if inst in self._quotes:
+            # Serve a cached quote only while it is recent; an old one is not a price.
+            import time as _time
+
+            if inst in self._quotes and _time.monotonic() - self._rest_quote_time.get(inst, 0.0) < 10.0:
                 return self._quotes[inst]
             raise RuntimeError(f"OANDA pricing fetch failed for {inst}: {exc}") from exc
 
@@ -1552,6 +1672,9 @@ class OANDABroker(BrokerInterface):
         b = float(bids[0]["price"])
         a = float(asks[0]["price"])
         self._quotes[inst] = (b, a)
+        import time as _time
+
+        self._rest_quote_time[inst] = _time.monotonic()
         return b, a
 
     def get_account(self) -> dict:
@@ -2401,7 +2524,11 @@ class LiveTradingEngine:
                         self._quote_errors = getattr(self, "_quote_errors", 0) + 1
                     # 0.1 s only with a local stream (ZMQ) or the paper broker; REST
                     # polling at 10/s per pair wastes the API budget for no new data.
-                    _fast_feed = getattr(self.broker, "_zmq_sub", None) is not None or isinstance(self.broker, PaperBroker)
+                    _fast_feed = (
+                        getattr(self.broker, "_zmq_sub", None) is not None
+                        or bool(getattr(self.broker, "streaming", False))
+                        or isinstance(self.broker, PaperBroker)
+                    )
                     time.sleep(0.1 if _fast_feed else 0.5)
                     continue
                 bar_ts = next_bar_time
@@ -3958,11 +4085,13 @@ class MultiPairLiveTradingEngine:
         print(f"[Live] MultiPair synchronized loop started for {self.pairs}")
         bar_count = 0
         next_bar_time = _align_next_bar(self.bar_freq)
-        poll_interval = (
-            0.1
-            if (getattr(self.broker, "_zmq_sub", None) is not None or isinstance(self.broker, PaperBroker))
-            else 0.5
-        )
+        def _poll_interval() -> float:
+            fast = (
+                getattr(self.broker, "_zmq_sub", None) is not None
+                or bool(getattr(self.broker, "streaming", False))
+                or isinstance(self.broker, PaperBroker)
+            )
+            return 0.1 if fast else 0.5
         try:
             while self._running:
                 if max_bars and bar_count >= max_bars:
@@ -3973,7 +4102,7 @@ class MultiPairLiveTradingEngine:
                         bid, ask = self.broker.get_bid_ask(e.pair)
                         if bid and ask:
                             e.buf.push_tick(bid, ask)
-                    time.sleep(poll_interval)
+                    time.sleep(_poll_interval())  # stream state can change at runtime
                     continue
                 # Phase 1: every pair builds and publishes this bar's features.
                 # Phase 2: each pair decides. Deciding in one pass fed pair k the

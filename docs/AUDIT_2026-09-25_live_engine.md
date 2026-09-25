@@ -133,11 +133,11 @@
 | L16 | Scale-in and scale-out go through the safety gate and the rate limit. Scale-in keeps a weighted-average entry. |
 | L17 | Quote polling runs every 0.5 s on REST and every 0.1 s only with the ZMQ stream or the paper broker. |
 | L18 | `run_preflight` runs before real-broker starts: feed, broker, risk limits, model, and a schema hash taken from `_features.json`. |
+| L17b | OANDABroker has a pure-Python v20 pricing stream (on by default when no ZMQ; `OANDA_STREAM=0` disables it). Heartbeats count as liveness, it reconnects with backoff, and REST falls back only while the cached quote is under 10 s old. |
 | L19 | A broker position error blocks the order. Errors from the peer model are logged. |
 
 **Still open:**
 - Warm-up rows for multi-pair models: entries are gated instead of rebuilding historical peer rows.
-- A streaming price feed without the C++ ZMQ bridge.
 - A replay test of the live feature path against the training cache.
 
 **Note:** real-broker runs now require a checkpoint trained after this change (it needs `_features.json`), so preflight will block the current checkpoints.
