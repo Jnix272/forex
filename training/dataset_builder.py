@@ -2144,7 +2144,7 @@ def _build_chunk(
         y_cls_seq = np.sign(y_seq).astype(np.float32)
     pq_seq = pq_arr[seq_len - 1 :]  # path quality aligned with y_seq
     pq_seq = np.asarray(pq_seq, dtype=np.float32)
-    close_seq, atr_seq, spread_seq = _market_bar_arrays_from_feats(feats_aligned, x_index, fe, seq_len)
+    close_seq, atr_seq, spread_seq = _market_bar_arrays_from_feats(feats_aligned, x_index, fe, seq_len, pair=pair)
     time_idx = x_index[seq_len - 1 :]
 
     # B: per-sample difficulty scores aligned with X (inner-joined features)
@@ -2590,6 +2590,35 @@ def _build_multipair_chunk(
     return _make_return(out_9, yp=y_pairs, ycp=ycls_pairs)
 
 
+# Raw price levels (and bands built on them) drift across the 2008-2025 range,
+# so a model can key on the era instead of the pattern (audit B1/E4). The
+# 146-per-pair schema is shared with live trading, so they are neutralised in the
+# scaler (transform -> ~0) instead of being dropped from X. The scaler travels
+# with the checkpoint, so inference applies the identical transform.
+PRICE_LEVEL_FEATURES: frozenset[str] = frozenset(
+    {
+        "open", "high", "low", "close", "mid", "mid_close",
+        "bid_open", "bid_close", "ask_open", "ask_close",
+        "bb_upper", "bb_lower", "bb_mid", "vwap", "vwap_upper", "vwap_lower",
+    }
+)
+
+
+def neutralize_price_level_columns(scaler, feature_names: list[str] | None) -> list[str]:
+    """Make ``scaler`` map price-level columns to ~0. Returns the names neutralised."""
+    if scaler is None or not feature_names or getattr(scaler, "scale_", None) is None:
+        return []
+    scale = scaler.scale_
+    if len(feature_names) != len(scale):
+        return []
+    hit = []
+    for i, name in enumerate(feature_names):
+        if str(name).split("::")[-1] in PRICE_LEVEL_FEATURES:
+            scale[i] = 1e12
+            hit.append(str(name))
+    return hit
+
+
 def _merge_scalers(scaler_list: list) -> StandardScaler | RobustScaler:
     """Merge independently fitted scalers using the parallel merge formula.
 
@@ -2602,16 +2631,23 @@ def _merge_scalers(scaler_list: list) -> StandardScaler | RobustScaler:
 
     is_robust = any(isinstance(s, RobustScaler) for s in scaler_list)
 
+    def _n_seen(s) -> int:
+        # sklearn's RobustScaler has no n_samples_seen_; weight fitted ones equally.
+        n = getattr(s, "n_samples_seen_", None)
+        return int(np.atleast_1d(n)[0]) if n is not None else 1
+
+    # Previously required n_samples_seen_, which silently dropped every
+    # RobustScaler and returned the first worker's scaler unmerged.
     valid = [
         s for s in scaler_list
-        if hasattr(s, "n_samples_seen_") and s.n_samples_seen_ is not None
+        if getattr(s, "n_samples_seen_", None) is not None or getattr(s, "scale_", None) is not None
     ]
     if not valid:
         return scaler_list[0] if scaler_list else _make_scaler("standard")
     if len(valid) == 1:
         return valid[0]
 
-    total_n = sum(int(np.atleast_1d(s.n_samples_seen_)[0]) for s in valid)
+    total_n = sum(_n_seen(s) for s in valid)
     if total_n == 0:
         return valid[0]
 
@@ -2622,7 +2658,7 @@ def _merge_scalers(scaler_list: list) -> StandardScaler | RobustScaler:
         combined_scale = np.zeros(n_features, dtype=np.float64)
         for s in valid:
             center = s.center_ if hasattr(s, "center_") and s.center_ is not None else np.zeros(n_features)
-            n = int(np.atleast_1d(s.n_samples_seen_)[0])
+            n = _n_seen(s)
             combined_center += n * center
             combined_scale += n * s.scale_
         combined_center /= total_n
@@ -2901,7 +2937,7 @@ def _build_multipair_dataset(
             print(f"[CrossAsset] WARN: external load failed ({e}) -- falling back to synthetic")
             cross_asset = None
 
-    scalers = {p: StandardScaler() for p in pairs}
+    scalers = {p: _make_scaler() for p in pairs}  # honour data.scaler_type (was hard-coded Standard)
     n_features = 0
     total_samples = 0
     z_store = None  # zarr (primary)

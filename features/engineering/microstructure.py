@@ -218,17 +218,24 @@ def bollinger_bands(window: int = 20, n_std: float = 2.0) -> list[pl.Expr]:
 
 # === Momentum ========================================================================
 
+def _log_ret() -> pl.Expr:
+    # Per-bar log return. ``close_ffd`` is a fractionally differenced price *level*
+    # (~0.04 x price), not a return: summing it gave ret_w ~ w x price (|corr| > 0.995
+    # with open) and pinned RSI near 100. Log returns are also pip-size free (JPY-safe).
+    return pl.col("close").log().diff()
+
+
 def rsi(period: int = 14) -> pl.Expr:
-    d = pl.col("close_ffd")
+    d = _log_ret()
     g = d.clip(0, float("inf")).rolling_mean(period)
     l = (-d.clip(float("-inf"), 0)).rolling_mean(period) + 1e-9  # noqa: E741
     return (100 - 100 / (1 + g / l)).alias(f"rsi_{period}")
 
 
 def macd(fast: int = 12, slow: int = 26, signal: int = 9) -> list[pl.Expr]:
-    ef = pl.col("close_ffd").ewm_mean(span=fast, adjust=False)
-    es = pl.col("close_ffd").ewm_mean(span=slow, adjust=False)
-    line = ef - es
+    ef = pl.col("close").ewm_mean(span=fast, adjust=False)
+    es = pl.col("close").ewm_mean(span=slow, adjust=False)
+    line = (ef - es) / pl.col("close") * 1e4  # bps of price: comparable across pairs
     sig = line.ewm_mean(span=signal, adjust=False)
     return [line.alias("macd"), sig.alias("macd_sig"), (line - sig).alias("macd_hist")]
 
@@ -236,7 +243,7 @@ def macd(fast: int = 12, slow: int = 26, signal: int = 9) -> list[pl.Expr]:
 def lag_returns(windows: list[int] | None = None) -> list[pl.Expr]:
     if windows is None:
         windows = [5, 20, 60]
-    return [pl.col("close_ffd").rolling_sum(w).alias(f"ret_{w}") for w in windows]
+    return [(_log_ret().rolling_sum(w) * 1e4).alias(f"ret_{w}") for w in windows]  # bps
 
 
 # === Classical Indicators ============================================================
@@ -439,7 +446,7 @@ def vwap_bands(window: int = 60, n_std: float = 2.0) -> list[pl.Expr]:
 
 def volume_weighted_momentum(window: int = 20) -> pl.Expr:
     """Volume-weighted moving average of returns."""
-    ret = pl.col("close_ffd")
+    ret = _log_ret() * 1e4
     vwma = (ret * pl.col("volume")).rolling_sum(window) / pl.col("volume").rolling_sum(window)
     return vwma.alias("vwma_ret")
 
@@ -674,7 +681,10 @@ def add_market_regime_features(
     ret = pd.Series(np.log(close / close.shift(1)), index=close.index, dtype="float64")
     acorr = ret.rolling(vw, min_periods=min(10, vw)).corr(ret.shift(1)).clip(-1.0, 1.0)
     hurst = (0.5 + 0.25 * acorr).clip(0.0, 1.0)
-    noise_to_signal = ret.rolling(60, min_periods=10).std() / (ret.rolling(60, min_periods=10).mean().abs() + 1e-9)
+    # Bounded form of std/|mean|: the raw ratio exploded (~8k) when the mean return ~ 0.
+    _n2s_mean = ret.rolling(60, min_periods=10).mean().abs()
+    _n2s_std = ret.rolling(60, min_periods=10).std()
+    noise_to_signal = np.log1p(_n2s_std / (_n2s_mean + _n2s_std * 1e-3 + 1e-12))
     trailing_vol = ret.rolling(60, min_periods=10).std()
 
     return df.with_columns(

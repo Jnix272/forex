@@ -147,6 +147,20 @@ def _fetch_all_yields(
 # ── Synthetic fallback ────────────────────────────────────────────────────────
 
 
+def _fallback_yields(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.Series]:
+    """Stand-in when FRED is unavailable: missing values, not invented ones.
+
+    Seeded random-walk yields used to be substituted silently, so carry/spread
+    features trained on noise that looks like data. Missing yields become 0 in
+    ``build`` (constant columns the feature filter drops). Set
+    FOREX_ALLOW_SYNTHETIC_YIELDS=1 to restore the synthetic series (tests/demos).
+    """
+    if os.environ.get("FOREX_ALLOW_SYNTHETIC_YIELDS", "").strip() == "1":
+        return _synthetic_yields(start, end)
+    days = pd.date_range(start.date(), end.date(), freq="B", tz="UTC")
+    return {k: pd.Series(np.nan, index=days, dtype="float64") for k in _YIELD_NAMES}
+
+
 def _synthetic_yields(
     start: pd.Timestamp,
     end: pd.Timestamp,
@@ -232,7 +246,7 @@ class MacroYieldFeatureBuilder:
         if self._fred_key:
             try:
                 raw = _fetch_all_yields(start, end, self._fred_key)
-                synth = _synthetic_yields(start, end)
+                synth = _fallback_yields(start, end)
                 n_real = 0
                 n_synth = 0
                 for k in raw:
@@ -262,7 +276,7 @@ class MacroYieldFeatureBuilder:
                     note="batch failed",
                 )
 
-        synth = _synthetic_yields(start, end)
+        synth = _fallback_yields(start, end)
         log_data_load(
             "fred_yields",
             f"synthetic:{start}->{end}",

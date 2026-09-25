@@ -86,6 +86,20 @@ _SANITIZE_NO_CLIP = frozenset(
 )
 
 
+def _num(col: str) -> pl.Expr:
+    return pl.col(col).cast(pl.String).str.replace_all(r"[^\d\.\-]", "").cast(pl.Float64, strict=False)
+
+
+def _relative_surprise(ref: str) -> pl.Expr:
+    """(actual - ref) scaled to [-1, 1] by the size of the two values.
+
+    Raw differences mixed units across releases (NFP in thousands vs CPI in %),
+    hit the +/-1e6 sanitize clip, and sat as outliers in the cache.
+    """
+    a, r = _num("actual"), _num(ref)
+    return ((a - r) / (a.abs() + r.abs() + 1e-9)).fill_null(0.0).fill_nan(0.0)
+
+
 def sanitize_frame(df: pl.DataFrame, fill_value: float = 0.0, context: str = "frame") -> pl.DataFrame:
     cols = df.select(pl.col(pl.Float32, pl.Float64)).columns
     if not cols:
@@ -707,35 +721,13 @@ class FeatureEngineer:
             if "actual" in F.columns and "forecast" in F.columns:
                 F = F.with_columns(
                     [
-                        (
-                            pl.col("actual")
-                            .cast(pl.String)
-                            .str.replace_all(r"[^\d\.\-]", "")
-                            .cast(pl.Float64, strict=False)
-                            - pl.col("forecast")
-                            .cast(pl.String)
-                            .str.replace_all(r"[^\d\.\-]", "")
-                            .cast(pl.Float64, strict=False)
-                        )
-                        .fill_null(0.0)
-                        .alias("eco_surprise")
+                        _relative_surprise("forecast").alias("eco_surprise")
                     ]
                 )
                 if "prior" in F.columns:
                     F = F.with_columns(
                         [
-                            (
-                                pl.col("actual")
-                                .cast(pl.String)
-                                .str.replace_all(r"[^\d\.\-]", "")
-                                .cast(pl.Float64, strict=False)
-                                - pl.col("prior")
-                                .cast(pl.String)
-                                .str.replace_all(r"[^\d\.\-]", "")
-                                .cast(pl.Float64, strict=False)
-                            )
-                            .fill_null(0.0)
-                            .alias("eco_revision")
+                            _relative_surprise("prior").alias("eco_revision")
                         ]
                     )
                 else:

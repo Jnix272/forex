@@ -41,6 +41,21 @@ def _default_labeling() -> dict[str, Any]:
         return {}
 
 
+@njit(cache=True)
+def _cost_aware_label(cpar_l: float, cpar_s: float) -> float:
+    """BUY/SELL only when that side pays after costs, else HOLD.
+
+    Each side's CPAR already enters at the ask (long) / bid (short), so it is net
+    of spread. The old ``sign((cpar_l - cpar_s) / 2)`` cancelled the spread and
+    labelled the mid-price move, leaving HOLD almost empty (127 of 418k EURUSD).
+    """
+    if cpar_l > 0.0 and cpar_l >= cpar_s:
+        return 1.0
+    if cpar_s > 0.0 and cpar_s > cpar_l:
+        return -1.0
+    return 0.0
+
+
 @njit(cache=True, fastmath=True, parallel=True)
 def _scan_outcomes_cpar_numba(
     exit_long_path: np.ndarray,
@@ -99,7 +114,7 @@ def _scan_outcomes_cpar_numba(
         # Continuous scalar label for regression
         reward_val = (cpar_l - cpar_s) / 2.0
         reward_out[i] = reward_val
-        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
+        label_out[i] = _cost_aware_label(cpar_l, cpar_s)
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -159,7 +174,7 @@ def _scan_outcomes_cpar_sequential(
         cpar_short_out[i] = cpar_s
         reward_val = (cpar_l - cpar_s) / 2.0
         reward_out[i] = reward_val
-        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
+        label_out[i] = _cost_aware_label(cpar_l, cpar_s)
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -241,7 +256,7 @@ def _scan_outcomes_cpar_dynamic(
         reward_val = (cpar_l - cpar_s) / 2.0
         reward_out[i] = reward_val
         # The 'label' column must be discrete {-1, 0, 1} for row_quality checks
-        label_out[i] = np.sign(reward_val) if reward_val != 0 else 0.0
+        label_out[i] = _cost_aware_label(cpar_l, cpar_s)
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -276,8 +291,8 @@ def compute_triple_barrier_labels(
     if pair and pip_size == 0.0001 and "JPY" in str(pair).upper():
         pip_size = 0.01
 
-    # Penalty for CPAR (use stop_loss_atr as a base or hardcode)
-    penalty = 0.5 
+    # MAE penalty weight. Was hard-coded 0.5 regardless of config.
+    penalty = float(cfg.get("cpar_mae_penalty", 0.5))
 
     if len(bars) < vertical_bars + 2:
         warnings.warn(
