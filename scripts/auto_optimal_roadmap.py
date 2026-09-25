@@ -38,9 +38,16 @@ ENSEMBLE_DIR = ROOT / "checkpoints" / "ensemble"
 
 # Conservative deployment limits.  These are deliberately stricter than the
 # old positive-return/positive-Sharpe-only gate.
-MAX_EVAL_DRAWDOWN_PCT = 20.0
-MAX_CONFLICT_RATE = 0.50
-MIN_AGREEMENT_SCORE = 0.50
+from validation.gate_policy import (  # noqa: E402
+    CERTIFIED_STATUS,
+    MAX_CONFLICT_RATE,
+    MIN_AGREEMENT_SCORE,
+    MIN_SHARPE,
+    MIN_TRADES,
+    PROMOTION_GATE_VERSION,
+    agent_rejection_reasons,
+)
+from validation.gate_policy import MAX_DRAWDOWN_PCT as MAX_EVAL_DRAWDOWN_PCT  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -283,7 +290,8 @@ def run_stage_4_certification() -> dict:
                     import json as _j; _d=_j.load(open(fp))
                     v=float(_d.get("best_val_sharpe_proxy", _d.get("best_val_sharpe", 0)))
                     if abs(v)<100: fold_sharpes.append(v)
-                except: pass
+                except Exception as _fe:
+                    log(f"  [WARN] unreadable fold config {fp}: {_fe}")
         if len(fold_sharpes)>=7:
             avg_sh=float(sum(fold_sharpes)/len(fold_sharpes))
             var_sh=float(max(fold_sharpes)-min(fold_sharpes))
@@ -294,13 +302,14 @@ def run_stage_4_certification() -> dict:
             if any(v < -15 for v in fold_sharpes):
                 reasons.append(f"Fold crash < -15 Sharpe present {min(fold_sharpes):.1f}")
     except Exception as _e:
-        pass
+        reasons.append(f"Fold consistency check failed: {_e}")
+    reasons.extend(agent_rejection_reasons(rl_metrics.get("individual_agents")))
     # Hard Quality Gate evaluation
     if n_trades == 0:
         cert_status = "FAILED_ZERO_TRADES"
         reasons.append("Model/Ensemble took zero trades during evaluation (inaction collapse)")
     elif (
-        n_trades < 10
+        n_trades < MIN_TRADES
         or eval_return_pct <= 0.0
         or sharpe <= 0.0
         or max_drawdown_pct > MAX_EVAL_DRAWDOWN_PCT
@@ -308,8 +317,8 @@ def run_stage_4_certification() -> dict:
         or agreement_score < MIN_AGREEMENT_SCORE
     ):
         cert_status = "REJECTED_INACTION_COLLAPSE"
-        if n_trades < 10:
-            reasons.append(f"Insufficient trade count: {n_trades} < 10 required")
+        if n_trades < MIN_TRADES:
+            reasons.append(f"Insufficient trade count: {n_trades} < {MIN_TRADES} required")
         if eval_return_pct <= 0.0:
             reasons.append(f"Non-positive evaluation return: {eval_return_pct:+.2f}% <= 0.0%")
         if sharpe <= 0.0:
@@ -320,8 +329,12 @@ def run_stage_4_certification() -> dict:
             reasons.append(f"Policy conflict rate: {conflict_rate:.1%} > {MAX_CONFLICT_RATE:.1%}")
         if agreement_score < MIN_AGREEMENT_SCORE:
             reasons.append(f"Policy agreement: {agreement_score:.1%} < {MIN_AGREEMENT_SCORE:.1%}")
-    elif n_trades >= 10 and sharpe > 0.5 and eval_return_pct > 0.0:
-        cert_status = "CERTIFIED_READY_FOR_DEPLOYMENT"
+    elif reasons:
+        # Fold-consistency or per-agent failures block certification even when
+        # the consensus metrics look good (v1 certified despite these).
+        cert_status = "REJECTED_GATE_REASONS"
+    elif sharpe > MIN_SHARPE and eval_return_pct > 0.0:
+        cert_status = CERTIFIED_STATUS
     else:
         cert_status = "REJECTED_INACTION_COLLAPSE"
         reasons.append(f"Sub-par performance metrics: n_trades={n_trades}, sharpe={sharpe:.2f}, eval_return={eval_return_pct:+.2f}%")
@@ -333,15 +346,16 @@ def run_stage_4_certification() -> dict:
 
     certification = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "gate_version": PROMOTION_GATE_VERSION,
         "status": cert_status,
-        "quality_gate_passed": bool(cert_status == "CERTIFIED_READY_FOR_DEPLOYMENT"),
+        "quality_gate_passed": bool(cert_status == CERTIFIED_STATUS),
         "rejection_reasons": reasons,
         "performance_gate": {
             "n_trades": n_trades,
             "sharpe": sharpe,
             "eval_return_pct": eval_return_pct,
-            "min_trades_required": 10,
-            "min_sharpe_required": 0.5,
+            "min_trades_required": MIN_TRADES,
+            "min_sharpe_required": MIN_SHARPE,
             "min_return_required": 0.0,
             "max_drawdown_pct": MAX_EVAL_DRAWDOWN_PCT,
             "max_conflict_rate": MAX_CONFLICT_RATE,

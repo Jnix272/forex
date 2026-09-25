@@ -365,15 +365,46 @@ def test_stage_4_certification_quality_gate(monkeypatch):
         assert cert3["status"] == "REJECTED_INACTION_COLLAPSE"
         assert cert3["quality_gate_passed"] is False
 
-        # Case 4: Valid metrics (>= 10 trades, Sharpe > 0.5, return > 0) -> CERTIFIED_READY_FOR_DEPLOYMENT
+        # Isolate from real checkpoints/: the fold-consistency check globs them.
+        import glob as _glob
+
+        monkeypatch.setattr(_glob, "glob", lambda *a, **k: [])
+
+        # Case 4: Valid metrics under gate v2 (>= MIN_TRADES, low DD, agents agree,
+        # every agent profitable) -> CERTIFIED_READY_FOR_DEPLOYMENT
+        good_agents = [
+            {"agent_id": i, "eval_return_pct": 3.0, "max_drawdown_pct": 5.0} for i in range(3)
+        ]
         rl_valid = {
+            "individual_agents": good_agents,
             "ensemble_consensus": {
-                "n_trades": 35,
+                "n_trades": 1500,
                 "sharpe": 1.85,
                 "eval_return_pct": 4.2,
-            }
+                "max_drawdown_pct": 6.0,
+                "conflict_rate": 0.2,
+                "mean_agreement_score": 0.8,
+            },
         }
         (tmp_path / "rl_report.json").write_text(json.dumps(rl_valid), encoding="utf-8")
         cert4 = run_stage_4_certification()
         assert cert4["status"] == "CERTIFIED_READY_FOR_DEPLOYMENT"
         assert cert4["quality_gate_passed"] is True
+        assert cert4["gate_version"] >= 2
+
+        # Case 5: consensus looks good but one agent lost money (2026-09-21 shape) -> rejected
+        rl_bad_agent = dict(rl_valid)
+        rl_bad_agent["individual_agents"] = [
+            *good_agents[:2],
+            {"agent_id": 2, "eval_return_pct": -122.5, "max_drawdown_pct": 262.0},
+        ]
+        (tmp_path / "rl_report.json").write_text(json.dumps(rl_bad_agent), encoding="utf-8")
+        cert5 = run_stage_4_certification()
+        assert cert5["quality_gate_passed"] is False
+        assert any("Agent 2" in r for r in cert5["rejection_reasons"])
+
+        # Case 6: 364 trades (the old certified run) is below MIN_TRADES -> rejected
+        rl_few_v2 = dict(rl_valid)
+        rl_few_v2["ensemble_consensus"] = {**rl_valid["ensemble_consensus"], "n_trades": 364}
+        (tmp_path / "rl_report.json").write_text(json.dumps(rl_few_v2), encoding="utf-8")
+        assert run_stage_4_certification()["quality_gate_passed"] is False

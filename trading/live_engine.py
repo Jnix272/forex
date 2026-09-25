@@ -3639,15 +3639,14 @@ if __name__ == "__main__":
                     if _stale:
                         _prom_reasons.append(f"{_cand.name}: stale relative to current ensemble checkpoint")
                         continue
-                if (
-                    bool(_pg.get("promoted"))
-                    or bool(_pg.get("quality_gate_passed"))
-                    or _pg.get("status") == "CERTIFIED_READY_FOR_DEPLOYMENT"
-                ):
+                from validation.gate_policy import check_gate_artifact
+
+                _ok, _why = check_gate_artifact(_pg)
+                if _ok:
                     _promoted = True
                     print(f"[Live] Promotion gate OK: {_cand}")
                     break
-                _prom_reasons.append(f"{_cand.name}: promoted={_pg.get('promoted')}")
+                _prom_reasons.append(f"{_cand.name}: {_why}")
             except Exception as _pe:
                 _prom_reasons.append(f"{_cand}: {_pe}")
         if not _promoted:
