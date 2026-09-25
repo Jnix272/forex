@@ -500,10 +500,12 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
         return False
     encoder = model.backbone if hasattr(model, "backbone") else model
     target = _core_model(encoder)
+    # Load on CPU: load_state_dict copies onto the model's device anyway, and a
+    # CUDA-saved encoder must still load when the run has no visible GPU.
     try:
-        state = torch.load(ckpt_path, map_location=device, weights_only=True)
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     except Exception:
-        state = torch.load(ckpt_path, map_location=device)
+        state = torch.load(ckpt_path, map_location="cpu")
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
     # The head is expected to be missing ΓåÆ allow up to ~40% missing for wide heads.
