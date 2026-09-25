@@ -7,6 +7,7 @@ DirectMLInferenceEngine and training checkpoints (production_best.pt / *_best.pt
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections import deque
