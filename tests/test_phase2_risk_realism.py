@@ -26,11 +26,16 @@ def test_margin_80pct_blocks_oversized():
 def test_friday_square_off_and_rollover():
     # P1.2: Fri 20:30 UTC square-off, Sun 21-22 halt
     rr=RegimeRouter(rollover_start_utc=21, rollover_end_utc=22)
-    fri = pd.Timestamp("2026-09-26 20:30:00", tz="UTC")  # Friday
-    assert rr.route(pd.DataFrame({"regime_break_prob":[0.1]}), now=fri).blocked  # rollover 21-22
-    # Simulate live_engine Friday 20:30 close_all path would be triggered by calendar/rollover check
-    sat = pd.Timestamp("2026-09-27 10:00:00", tz="UTC")
-    assert not rr.route(pd.DataFrame({"regime_break_prob":[0.1]}), now=sat).blocked
+    f = pd.DataFrame({"regime_break_prob":[0.1]})
+    fri = pd.Timestamp("2026-09-25 20:30:00", tz="UTC")  # Friday cutoff
+    assert rr.route(f, now=fri).reason == "weekend_close"
+    assert not rr.route(f, now=pd.Timestamp("2026-09-25 20:29:00", tz="UTC")).blocked
+    assert rr.route(f, now=pd.Timestamp("2026-09-26 10:00:00", tz="UTC")).blocked  # Saturday
+    assert rr.route(f, now=pd.Timestamp("2026-09-27 21:30:00", tz="UTC")).blocked  # Sunday pre-open
+    assert not rr.route(f, now=pd.Timestamp("2026-09-27 22:00:00", tz="UTC")).blocked  # Sunday reopen
+    # Weekday rollover 21-22
+    assert rr.route(f, now=pd.Timestamp("2026-09-23 21:30:00", tz="UTC")).reason == "rollover"
+    assert not rr.route(f, now=pd.Timestamp("2026-09-28 10:00:00", tz="UTC")).blocked  # Monday
 
 
 def test_one_tick_candle_filtered():

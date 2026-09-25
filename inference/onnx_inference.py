@@ -1117,7 +1117,12 @@ class DirectMLInferenceEngine(BaseInferenceEngine):
         """
         x = window[np.newaxis].astype(np.float32)  # (1, seq_len, n_feat)
         logits = np.asarray(self.session.run([self.output_name], {self.input_name: x})[0])
-        logits = logits[0]  # (3,) or (1,)
+        logits = logits[0]  # (3,) or (1,), or (P,) for per-pair heads
+        if logits.ndim == 1 and logits.size > 1 and logits.size != 3:
+            # Per-pair heads: one direction logit per pair; trade the primary pair.
+            from models.ensemble import PRIMARY_PAIR_INDEX
+
+            logits = logits[PRIMARY_PAIR_INDEX : PRIMARY_PAIR_INDEX + 1]
 
         # Regression head: single value -> convert to buy/hold/sell proba
         if logits.shape[-1] == 1 or logits.ndim == 0:

@@ -128,7 +128,9 @@ def compute_asia_london_gap(
     daily_gaps = london_open_times.merge(asia_close_vals, on="date", how="inner")
 
     data = data.merge(daily_gaps, on="date", how="left")
-    data["gap"] = data["close"] - data["asia_close"]
+    # Only London rows may see the day's final Asia close; Asia rows would be
+    # reading a close that hasn't happened yet. They carry the prior day's gap.
+    data["gap"] = (data["close"] - data["asia_close"]).where(data["is_london"])
     gap_series = data["gap"].ffill().fillna(0.0).replace([np.inf, -np.inf], 0.0)
 
     if atr is not None:
@@ -247,7 +249,7 @@ def compute_multipair_features(
 
     F["no_trade_score"] = ((low_vol + neutral_ofi + trend_unstable) / 3.0).clip(0.0, 1.0)
 
-    F = F.ffill().bfill().fillna(0.0)
+    F = F.ffill().fillna(0.0)  # no bfill: it copies future values into the warm-up rows
     return pl.from_pandas(F.reset_index(drop=True))
 
 

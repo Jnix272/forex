@@ -598,9 +598,16 @@ def validate_epoch(
                     yb_for_returns = yb_for_returns.abs() * side
                 r = (d * yb_for_returns).flatten()
                 if honest_ctx is not None:
-                    # One position per row: average multi-pair/multi-output signs, re-sign.
-                    _d_row = torch.sign(d.detach().float().reshape(d.shape[0], -1).mean(dim=1)).cpu()
-                    _full = torch.zeros(_b_rows)
+                    _d2 = d.detach().float().reshape(d.shape[0], -1).cpu()
+                    _np_h = int(honest_ctx.get("n_pairs") or 0)
+                    if _np_h > 1 and _d2.shape[1] == _np_h:
+                        # Per-pair heads: keep one position per pair (scored on its own prices).
+                        _d_row = torch.sign(_d2)
+                        _full = torch.zeros(_b_rows, _np_h)
+                    else:
+                        # One position per row: average multi-output signs, re-sign.
+                        _d_row = torch.sign(_d2.mean(dim=1))
+                        _full = torch.zeros(_b_rows)
                     if _b_keep is not None and not bool(_b_keep.all()):
                         _full[_b_keep.detach().cpu().bool()] = _d_row
                     else:
@@ -779,22 +786,37 @@ def validate_epoch(
         try:
             import numpy as np
 
-            from training.honest_eval import net_pnl_metrics
+            from training.honest_eval import net_pnl_metrics, pooled_pair_metrics
 
             _dirs = torch.cat(_dir_parts).numpy()
             _sidx = np.asarray(honest_ctx["sample_idx"])
             if len(_dirs) == len(_sidx):
-                _hm = net_pnl_metrics(
-                    _dirs, _sidx, honest_ctx["close"], honest_ctx.get("spread"),
-                    int(honest_ctx.get("horizon", lookahead_bars)),
-                    bars_per_year=int(honest_ctx.get("bars_per_year", 288 * 260)),
-                )
+                if _dirs.ndim == 2 and honest_ctx.get("close_pairs") is not None:
+                    _hm = pooled_pair_metrics(
+                        _dirs, _sidx, honest_ctx["close_pairs"], honest_ctx.get("spread_pairs"),
+                        int(honest_ctx.get("horizon", lookahead_bars)),
+                        pair_names=honest_ctx.get("pair_names"),
+                        bars_per_year=int(honest_ctx.get("bars_per_year", 288 * 260)),
+                    )
+                    _pp = " ".join(
+                        f"{k}={v['sharpe_net']:.2f}({v['n_trades']})" for k, v in _hm["per_pair"].items()
+                    )
+                    print(f"[Val][honest] per-pair net_sharpe(trades): {_pp}")
+                else:
+                    _hm = net_pnl_metrics(
+                        _dirs, _sidx, honest_ctx["close"], honest_ctx.get("spread"),
+                        int(honest_ctx.get("horizon", lookahead_bars)),
+                        bars_per_year=int(honest_ctx.get("bars_per_year", 288 * 260)),
+                    )
+                    _hm.pop("_net_returns", None)
                 validate_epoch.last_honest = _hm
                 cost_sharpe = _hm["sharpe_net"]
                 print(
                     f"[Val][honest] net_sharpe={_hm['sharpe_net']:.3f} gross={_hm['sharpe_gross']:.3f} "
                     f"trades={_hm['n_trades']} win={_hm['win_rate']:.1%} "
-                    f"net={_hm['mean_ret_bps']:.2f}bps cost={_hm['cost_bps']:.2f}bps"
+                    f"net={_hm['mean_ret_bps']:.2f}bps cost={_hm['cost_bps']:.2f}bps "
+                    f"95%CI=[{_hm.get('sharpe_net_ci_low', 0.0):.2f}, {_hm.get('sharpe_net_ci_high', 0.0):.2f}] "
+                    f"P(sharpe<=0)={_hm.get('sharpe_net_p_le_0', 1.0):.2f}"
                 )
             else:
                 print(f"[Val][honest] skipped: {len(_dirs)} predictions vs {len(_sidx)} val indices")

@@ -121,6 +121,12 @@ def scaler_feature_count(scaler: Any) -> int | None:
     return int(n)
 
 
+# Scaled features are clipped to +/- this many robust units, in training
+# (training.gpu_datasets) and here. RobustScaler does not bound outliers, and raw
+# COT/volume/placeholder values left scaled inputs in the thousands.
+SCALED_FEATURE_CLIP = 10.0
+
+
 def apply_inference_scaler(scaler: Any, x: np.ndarray) -> np.ndarray:
     """Apply the scaler to ``x`` (returns ``np.float32``), sanitising non-finite values.
 
@@ -143,4 +149,5 @@ def apply_inference_scaler(scaler: Any, x: np.ndarray) -> np.ndarray:
         warnings.filterwarnings("ignore", message="X does not have valid feature names")
         out = scaler.transform(arr.reshape(-1, arr.shape[-1]))
     out = out.reshape(arr.shape).astype(np.float32, copy=False)
+    np.clip(out, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=out)
     return out

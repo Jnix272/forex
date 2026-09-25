@@ -483,8 +483,8 @@ def parse_args():
         "--sacs-enabled",
         dest="sacs_enabled",
         action=argparse.BooleanOptionalAction,
-        default=bool(TRAINING.get("sacs_enabled", True)),
-        help="Enable Sharpness-Aware Checkpoint Selection (SACS).",
+        default=bool(TRAINING.get("sacs_enabled", False)),
+        help="Enable Sharpness-Aware Checkpoint Selection (SACS). Off by default: 5 extra full validation passes per epoch.",
     )
     p.add_argument(
         "--sacs-eps",
@@ -863,6 +863,21 @@ def parse_args():
         "--force-pretrain",
         action="store_true",
         help="Delete existing contrastive encoder checkpoint and pretrain from scratch",
+    )
+    p.add_argument(
+        "--period-balance",
+        dest="period_balance",
+        action=argparse.BooleanOptionalAction,
+        default=bool(TRAINING.get("period_balance", False)),
+        help="Weight training rows so each calendar year contributes equally (needs t_ns in the cache).",
+    )
+    p.add_argument(
+        "--per-pair-heads",
+        dest="per_pair_heads",
+        action=argparse.BooleanOptionalAction,
+        default=bool(TRAINING.get("per_pair_heads", False)),
+        help="One multitask head per pair, trained on that pair's own label (y_pairs). "
+        "Needs a cache built with per-pair arrays.",
     )
     p.add_argument(
         "--multitask",

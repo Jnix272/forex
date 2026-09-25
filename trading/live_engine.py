@@ -484,6 +484,12 @@ class LiveTickBuffer:
                         self._combined_cache = self._combined_cache.set_index("timestamp").sort_index()
                 else:
                     self._combined_cache = seeded.copy() if hasattr(seeded, "copy") else seeded
+                try:
+                    idx = pd.DatetimeIndex(self._combined_cache.index)
+                    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+                    self._combined_cache.index = idx.as_unit("ns")
+                except Exception:
+                    pass
                 self._combined_cache_seeded = True
         live_bars = None
         if len(ticks) >= 2:
@@ -495,15 +501,35 @@ class LiveTickBuffer:
                     lb_pd = lb_pd.set_index("timestamp").sort_index()
             else:
                 lb_pd = live_bars
+            # polars yields datetime64[us, UTC]; seeded candles are [ns, UTC]. Mixed units
+            # make index intersection/difference miss equal timestamps -> duplicate bars.
+            lb_pd.index = pd.DatetimeIndex(lb_pd.index).tz_convert("UTC").as_unit("ns")
+            # Drop the bar still forming: at a boundary it holds a single tick
+            # (O=H=L=C), and once cached it would never be revisited.
+            lb_pd =lb_pd[lb_pd.index + self.freq <= pd.Timestamp.now(tz="UTC")]
             with self._lock:
                 if self._combined_cache is None:
                     self._combined_cache = lb_pd.tail(self.max_bars)
                 else:
-                    # Only append new indices
                     try:
-                        new_idx = lb_pd.index.difference(self._combined_cache.index)
+                        cache = self._combined_cache
+                        # Bars seen by both (e.g. the seed's incomplete last candle):
+                        # merge so the ticks after the seed snapshot are not lost.
+                        common = lb_pd.index.intersection(cache.index)
+                        if len(common) > 0:
+                            cache = cache.copy()
+                            for c in ("high", "low", "close", "bid_close", "ask_close"):
+                                if c in cache.columns:
+                                    cache[c] = cache[c].astype(float)
+                            cache.loc[common, "high"] = np.maximum(cache.loc[common, "high"], lb_pd.loc[common, "high"])
+                            cache.loc[common, "low"] = np.minimum(cache.loc[common, "low"], lb_pd.loc[common, "low"])
+                            for c in ("close", "bid_close", "ask_close"):
+                                if c in cache.columns and c in lb_pd.columns:
+                                    cache.loc[common, c] = lb_pd.loc[common, c]
+                        new_idx = lb_pd.index.difference(cache.index)
                         if len(new_idx) > 0:
-                            self._combined_cache = pd.concat([self._combined_cache, lb_pd.loc[new_idx]]).sort_index().tail(self.max_bars)
+                            cache = pd.concat([cache, lb_pd.loc[new_idx]]).sort_index()
+                        self._combined_cache = cache.tail(self.max_bars)
                     except Exception:
                         # Fallback to full concat on error
                         try:
@@ -2131,7 +2157,12 @@ class LiveTradingEngine:
 
     def _journal_record(self, rec: dict) -> None:
         if isinstance(rec, dict) and rec.get("event") in ("blocked", "order_rejected"):
-            self._decision_log(str(rec.get("event")).upper(), reason=rec.get("reason"))
+            detail = {
+                k: (f"{v:.6g}" if isinstance(v, float) else v)
+                for k, v in rec.items()
+                if k not in ("event", "reason") and isinstance(v, (int, float, str))
+            }
+            self._decision_log(str(rec.get("event")).upper(), reason=rec.get("reason"), **detail)
         self.trade_journal.record(rec)
 
     def _risk_trade_closed(self, mid: float, reason: str) -> None:
@@ -2581,15 +2612,18 @@ class LiveTradingEngine:
                 except ValueError:
                     _sa_name = str(_sa)
                 self._decision_log("SHADOW_RL", action=_sa_name,
-                                   raw=f"{float(self._agent_wrap_shadow.last_raw):+.0f}")
+                                   raw=f"{float(self._agent_wrap_shadow.last_raw):+.4f}")
             except Exception as _se:
                 self._decision_log("SHADOW_RL", error=str(_se)[:80])
+        # In RL shadow mode fast == slow, so log the shadow agent's score as fast_raw
+        # (the same source the hedge uses below) instead of repeating slow_raw.
+        _fast_log_src = self._agent_wrap_shadow if self._agent_wrap_shadow is not None else self.fast
         self._decision_log(
             "SIGNAL",
             action=_act_name,
             model=model_used,
             slow_raw=f"{float(getattr(self.slow, 'last_raw', 0.0)):+.4f}",
-            fast_raw=f"{float(getattr(self.fast, 'last_raw', 0.0)):+.4f}",
+            fast_raw=f"{float(getattr(_fast_log_src, 'last_raw', 0.0)):+.4f}",
         )
 
         # Hedge inputs: each model's score for THIS bar (both ran above). In RL shadow
@@ -2648,11 +2682,21 @@ class LiveTradingEngine:
                     normalized_action=action,
                 )
 
+        # Routed before the spread guard so a wide spread can't skip the Friday flatten.
+        regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
+        if regime_result.blocked:
+            if regime_result.reason == "weekend_close" and abs(self._position) > 0:
+                self._risk_trade_closed(mid, "weekend_square_off")
+                self.broker.close_position(self.pair)
+                self._position = 0.0
+                self._entry_price = 0.0
+                self._holding_bars = 0
+            self._journal_record({"event": "blocked", "reason": regime_result.reason, **(regime_result.details or {})})
+            return
         spread_result = self.spread_vol_guard.check(features, bid=bid, ask=ask)
         if spread_result.blocked:
-            self._journal_record({"event": "blocked", "reason": spread_result.reason})
+            self._journal_record({"event": "blocked", "reason": spread_result.reason, **(spread_result.details or {})})
             return
-        regime_result = self.regime_router.route(features, calendar_blocked=calendar_result.blocked)
         is_tip = hasattr(self, "tip") and hasattr(self.tip, "select_action")
         disagreement_result = self.disagreement_gate.check(
             orig_action if is_inverted else action,

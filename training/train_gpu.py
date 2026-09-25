@@ -1161,21 +1161,41 @@ def main():
         }
         # Per-fold best metrics + robust aggregate for HPO / gates: the median of
         # fold bests, not the last fold's max-over-epochs.
+        _warm = max(0, int(getattr(model_args, "direction_warmup_epochs", 2) or 0))
+
+        def _robust_cost_sharpe(hist: dict) -> float | None:
+            # Post-warmup epochs only (warmup scores a different objective); mean of
+            # best and final epoch discounts one-epoch spikes chosen by max().
+            cs = [float(v) for v in (hist.get("cost_aware_sharpe") or []) if v is not None]
+            cs = cs[_warm:] or cs
+            cs = [v for v in cs if np.isfinite(v)]
+            return (max(cs) + cs[-1]) / 2.0 if cs else None
+
         try:
             if model_args.walk_forward_cv and "cv_hist" in locals() and cv_hist:
+                # Always record the cost Sharpe, whatever early_stop_metric is: HPO
+                # scores on it, and it used to be -inf unless early stopping used it.
+                _fcs = [_robust_cost_sharpe(e.get("history") or {}) for e in cv_hist]
+                _fcs = [v for v in _fcs if v is not None]
+                if _fcs:
+                    _ts_summary["fold_cost_sharpes"] = [round(v, 6) for v in _fcs]
+                    _ts_summary["best_cost_sharpe"] = round(float(np.median(_fcs)), 6)
+                # Lower 95% bootstrap bound of the honest net Sharpe at each fold's
+                # last epoch: a fold only counts as evidence when this is > 0.
+                _fci = [float(((e.get("history") or {}).get("honest_sharpe_ci_low") or [0.0])[-1]) for e in cv_hist]
+                _ts_summary["fold_honest_ci_low"] = [round(v, 4) for v in _fci]
+                _ts_summary["folds_ci_low_positive"] = int(sum(v > 0 for v in _fci))
                 _fb = [float(e["best_metric"]) for e in cv_hist
                        if e.get("best_metric") is not None and np.isfinite(float(e["best_metric"]))]
                 if _fb:
                     _ts_summary["fold_best_metrics"] = [round(v, 6) for v in _fb]
                     _ts_summary["fold_best_median"] = round(float(np.median(_fb)), 6)
                     _ts_summary["fold_positive_frac"] = round(float(np.mean([v > 0 for v in _fb])), 4)
-                    if getattr(model_args, "early_stop_metric", "") == "cost_sharpe":
-                        _ts_summary["best_cost_sharpe"] = _ts_summary["fold_best_median"]
+                    _ts_summary["fold_best_metric_name"] = getattr(model_args, "early_stop_metric", "val_loss")
             else:
-                _cs = [float(v) for v in (_ts_hist.get("cost_aware_sharpe") or []) if v is not None]
-                if _cs:
-                    # Average best and final epoch: discounts one-epoch spikes chosen by max().
-                    _ts_summary["best_cost_sharpe"] = round((max(_cs) + _cs[-1]) / 2.0, 6)
+                _v = _robust_cost_sharpe(_ts_hist or {})
+                if _v is not None:
+                    _ts_summary["best_cost_sharpe"] = round(float(_v), 6)
         except Exception as _fbe:
             print(f"[TrainSummary] fold aggregate skipped: {_fbe}")
         try:

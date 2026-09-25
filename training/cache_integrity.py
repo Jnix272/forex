@@ -168,13 +168,21 @@ def _get_cache_path(args) -> Path:
         f"{strategy}_{bar_freq}_{pair_tag}_{args.n_ticks}_{args.data_source}_{args.seq_len}_"
         f"{args.label_method}_{target_col}_lh{lookahead}_tp{tp_atr:g}_sl{sl_atr:g}_"
         f"exec{exec_delay}_lexit-{exit_mode}_wu{warmup_days}_fm{mask_digest}_"
-        f"lr{lr_digest}_{news_tag}_{ca_tag}"
+        f"lr{lr_digest}_{news_tag}_{ca_tag}_b{DATASET_BUILD_VERSION}"
     )
     if getattr(args, "data_start", None) and getattr(args, "data_end", None):
         tag += f"_{args.data_start}_{args.data_end}"
     use_zarr_cache = bool(ZARR)
     ext = ".zarr" if use_zarr_cache else ""
     return Path(args.data_cache) / f"dataset_{tag}{ext}"
+
+
+# Bump when feature or label *code* changes, which no config digest can see.
+# a0925: log-return features, cost-aware CPAR labels, per-pair spread, no
+# multipair lookahead, unit-free eco surprise, no synthetic yields.
+# a0925b: per-pair y/close/spread arrays + row timestamps; scalar label is the
+# market pair's own (was the 4-pair average); news sentiment in calendar mode.
+DATASET_BUILD_VERSION = "a0925b"
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")
@@ -236,6 +244,7 @@ def _market_bar_arrays_from_feats(
     x_index,
     fe: FeatureEngineer,
     seq_len: int,
+    pair: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Bar-level close/ATR/spread aligned with feature rows (before sequence filter)."""
     close_col = "mid_close" if "mid_close" in feats.columns else "close"
@@ -250,7 +259,14 @@ def _market_bar_arrays_from_feats(
         )
     if atr_col is None:
         raise ValueError("[Data] RL market cache requires an ATR column (e.g. atr_6)")
-    pip = float(LABELING.get("pip_size", 0.0001))
+    # spread_pips was built with the pair's own pip size, so convert back with it.
+    # The global 0.0001 made USDJPY spreads (and RL costs) ~100x too small.
+    if pair:
+        from config.settings import get_pip_size
+
+        pip = float(get_pip_size(pair))
+    else:
+        pip = float(LABELING.get("pip_size", 0.0001))
     close_bars = feats[close_col].reindex(x_index).astype(np.float64).values
     atr_bars = feats[atr_col].reindex(x_index).astype(np.float64).values
     if "spread_pips" in feats.columns:

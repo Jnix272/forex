@@ -218,17 +218,24 @@ def bollinger_bands(window: int = 20, n_std: float = 2.0) -> list[pl.Expr]:
 
 # === Momentum ========================================================================
 
+def _log_ret() -> pl.Expr:
+    # Per-bar log return. ``close_ffd`` is a fractionally differenced price *level*
+    # (~0.04 x price), not a return: summing it gave ret_w ~ w x price (|corr| > 0.995
+    # with open) and pinned RSI near 100. Log returns are also pip-size free (JPY-safe).
+    return pl.col("close").log().diff()
+
+
 def rsi(period: int = 14) -> pl.Expr:
-    d = pl.col("close_ffd")
+    d = _log_ret()
     g = d.clip(0, float("inf")).rolling_mean(period)
     l = (-d.clip(float("-inf"), 0)).rolling_mean(period) + 1e-9  # noqa: E741
     return (100 - 100 / (1 + g / l)).alias(f"rsi_{period}")
 
 
 def macd(fast: int = 12, slow: int = 26, signal: int = 9) -> list[pl.Expr]:
-    ef = pl.col("close_ffd").ewm_mean(span=fast, adjust=False)
-    es = pl.col("close_ffd").ewm_mean(span=slow, adjust=False)
-    line = ef - es
+    ef = pl.col("close").ewm_mean(span=fast, adjust=False)
+    es = pl.col("close").ewm_mean(span=slow, adjust=False)
+    line = (ef - es) / pl.col("close") * 1e4  # bps of price: comparable across pairs
     sig = line.ewm_mean(span=signal, adjust=False)
     return [line.alias("macd"), sig.alias("macd_sig"), (line - sig).alias("macd_hist")]
 
@@ -236,7 +243,7 @@ def macd(fast: int = 12, slow: int = 26, signal: int = 9) -> list[pl.Expr]:
 def lag_returns(windows: list[int] | None = None) -> list[pl.Expr]:
     if windows is None:
         windows = [5, 20, 60]
-    return [pl.col("close_ffd").rolling_sum(w).alias(f"ret_{w}") for w in windows]
+    return [(_log_ret().rolling_sum(w) * 1e4).alias(f"ret_{w}") for w in windows]  # bps
 
 
 # === Classical Indicators ============================================================
@@ -439,7 +446,7 @@ def vwap_bands(window: int = 60, n_std: float = 2.0) -> list[pl.Expr]:
 
 def volume_weighted_momentum(window: int = 20) -> pl.Expr:
     """Volume-weighted moving average of returns."""
-    ret = pl.col("close_ffd")
+    ret = _log_ret() * 1e4
     vwma = (ret * pl.col("volume")).rolling_sum(window) / pl.col("volume").rolling_sum(window)
     return vwma.alias("vwma_ret")
 
@@ -485,13 +492,27 @@ def add_volume_profile_features(df: pl.DataFrame, window: int = 240, n_bins: int
 
 # === Intraday Volatility Clock ========================================================
 
-def add_volatility_clock_features(df: pl.DataFrame, day_period: int = 1440, k_days: int = 7) -> pl.DataFrame:
-    """Intraday 'volatility clock' features."""
+def add_volatility_clock_features(df: pl.DataFrame, day_period: int | None = None, k_days: int = 7) -> pl.DataFrame:
+    """Intraday 'volatility clock' features.
+
+    ``day_period`` is bars per day. It used to default to 1440 (1-minute bars):
+    on 5-minute bars the 7-day lookback needed 10,080 bars, longer than any build
+    window, so pace/hot were always null -> constant 0. Now inferred from the
+    median bar spacing when not given.
+    """
+    if day_period is None:
+        day_period = 1440
+        if "timestamp_utc" in df.columns and df.height > 2:
+            _dt = df["timestamp_utc"].diff().drop_nulls()
+            if len(_dt):
+                _med_s = _dt.dt.total_seconds().median()
+                if _med_s and _med_s > 0:
+                    day_period = max(1, int(round(86400 / float(_med_s))))
     ret = (pl.col("close") / pl.col("close").shift(1)).log().abs()
     mins_day = pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp_utc").dt.minute().cast(
         pl.Int32
     )
-    pos = mins_day / float(day_period)
+    pos = mins_day / 1440.0  # fraction of the day, independent of bar size
 
     refs = [ret.shift(day_period * k) for k in range(1, k_days + 1)]
     ref_mean = pl.sum_horizontal(refs) / k_days
@@ -674,7 +695,10 @@ def add_market_regime_features(
     ret = pd.Series(np.log(close / close.shift(1)), index=close.index, dtype="float64")
     acorr = ret.rolling(vw, min_periods=min(10, vw)).corr(ret.shift(1)).clip(-1.0, 1.0)
     hurst = (0.5 + 0.25 * acorr).clip(0.0, 1.0)
-    noise_to_signal = ret.rolling(60, min_periods=10).std() / (ret.rolling(60, min_periods=10).mean().abs() + 1e-9)
+    # Bounded form of std/|mean|: the raw ratio exploded (~8k) when the mean return ~ 0.
+    _n2s_mean = ret.rolling(60, min_periods=10).mean().abs()
+    _n2s_std = ret.rolling(60, min_periods=10).std()
+    noise_to_signal = np.log1p(_n2s_std / (_n2s_mean + _n2s_std * 1e-3 + 1e-12))
     trailing_vol = ret.rolling(60, min_periods=10).std()
 
     return df.with_columns(
@@ -783,11 +807,18 @@ def missingness_flags(df: pl.DataFrame, cols: list, decay: float = 0.9) -> pl.Da
             df = df.with_columns([pl.lit(1.0).alias(f"{c}_missing"), pl.lit(1.0).alias(f"{c}_staleness")])
             continue
 
-        is_null = df[c].is_null()
+        # Upstream joins fill gaps with 0.0, so "missing" is null *or* exactly 0
+        # (only null made it constant). Staleness = 1 - decay**(bars since the value
+        # last changed): 0 right after a fresh release/headline, -> 1 as it ages.
+        # (The old ``is_null.cum_min()`` was 0 after the first value, forever.)
+        v = pl.col(c)
+        changed = (v != v.shift(1)).fill_null(True)
+        grp = changed.cast(pl.Int64).cum_sum()
+        age = pl.int_range(pl.len()).over(grp)
         df = df.with_columns(
             [
-                is_null.cast(pl.Float64).alias(f"{c}_missing"),
-                is_null.cum_min().cast(pl.Float64).alias(f"{c}_staleness"),
+                (v.is_null() | (v == 0.0)).cast(pl.Float64).alias(f"{c}_missing"),
+                (1.0 - pl.lit(float(decay)).pow(age.cast(pl.Float64))).alias(f"{c}_staleness"),
             ]
         )
     return df

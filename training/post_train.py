@@ -21,7 +21,7 @@ from torch.amp import autocast
 from torch.utils.data import DataLoader
 
 from models.architectures import MODEL_REGISTRY
-from models.ensemble import EnsembleMetaLearner, _base_pred_to_batch_vector, train_meta_learner
+from models.ensemble import EnsembleMetaLearner, _base_pred_to_batch_vector, load_base_scaler, train_meta_learner
 from training.cache_integrity import _get_pairs, _on_disk_sequence_count, _promotion_holdout_n
 from training.core import _TRAIN_LOGGER, _log_info
 from training.cv_splits import _embargo_bars
@@ -151,7 +151,13 @@ def run_ensemble_meta(
         hidden=64,
         base_names=loaded_names,
         base_seq_lens=loaded_seq_lens,
-    ).to(device)
+    )
+    _base_scalers = [load_base_scaler(c) for c in loaded_ckpts]
+    if all(sc is not None for sc in _base_scalers):
+        meta.attach_base_scalers(_base_scalers)  # bases see their training transform
+    else:
+        print("  [EnsembleMeta] WARN: some bases lack *_scaler.npz; they will see raw features")
+    meta = meta.to(device)
 
     # Random 10% of the *trainable* prefix only - never the promotion holdout.
     _total = _on_disk_sequence_count(cache_path) or 10_000
@@ -169,7 +175,16 @@ def run_ensemble_meta(
     _meta_frac = float(getattr(args, "ensemble_meta_frac", 0.15))
     n_meta = min(200_000, max(1, int(_meta_frac * _trainable)))
     meta_idx = np.arange(_trainable - n_meta, _trainable)
+    # Chronological 70/30 split: pick the best meta epoch on the later 30%.
+    _cut = int(len(meta_idx) * 0.7)
+    meta_val_idx = meta_idx[_cut:]
+    meta_idx = meta_idx[:_cut]
     meta_ds = ZarrStreamDataset(cache_path, meta_idx, shuffle_chunks=True)
+    meta_val_dl = (
+        DataLoader(ZarrStreamDataset(cache_path, meta_val_idx, shuffle_chunks=False),
+                   batch_size=min(args.batch_size, 512), shuffle=False, num_workers=0)
+        if len(meta_val_idx) >= 100 else None
+    )
     meta_dl = DataLoader(
         meta_ds,
         batch_size=min(args.batch_size, 512),
@@ -190,6 +205,7 @@ def run_ensemble_meta(
         device=str(device),
         verbose=True,
         checkpoint_path=str(out),
+        val_loader=meta_val_dl,
         checkpoint_meta={
             "base_names": loaded_names,
             "base_seq_lens": loaded_seq_lens,
@@ -719,6 +735,14 @@ def _promote_best_fold(
     _atomic_copy(src, dst_flat)
     if src != dst_nested:
         _atomic_copy(src, dst_nested)
+    # The train-only scaler must travel with the weights: inference and the
+    # ensemble look for ``<stem>_scaler.npz`` beside the promoted checkpoint.
+    _src_scaler = src.with_name(src.stem + "_scaler.npz")
+    if _src_scaler.is_file():
+        for _dst in {dst_flat, dst_nested}:
+            _atomic_copy(_src_scaler, _dst.with_name(_dst.stem + "_scaler.npz"))
+    else:
+        print(f"[BestFold] WARN: {model_name}: no scaler sidecar beside {src.name}; inference will fall back to the cache scaler")
     print(
         f"[BestFold] {model_name}: fold {best_fold} is best ({metric_label}={metric_val:.4f}) -> promoted to {dst_flat.name} & {dst_nested.name}"
     )
@@ -735,7 +759,9 @@ def _promote_best_fold(
         "metric": metric_label,
         "metric_value": round(metric_val, 6),
         "secondary_metric": "val_loss" if use_sharpe else "val_sharpe",
-        "secondary_value": round(best_metrics.get("val_loss", 0.0), 6),
+        "secondary_value": round(
+            float(best_metrics.get("val_loss" if use_sharpe else "val_sharpe") or 0.0), 6
+        ),  # was always val_loss, duplicating metric_value when selecting on loss
         "gen_gap": round(best_metrics.get("gen_gap") or 0.0, 6),
         "n_candidates": len(candidate_folds),
         "source_checkpoint": str(src.name),

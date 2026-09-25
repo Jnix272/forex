@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -20,8 +21,28 @@ import yaml
 ARTIFACT_DIR = Path("logs/optuna")
 OPTUNA_CONFIG_DIR = Path("config/optuna")  # isolated folder for all trial + best configs
 BEST_CONFIG_DIR = OPTUNA_CONFIG_DIR  # kept for compat with helpers that reference it
-ACTIVE_RUN_CONFIG = Path("config/run.yaml")  # applied automatically after study finishes
+ACTIVE_RUN_CONFIG = Path("config/run.yaml")  # base config; never overwritten by the tuner
 DEFAULT_METRIC = "cost_sharpe"
+
+
+def _direction_warmup_epochs() -> int:
+    """direction_training.warmup_epochs from config/run.yaml (trainer default 2)."""
+    try:
+        cfg = yaml.safe_load(Path("config/run.yaml").read_text(encoding="utf-8")) or {}
+        return max(0, int((cfg.get("direction_training") or {}).get("warmup_epochs", 2)))
+    except Exception:
+        return 2
+
+
+def _fail_stale_running_trials(study: optuna.Study) -> None:
+    """Mark RUNNING trials left by an interrupted process as FAIL before resuming."""
+    for t in study.trials:
+        if t.state == optuna.trial.TrialState.RUNNING:
+            try:
+                study._storage.set_trial_state_values(t._trial_id, optuna.trial.TrialState.FAIL)
+                print(f"[Optuna] Marked stale RUNNING trial {t.number} as FAIL")
+            except Exception as exc:
+                print(f"[Optuna] Could not close stale trial {t.number}: {exc}")
 
 
 def _metric_direction(metric: str) -> str:
@@ -34,17 +55,19 @@ def _safe_slug(text: str) -> str:
 
 
 def _mode_defaults(mode: str) -> dict[str, Any]:
+    # Proxies must outlast the 2 direction-warmup epochs (which train a different,
+    # direction-only objective); 2-epoch proxies measured nothing else.
     if mode == "deep":
         return {
-            "epochs": 8,
+            "epochs": 12,
             "folds": 2,
             "confirm_top_k": 3,
             "full_confirm_folds": 7,
             "full_confirm_epochs": 18,
         }
     return {
-        "epochs": 2,
-        "folds": 1,
+        "epochs": 6,
+        "folds": 2,
         "confirm_top_k": 0,
         "full_confirm_folds": 7,
         "full_confirm_epochs": 18,
@@ -261,7 +284,10 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
     if n_folds > 1:
         score += min(0.05, 0.01 * n_folds)
 
-    # P2: Curriculum health penalties/bonuses
+    # P2: Curriculum health penalties/bonuses. Skipped for short proxies: the
+    # curriculum is pinned there, so "never advanced" was a constant -0.10.
+    if epochs_completed < _MIN_EPOCHS_FOR_CURRICULUM:
+        return score, diagnostics
     total_stalls = curr_diag["total_stalls"]
     advance_count = curr_diag["advance_count"]
     seq_advanced = curr_diag["seq_advanced"]
@@ -502,13 +528,19 @@ def _build_seq_schedule(
         {"epoch_start": int(cur_seq_ramp_epoch), "seq_len": int(mid)},
         {"epoch_start": int(second_ramp), "seq_len": int(cur_seq_target)},
     ]
-    # Deduplicate by epoch_start preserving order
+    # Keep stages inside the run and in epoch order. With few epochs the clamp to
+    # total_epochs - 1 used to put the second ramp *before* the first
+    # (e.g. {10: 60}, {1: 90}).
+    last = max(0, int(total_epochs) - 1)
     seen: set[int] = set()
     deduped = []
-    for entry in schedule:
-        if entry["epoch_start"] not in seen:
-            seen.add(entry["epoch_start"])
-            deduped.append(entry)
+    for entry in sorted(schedule, key=lambda e: e["epoch_start"]):
+        if entry["epoch_start"] > last or entry["epoch_start"] in seen:
+            continue
+        if deduped and entry["seq_len"] <= deduped[-1]["seq_len"]:
+            continue
+        seen.add(entry["epoch_start"])
+        deduped.append(entry)
     return deduped
 
 
@@ -918,10 +950,15 @@ def _production_epochs_from_config(base_cfg_path: Path) -> int:
 
 
 def _launch_training_run(args) -> int:
-    """Run full production training with the Optuna-applied config."""
-    if not ACTIVE_RUN_CONFIG.exists():
+    """Run full production training with the exported best config.
+
+    It used to launch from config/run.yaml, which the tuner never changes, so the
+    study's result was silently ignored.
+    """
+    cfg_path = Path(getattr(args, "_exported_config", "") or "")
+    if not cfg_path.is_file():
         raise FileNotFoundError(
-            f"Cannot launch training: {ACTIVE_RUN_CONFIG} not found. Did _export_best_config run successfully?"
+            f"Cannot launch training: exported config {cfg_path} not found. Did _export_best_config run?"
         )
 
     run_name = f"optuna_launch_{_safe_slug(args.model)}_{_safe_slug(args.study_name)}"
@@ -930,7 +967,7 @@ def _launch_training_run(args) -> int:
         "-m",
         "training.train_gpu",
         "--config",
-        str(ACTIVE_RUN_CONFIG),
+        str(cfg_path),
         "--model",
         args.model,
         "--run-name",
@@ -948,8 +985,10 @@ def _launch_training_run(args) -> int:
     return int(result.returncode)
 
 
-def _export_best_config(args, study: optuna.Study) -> None:
-    best_params = study.best_trial.params
+def _export_best_config(args, study: optuna.Study, confirmed_trial: int | None = None) -> Path:
+    # Prefer the full-budget confirmation winner over the proxy winner.
+    chosen = study.trials[confirmed_trial] if confirmed_trial is not None else study.best_trial
+    best_params = chosen.params
     base_cfg_path = Path("config/run.yaml")
     curriculum_only = bool(getattr(args, "curriculum_only", False))
     params = _assemble_trial_params(
@@ -968,10 +1007,8 @@ def _export_best_config(args, study: optuna.Study) -> None:
     with export_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 
-    # ------------------------------------------------------------------
-    # Auto-apply: back up the current run.yaml then overwrite it so the
-    # next training run immediately uses Optuna's best settings.
-    # ------------------------------------------------------------------
+    # Not applied to config/run.yaml automatically; --launch-training trains
+    # from export_path directly.
     scope = "curriculum" if curriculum_only else "full"
     print(f"[Optuna] [OK] Best {scope} config archived -> {export_path}")
     print(f"[Optuna]   To apply: copy {export_path} {ACTIVE_RUN_CONFIG}")
@@ -983,8 +1020,9 @@ def _export_best_config(args, study: optuna.Study) -> None:
         "mode": args.mode,
         "curriculum_only": curriculum_only,
         "study_name": args.study_name,
-        "best_trial_number": int(study.best_trial.number),
-        "best_trial_value": study.best_value,
+        "best_trial_number": int(chosen.number),
+        "best_trial_value": chosen.value,
+        "selected_by": "confirmation" if confirmed_trial is not None else "proxy",
         "best_params": best_params,
         "exported_config": str(export_path),
     }
@@ -993,18 +1031,21 @@ def _export_best_config(args, study: optuna.Study) -> None:
         json.dumps(best_summary, indent=2, default=str),
         encoding="utf-8",
     )
+    args._exported_config = export_path
+    return export_path
 
 
-def _confirm_top_trials(args, study: optuna.Study) -> None:
+def _confirm_top_trials(args, study: optuna.Study) -> int | None:
+    """Retrain the top-K proxy trials at full budget; return the best confirmed trial number."""
     if args.confirm_top_k <= 0:
-        return
+        return None
     # study.best_trials is only the Pareto front (1 trial for single-objective);
     # rank all completed trials to confirm the real top-K.
     _done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
     _done.sort(key=lambda t: t.value, reverse=_metric_direction(args.metric) == "maximize")
     top_trials = _done[: args.confirm_top_k]
     if not top_trials:
-        return
+        return None
 
     base_cfg_path = Path("config/run.yaml")
     curriculum_only = bool(getattr(args, "curriculum_only", False))
@@ -1053,6 +1094,12 @@ def _confirm_top_trials(args, study: optuna.Study) -> None:
 
     path = ARTIFACT_DIR / f"{_safe_slug(args.study_name)}_confirm_report.json"
     path.write_text(json.dumps({"rows": confirm_rows}, indent=2, default=str), encoding="utf-8")
+    scored = [r for r in confirm_rows if math.isfinite(float(r["objective_score"]))]
+    if not scored:
+        return None
+    pick = (max if _metric_direction(args.metric) == "maximize" else min)(scored, key=lambda r: r["objective_score"])
+    print(f"[Optuna] Confirmation winner: trial {pick['trial']} (score {pick['objective_score']:.4f})")
+    return int(pick["trial"])
 
 
 def objective(trial, args):
@@ -1173,11 +1220,17 @@ def main():
     from training.hpo import build_optuna_search
 
     hpo_scheduler = str(getattr(args, "hpo_scheduler", "tpe") or "tpe").lower()
+    _warm = _direction_warmup_epochs()
+    if int(args.epochs) < _warm + 2:
+        raise SystemExit(
+            f"[Optuna] --epochs {args.epochs} leaves < 2 epochs after the {_warm} direction-warmup epochs; "
+            f"trials would only measure warmup. Use --epochs >= {_warm + 2}."
+        )
     sampler, pruner = build_optuna_search(
         hpo_scheduler,
         seed=int(args.seed),
-        min_resource=2,
-        max_resource=max(int(args.epochs), 2),
+        min_resource=_warm + 2,
+        max_resource=max(int(args.epochs), _warm + 2),
     )
     print(f"[Optuna] HPO scheduler={hpo_scheduler} sampler={type(sampler).__name__} pruner={type(pruner).__name__}")
 
@@ -1190,6 +1243,7 @@ def main():
         pruner=pruner,
     )
 
+    _fail_stale_running_trials(study)
     if int(args.epochs) < _MIN_EPOCHS_FOR_CURRICULUM:
         print(
             f"[Optuna] Proxy epochs={args.epochs} < {_MIN_EPOCHS_FOR_CURRICULUM}: curriculum params pinned "
@@ -1207,15 +1261,21 @@ def main():
     study.optimize(
         lambda trial: objective(trial, args),
         n_trials=args.trials,
-        catch=(RuntimeError, subprocess.CalledProcessError),
+        catch=(Exception,),  # any single-trial failure is recorded, not study-fatal
     )
 
-    if not study.best_trials:
-        raise RuntimeError("Optuna produced no completed trials; refusing to export a configuration")
+    _finite = [
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None and math.isfinite(t.value)
+    ]
+    if not _finite:
+        raise RuntimeError(
+            "Optuna produced no completed trial with a finite score; refusing to export a configuration"
+        )
 
-    _confirm_top_trials(args, study)
+    confirmed = _confirm_top_trials(args, study)
     _write_ranked_report(study, args.study_name, args)
-    _export_best_config(args, study)
+    _export_best_config(args, study, confirmed_trial=confirmed)
 
     print("\n=== OPTUNA STUDY FINISHED ===")
     print(f"Best Trial: {study.best_trial.number}")
