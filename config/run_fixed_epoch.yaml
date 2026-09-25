@@ -668,7 +668,7 @@ training:
   #
   # Reference: sqrt(252 * 78 / 30) ≈ 25.6 (session) or
   #            sqrt(252 * 288 / 30) ≈ 49.2 (full-day FX)
-  sharpe_annualization_factor: 325.0
+  sharpe_annualization_factor: null  # auto: sqrt(bars_per_year / lookahead); 325 inflated Sharpe (audit A3)
   fx_full_day: true  # FX is 24/5 — use full-day bars-per-day (288 for 5m)
   # Weight vs Huber: designed default in gpu_losses.py is 0.2.
   # Was 1.0 (5× too high) — Sharpe gradient dominated loss, causing early_peak

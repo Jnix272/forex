@@ -93,7 +93,7 @@ training:
   save_every: 5
   seed: 1337
   seq_len: 120
-  sharpe_annualization_factor: 325.0
+  sharpe_annualization_factor: null  # auto: sqrt(bars_per_year / lookahead); 325 inflated Sharpe (audit A3)
   fx_full_day: true
   sharpe_weight: 0.25
   swa_enabled: true
