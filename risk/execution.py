@@ -72,11 +72,11 @@ class RegimePositionSizer:
         self.pip_size = pip_size
         self.min_stop_pips = float(min_stop_pips)
 
-    def _atr_to_pips(self, atr):
+    def _atr_to_pips(self, atr, pip_size=None):
         atr = abs(float(atr))
         if atr > 5.0:
             return atr
-        return atr / self.pip_size
+        return atr / (pip_size or self.pip_size)
 
     def _regime_scale(self, corr_avg=0.0, hurst=0.5, corr_break=0.0):
         scale = 1.0
@@ -88,23 +88,46 @@ class RegimePositionSizer:
             scale *= self.mr_pen
         return float(np.clip(scale, self.min_k / self.base_k, self.max_k / self.base_k))
 
-    def size(self, equity, win_prob, win_loss_r, returns, atr, corr_avg=0.0, hurst=0.5, corr_break=0.0):
+    def size(
+        self, equity, win_prob, win_loss_r, returns, atr, corr_avg=0.0, hurst=0.5, corr_break=0.0,
+        *, pair=None, price=None, bars_per_year=252,
+    ):
+        """Kelly-scaled lots.
+
+        ``pair``/``price``: use that pair's pip size and convert pip value to USD
+        (USD-base pairs like USDJPY price pips in the quote currency; the fixed
+        0.0001 pip mis-sized them ~100x). ``bars_per_year`` annualises the
+        volatility of ``returns`` at their own frequency (sqrt(252) on 5-minute
+        returns understated vol and pinned the vol scalar at its 3x cap).
+        """
+        pip = self.pip_size
+        pip_usd_per_unit = self.pip_size
+        if pair:
+            from config.settings import get_pip_size
+
+            pip = float(get_pip_size(pair))
+            pip_usd_per_unit = pip
+            p = str(pair).upper().replace("/", "").replace("_", "")
+            if p.startswith("USD") and not p.endswith("USD") and price and float(price) > 0:
+                pip_usd_per_unit = pip / float(price)
         q = 1 - win_prob
         full_k = max(0, win_prob - q / max(win_loss_r, 0.01))
         base_k = full_k * self.base_k
         reg_sc = self._regime_scale(corr_avg, hurst, corr_break)
         adj_k = float(np.clip(base_k * reg_sc, self.min_k, self.max_k)) if base_k > 1e-9 else 0.0
         if len(returns) >= 20:
-            vol_sc = np.clip(self.vol_tgt / (float(np.std(returns[-60:])) * np.sqrt(252) + 1e-9), 0.1, 3.0)
+            vol_sc = np.clip(
+                self.vol_tgt / (float(np.std(returns[-60:])) * np.sqrt(float(bars_per_year)) + 1e-9), 0.1, 3.0
+            )
         else:
             vol_sc = 1.0
         risk_usd = equity * min(adj_k * vol_sc, self.max_pct)
-        pip_stop = max(self.min_stop_pips, self._atr_to_pips(atr) * 1.5)
+        pip_stop = max(self.min_stop_pips, self._atr_to_pips(atr, pip) * 1.5)
         if adj_k <= 1e-12 or risk_usd <= 0.0:
             lots = 0.0
         else:
             lots = round(
-                np.clip(risk_usd / (pip_stop * self.lot_size * self.pip_size), 0.01, equity / self.lot_size * 0.3), 2
+                np.clip(risk_usd / (pip_stop * self.lot_size * pip_usd_per_unit), 0.01, equity / self.lot_size * 0.3), 2
             )
         reg_desc = (
             "crisis"

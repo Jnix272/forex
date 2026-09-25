@@ -367,6 +367,108 @@ def build_inference_agents(
     return fast_agent, slow_engine, meta
 
 
+def check_promotion(checkpoint_dir: Path, model: str, served_checkpoint: Path | None = None):
+    """(promoted, reasons) for ``model`` under ``checkpoint_dir``.
+
+    A gate artifact counts only if it passes validation.gate_policy and is newer
+    than the checkpoint(s) it would authorise; otherwise an old PASS could bless
+    a retrained, unvalidated model (previously only the ensemble cert was checked).
+    """
+    import json as _json
+
+    from validation.gate_policy import check_gate_artifact
+
+    reasons: list[str] = []
+    cands = [
+        checkpoint_dir / model / "promotion_gate.json",
+        checkpoint_dir / "promotion_gate.json",
+        checkpoint_dir / "ensemble" / "promotion_gate.json",
+        Path("checkpoints/ensemble/optimal_roadmap_certification.json"),
+        Path("checkpoints/ensemble/promotion_gate.json"),
+    ]
+    for cand in cands:
+        if not cand.exists():
+            continue
+        try:
+            served = [served_checkpoint] if served_checkpoint else []
+            served += [
+                checkpoint_dir / model / f"{model}_best.pt",
+                checkpoint_dir / f"{model}_best.pt",
+                cand.parent / "ensemble_meta_best.pt",
+                cand.parent / "rl_ensemble_best.pt",
+            ]
+            newer = [str(p) for p in served if p and Path(p).exists() and Path(p).stat().st_mtime > cand.stat().st_mtime]
+            if newer:
+                reasons.append(f"{cand.name}: older than {newer[0]}")
+                continue
+            ok, why = check_gate_artifact(_json.loads(cand.read_text(encoding="utf-8")))
+            if ok:
+                print(f"[Live] Promotion gate OK: {cand}")
+                return True, reasons
+            reasons.append(f"{cand.name}: {why}")
+        except Exception as exc:
+            reasons.append(f"{cand}: {exc}")
+    return False, reasons
+
+
+def _run_live_preflight(broker, slow_model, pair: str, checkpoint_dir: str) -> None:
+    """Fail-closed readiness check before a real-broker run (trading/preflight_check).
+
+    Feed/broker adapters probe the actual broker; the schema check compares the
+    checkpoint's ``_features.json`` with the columns live will assemble, so a
+    checkpoint without that sidecar (trained before it existed) blocks live money.
+    """
+    import hashlib
+    import json as _json
+
+    from config.settings import LIVE_RISK
+    from trading.preflight_check import run_preflight
+
+    class _Feed:
+        def __init__(self):
+            self.connected = False
+            self.last_tick_time = None
+            try:
+                bid, ask = broker.get_bid_ask(pair)
+                if bid and ask:
+                    self.connected = True
+                    self.last_tick_time = datetime.now(UTC)
+            except Exception:
+                pass
+
+    class _Broker:
+        def __init__(self):
+            self.connected = bool(broker.connect())
+            self.account_id = getattr(broker, "_account_id", None) or "n/a"
+
+        def get_positions(self):
+            pos = broker.get_positions()
+            if pos is None:
+                raise RuntimeError(getattr(broker, "_last_position_error", "position state unknown"))
+            return pos
+
+    model_hash = live_hash = None
+    ckpt = getattr(slow_model, "checkpoint_path", None)
+    if ckpt:
+        side = Path(str(ckpt)).with_name(Path(str(ckpt)).stem + "_features.json")
+        if side.is_file():
+            names = _json.loads(side.read_text(encoding="utf-8"))
+            model_hash = hashlib.sha256(_json.dumps(names).encode()).hexdigest()
+            # _verify_feature_contract already enforced pair order and adopted the
+            # checkpoint's column order, so live assembles exactly these names.
+            if _verify_feature_contract(slow_model) is not None:
+                live_hash = model_hash
+    run_preflight(
+        feed_client=_Feed(),
+        broker_client=_Broker(),
+        config={"risk": dict(LIVE_RISK)},
+        model=getattr(slow_model, "model", slow_model),
+        checkpoint_dir=checkpoint_dir,
+        model_schema_hash=model_hash,
+        live_schema_hash=live_hash,
+    )
+
+
 LIVE_PAIR_ORDER = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]  # slot order in _Wrap._format_obs
 
 
@@ -418,6 +520,15 @@ def _bar_key(bars):
         return str(bars.index[-1])
     except Exception:
         return None
+
+
+def _bars_per_year(bar_freq: str) -> float:
+    """24h FX bars per year (260 trading days) for ``bar_freq``."""
+    try:
+        minutes = max(1.0, pd.Timedelta(str(bar_freq)).total_seconds() / 60.0)
+    except Exception:
+        minutes = 5.0
+    return 260.0 * 1440.0 / minutes
 
 
 def _warmup_bar_count(bar_freq: str, days: int = 14, cap: int = 5000) -> int:
@@ -721,6 +832,9 @@ class LiveSafetyConfig:
     max_spread_pips: float = 2.5
     max_daily_loss_pct: float = 0.05
     max_orders_per_minute: int = 30
+    # Drawdown from the running equity peak. Unlike the daily limit this is NOT
+    # reset at the day boundary; clearing it needs a restart (manual review).
+    max_total_drawdown_pct: float = 0.15
 
 
 class LiveSafetyGate:
@@ -730,13 +844,15 @@ class LiveSafetyGate:
         self.config = config
         self.starting_equity = float(starting_equity)
         self.halted = False
+        self.total_halted = False
+        self.peak_equity = float(starting_equity)
         self._order_times: deque = deque()
         self._current_day: int | None = None
 
     def new_day(self, equity: float) -> None:
         """Reset daily loss tracking at the start of a new trading day."""
         self.starting_equity = float(equity)
-        self.halted = False
+        self.halted = self.total_halted
         self._current_day = datetime.now(UTC).timetuple().tm_yday
 
     def allow_order(
@@ -751,7 +867,13 @@ class LiveSafetyGate:
         record: bool = True,
     ) -> dict[str, object]:
         if self.halted:
-            return {"ok": False, "reason": "halted"}
+            return {"ok": False, "reason": "total_drawdown_halt" if self.total_halted else "halted"}
+        self.peak_equity = max(self.peak_equity, float(equity))
+        if self.peak_equity > 0:
+            dd = (self.peak_equity - float(equity)) / self.peak_equity
+            if dd >= float(getattr(self.config, "max_total_drawdown_pct", 0.15)):
+                self.halted = self.total_halted = True
+                return {"ok": False, "reason": f"total_drawdown:{dd:.4f}>={self.config.max_total_drawdown_pct}"}
 
         ts = float(time.time() if now is None else now)
         spread_pips = max(0.0, price_to_pips(float(ask) - float(bid), pair))
@@ -2276,8 +2398,11 @@ class LiveTradingEngine:
                         if bid and ask:
                             self.buf.push_tick(bid, ask)
                     except Exception:
-                        pass
-                    time.sleep(0.1)
+                        self._quote_errors = getattr(self, "_quote_errors", 0) + 1
+                    # 0.1 s only with a local stream (ZMQ) or the paper broker; REST
+                    # polling at 10/s per pair wastes the API budget for no new data.
+                    _fast_feed = getattr(self.broker, "_zmq_sub", None) is not None or isinstance(self.broker, PaperBroker)
+                    time.sleep(0.1 if _fast_feed else 0.5)
                     continue
                 bar_ts = next_bar_time
                 bars = self.buf.get_bars()
@@ -2292,6 +2417,32 @@ class LiveTradingEngine:
                     next_bar_time += _interval
         finally:
             self.stop()
+
+    def _stop_distance(self, atr: float, bid, ask) -> float:
+        """ATR stop with a floor of 3x the live spread (ATR(6) on 5m bars put
+        0.8xATR stops within a spread or two of entry, i.e. stopped by noise)."""
+        spread = (float(ask) - float(bid)) if bid and ask else 0.0
+        return max(float(self.stop_loss_atr) * float(atr), 3.0 * max(spread, 0.0))
+
+    def _measured_edge(self, prior_n: float = 50.0) -> tuple[float, float]:
+        """Win rate and payoff from this engine's closed trades, shrunk toward a
+        no-edge prior (p=0.52, b=1.0) with ``prior_n`` pseudo-trades.
+
+        Replaces the hard-coded 0.55 / 1.5: Kelly on an invented edge is not sizing.
+        With no history the prior gives a small positive Kelly (about 0.04 before
+        the fractional multiplier), so the engine trades small until it has data.
+        """
+        res = list(getattr(self, "_trade_results", []) or [])
+        wins = [r for r in res if r > 0]
+        losses = [-r for r in res if r < 0]
+        n = len(res)
+        p = (0.52 * prior_n + len(wins)) / (prior_n + n)
+        avg_w = float(np.mean(wins)) if wins else 1.0
+        avg_l = float(np.mean(losses)) if losses else 1.0
+        b_obs = avg_w / max(avg_l, 1e-9)
+        k = min(len(wins), len(losses))
+        b = (1.0 * prior_n + b_obs * k) / (prior_n + k)
+        return float(p), float(b)
 
     def _flatten(self, mid: float, reason: str) -> bool:
         """Close this pair at the broker; clear internal state only if confirmed.
@@ -2406,9 +2557,24 @@ class LiveTradingEngine:
         ``self._position`` is in mini-lots (10k units), ``pip_value_per_lot``
         is USD per pip per lot.
         """
+        pos = float(abs(self._position))
+        if pos > 1e-12 and self._entry_price > 0 and float(mid) > 0:
+            # Per-trade return (price fraction) for the measured-edge sizing.
+            _r = (float(mid) - self._entry_price) / self._entry_price * (1.0 if self._position > 0 else -1.0)
+            if not hasattr(self, "_trade_results"):
+                self._trade_results = deque(maxlen=500)
+            self._trade_results.append(_r)
+            _pair_c = str(self.pair).upper().replace("/", "").replace("_", "")
+            _notional_usd = pos * 10_000.0 * (self._entry_price if _pair_c.endswith("USD") else 1.0)
+            _pnl_usd = _r * _notional_usd
+            try:
+                self.demotion.on_trade_closed(pnl=_pnl_usd, equity=self.equity)
+                if self.prom is not None:
+                    self.prom.update_trade(_pnl_usd, won=_pnl_usd > 0)
+            except Exception as _dm_e:
+                self.logger.event("WARN", "demotion_update_failed", f"demotion update failed: {_dm_e}", pair=self.pair)
         if self.risk_engine is None:
             return
-        pos = float(abs(self._position))
         if pos <= 1e-12 or self._entry_price <= 0:
             return
         try:
@@ -2473,6 +2639,26 @@ class LiveTradingEngine:
         except Exception:
             pass
 
+    def _sentiment_frame(self, bars, bias: float):
+        """Rolling (timestamp_utc, sentiment) history of live per-bar scores."""
+        hist = getattr(self, "_sent_hist", None)
+        if hist is None:
+            hist = self._sent_hist = deque(maxlen=5000)
+        try:
+            if _POLARS and pl is not None and isinstance(bars, pl.DataFrame):
+                ts = bars["timestamp_utc"][-1] if "timestamp_utc" in bars.columns else datetime.now(UTC)
+            else:
+                ts = pd.Timestamp(bars.index[-1]).to_pydatetime()
+        except Exception:
+            ts = datetime.now(UTC)
+        if abs(float(bias)) > 1e-9:
+            hist.append((ts, float(bias)))
+        if not hist or pl is None:
+            return None
+        return pl.DataFrame(
+            {"timestamp_utc": [t for t, _ in hist], "sentiment": [v for _, v in hist]}
+        ).with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
+
     def _build_features_obs(self, bars):
         """Features + last-row observation for this bar; publishes obs to peers.
 
@@ -2481,32 +2667,6 @@ class LiveTradingEngine:
         _key0 = _bar_key(bars)  # before conversion, so it matches callers' key
         bars = _ensure_polars_frame(bars)
         try:
-            features = _ensure_polars_frame(self.fe.build(bars, cross_asset=self.cross_asset, pair=self.pair))
-            macro_df = self.macro.build(bars)
-            if macro_df is not None and len(macro_df) > 0:
-                macro_df = _ensure_polars_frame(macro_df)
-                if "timestamp_utc" in macro_df.columns:
-                    macro_df = macro_df.drop("timestamp_utc")
-                if macro_df is not None and len(macro_df) == len(features):
-                    macro_cols = [c for c in macro_df.columns if c not in features.columns]
-                    if macro_cols:
-                        if _POLARS and isinstance(features, pl.DataFrame):
-                            features = features.hstack(macro_df.select(macro_cols))
-                        else:
-                            features = pd.concat([features, macro_df[macro_cols]], axis=1)
-            if self.afb is not None:
-                try:
-                    adv_df = self.afb.build(bars, features)
-                    if adv_df is not None and len(adv_df) == len(features):
-                        adv_df = _ensure_polars_frame(adv_df)
-                        adv_cols = [c for c in adv_df.columns if c not in features.columns and c != "timestamp_utc"]
-                        if adv_cols:
-                            if _POLARS and isinstance(features, pl.DataFrame):
-                                features = features.hstack(adv_df.select(adv_cols))
-                            else:
-                                features = pd.concat([features, adv_df[adv_cols]], axis=1)
-                except Exception as e:
-                    self.logger.event("WARN", "afb_warning", f"[Live] AFB build skipped: {e}", pair=self.pair)
             bias = 0.0
             if self._sent_backend not in ("off", "none", "neutral"):
                 try:
@@ -2540,6 +2700,37 @@ class LiveTradingEngine:
                     except Exception as e:
                         self.logger.event("ERROR", "feature_error", f"[Live] Feature error: {e}", pair=self.pair)
                         bias = 0.0
+            # Same input as training: a timestamped per-bar sentiment series, so
+            # sentiment_raw / sentiment_decayed are not constant 0 live.
+            features = _ensure_polars_frame(
+                self.fe.build(bars, cross_asset=self.cross_asset, pair=self.pair,
+                              sentiment=self._sentiment_frame(bars, bias))
+            )
+            macro_df = self.macro.build(bars)
+            if macro_df is not None and len(macro_df) > 0:
+                macro_df = _ensure_polars_frame(macro_df)
+                if "timestamp_utc" in macro_df.columns:
+                    macro_df = macro_df.drop("timestamp_utc")
+                if macro_df is not None and len(macro_df) == len(features):
+                    macro_cols = [c for c in macro_df.columns if c not in features.columns]
+                    if macro_cols:
+                        if _POLARS and isinstance(features, pl.DataFrame):
+                            features = features.hstack(macro_df.select(macro_cols))
+                        else:
+                            features = pd.concat([features, macro_df[macro_cols]], axis=1)
+            if self.afb is not None:
+                try:
+                    adv_df = self.afb.build(bars, features)
+                    if adv_df is not None and len(adv_df) == len(features):
+                        adv_df = _ensure_polars_frame(adv_df)
+                        adv_cols = [c for c in adv_df.columns if c not in features.columns and c != "timestamp_utc"]
+                        if adv_cols:
+                            if _POLARS and isinstance(features, pl.DataFrame):
+                                features = features.hstack(adv_df.select(adv_cols))
+                            else:
+                                features = pd.concat([features, adv_df[adv_cols]], axis=1)
+                except Exception as e:
+                    self.logger.event("WARN", "afb_warning", f"[Live] AFB build skipped: {e}", pair=self.pair)
             if _POLARS and isinstance(features, pl.DataFrame):
                 features = features.with_columns(pl.lit(bias).cast(pl.Float64).alias("finbert_sentiment"))
             else:
@@ -2682,7 +2873,7 @@ class LiveTradingEngine:
 
         # Software Stop-Loss & Take-Profit:
         if abs(self._position) > 0 and atr > 0 and self._entry_price > 0:
-            stop_dist = float(self.stop_loss_atr) * float(atr)
+            stop_dist = self._stop_distance(atr, bid, ask)
             tp_dist = float(getattr(self, "take_profit_atr", 1.5)) * float(atr)
             hit_sl = (self._position > 0 and mid <= self._entry_price - stop_dist) or (
                 self._position < 0 and mid >= self._entry_price + stop_dist
@@ -2764,13 +2955,11 @@ class LiveTradingEngine:
                 )
                 self._running = False
                 return
-        pnl = self.equity - prev_equity
+        pnl = self.equity - prev_equity  # per-bar equity change (includes unrealised)
         if self.prom is not None:
             self.prom.update_equity(self.equity)
-        if abs(pnl) > 0:
-            self.demotion.on_trade_closed(pnl=pnl, equity=self.equity)
-            if self.prom is not None:
-                self.prom.update_trade(pnl, won=pnl > 0)
+        # Trade stats are recorded per *closed trade* in _risk_trade_closed; feeding
+        # every bar's mark-to-market change here counted each bar as a trade.
         demotion_alert = self.demotion.on_bar(self.equity)
         if demotion_alert and demotion_alert.get("demoted"):
             triggers = demotion_alert.get("triggers") or ["unknown"]
@@ -2868,8 +3057,8 @@ class LiveTradingEngine:
         if _other is not None and _other is not (self.fast if _ran_fast else self.slow):
             try:
                 _other.select_action(obs)
-            except Exception:
-                pass
+            except Exception as _oe:
+                self.logger.event("WARN", "peer_model_error", f"[Live] {('slow' if _ran_fast else 'fast')} model failed: {_oe}", pair=self.pair)
         if self._agent_wrap_shadow is not None:
             try:
                 _sa = int(self._agent_wrap_shadow.select_action(obs))
@@ -3033,15 +3222,19 @@ class LiveTradingEngine:
             vol = _last_float(features, "vol_20", 0.001)
             recent_returns = np.full(60, float(ret if ret else vol * 0.1), dtype=np.float64)
 
+        _wp, _payoff = self._measured_edge()
         sizing = self.rck.size(
             self.equity,
-            0.55,
-            1.5,
+            _wp,
+            _payoff,
             recent_returns,
             atr,
             corr_avg=float(var_result.get("correlation_avg", 0.0) or 0.0),
             hurst=float(hurst),
             corr_break=float(corr_stab),
+            pair=self.pair,
+            price=mid,
+            bars_per_year=_bars_per_year(self.bar_freq),
         )
         if isinstance(regime_result, dict):
             regime_size_mult = float(regime_result.get("size_multiplier", 1.0) or 1.0)
@@ -3166,8 +3359,10 @@ class LiveTradingEngine:
                         b_lot = float(bp.get(pair_clean, bp.get(self.pair, 0.0)))
                         if abs(b_lot) > 1e-5:
                             effective_pos = b_lot
-                except Exception:
-                    pass
+                except Exception as _pos_err:
+                    # Unknown broker position must block, like get_positions() -> None.
+                    self._journal_record({"event": "blocked", "reason": "position_sync_error", "details": str(_pos_err)})
+                    return
 
             if (buy and effective_pos > 0) or (not buy and effective_pos < 0):
                 self._holding_bars += 1
@@ -3178,8 +3373,10 @@ class LiveTradingEngine:
             # Broker-side protective stops (P0 M1): attach SL/TP on a market order
             # so a crash/feed-gap cannot leave a naked position. Mirrors the
             # in-process ATR stop so both agree on the adverse-move distance.
-            stop_dist = float(self.stop_loss_atr) * float(atr) if atr > 0 else 0.0
+            stop_dist = self._stop_distance(atr, bid, ask) if atr > 0 else 0.0
             tp_dist = float(self.take_profit_atr) * float(atr) if atr > 0 else 0.0
+            # Keep reward:risk at least as configured when the spread floor widens the stop.
+            tp_dist = max(tp_dist, stop_dist * float(self.take_profit_atr) / max(float(self.stop_loss_atr), 1e-9))
             if buy:
                 sl = (mid - stop_dist) if stop_dist > 0 else None
                 tp = (mid + tp_dist) if tp_dist > 0 else None
@@ -3297,9 +3494,15 @@ class LiveTradingEngine:
             if abs(self._position) > 1e-12:
                 fraction = 0.25 if action == int(LiveAction.SCALE_OUT_25) else 0.50
                 reduce_lots = round(abs(self._position) * fraction, 4)
-                if reduce_lots > 0:
+                _gate = self.safety.allow_order(
+                    pair=self.pair, side="sell" if self._position > 0 else "buy", lots=reduce_lots,
+                    bid=float(bid or mid), ask=float(ask or mid), equity=self.equity, record=False,
+                )
+                # Risk-reducing: only the rate limit / spread may block it, not the halt.
+                if reduce_lots > 0 and (_gate.get("ok") or str(_gate.get("reason", "")).startswith(("halted", "total_drawdown", "daily_loss"))):
                     reduce_side = "sell" if self._position > 0 else "buy"
                     r = self.broker.market_order(self.pair, reduce_side, reduce_lots)
+                    self.safety.record_order()
                     if not (isinstance(r, dict) and r.get("ok") is False):
                         if self._position > 0:
                             self._position -= reduce_lots
@@ -3310,10 +3513,22 @@ class LiveTradingEngine:
             if abs(self._position) > 1e-12:
                 fraction = {int(LiveAction.SCALE_IN_25): 0.25, int(LiveAction.SCALE_IN_50): 0.50, int(LiveAction.SCALE_IN_100): 1.0}[action]
                 add_lots = round(abs(lots) * fraction, 4)
-                if add_lots > 0:
+                _gate = self.safety.allow_order(
+                    pair=self.pair, side="buy" if self._position > 0 else "sell", lots=add_lots,
+                    bid=float(bid or mid), ask=float(ask or mid), equity=self.equity, record=False,
+                )
+                if add_lots > 0 and not _gate.get("ok"):
+                    self._journal_record({"event": "blocked", "reason": f"scale_in:{_gate.get('reason')}"})
+                elif add_lots > 0 and not self._halt_new_orders:
                     add_side = "buy" if self._position > 0 else "sell"
                     r = self.broker.market_order(self.pair, add_side, add_lots)
                     if not (isinstance(r, dict) and r.get("ok") is False):
+                        self.safety.record_order()
+                        _fill = float(r.get("price", 0.0) or 0.0) if isinstance(r, dict) else 0.0
+                        _fill = _fill if _fill > 0 else mid
+                        _old = abs(self._position)
+                        # Weighted-average entry so stops/PnL reflect the whole position.
+                        self._entry_price = (self._entry_price * _old + _fill * add_lots) / max(_old + add_lots, 1e-12)
                         if self._position > 0:
                             self._position += add_lots
                         else:
@@ -3384,6 +3599,14 @@ class LiveTradingEngine:
             pair=self.pair,
         )
         try:
+            if not isinstance(self.broker, PaperBroker):
+                _ok, _why = check_promotion(Path(self._checkpoint_dir), str(self._model_name))
+                if not _ok:
+                    self.logger.event(
+                        "ERROR", "model_reload_refused",
+                        f"[Live] Hot reload refused: new checkpoint not promoted ({_why})", pair=self.pair,
+                    )
+                    return
             fast, slow, meta = build_inference_agents(
                 model_name=self._model_name,
                 runtime=self._runtime,
@@ -3392,8 +3615,11 @@ class LiveTradingEngine:
                 n_features=self._inference_meta.get("n_features"),
                 checkpoint_dir=self._checkpoint_dir,
             )
+            _cols = _verify_feature_contract(slow)  # raises on a pair-order mismatch
             self._agent_wrap_fast.set_model(fast, self._live_action_adapter(fast))
             self._agent_wrap_slow.set_model(slow, self._live_action_adapter(slow))
+            if _cols:
+                self._expected_features = list(_cols)
             self._inference_meta.update(meta)
             self.logger.event(
                 "INFO",
@@ -3983,47 +4209,7 @@ if __name__ == "__main__":
         )
     # Non-paper live runs require a passed promotion gate artifact (fail-closed).
     if args.broker != "paper":
-        _promoted = False
-        _prom_reasons: list[str] = []
-        for _cand in (
-            Path(ckpt_paths.checkpoint_dir) / args.model / "promotion_gate.json",
-            Path(ckpt_paths.checkpoint_dir) / "promotion_gate.json",
-            Path(ckpt_paths.checkpoint_dir) / "ensemble" / "promotion_gate.json",
-            Path("checkpoints/ensemble/optimal_roadmap_certification.json"),
-            Path("checkpoints/ensemble/promotion_gate.json"),
-        ):
-            if not _cand.exists():
-                continue
-            try:
-                import json as _json
-
-                _pg = _json.loads(_cand.read_text(encoding="utf-8"))
-                # A promotion artifact must describe the current ensemble
-                # checkpoints.  Otherwise an old PASS can authorize a newer,
-                # unvalidated model after retraining.
-                _stale = False
-                if args.model.lower() == "ensemble" and _cand.name == "optimal_roadmap_certification.json":
-                    _artifact_paths = [
-                        _cand.parent / "ensemble_meta_best.pt",
-                        _cand.parent / "rl_ensemble_best.pt",
-                    ]
-                    _stale = any(
-                        _p.exists() and _p.stat().st_mtime > _cand.stat().st_mtime
-                        for _p in _artifact_paths
-                    )
-                    if _stale:
-                        _prom_reasons.append(f"{_cand.name}: stale relative to current ensemble checkpoint")
-                        continue
-                from validation.gate_policy import check_gate_artifact
-
-                _ok, _why = check_gate_artifact(_pg)
-                if _ok:
-                    _promoted = True
-                    print(f"[Live] Promotion gate OK: {_cand}")
-                    break
-                _prom_reasons.append(f"{_cand.name}: {_why}")
-            except Exception as _pe:
-                _prom_reasons.append(f"{_cand}: {_pe}")
+        _promoted, _prom_reasons = check_promotion(Path(ckpt_paths.checkpoint_dir), args.model)
         if not _promoted:
             raise SystemExit(
                 "[Live] Refusing non-paper broker without promotion_gate.json "
@@ -4159,4 +4345,6 @@ if __name__ == "__main__":
         print(f"\n[Live] Starting {args.broker.upper()} engine | {pair_list[0]} | max {args.max_lots:.4f} lots")
     print(f"       Runtime: {args.runtime.upper()} | Strategy: {args.strategy_mode} | Bars: {args.bar_freq}")
     print("       Press Ctrl+C to stop and save logs\n")
+    if args.broker != "paper":
+        _run_live_preflight(broker, slow_model, pair_list[0], str(ckpt_paths.checkpoint_dir))
     engine.start(max_bars=args.max_bars)

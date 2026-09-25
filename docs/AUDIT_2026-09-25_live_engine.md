@@ -108,3 +108,36 @@
 1. **Before any real-money run:** L1, L2, L3, L4, L5 and L6.
 2. **Before trusting live predictions:** L8, L9 and L10. Add a replay test that feeds a day of historical ticks through the live feature path and compares the result to the training cache, column by column.
 3. **Then:** L12 (sizing from measured win rate and payoff), then L13–L19.
+
+---
+
+## Fix log
+
+| # | Fix |
+|---|---|
+| L1 | `--demo` is refused with any broker other than `paper`. |
+| L2 | OANDA orders request broker-side SL/TP. If the brackets are rejected (FIFO), the plain order is placed and SL/TP are attached to the opened trade (`set_trade_stops`). A failed attach logs `broker_stops_missing`. |
+| L3 | Orders carry a client id. On a timeout the order is looked up by that id (FILLED, CANCELLED or unknown) instead of being reported as failed. |
+| L4 | Adopted and reconciled positions take the broker's `averagePrice` as entry, or the mid as a fallback. Fills record the fill price. |
+| L5 | A sizing decision of 0 stays 0; the 0.02-lot minimum applies only to positive sizes. |
+| L6 | `_flatten()` clears state only after the broker confirms the close. A failed close halts new orders and is retried every bar. |
+| L7 | Returns come from `close` (`ret_5` is now in bps). The basis flip is skipped for per-pair-head models. |
+| L8 | Startup seeds about 14 days of candles into a 5,000-bar buffer. Volume counts quote changes. Entries wait for `seq_len + 60` bars. Absolute-volume features are neutralised in the training scaler. |
+| L9 | Checkpoints save `<stem>_features.json` (copied on promotion). Live adopts that column order and refuses a pair-order mismatch. |
+| L10 | Multi-pair bars run in two phases (publish, then decide). A pair blocks on stale or missing peer features, and multi-pair entries wait for a full live window. |
+| L11 | Live per-bar sentiment is passed to `fe.build(sentiment=...)` as a timestamped series, as in training. |
+| L12 | Kelly inputs come from the engine's own closed trades, shrunk toward a no-edge prior. The sizer uses per-pair pip size and USD pip value, and annualises at the bar frequency. Stops have a floor of 3× the spread. |
+| L13 | Demotion and Prometheus trade stats update per closed trade, not per bar. |
+| L14 | `LiveSafetyGate` has a 15% drawdown-from-peak halt that survives the daily reset. |
+| L15 | `check_promotion()` requires the gate artifact to be newer than the checkpoints it authorises. It's used at startup and on hot reload (real brokers). Hot reload also re-checks the feature contract. |
+| L16 | Scale-in and scale-out go through the safety gate and the rate limit. Scale-in keeps a weighted-average entry. |
+| L17 | Quote polling runs every 0.5 s on REST and every 0.1 s only with the ZMQ stream or the paper broker. |
+| L18 | `run_preflight` runs before real-broker starts: feed, broker, risk limits, model, and a schema hash taken from `_features.json`. |
+| L19 | A broker position error blocks the order. Errors from the peer model are logged. |
+
+**Still open:**
+- Warm-up rows for multi-pair models: entries are gated instead of rebuilding historical peer rows.
+- A streaming price feed without the C++ ZMQ bridge.
+- A replay test of the live feature path against the training cache.
+
+**Note:** real-broker runs now require a checkpoint trained after this change (it needs `_features.json`), so preflight will block the current checkpoints.
