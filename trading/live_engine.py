@@ -340,7 +340,14 @@ def build_inference_agents(
                         meta["rl_algo"] = _fallback_algo
                         print(f"[Live] Fast agent fallback algo={_fallback_algo}")
                         break
-            if rl_agent is not None:
+            _rl_shadow = str(os.getenv("LIVE_RL_SHADOW", "1")).strip().lower() not in ("0", "false", "no", "off")
+            if rl_agent is not None and _rl_shadow:
+                # RL has not passed the honest promotion gate (2/3 PPO agents went
+                # bankrupt in training); run it in shadow: log its action, don't trade it.
+                meta["rl_shadow_agent"] = rl_agent
+                print(f"[Live] RL policy ({rl_algo}) in SHADOW mode - logged only, supervised trades. "
+                      f"Set LIVE_RL_SHADOW=0 to let it trade.")
+            elif rl_agent is not None:
                 fast_agent = rl_agent
                 meta["rl_fast"] = True
                 print(f"[Live] Fast agent: RL policy ({rl_algo} TIP fast path)")
@@ -2540,6 +2547,17 @@ class LiveTradingEngine:
             _act_name = LiveAction(action).name
         except ValueError:
             _act_name = str(action)
+        _shadow = self._inference_meta.get("rl_shadow_agent")
+        if _shadow is not None:
+            try:
+                _sa = int(_shadow.select_action(obs))
+                try:
+                    _sa_name = LiveAction(_sa).name
+                except ValueError:
+                    _sa_name = str(_sa)
+                self._decision_log("SHADOW_RL", action=_sa_name)
+            except Exception as _se:
+                self._decision_log("SHADOW_RL", error=str(_se)[:80])
         self._decision_log(
             "SIGNAL",
             action=_act_name,
