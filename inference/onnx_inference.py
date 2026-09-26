@@ -363,6 +363,91 @@ def _export_onnx(model, dummy, output_path, opset, input_names, output_name, dyn
     _export(dynamo=False)
 
 
+def _verify_onnx_parity(model, onnx_path, dummy, atol: float = 1e-4) -> float:
+    """O2: run the same inputs through PyTorch and onnxruntime; delete the file
+    and raise if they disagree. Loading alone was the only check before."""
+    import numpy as np
+    import torch
+
+    try:
+        import onnxruntime as ort  # pyright: ignore[reportMissingImports]
+    except Exception:
+        print("[Export] WARN: onnxruntime unavailable; ONNX parity NOT verified")
+        return float("nan")
+    model.eval()
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    xs = [dummy.detach().cpu()] + [
+        torch.randn(dummy.shape, generator=gen) * 3.0 for _ in range(3)
+    ]
+    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    in_name = sess.get_inputs()[0].name
+    worst = 0.0
+    dev = next(model.parameters()).device if any(True for _ in model.parameters()) else torch.device("cpu")
+    for x in xs:
+        with torch.no_grad():
+            ref = model(x.to(dev))
+        ref = ref[0] if isinstance(ref, (tuple, list)) else ref
+        ref = ref.detach().float().cpu().numpy()
+        got = np.asarray(sess.run(None, {in_name: x.numpy().astype(np.float32)})[0], dtype=np.float32)
+        worst = max(worst, float(np.max(np.abs(ref.reshape(got.shape) - got))))
+    if not np.isfinite(worst) or worst > atol:
+        try:
+            Path(onnx_path).unlink()
+        except OSError:
+            pass
+        raise RuntimeError(f"ONNX parity failed: max |torch - onnx| = {worst:.3g} > {atol}")
+    print(f"[Export] ONNX parity OK (max |diff| = {worst:.2e})")
+    return worst
+
+
+def _write_onnx_sidecar(onnx_path, source_ckpt, extra: dict | None = None) -> None:
+    """O4/O5: tie the .onnx to the exact .pt / scaler / feature list it came from."""
+    import hashlib
+    import json as _json
+
+    def _h(p):
+        p = Path(p)
+        if not p.is_file():
+            return None
+        d = hashlib.sha256()
+        with open(p, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                d.update(b)
+        return d.hexdigest()
+
+    src = Path(source_ckpt)
+    meta = {
+        "onnx_sha256": _h(onnx_path),
+        "source_checkpoint": str(src),
+        "source_sha256": _h(src),
+        "scaler_sha256": _h(src.with_name(src.stem + "_scaler.npz")),
+        "features_sha256": _h(src.with_name(src.stem + "_features.json")),
+        # Multitask exports emit log [SELL, HOLD, BUY] action probabilities
+        # (training.decision); consumers should check this before interpreting.
+        "onnx_output_semantics": "log_action_proba_v1",
+        **(extra or {}),
+    }
+    Path(str(onnx_path) + ".json").write_text(_json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def onnx_matches_checkpoint(onnx_path, source_ckpt) -> tuple[bool, str]:
+    """True when the ONNX sidecar hashes match the current .pt (O4)."""
+    import json as _json
+
+    side = Path(str(onnx_path) + ".json")
+    if not side.is_file():
+        return False, "no ONNX sidecar"
+    meta = _json.loads(side.read_text(encoding="utf-8"))
+    import hashlib
+
+    src = Path(source_ckpt)
+    if not src.is_file():
+        return False, "source checkpoint missing"
+    if hashlib.sha256(src.read_bytes()).hexdigest() != meta.get("source_sha256"):
+        return False, "checkpoint changed since export (stale ONNX)"
+    return True, "ok"
+
+
 def core_onnx_export(
     model: "torch.nn.Module",
     n_features: int,
@@ -421,8 +506,10 @@ def core_onnx_export(
                     # x: (batch, seq_len, n_features)
                     # NaN/Inf sanitization FIRST (same as training)
                     x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
-                    # Apply normalization: (x - offset) / scale
+                    # Apply normalization: (x - offset) / scale, then the same
+                    # +/-10 clip as training (inference._scaler_load).
                     x = (x - self._offset) / self._scale
+                    x = torch.clamp(x, -10.0, 10.0)
                     return self._wrapped_model(x)
 
             model = ScaledModel(model, offset_tensor, scale_tensor)
@@ -436,6 +523,7 @@ def core_onnx_export(
         dummy = torch.randn(batch_size, 6, n_features // 6, device=export_device)
 
     _export_onnx(model, dummy, output_path, opset, ["features"], output_name)
+    _verify_onnx_parity(model, output_path, dummy)
     print(f"[Export] Saved ONNX model: {output_path}")
     print(f"         n_features={n_features} | seq_len={seq_len} | opset={opset}")
     _print_onnx_info(output_path)
@@ -536,6 +624,7 @@ def export_to_onnx(
     output_path: str | None = None,
     opset: int = 17,
     n_features: int | None = None,
+    allow_unscaled: bool = False,
 ) -> str:
     """
     Load a trained .pt checkpoint and export to ONNX.
@@ -655,7 +744,14 @@ def export_to_onnx(
         model = cast(Any, build_model(model_name, input_size=int(n_features), seq_len=seq_len))
 
     model = cast(Any, model)
-    model.load_state_dict(state_dict, strict=False)
+    # O3: strict enough to notice missing layers (strict=False exported random
+    # weights silently when names drifted).
+    try:
+        from training.model_factory import _strict_load_report
+
+        _strict_load_report(model, state_dict, f"Export->{model_name}", min_frac_loaded=0.99)
+    except ImportError:
+        model.load_state_dict(state_dict, strict=True)
     model = _wrap_logits_output(model)
     model.eval()
 
@@ -673,9 +769,17 @@ def export_to_onnx(
     try:
         from inference._scaler_load import load_inference_scaler
 
-        scaler = load_inference_scaler(cache_path)
+        # O1: the checkpoint's own train-only scaler (what training applied), not
+        # the cache-wide one.
+        _side = Path(checkpoint_path).with_name(Path(checkpoint_path).stem + "_scaler.npz")
+        scaler = load_inference_scaler(_side) if _side.is_file() else None
+        if scaler is None and not allow_unscaled:
+            raise RuntimeError(
+                f"[Export] No scaler sidecar {_side.name}: refusing to export an ONNX model that would "
+                "see unscaled inputs (pass allow_unscaled=True only for models trained unscaled)."
+            )
         if scaler is not None:
-            print(f"[Export] Found scaler at {cache_path}/scaler.npz, fusing into ONNX")
+            print(f"[Export] Fusing checkpoint scaler {_side.name} into ONNX")
         else:
             print(f"[Export] No scaler found at {cache_path}/scaler.npz, exporting without normalization")
     except Exception as e:
@@ -684,7 +788,7 @@ def export_to_onnx(
     if output_path is None:
         output_path = str(ckpt_path.with_suffix(".onnx"))
 
-    return core_onnx_export(
+    out = core_onnx_export(
         model=model,
         n_features=n_features,
         seq_len=seq_len,
@@ -694,6 +798,9 @@ def export_to_onnx(
         output_name="logits",
         scaler=scaler,
     )
+    _write_onnx_sidecar(output_path, checkpoint_path, {"model_name": model_name, "seq_len": int(seq_len),
+                                                       "n_features": int(n_features), "scaler_fused": scaler is not None})
+    return out
 
 
 def export_ensemble_to_onnx(

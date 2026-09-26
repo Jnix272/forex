@@ -518,6 +518,76 @@ def _stability_adjusted_score(score, sharpe_curve, gen_gap):
     return score, volatility, gap_penalty
 
 
+def holdout_sharpe_for_checkpoint(ckpt_path, model_name, cache_path, n_samples, n_features, args, device) -> float | None:
+    """Honest holdout net Sharpe of an existing checkpoint (T3: challenger and
+    production are compared on the same rows, not on different folds' losses)."""
+    try:
+        from inference.pytorch_inference import load_pytorch_model
+        from training.honest_eval import holdout_gate_metrics
+
+        model, _nf, _sl, _arch, scaler = load_pytorch_model(
+            str(ckpt_path), model_name, seq_len=int(getattr(args, "seq_len", 120)),
+            n_features=int(n_features), device=device, cache_path=str(cache_path),
+        )
+        start = max(0, int(n_samples) - int(_promotion_holdout_n(n_samples, args)))
+        m = holdout_gate_metrics(
+            model, str(cache_path), np.arange(start, int(n_samples)),
+            horizon=int(getattr(args, "lookahead_bars", None) or 30),
+            bar_freq=str(getattr(args, "bar_freq", "5min")), scaler=scaler,
+            pair_names=list(_get_pairs(args)) or None, device=device,
+        )
+        return float(m["sharpe"])
+    except Exception as exc:
+        print(f"[Challenger] production holdout scoring failed: {exc}")
+        return None
+
+
+def _cv_refit_epochs(cv_hist: list, max_epochs: int) -> int:
+    """Median selected epoch across folds (+1 for 0-based), at least warmup + 2."""
+    eps = []
+    for e in cv_hist:
+        h = e.get("history") or {}
+        ci = h.get("honest_sharpe_ci_low") or []
+        vl = h.get("val_loss") or []
+        if ci and any(v != 0.0 for v in ci):
+            eps.append(int(np.argmax(ci)) + 1)
+        elif vl:
+            eps.append(int(np.argmin(vl)) + 1)
+    n = int(np.median(eps)) if eps else int(max_epochs)
+    return int(min(max(n, 4), max(4, int(max_epochs))))
+
+
+def _promote_refit(model_name: str, checkpoint_dir: str, cv_hist: list, refit_epochs: int) -> None:
+    """Copy the refit checkpoint (+ scaler/feature sidecars) to <model>_best.pt."""
+    ckpt_dir = Path(checkpoint_dir)
+    src = next(
+        (p for p in (ckpt_dir / model_name / f"{model_name}_foldrefit_best.pt", ckpt_dir / f"{model_name}_foldrefit_best.pt")
+         if p.exists()),
+        None,
+    )
+    if src is None:
+        print(f"[Refit] {model_name}: refit checkpoint not found; nothing promoted")
+        return
+    for dst in {ckpt_dir / f"{model_name}_best.pt", ckpt_dir / model_name / f"{model_name}_best.pt"}:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_copy(src, dst)
+        for suffix in ("_scaler.npz", "_features.json"):
+            side = src.with_name(src.stem + suffix)
+            if side.is_file():
+                _atomic_copy(side, dst.with_name(dst.stem + suffix))
+    summary = {
+        "model": model_name,
+        "selected": "refit",
+        "refit_epochs": int(refit_epochs),
+        "note": "folds used only to estimate performance; deployed model refit on all pre-holdout data",
+        "fold_estimates": [
+            {"fold": e.get("fold"), "best_metric": e.get("best_metric")} for e in cv_hist
+        ],
+    }
+    _safe_save_json(summary, ckpt_dir / "fold_selection.json")
+    print(f"[Refit] {model_name}: promoted {src.name} -> {model_name}_best.pt")
+
+
 def _promote_best_fold(
     model_name: str,
     checkpoint_dir: str,

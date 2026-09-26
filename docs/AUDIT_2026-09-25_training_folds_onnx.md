@@ -94,3 +94,20 @@
 2. **O1 + O2:** export with the checkpoint's own scaler and clip, then verify ONNX against PyTorch before keeping the file.
 3. **T3, T4, O3, O4:** challenger on the same holdout, fold provenance, strict loading, and hash-linked ONNX sidecars.
 4. **T5, T6, O5, O6.**
+
+---
+
+## Fix log
+
+| # | Fix |
+|---|---|
+| T1 / T2 | After walk-forward CV, `train_gpu` refits once on all pre-holdout rows with the median CV-selected epoch count (fixed epochs, no early stop or selection) and promotes that (`_promote_refit`; `fold_selection.json` says `selected: refit`). Folds only estimate performance. `training.cv_refit_final: false` restores the old behaviour. |
+| T3 | Before deploying, the current production checkpoint is scored on the same holdout (`holdout_sharpe_for_checkpoint`), and the challenger must beat it. |
+| T4 | Fold configs record train/val index ranges, their `t_ns` timestamps, n_train/n_val, the cache path, `DATASET_BUILD_VERSION`, the seed, and whether it's the refit. |
+| T5 | Fold configs mark `val_sharpe_is_honest` and record `honest_sharpe_ci_low`. Promotion no longer ranks folds. |
+| O1 | `export_to_onnx` fuses the checkpoint's own `*_scaler.npz` with the ±10 clip, and refuses to export without it (`allow_unscaled=True` to override). |
+| O2 | `_verify_onnx_parity` compares PyTorch and onnxruntime on 4 inputs; if max |Δ| > 1e-4 the file is deleted and export fails. |
+| O3 | Export loads weights through `_strict_load_report(min_frac_loaded=0.99)`. |
+| O4 / O5 | `<file>.onnx.json` records the SHA-256 of the ONNX, the source `.pt`, the scaler and the feature sidecar, plus `onnx_output_semantics`. `onnx_matches_checkpoint()` detects stale exports. |
+
+Not changed: T6 (fold dependence is documented, not fixed) and O6 (supervised schema verification relies on the L9 `_features.json` contract).

@@ -49,6 +49,7 @@ Usage
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -390,7 +391,9 @@ from training.post_train import (
     _generate_model_card,
     _history_for_auto_tune,
     _maybe_auto_tune_next_run,
+    _cv_refit_epochs,
     _promote_best_fold,
+    _promote_refit,
     _safe_save_json,
     run_ensemble_meta,
     run_profiler,
@@ -1049,9 +1052,30 @@ def main():
 
             with open(log_dir / f"{_artifact_run_name}_{_artifact_model_name}_cv.json", "w", encoding="utf-8") as fp:
                 json.dump(cv_hist, fp)
-            _promote_best_fold(
-                model_name, model_args.checkpoint_dir, cv_hist, getattr(model_args, 'early_stop_metric', 'val_loss'), alerter=alerter
-            )
+            if bool(getattr(model_args, "cv_refit_final", True)) and splits:
+                # T1/T2: folds estimate performance; they are not candidates. Refit
+                # once on all pre-holdout data with the CV-chosen epoch count and
+                # deploy that (a single fold saw as little as 3/8 of the history, and
+                # fold scores come from different periods so are not comparable).
+                _refit_epochs = _cv_refit_epochs(cv_hist, int(model_args.epochs))
+                _refit_args = copy.copy(model_args)
+                _refit_args.epochs = _refit_epochs
+                _refit_args._refit_fixed_epochs = True
+                _refit_end = max(0, _cv_n - int(_embargo_bars(model_args)) - int(_purge_bars(model_args)))
+                _refit_tr = np.arange(0, _refit_end, dtype=np.int64)
+                _refit_va = splits[-1][1]  # logging only; overlaps training in refit mode
+                print(f"[Refit] {model_name}: training on rows [0, {_refit_end}) for {_refit_epochs} epochs")
+                with _timer.stage(f"supervised_{model_name}_refit"):
+                    supervised_train(
+                        model_name, cache_path, n_samples, n_features, _refit_args, device, n_gpus,
+                        run=wandb_run, train_idx=_refit_tr, val_idx=_refit_va, fold_id="refit",
+                        amp_dtype=amp_dtype,
+                    )
+                _promote_refit(model_name, model_args.checkpoint_dir, cv_hist, _refit_epochs)
+            else:
+                _promote_best_fold(
+                    model_name, model_args.checkpoint_dir, cv_hist, getattr(model_args, 'early_stop_metric', 'val_loss'), alerter=alerter
+                )
             _generate_model_card(model_name, model_args, cv_hist, model_args.checkpoint_dir, n_features)
             _fold_metrics = [e.get("best_metric") for e in cv_hist if e.get("best_metric") is not None]
         else:
@@ -1356,6 +1380,24 @@ def main():
             _schema_final = None
 
             _reload_flag = None
+            if gate_result.get("promoted") and ckpt_best.exists():
+                # T3: replace production only if the challenger beats it on the same
+                # holdout rows (was: fold-level losses from different periods).
+                try:
+                    from monitoring.demotion_monitor import PROD_CHECKPOINT as _prod_chk
+                except Exception:
+                    _prod_chk = Path(model_args.checkpoint_dir) / "production_best.pt"
+                _chal_sh = float((gate_result.get("details") or {}).get("sharpe", 0.0) or 0.0)
+                if Path(_prod_chk).exists():
+                    from training.post_train import holdout_sharpe_for_checkpoint
+
+                    _prod_sh = holdout_sharpe_for_checkpoint(
+                        _prod_chk, model_name, cache_path, n_samples, n_features, model_args, device
+                    )
+                    if _prod_sh is not None and _chal_sh <= _prod_sh:
+                        print(f"[Challenger] keep production: holdout Sharpe {_chal_sh:.3f} <= production {_prod_sh:.3f}")
+                        gate_result["promoted"] = False
+                        gate_result.setdefault("reasons", []).append("challenger does not beat production on holdout")
             if gate_result.get("promoted") and ckpt_best.exists():
                 # B-C3: deploy to the SAME production path the live engine and the
                 # demotion monitor's rollback read, not the per-run checkpoint dir.

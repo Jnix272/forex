@@ -593,6 +593,38 @@ def _warm_start_from_checkpoint(model: nn.Module, args, device, model_name: str)
     return True
 
 
+def _fold_provenance(cache_path, train_idx, val_idx, args) -> dict:
+    """Train/val index ranges, their timestamps, cache and dataset version, seed."""
+    out: dict = {"cache_path": str(cache_path), "seed": getattr(args, "seed", None)}
+    try:
+        from training.cache_integrity import DATASET_BUILD_VERSION
+
+        out["dataset_build_version"] = DATASET_BUILD_VERSION
+    except Exception:
+        pass
+    t_ns = None
+    try:
+        import zarr as _zr
+
+        _root = _zr.open(str(cache_path), mode="r")
+        if "t_ns" in _root:
+            t_ns = _root["t_ns"]
+    except Exception:
+        t_ns = None
+    for name, idx in (("train", train_idx), ("val", val_idx)):
+        if idx is None or len(idx) == 0:
+            continue
+        lo, hi = int(np.min(idx)), int(np.max(idx))
+        out[f"{name}_range"] = [lo, hi + 1]
+        out[f"n_{name}"] = int(len(idx))
+        if t_ns is not None:
+            try:
+                out[f"{name}_start_ns"], out[f"{name}_end_ns"] = int(t_ns[lo]), int(t_ns[hi])
+            except Exception:
+                pass
+    return out
+
+
 def supervised_train(
     model_name: str,
     cache_path: str,
@@ -2503,6 +2535,10 @@ def supervised_train(
         if _select_on_honest and not _sacs_enabled:
             _sacs_score = -float(_hm_sel.get("sharpe_net_ci_low", 0.0))
         improved = _sacs_score < _best_sacs_score
+        if getattr(args, "_refit_fixed_epochs", False):
+            # Final refit on all pre-holdout data: epoch count fixed from CV, the
+            # "validation" rows are inside training, so keep the last epoch.
+            improved = True
         if improved:
             _best_from_warmup = _direction_warmup_active
 
@@ -2519,7 +2555,7 @@ def supervised_train(
         _warmup_done = ep >= int(getattr(args, "lr_warmup_epochs", 0))
 
         # ── Dynamic Early Stop ────────────────────────────────────────────────
-        if _des_base_patience > 0 and _warmup_done:
+        if _des_base_patience > 0 and _warmup_done and not getattr(args, "_refit_fixed_epochs", False):
             # Fix-1: Curriculum stage advance resets counter — a difficulty jump
             # causes a temporary val_loss spike that shouldn't trigger early stop.
             _cur_difficulty = int(
@@ -2633,6 +2669,15 @@ def supervised_train(
                         "n_samples": n_samples,
                         "loss": args.loss,
                         "fold_id": fold_id,
+                        # T4 provenance: what this checkpoint was trained/validated on.
+                        **_fold_provenance(cache_path, train_idx, val_idx, args),
+                        # T5: v_sh is the honest net Sharpe when price arrays exist
+                        # (S9); its CI lower bound is the selection statistic.
+                        "val_sharpe_is_honest": bool(getattr(validate_epoch, "last_honest", None)),
+                        "honest_sharpe_ci_low": float(
+                            (getattr(validate_epoch, "last_honest", None) or {}).get("sharpe_net_ci_low", 0.0)
+                        ),
+                        "refit": bool(getattr(args, "_refit_fixed_epochs", False)),
                     },
                     _cfg_fp,
                     indent=2,

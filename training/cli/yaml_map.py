@@ -57,6 +57,7 @@ _YAML_MAP = {
     "training.swa_lr": "swa_lr",
     "training.sacs_enabled": "sacs_enabled",
     "training.per_pair_heads": "per_pair_heads",
+    "training.cv_refit_final": "cv_refit_final",
     "training.period_balance": "period_balance",
     "training.sacs_eps": "sacs_eps",
     "training.sacs_n_samples": "sacs_n_samples",
