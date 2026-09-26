@@ -85,7 +85,8 @@ def test_holdout_gate_metrics_scores_cached_rows(tmp_path):
             return x[:, -1, 0]
 
     m = holdout_gate_metrics(Oracle(), str(tmp_path / "c.zarr"), np.arange(300, n - h), horizon=h)
-    assert m["n_trades"] > 20 and m["sharpe"] > 0 and m["periods_per_year"] == pytest.approx(288 * 260 / h)
+    # Realised trades per year: at most one per horizon.
+    assert m["n_trades"] > 20 and m["sharpe"] > 0 and 0 < m["periods_per_year"] <= 288 * 260 / h + 1e-6
 
 
 def test_backtest_pip_value_for_usd_base_pair():

@@ -384,7 +384,6 @@ def _read_arch_params_from_config(base_cfg_path: Path) -> dict[str, Any]:
         "num_layers": int(model.get("num_layers", 3)),
         "dropout": float(model.get("dropout", 0.25)),
         "batch_size": int(training.get("batch_size", 256)),
-        "mt_direction_weight_floor": float(multitask.get("direction_weight_floor", 0.30)),
         "mt_focal_gamma": float(multitask.get("focal_gamma", 1.5)),
         "mt_class_balance_weight": float(multitask.get("class_balance_weight", 0.15)),
     }
@@ -595,7 +594,6 @@ def _sample_params(
             "num_layers": trial.suggest_categorical("num_layers", [2, 3, 4]),
             "dropout": trial.suggest_float("dropout", 0.05, 0.35),
             "batch_size": trial.suggest_categorical("batch_size", batch_choices),
-            "mt_direction_weight_floor": trial.suggest_float("mt_direction_weight_floor", 0.20, 0.50),
             "mt_focal_gamma": trial.suggest_float("mt_focal_gamma", 1.0, 2.5),
             "mt_class_balance_weight": trial.suggest_float("mt_class_balance_weight", 0.05, 0.30),
         }
@@ -610,7 +608,6 @@ def _sample_params(
             "num_layers": trial.suggest_int("num_layers", 2, 6),
             "dropout": trial.suggest_float("dropout", 0.1, 0.45),
             "batch_size": trial.suggest_categorical("batch_size", batch_choices),
-            "mt_direction_weight_floor": trial.suggest_float("mt_direction_weight_floor", 0.20, 0.50),
             "mt_focal_gamma": trial.suggest_float("mt_focal_gamma", 1.0, 2.5),
             "mt_class_balance_weight": trial.suggest_float("mt_class_balance_weight", 0.05, 0.30),
         }
@@ -625,7 +622,6 @@ def _sample_params(
             "num_layers": trial.suggest_int("num_layers", 2, 8),
             "dropout": trial.suggest_float("dropout", 0.1, 0.4),
             "batch_size": trial.suggest_categorical("batch_size", batch_choices),
-            "mt_direction_weight_floor": trial.suggest_float("mt_direction_weight_floor", 0.20, 0.50),
             "mt_focal_gamma": trial.suggest_float("mt_focal_gamma", 1.0, 2.5),
             "mt_class_balance_weight": trial.suggest_float("mt_class_balance_weight", 0.05, 0.30),
         }
@@ -668,7 +664,6 @@ def _build_trial_config(
         cfg["training"]["lr"] = float(f"{params['lr']:.2e}")
         cfg["training"]["batch_size"] = int(params["batch_size"])
 
-        cfg["multitask"]["direction_weight_floor"] = float(f"{params['mt_direction_weight_floor']:.3f}")
         cfg["multitask"]["focal_gamma"] = float(f"{params['mt_focal_gamma']:.3f}")
         cfg["multitask"]["class_balance_weight"] = float(f"{params['mt_class_balance_weight']:.3f}")
 

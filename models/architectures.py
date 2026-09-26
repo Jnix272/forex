@@ -405,13 +405,29 @@ if TORCH:
 
     class MultiTaskLoss(nn.Module):
         """
-        Weighted combination of supervised objectives for pure regression:
-          L = w_dir  * Huber(direction, y_cont)
-            + w_ret  * Huber(return_hat, y_cont)
-            + w_conf * BCE(confidence, abs(y_cont) > 0.0001)
+        Multi-task objective (audit 2026-09-25 S1-S6):
 
-        Typical weights: w_dir=1.0, w_ret=0.5, w_conf=0.3
+          direction : BCE(logit, y_cls == BUY) on BUY/SELL rows only (HOLD rows are
+                      masked out), with per-class weights, label smoothing and an
+                      optional focal factor. The CPAR y_cls labels are cost-aware,
+                      so the head learns "which side clears costs", not the sign of
+                      the mid move.
+          trade     : BCE(conf, y_cls != HOLD) - the confidence head predicts
+                      whether a trade clears costs at all; decide() gates on it.
+          return    : Huber(return_hat, clip(y_cont, +/-target_clip)) - tails of
+                      the ATR-normalised reward no longer dominate.
+          balance   : class_balance_weight * (mean P(buy) - 0.5)^2 - discourages
+                      collapsing to one side.
+          sharpe    : optional -w_sharpe * batch Sharpe of tanh(logit) * y_cont.
+          quantiles : pinball loss on q_low / q_high (clipped target).
+
+        Every term is a per-sample vector combined with ``bet_size`` (per-sample
+        weights: period balance, curriculum) as a weighted mean. Unknown keyword
+        arguments raise, so config options can no longer be silently dropped.
         """
+
+        _ACCEPTED = {"class_weights", "focal_gamma", "label_smoothing", "class_balance_weight",
+                     "w_sharpe", "sharpe_ann", "target_clip", "recon_w", "vol_w"}
 
         def __init__(
             self,
@@ -423,9 +439,18 @@ if TORCH:
             vol_w: float = 0.05,
             w_quantile: float = 0.2,
             quantiles: tuple[float, float] = (0.05, 0.95),
+            class_weights: "torch.Tensor | None" = None,
+            focal_gamma: float = 0.0,
+            label_smoothing: float = 0.0,
+            class_balance_weight: float = 0.0,
+            w_sharpe: float = 0.0,
+            sharpe_ann: float = 1.0,
+            target_clip: float = 5.0,
             **kwargs,
         ):
             super().__init__()
+            if kwargs:
+                raise TypeError(f"MultiTaskLoss: unsupported options {sorted(kwargs)} (they would be ignored)")
             self.w_dir = w_dir
             self.w_ret = w_ret
             self.w_conf = w_conf
@@ -435,12 +460,27 @@ if TORCH:
             self.bce = nn.BCEWithLogitsLoss(reduction="none")
             self.recon_w = recon_w
             self.vol_w = vol_w
+            self.focal_gamma = float(focal_gamma or 0.0)
+            self.label_smoothing = float(label_smoothing or 0.0)
+            self.class_balance_weight = float(class_balance_weight or 0.0)
+            self.w_sharpe = float(w_sharpe or 0.0)
+            self.sharpe_ann = float(sharpe_ann or 1.0)
+            self.target_clip = float(target_clip) if target_clip else 0.0
+            cw = torch.ones(3) if class_weights is None else torch.as_tensor(class_weights, dtype=torch.float32).reshape(-1)[:3]
+            self.register_buffer("class_weights", cw.float())
 
         @staticmethod
         def _pinball_loss(pred: torch.Tensor, target: torch.Tensor, q: float) -> torch.Tensor:
             """Pinball loss for quantile q in (0,1)."""
             diff = target - pred
             return torch.where(diff >= 0, q * diff, (q - 1) * diff)
+
+        @staticmethod
+        def _wmean(v: torch.Tensor, w: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+            if mask is not None:
+                w = w * mask.float()
+            den = w.sum()
+            return (v * w).sum() / den if float(den) > 0 else v.sum() * 0.0
 
         def forward(
             self,
@@ -458,33 +498,59 @@ if TORCH:
             q_low: torch.Tensor | None = None,
             q_high: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            logits_flat = logits.reshape_as(y_cont)
-            ret_flat = ret_hat.reshape_as(y_cont)
-            conf_flat = conf.reshape_as(y_cont)
-            l_huber_dir = self.hub(logits_flat, y_cont)
-            tgt_dir = (y_cont > 0).float()
-            tgt_dir = torch.where(y_cont == 0, torch.full_like(tgt_dir, 0.5), tgt_dir)
-            l_bce_dir = self.bce(logits_flat, tgt_dir)
-            l_dir = l_huber_dir + l_bce_dir
-            l_ret = self.hub(ret_flat, y_cont)
-            
-            tgt_conf = (y_cont.abs() > 0.0001).float() if y_conf is None else y_conf.reshape_as(y_cont)
-            l_conf = self.bce(conf_flat, tgt_conf)
-            
-            loss = self.w_dir * l_dir.mean() + self.w_ret * l_ret.mean() + self.w_conf * l_conf.mean()
-            
+            logit = logits.reshape_as(y_cont).float()
+            ret = ret_hat.reshape_as(y_cont).float()
+            cf = conf.reshape_as(y_cont).float()
+            # y_cls arrives as a class index {0: SELL, 1: HOLD, 2: BUY}; without it
+            # fall back to the sign of the reward.
+            if y_cls is None:
+                cls = (torch.sign(y_cont) + 1).long().clamp(0, 2)
+            else:
+                cls = y_cls.reshape_as(y_cont).long().clamp(0, 2)
+            w = torch.ones_like(y_cont, dtype=torch.float32)
+            if bet_size is not None:
+                w = w * bet_size.reshape(-1, *([1] * (y_cont.dim() - 1))).expand_as(y_cont).float()
+
+            # Direction: BUY vs SELL on tradable rows only.
+            trade = cls != 1
+            tgt = (cls == 2).float()
+            if self.label_smoothing > 0:
+                tgt = tgt * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+            l_dir = self.bce(logit, tgt)
+            if self.focal_gamma > 0:
+                p = torch.sigmoid(logit)
+                p_t = torch.where(cls == 2, p, 1 - p)
+                l_dir = l_dir * (1 - p_t).clamp(min=0).pow(self.focal_gamma)
+            w_cls = self.class_weights.to(logit.device)[cls]
+            loss = self.w_dir * self._wmean(l_dir, w * w_cls, trade)
+
+            # Trade (abstain) head: does this row clear costs at all?
+            tgt_trade = trade.float() if y_conf is None else y_conf.reshape_as(y_cont).float()
+            loss = loss + self.w_conf * self._wmean(self.bce(cf, tgt_trade), w)
+
+            # Return head on a winsorised target.
+            y_reg = y_cont.float()
+            if self.target_clip > 0:
+                y_reg = y_reg.clamp(-self.target_clip, self.target_clip)
+            loss = loss + self.w_ret * self._wmean(self.hub(ret, y_reg), w)
+
+            if self.class_balance_weight > 0:
+                loss = loss + self.class_balance_weight * (torch.sigmoid(logit).mean() - 0.5).pow(2)
+            if self.w_sharpe > 0 and y_cont.numel() > 2:
+                pnl = torch.tanh(logit) * y_reg
+                sr = pnl.mean() / (pnl.std() + 1e-6) * (self.sharpe_ann ** 0.5)
+                loss = loss - self.w_sharpe * sr
             if recon_hat is not None and recon_tgt is not None and self.recon_w > 0:
-                loss += self.recon_w * self.hub(recon_hat, recon_tgt).mean()
+                loss = loss + self.recon_w * self.hub(recon_hat, recon_tgt).mean()
             if vol_hat is not None and vol_tgt is not None and self.vol_w > 0:
-                loss += self.vol_w * self.hub(vol_hat, vol_tgt).mean()
+                loss = loss + self.vol_w * self.hub(vol_hat, vol_tgt).mean()
             if self.w_quantile > 0:
                 if q_low is not None:
-                    l_q_low = self._pinball_loss(q_low, y_cont, self.quantiles[0])
-                    loss += self.w_quantile * l_q_low.mean()
+                    l_q = self._pinball_loss(q_low.reshape_as(y_reg), y_reg, self.quantiles[0])
+                    loss = loss + self.w_quantile * self._wmean(l_q, w)
                 if q_high is not None:
-                    l_q_high = self._pinball_loss(q_high, y_cont, self.quantiles[1])
-                    loss += self.w_quantile * l_q_high.mean()
-                
+                    l_q = self._pinball_loss(q_high.reshape_as(y_reg), y_reg, self.quantiles[1])
+                    loss = loss + self.w_quantile * self._wmean(l_q, w)
             return loss
 
     class MultiTaskWrapper(nn.Module):

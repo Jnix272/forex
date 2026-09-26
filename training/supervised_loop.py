@@ -2464,6 +2464,11 @@ def supervised_train(
         # Lower robust score → flatter minimum → prefer this checkpoint.
         # Falls back to plain val_loss when SACS is disabled or fails.
         _sacs_score = vl  # default: no sharpness penalty
+        # S7: when the honest metric exists, select on its 95% CI lower bound
+        # (lower score = better, so negate). Validation loss is a poor proxy
+        # for trade quality with heavy-tailed targets.
+        _hm_sel = getattr(validate_epoch, "last_honest", None) or {}
+        _select_on_honest = bool(_hm_sel) and int(_hm_sel.get("n_trades", 0)) >= 30
         if _sacs_enabled:
             try:
                 _core_now = _core_model(model)
@@ -2495,6 +2500,8 @@ def supervised_train(
         if _best_from_warmup and not _direction_warmup_active:
             _best_sacs_score = float("inf")
             _best_from_warmup = False
+        if _select_on_honest and not _sacs_enabled:
+            _sacs_score = -float(_hm_sel.get("sharpe_net_ci_low", 0.0))
         improved = _sacs_score < _best_sacs_score
         if improved:
             _best_from_warmup = _direction_warmup_active
@@ -2529,10 +2536,11 @@ def supervised_train(
             # Use SACS score as the base (already sharpness-penalised) so dynamic stop
             # and SACS checkpoint selection agree on what "better" means. Fall back to
             # vl when SACS is disabled.
-            _des_base_score = _sacs_score if _sacs_enabled else vl
+            _des_base_score = _sacs_score if (_sacs_enabled or _select_on_honest) else vl
             # No SI/EWC credit: subtracting a term that grows with the epoch count made
-            # the composite "improve" on its own, so patience never ran out.
-            _composite = _des_base_score - 0.1 * _sharpe_signal
+            # the composite "improve" on its own, so patience never ran out. When
+            # selecting on the honest CI bound the score already is the Sharpe signal.
+            _composite = _des_base_score if _select_on_honest else _des_base_score - 0.1 * _sharpe_signal
 
             # EMA-smooth the composite (reduces single-epoch noise)
             if _des_ema is None:

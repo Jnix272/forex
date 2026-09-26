@@ -121,3 +121,23 @@
 4. **S5, S6, S10, S11:** robust targets, a meaningful confidence target, HOLD-aware accuracy, full costs, realised-trade annualisation, and a timestamp-block bootstrap.
 
 Items 1–3 change what every model learns and how it's selected, so do them before the post-rebuild retrain.
+
+---
+
+## Fix log
+
+| # | Fix |
+|---|---|
+| S1 | `MultiTaskLoss` implements `class_weights`, `focal_gamma`, `label_smoothing`, `class_balance_weight` (penalty on mean P(buy) − 0.5) and `w_sharpe`. Unknown options raise `TypeError`. `direction_weight_floor`, `entropy_weight` and `class_prior` were removed from the caller, and `mt_direction_weight_floor` from Optuna. |
+| S2 | Direction is a BCE on `y_cls` (BUY vs SELL) over tradable rows; HOLD rows are masked. With no `y_cls`, it falls back to the sign of the reward. |
+| S3 | No Huber on the direction logit, in either full training or direction warm-up. |
+| S4 | Every term is a per-sample weighted mean using `bet_size` (period balance and curriculum weights now apply). |
+| S5 | The regression target is winsorised to ±`training.regression_target_clip` (default 5). |
+| S6 | The confidence head predicts tradability (`y_cls != HOLD`). |
+| S7 | With the honest metric available (≥ 30 trades), the checkpoint is selected on −(95% CI lower bound of the net Sharpe), and early stopping uses the same score. |
+| S8 | `training/decision.py`: `action_proba` / `decide` form [SELL, HOLD, BUY] = [(1−p_buy)·p_trade, 1−p_trade, p_buy·p_trade] with the 0.45 threshold. Validation, the gate's holdout backtest and live (PyTorch and the ONNX wrapper, which now outputs log action-probabilities) all use it. |
+| S9 | `validate_epoch` returns the honest net Sharpe as `val_sharpe` (history, collapse controller, early stop, Optuna). The label Sharpe is kept as `last_label_sharpe` for diagnostics. |
+| S10 | With HOLD decisions possible, 3-class accuracy compares like with like. |
+| S11 | The honest metric adds commission and slippage (`EXECUTION.honest_extra_cost_pips`, default 1 pip, in each pair's own pips), annualises by realised trades per calendar year, and pools pairs into one equal-weight portfolio return per timestamp. The gate uses the same `periods_per_year`. |
+
+**Tests:** `tests/test_loss_sharpe_fixes_2026_09_25.py` plus updated gate and honest-eval tests. In the wider loss, metric, inference and gate run, the 5 remaining failures all fail on the prior commit too.

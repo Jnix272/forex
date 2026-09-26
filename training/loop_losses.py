@@ -79,10 +79,14 @@ def _compute_loss(
             # MultiTaskLoss.forward expects (logits, ret, conf, y_cls, y_cont, ...);
             # calling it with 2 args would TypeError or mis-bind.
             if isinstance(crit, (MultiTaskLoss, MultiPairMultiTaskLoss)):
-                # Keep batch and pair dimensions intact for proper bet_size broadcast
-                y_cont = _match_target_shape(logits, yb)
-                l_hub = cast(Any, crit).hub(logits, y_cont)
-                return _apply_bet_size(l_hub, bet_size).mean()
+                # Same direction objective as full training (BUY vs SELL BCE on
+                # tradable rows); Huber on the logit fought the BCE (audit S3).
+                _mt = crit.single_loss if isinstance(crit, MultiPairMultiTaskLoss) else crit
+                _yi = y_cls_idx.reshape(logits.shape).long().clamp(0, 2)
+                _trade = (_yi != 1).float()
+                _l = _mt.bce(logits.float(), (_yi == 2).float()) * _trade
+                _l = _apply_bet_size(_l, bet_size)
+                return _l.sum() / _trade.sum().clamp(min=1.0)
             try:
                 if isinstance(crit, nn.CrossEntropyLoss):
                     if logits.ndim == 3 and y_cls_idx.ndim == 2:
@@ -425,6 +429,10 @@ def build_criterion(
             w_ret=float(getattr(args, "mt_w_ret", 0.5)),
             w_conf=float(getattr(args, "mt_w_conf", 0.3)),
             huber_delta=d,
+            focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
+            class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
+            label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
+            target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
             w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
             quantiles=(0.05, 0.95),
         ).to(device)
@@ -449,6 +457,7 @@ def build_criterion(
         w_sharpe = float(getattr(args, "sharpe_weight", 0.0)) if loss_str == "sharpe_huber" else 0.0
         from training.train_gpu import _sharpe_ann_factor
         sharpe_ann = _sharpe_ann_factor(args) if w_sharpe > 0 else 1.0
+        del cp  # the class prior now enters through class_weights only
         return MultiTaskLoss(  # type: ignore
             class_weights=cw,
             w_dir=1.0,
@@ -456,13 +465,11 @@ def build_criterion(
             w_conf=float(getattr(args, "mt_w_conf", 0.3)),
             huber_delta=d,
             class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
-            entropy_weight=float(getattr(args, "mt_entropy_weight", 0.0)),
-            direction_weight_floor=float(getattr(args, "mt_direction_weight_floor", 0.0)),
             focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
-            class_prior=cp,
             w_sharpe=w_sharpe,
             sharpe_ann=sharpe_ann,
             label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
+            target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
             w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
             quantiles=(0.05, 0.95),
         ).to(device)  # type: ignore

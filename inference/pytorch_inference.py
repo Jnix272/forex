@@ -345,6 +345,15 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         x = self._torch.as_tensor(scaled[np.newaxis], dtype=self._torch.float32, device=self.device)
         with self._torch.no_grad():
             logits = self.model(x)
+            if isinstance(logits, (tuple, list)) and len(logits) >= 3:
+                # Multitask heads: same [SELL, HOLD, BUY] rule as validation and
+                # the gate (training.decision); select_action then applies
+                # hold_threshold to it.
+                from models.ensemble import PRIMARY_PAIR_INDEX
+                from training.decision import action_proba
+
+                pr = action_proba(logits).detach().cpu().numpy()[0]
+                return (pr[PRIMARY_PAIR_INDEX] if pr.ndim == 2 else pr).astype(np.float32)
             if isinstance(logits, (tuple, list)):
                 logits = logits[0]
             if hasattr(logits, "detach"):

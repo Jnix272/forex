@@ -28,6 +28,26 @@ _FX_BARS_PER_DAY = {
 }
 
 
+def _default_extra_cost_pips() -> float:
+    try:
+        from config.settings import EXECUTION
+
+        return float(EXECUTION.get("honest_extra_cost_pips", 1.0))
+    except Exception:
+        return 1.0
+
+
+def _pair_pip(name: str | None) -> float | None:
+    if not name or name.startswith("pair_"):
+        return None
+    try:
+        from config.settings import get_pip_size
+
+        return float(get_pip_size(name))
+    except Exception:
+        return None
+
+
 def fx_bars_per_year(bar_freq: str = "5min") -> int:
     return _FX_BARS_PER_DAY.get(str(bar_freq or "5min").lower(), 288) * FX_DAYS_PER_YEAR
 
@@ -41,8 +61,15 @@ def net_pnl_metrics(
     *,
     bars_per_year: int = 288 * FX_DAYS_PER_YEAR,
     min_trades: int = 30,
+    extra_cost_pips: float | None = None,
+    pip_size: float | None = None,
 ) -> dict:
-    """Net-of-spread, non-overlapping per-trade metrics.
+    """Net-of-cost, non-overlapping per-trade metrics.
+
+    Cost per round trip = the bar's spread + ``extra_cost_pips`` (commission +
+    slippage; default EXECUTION.honest_extra_cost_pips = 1.0) in the pair's pips.
+    Annualised by *realised* trades per calendar year of the sample span (trades
+    skip HOLD bars, so sqrt(bars_per_year / h) overstated it).
 
     directions : per-sample position in {-1, 0, +1} (or signed scores; sign is used)
     sample_idx : cache row index for each direction (ascending)
@@ -77,13 +104,23 @@ def net_pnl_metrics(
         cost = np.abs(sp) / entry
     else:
         cost = np.zeros_like(gross)
+    if extra_cost_pips is None:
+        extra_cost_pips = _default_extra_cost_pips()
+    if extra_cost_pips:
+        _pip = float(pip_size) if pip_size else np.where(entry > 20.0, 0.01, 0.0001)
+        cost = cost + float(extra_cost_pips) * _pip / entry
     net = gross - cost
 
     n = len(net)
     out["n_trades"] = int(n)
     if n < 2:
         return out
-    ann = math.sqrt(bars_per_year / h)
+    # Realised trades per year over the sample's calendar span.
+    _span_bars = float(np.max(sample_idx) - np.min(sample_idx) + h) if len(sample_idx) else float(h)
+    _years = max(_span_bars / float(bars_per_year), 1e-9)
+    trades_per_year = n / _years
+    ann = math.sqrt(trades_per_year)
+    out["trades_per_year"] = float(trades_per_year)
     sd_n, sd_g = net.std(ddof=1), gross.std(ddof=1)
     out["sharpe_net"] = float(net.mean() / sd_n * ann) if sd_n > 0 and n >= min_trades else 0.0
     out["sharpe_gross"] = float(gross.mean() / sd_g * ann) if sd_g > 0 and n >= min_trades else 0.0
@@ -91,6 +128,7 @@ def net_pnl_metrics(
     out["mean_ret_bps"] = float(net.mean() * 1e4)
     out["cost_bps"] = float(cost.mean() * 1e4)
     out["_net_returns"] = net  # for pooling across pairs; not a scalar metric
+    out["_idx"] = idx
     out["_gross_returns"] = gross
     out["_costs"] = cost
     if n >= min_trades:
@@ -151,14 +189,18 @@ def pooled_pair_metrics(
     d = np.asarray(directions, dtype=np.float64)
     n_p = d.shape[1]
     names = pair_names or [f"pair_{k}" for k in range(n_p)]
-    per_pair, pooled, pooled_gross, pooled_cost = {}, [], [], []
+    per_pair, pooled, pooled_gross, pooled_cost, pooled_idx = {}, [], [], [], []
     for k in range(n_p):
         m = net_pnl_metrics(
             d[:, k], sample_idx, close_pairs[:, k],
             None if spread_pairs is None else spread_pairs[:, k],
             horizon, bars_per_year=bars_per_year, min_trades=min_trades,
+            pip_size=_pair_pip(names[k]),
         )
         r = m.pop("_net_returns", None)
+        ix = m.pop("_idx", None)
+        if r is not None and ix is not None:
+            pooled_idx.append(np.asarray(ix))
         g = m.pop("_gross_returns", None)
         c = m.pop("_costs", None)
         if r is not None:
@@ -171,12 +213,21 @@ def pooled_pair_metrics(
            "sharpe_net_ci_low": 0.0, "sharpe_net_ci_high": 0.0, "sharpe_net_p_le_0": 1.0,
            "per_pair": per_pair}
     if pooled:
-        net = np.concatenate(pooled)
-        out["_net_returns"] = net
+        trades = np.concatenate(pooled)
         out["_gross_returns"] = np.concatenate(pooled_gross)
         out["_costs"] = np.concatenate(pooled_cost)
-        ann = math.sqrt(bars_per_year / max(1, int(horizon)))
-        out["n_trades"] = int(len(net))
+        out["n_trades"] = int(len(trades))
+        # One equal-weight portfolio return per decision timestamp: correlated
+        # pairs (EURUSD/GBPUSD ~0.8) at the same bar are not independent trades.
+        ts = np.concatenate(pooled_idx)
+        uniq, inv = np.unique(ts, return_inverse=True)
+        net = np.bincount(inv, weights=trades) / np.bincount(inv)
+        out["_net_returns"] = net
+        out["n_portfolio_periods"] = int(len(net))
+        _span = float(ts.max() - ts.min() + max(1, int(horizon))) if len(ts) else float(horizon)
+        ppy = len(net) / max(_span / float(bars_per_year), 1e-9)
+        out["trades_per_year"] = float(ppy)
+        ann = math.sqrt(ppy)
         if len(net) >= min_trades and net.std(ddof=1) > 0:
             out["sharpe_net"] = float(net.mean() / net.std(ddof=1) * ann)
             out["win_rate"] = float((net > 0).mean())
@@ -317,13 +368,11 @@ def holdout_gate_metrics(
                 xb = scaler.transform(xb.reshape(-1, shp[-1])).astype(np.float32).reshape(shp)
                 np.clip(xb, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=xb)
             out = model(torch.from_numpy(xb).to(dev))
-            logit = out[0] if isinstance(out, (tuple, list)) else out
-            logit = logit.detach().float().cpu().numpy()
-            if logit.ndim == 2 and logit.shape[-1] == 3:  # sell/hold/buy classes
-                d = logit.argmax(-1).astype(np.float64) - 1.0
-            else:  # scalar or per-pair direction logits
-                d = np.sign(logit.reshape(len(b), -1)).astype(np.float64)
-                d = d[:, 0] if d.shape[1] == 1 else d
+            from training.decision import decide
+
+            # Same confidence-gated rule as validation and live (audit S8).
+            d = decide(out).detach().cpu().numpy().astype(np.float64).reshape(len(b), -1)
+            d = d[:, 0] if d.shape[1] == 1 else d
             rows.append(d)
     dirs = np.concatenate(rows, axis=0)
     bpy = fx_bars_per_year(bar_freq)
@@ -345,8 +394,9 @@ def holdout_gate_metrics(
         "sharpe": float(m.get("sharpe_net", 0.0)),
         "n_trades": int(m.get("n_trades", 0)),
         "returns": net,
-        # Non-overlapping trades are spaced h bars apart -> bars_per_year / h per year.
-        "periods_per_year": bpy / h,
+        # Realised trades (portfolio periods for per-pair models) per calendar year;
+        # the same scale the Sharpe was annualised on.
+        "periods_per_year": float(m.get("trades_per_year") or bpy / h),
         "sharpe_ci_low": float(m.get("sharpe_net_ci_low", 0.0)),
         "sharpe_ci_high": float(m.get("sharpe_net_ci_high", 0.0)),
         "per_pair": {k: v.get("sharpe_net") for k, v in (m.get("per_pair") or {}).items()},

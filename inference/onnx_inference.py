@@ -158,6 +158,17 @@ def _wrap_logits_output(model):
 
         def forward(self, x):
             out = self.inner(x)
+            if isinstance(out, (tuple, list)) and len(out) >= 3:
+                # Multitask heads -> log of the shared [SELL, HOLD, BUY] action
+                # probabilities (training.decision), so softmax downstream (Python
+                # or C++) reproduces the rule validation and the gate scored.
+                from models.ensemble import PRIMARY_PAIR_INDEX
+                from training.decision import action_proba
+
+                pr = action_proba(out)
+                if pr.dim() == 3:
+                    pr = pr[:, PRIMARY_PAIR_INDEX, :]
+                return torch.log(pr.clamp_min(1e-9))
             if isinstance(out, (tuple, list)):
                 return out[0]
             if isinstance(out, dict):

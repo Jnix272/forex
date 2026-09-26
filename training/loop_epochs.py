@@ -33,6 +33,7 @@ from training.loop_batches import (
     _sanitize_batch_tensors,
     _unpack_batch,
 )
+from training.decision import decide
 from training.loop_losses import _build_train_loss, _compute_loss
 from training.loop_optim import _optimizer_step
 
@@ -528,7 +529,7 @@ def validate_epoch(
                     )
 
                     if isinstance(pred, tuple):
-                        logits, ret_hat, _conf = pred
+                        logits, ret_hat = pred[0], pred[1]  # may carry quantile/aux outputs too
                         loss = _compute_loss(
                             pred,
                             crit,
@@ -549,8 +550,11 @@ def validate_epoch(
                                 pbar.set_postfix(loss="NaN-skip")
                             continue
                         total += loss
-                        pred_cls = _accumulate_class_diag(logits, y_cls_idx)
-                        d = pred_cls.float() - 1.0
+                        # S8: the shared live decision rule (confidence-gated, HOLD
+                        # allowed), not sign(logit) on every row.
+                        d = decide(pred)
+                        _onehot = torch.nn.functional.one_hot((d + 1).long().clamp(0, 2), 3).float()
+                        _accumulate_class_diag(_onehot, y_cls_idx.reshape(d.shape))
                     elif classification:
                         loss = _compute_loss(
                             pred,
@@ -824,7 +828,13 @@ def validate_epoch(
             print(f"[Val][honest] failed: {_he}")
     validate_epoch.last_cost_sharpe = cost_sharpe
     validate_epoch.last_dir_sharpe = sharpe
+    validate_epoch.last_label_sharpe = sharpe  # diagnostic only: sign x CPAR label
     validate_epoch.last_ann_factor = ann
+    _hm_final = getattr(validate_epoch, "last_honest", None)
+    if _hm_final:
+        # S9: the Sharpe every consumer sees (history["val_sharpe"], collapse
+        # controller, early stopping, Optuna) is the price-based net Sharpe.
+        return val_loss, dir_acc, float(_hm_final.get("sharpe_net", 0.0))
     return val_loss, dir_acc, sharpe
 
 
