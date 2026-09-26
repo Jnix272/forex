@@ -182,7 +182,9 @@ def _get_cache_path(args) -> Path:
 # multipair lookahead, unit-free eco surprise, no synthetic yields.
 # a0925b: per-pair y/close/spread arrays + row timestamps; scalar label is the
 # market pair's own (was the 4-pair average); news sentiment in calendar mode.
-DATASET_BUILD_VERSION = "a0925b"
+# a0925c: JPY ask price no longer overwritten by the spread; tick frames with a
+# datetime index (fresh downloads) keep their pair; HMM/factor/vol-clock fixes.
+DATASET_BUILD_VERSION = "a0925c"
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")

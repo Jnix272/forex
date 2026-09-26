@@ -393,13 +393,10 @@ def resample_to_bars(
         if median_spread is not None and median_spread > 0:
             cap = median_spread * spread_cap_multiplier
             df = df.with_columns(pl.col("spread").clip(upper_bound=cap).alias("spread"))
-            # Recalculate mid based on capped spread
-            df = df.with_columns(
-                [
-                    ((pl.col("bid") + pl.col("ask")) / 2).alias("mid"),
-                    pl.col("ask") - pl.col("bid").alias("spread_check"),  # verify
-                ]
-            )
+            # Recalculate mid. (A stray `pl.col("ask") - pl.col("bid").alias(...)`
+            # here was named "ask" and overwrote every JPY ask price with the
+            # spread, ~0.005: JPY labels lost their cost, spread features broke.)
+            df = df.with_columns(((pl.col("bid") + pl.col("ask")) / 2).alias("mid"))
             print(f"[Resample] {pair}: Applied spread cap of {cap:.5f} ({spread_cap_multiplier}x median)")
 
     bars = (

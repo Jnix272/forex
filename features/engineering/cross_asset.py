@@ -153,6 +153,7 @@ class CrossAssetFeatures:
         own returns (``forex_ret``) as a ``PRIMARY`` series. Requires at least
         two assets; otherwise returns F unchanged.
         """
+        import numpy as np
         import pandas as pd
 
         from features.cross_asset_factors import build_cross_asset_factors
@@ -167,6 +168,15 @@ class CrossAssetFeatures:
             {c[:-4]: F[c].to_numpy() for c in ret_cols},
             index=range(len(F)),
         )
+        # Daily assets forward-filled onto intraday bars are mostly exact zeros /
+        # NaN; with those, the rolling least squares hit "SVD did not converge" in
+        # every window and no factor features were produced. Clean the panel and
+        # drop columns that barely move.
+        panel = panel.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        _moving = (panel != 0.0).mean(axis=0) >= 0.05
+        panel = panel.loc[:, _moving & (panel.std(axis=0) > 1e-12)]
+        if panel.shape[1] < 2:
+            return F
         fact = build_cross_asset_factors(
             panel,
             n_factors=3,

@@ -508,6 +508,10 @@ def add_volatility_clock_features(df: pl.DataFrame, day_period: int | None = Non
                 _med_s = _dt.dt.total_seconds().median()
                 if _med_s and _med_s > 0:
                     day_period = max(1, int(round(86400 / float(_med_s))))
+    # Lookback must fit in the frame (each build window is ~5 days + warm-up with
+    # weekend gaps): with k_days=7 at 288 bars/day the rolling mean never filled
+    # and pace/hot stayed constant 0.
+    k_days = int(max(1, min(int(k_days), df.height // max(1, int(day_period)) - 1)))
     ret = (pl.col("close") / pl.col("close").shift(1)).log().abs()
     mins_day = pl.col("timestamp_utc").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp_utc").dt.minute().cast(
         pl.Int32
@@ -517,7 +521,7 @@ def add_volatility_clock_features(df: pl.DataFrame, day_period: int | None = Non
     refs = [ret.shift(day_period * k) for k in range(1, k_days + 1)]
     ref_mean = pl.sum_horizontal(refs) / k_days
     ref_std = (pl.sum_horizontal([r**2 for r in refs]) / k_days - ref_mean**2).clip(0.0, None).sqrt()
-    typical_daily = ret.rolling_mean(day_period * k_days) * float(day_period)
+    typical_daily = ret.rolling_mean(day_period * k_days, min_samples=day_period) * float(day_period)
     session_cum = ret.cum_sum().over(pl.col("timestamp_utc").dt.date())
     pace = session_cum / (typical_daily + 1e-9)
 

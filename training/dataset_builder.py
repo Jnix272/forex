@@ -1674,6 +1674,26 @@ def _chunk_result(
     )
 
 
+def _ensure_timestamp_column(ticks):
+    """Move a datetime index into a ``timestamp_utc`` column (pandas or polars)."""
+    try:
+        if "timestamp_utc" in ticks.columns:
+            return ticks
+        for alt in ("timestamp", "time", "datetime"):
+            if alt in ticks.columns:
+                if isinstance(ticks, pl.DataFrame):
+                    return ticks.rename({alt: "timestamp_utc"})
+                return ticks.rename(columns={alt: "timestamp_utc"})
+        if isinstance(ticks, pd.DataFrame) and isinstance(ticks.index, pd.DatetimeIndex):
+            out = ticks.copy()
+            out.index = out.index.tz_localize("UTC") if out.index.tz is None else out.index.tz_convert("UTC")
+            out = out.rename_axis("timestamp_utc").reset_index()
+            return out
+    except Exception:
+        pass
+    return ticks
+
+
 def _build_chunk(
     ticks_chunk,  # pd.DataFrame or pl.DataFrame - handed to ForexDataPipeline.run, which auto-converts
     fe: FeatureEngineer,
@@ -1726,8 +1746,13 @@ def _build_chunk(
         _update_pair_readiness_raw(pair, ticks_chunk)
         return _chunk_result(*_empty, 0, _empty_time)
     _update_pair_readiness_raw(pair, ticks_chunk)
+    ticks_chunk = _ensure_timestamp_column(ticks_chunk)
     if "timestamp_utc" not in ticks_chunk.columns:
-        return _chunk_result(*_empty, 0, _empty_time)
+        # Was a silent empty return: freshly downloaded ticks (timestamp in the
+        # index) dropped a whole pair (USDCAD) while its raw ticks were counted.
+        raise ValueError(
+            f"[{pair}] tick frame has no timestamp_utc column or datetime index; columns={list(ticks_chunk.columns)}"
+        )
 
     pipeline = ForexDataPipeline(
         bar_freq=str(bar_freq or "1min"),

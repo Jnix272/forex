@@ -691,3 +691,33 @@ The config enables some of these (`feature_store.enabled`, `drift_detection.enab
 ### Next
 - Wire `trading/preflight_check.py` into the live engine (M4).
 - Rebuild dataset → baseline model (D6) → retrain.
+
+---
+
+## Dataset build check (2026-09-25, 3-week 4-pair build, 2024-03-04 → 03-22)
+
+A real `--build-only` run of the current code, inspected array by array. Problems found and fixed:
+
+| Problem | Effect | Fix |
+|---|---|---|
+| `resample_to_bars`: `pl.col("ask") - pl.col("bid").alias("spread_check")` is named `ask` and **overwrote every JPY ask price with the spread** (~0.005). Present since `dfe4103`. | USDJPY `ask_close` ≈ 0: cost-aware labels lost their spread (0% HOLD), and spread features and cached spread were wrong. | Stray expression removed; JPY spread now 0.50 pips, HOLD share 16.5%. |
+| Freshly downloaded ticks carry the timestamp in the **index**; `_build_chunk` silently returned nothing without a `timestamp_utc` column. | **USDCAD dropped entirely** (2.19M raw ticks → 0 bars); the pair readiness gate failed. | `_ensure_timestamp_column` moves a datetime index into the column; a missing timestamp now raises instead of dropping the pair. |
+| HMM regime decode: singular covariance. | Every window fell back to uniform "regime" probabilities. | Symmetrise + 1e-4 ridge, `allow_singular=True`. |
+| Cross-asset factor model: "SVD did not converge". | No PCA/Granger/lead-lag factor features in any window. | The panel is cleaned (inf/NaN → 0) and rarely moving (forward-filled daily) columns are dropped first. |
+| Cross-asset loader tried stooq first for every asset (4 symbols × 15 s timeouts) even with a cached Yahoo copy, and mislabelled the provider. | ~60 s per series, ~20 min per build. | Checks every provider's cache first, skips a provider after it fails outright, logs the provider that answered. Build time went from 1,643 s to 582 s. |
+| Volatility clock: 7-day lookback longer than a build window. | `vol_clock_pace` / `vol_clock_hot` constant. | Lookback adapts to the available days (min 1 day of samples). |
+
+**Verified on the rebuilt cache:**
+- all arrays are row-aligned, with timestamps monotonic, none missing and no duplicates
+- the scalar label equals the market pair's label 100% of the time
+- per-pair label mix is 38–43% SELL / 14–26% HOLD / 36–43% BUY
+- BUY/SELL labels agree with the forward price move for all pairs (BUY +7 to +14 pips, SELL −9 to −18)
+- spreads are 0.2–1.1 pips
+- `ret_*` are on a comparable bps scale across EUR and JPY, `rsi_14` averages 51, `eco_surprise` stays in [−1, 1], `sentiment_raw` varies and `noise_to_signal_60` is bounded
+
+**Expected or acceptable:**
+- constant `fb_0..7` (live placeholders)
+- constant COT columns within a 3-week window (weekly data)
+- raw price levels correlating with the forward return in a short trending sample; they're neutralised in the scaler
+
+`DATASET_BUILD_VERSION` is now `a0925c`.

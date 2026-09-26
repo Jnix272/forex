@@ -326,6 +326,10 @@ def _read_eodhd_daily(
 # ── Main public function ───────────────────────────────────────────────────────
 
 
+# Providers that failed outright in this process are skipped for later assets.
+_PROVIDERS_DOWN: set[str] = set()
+
+
 def load_cross_asset_panel(
     start: str,
     end: str,
@@ -361,18 +365,30 @@ def load_cross_asset_panel(
         if "fred" not in provider_order and asset in FRED_YIELD_SYMBOLS:
             provider_order.append("fred")
 
-        for provider in provider_order:
-            if ser is not None and not ser.empty:
-                used_provider = provider
+        # Any provider's cached copy that covers the range beats a network call
+        # (stooq was tried first every time, ~60 s of timeouts per asset).
+        for _cp in sorted(cdir.glob(f"{asset}_*.parquet")):
+            _cs = _cache_read(_cp, start_ts, end_ts)
+            if _cs is not None and not _cs.empty:
+                ser, used_provider = _cs, _cp.stem.split("_")[1] if "_" in _cp.stem else "cache"
                 break
 
+        for provider in provider_order:
+            if ser is not None and not ser.empty:
+                break
+            if provider in _PROVIDERS_DOWN:
+                continue
+            used_provider = provider
+
             if provider == "stooq":
+                _stooq_any = False
                 for sym in candidates:
                     safe_sym = sym.replace("^", "idx")
                     cache_path = cdir / f"{asset}_stooq_{safe_sym}.parquet"
                     ser = _cache_read(cache_path, start_ts, end_ts)
                     if ser is None or ser.empty:
                         ser = _read_stooq_daily(sym)
+                        _stooq_any = _stooq_any or ser is not None
                         if ser is not None and not ser.empty:
                             _cache_write(cache_path, ser, metadata={"source": "stooq", "symbol": sym, "asset": asset})
                     if ser is not None and not ser.empty:
@@ -384,6 +400,9 @@ def load_cross_asset_panel(
                             t0=_t0_asset,
                         )
                         break
+                if not _stooq_any and (ser is None or ser.empty):
+                    # Every symbol failed to respond: stop paying its timeouts.
+                    _PROVIDERS_DOWN.add("stooq")
 
             elif provider == "yahoo":
                 if asset in _NO_YAHOO_FALLBACK:

@@ -461,7 +461,16 @@ def _causal_hmm_decode(
         n = len(feat)
         framelogprob = np.zeros((n, n_states))
         for i in range(n_states):
-            framelogprob[:, i] = multivariate_normal.logpdf(Z_full, mean=means[i], cov=covars[i])
+            # Symmetrise + small ridge: a constant input column or a sparsely
+            # populated state gave a singular covariance, the decode raised, and
+            # every window fell back to uniform "regime" probabilities.
+            c = np.asarray(covars[i], dtype=float)
+            if c.ndim == 1:
+                c = np.diag(c)
+            c = 0.5 * (c + c.T) + 1e-4 * np.eye(c.shape[0])
+            framelogprob[:, i] = multivariate_normal.logpdf(
+                Z_full, mean=means[i], cov=c, allow_singular=True
+            )
 
         # Forward algorithm with frozen parameters.
         # Guard against exact-zero probabilities (a state absent from the warm-up
