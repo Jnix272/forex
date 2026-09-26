@@ -2441,8 +2441,11 @@ def _build_multipair_chunk(
 
     missing = [p for p in pair_ticks if p not in pair_Xs]
     if missing:
-        print(f"Warning: Required pair(s) produced no usable sequences: {missing}. Continuing with available pairs.")
-    if not pair_Xs:
+        # Skip the whole window. Keeping it zero-filled the missing pair's
+        # features, left its per-pair labels NaN and moved the scalar label and
+        # close/spread to another pair (34% of rows in the a0925c build).
+        _SKIPPED_PAIR_WINDOWS.append({"chunk": int(chunk_idx), "missing": list(missing)})
+        print(f"Warning: Required pair(s) produced no usable sequences: {missing}. Skipping window {chunk_idx}.")
         return _make_return((*_empty8, 0))
 
     # Timestamp inner join. Build explicit timestamp -> row index maps instead
@@ -2899,6 +2902,8 @@ def _parallel_window_worker(worker_args: dict):
         return {"window_idx": worker_args.get("window_idx", -1), "error": traceback.format_exc()}
 
 
+_SKIPPED_PAIR_WINDOWS: list[dict] = []  # windows dropped because a pair had no sequences
+
 _PAIR_EXTRA_KEYS = ("y_pairs", "ycls_pairs", "close_pairs", "atr_pairs", "spread_pairs", "t_ns")
 
 
@@ -3065,10 +3070,27 @@ def _build_multipair_dataset(
         diff = diff_seq if diff_seq is not None else np.zeros(n_rows, dtype=np.uint8)
         return pq, diff
 
+    _last_t_ns = -1
+
     def _append_chunk(
         X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq,
         y_pairs=None, ycls_pairs=None, extras=None,
     ):
+        nonlocal _last_t_ns
+        t = (extras or {}).get("t_ns")
+        if t is not None and len(t) == len(X_seq) and len(t) and int(np.min(t)) >= 0:
+            # Overlapping windows can repeat bars already stored; keep time strictly increasing.
+            keep = np.asarray(t) > _last_t_ns
+            if not keep.all():
+                print(f"[DataQuality] dropped {int((~keep).sum())} row(s) overlapping the previous window")
+                _cut = lambda a: a[keep] if a is not None and hasattr(a, "__len__") and len(a) == len(keep) else a  # noqa: E731
+                X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs, ycls_pairs = map(
+                    _cut, (X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs, ycls_pairs)
+                )
+                extras = {k: _cut(v) for k, v in extras.items()}
+                if len(X_seq) == 0:
+                    return
+            _last_t_ns = int(np.max(extras["t_ns"]))
         _append_chunk_core(
             X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq, y_pairs, ycls_pairs
         )

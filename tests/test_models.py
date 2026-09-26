@@ -819,11 +819,12 @@ class TestMultiPairHelpers:
         assert n_feat == 2
         np.testing.assert_array_equal(X[:, 0, 0], np.asarray([10, 20, 30], dtype=np.float32))
         np.testing.assert_array_equal(X[:, 0, 1], np.asarray([100, 200, 300], dtype=np.float32))
-        np.testing.assert_allclose(y, np.asarray([55, 110, 165], dtype=np.float32))
+        # Scalar label = the market (first) pair's own label, not a cross-pair mean.
+        np.testing.assert_allclose(y, np.asarray([10, 20, 30], dtype=np.float32))
         np.testing.assert_allclose(close, np.asarray([110, 120, 130], dtype=np.float32))
 
-    def test_multipair_chunk_averages_labels(self):
-        """y must be the mean of each pair's label array."""
+    def test_multipair_chunk_scalar_label_is_market_pair(self):
+        """y is the market (first) pair's own label, not the mean across pairs."""
         from sklearn.preprocessing import StandardScaler
 
         from training.train_gpu import _build_multipair_chunk
@@ -858,10 +859,27 @@ class TestMultiPairHelpers:
             )
         np.testing.assert_allclose(
             y_out,
-            ((y_eur + y_gbp) / 2).astype(np.float32),
+            y_eur,
             rtol=1e-5,
-            err_msg="Labels should be the mean across pairs",
+            err_msg="Scalar label should be the market pair's label",
         )
+
+    def test_multipair_chunk_skips_window_with_missing_pair(self):
+        """One pair with no sequences drops the whole window (no zero-filled pair, no NaN labels)."""
+        from sklearn.preprocessing import StandardScaler
+
+        from training.train_gpu import _build_multipair_chunk
+
+        T, F, N = 60, 8, 50
+        pair_ticks = {"EURUSD": "e", "GBPUSD": "g"}
+        scalers = {"EURUSD": StandardScaler(), "GBPUSD": StandardScaler()}
+        with patch(
+            "training.dataset_builder._build_chunk", side_effect=[self._fake_chunk(N, T, F), self._fake_chunk(0, T, F)]
+        ):
+            X, *_ = _build_multipair_chunk(
+                pair_ticks, fe=None, scalers=scalers, seq_len=T, chunk_idx=7, label_method="rl_reward"
+            )
+        assert len(X) == 0
 
     def test_multipair_chunk_empty_pairs_returns_empty(self):
         """When all pairs produce empty arrays the chunk exits gracefully."""

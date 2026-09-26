@@ -1274,6 +1274,27 @@ class ForexDataManager:
         self.duka_compact_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
 
+    STORE_MIN_COVERAGE = 0.98
+
+    def _store_covers(self, df, start: str, end: str, session_only: bool) -> bool:
+        """True when a store result holds >= STORE_MIN_COVERAGE of the requested weekday hours."""
+        hours = list(range(7, 18)) if session_only else None
+        s = pd.Timestamp(start, tz="UTC").to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+        e = pd.Timestamp(end, tz="UTC").to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+        wanted = self.duka._build_tasks_dt(s, e, hours)
+        if not wanted:
+            return True
+        if isinstance(df, pd.DataFrame):
+            if df.empty:
+                return False
+            ts = pd.to_datetime(df["timestamp_utc"], utc=True)
+        else:
+            if df.height == 0:
+                return False
+            ts = pd.to_datetime(df["timestamp_utc"].to_numpy(), utc=True)
+        present = set(pd.DatetimeIndex(ts).floor("h").unique().to_pydatetime().tolist())
+        return sum(dt in present for dt in wanted) / len(wanted) >= self.STORE_MIN_COVERAGE
+
     def load(
         self,
         pair: str,
@@ -1308,6 +1329,11 @@ class ForexDataManager:
                     streaming=streaming,
                     as_pandas=as_pandas,
                 )
+                if not streaming and not self._store_covers(df, start, end, session_only):
+                    # The consolidated store has scattered missing hours (2019 EURUSD:
+                    # 758 of ~2860 session hours). Use the hourly loader, which
+                    # reads its own cache and redownloads what is missing.
+                    raise LookupError(f"store coverage below {self.STORE_MIN_COVERAGE:.0%} for {pair} {start}->{end}")
                 if streaming:
                     # Lazy path: push the session filter down too.
                     if session_only:
@@ -1328,6 +1354,8 @@ class ForexDataManager:
                                 (pl.col("timestamp_utc").dt.hour() >= 7) & (pl.col("timestamp_utc").dt.hour() < 18)
                             )
                         return df
+            except LookupError as e:
+                print(f"[DuckDB] {e}; using hourly loader")
             except Exception as e:
                 print(f"[DuckDB Error] {e}")
 

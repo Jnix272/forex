@@ -184,7 +184,9 @@ def _get_cache_path(args) -> Path:
 # market pair's own (was the 4-pair average); news sentiment in calendar mode.
 # a0925c: JPY ask price no longer overwritten by the spread; tick frames with a
 # datetime index (fresh downloads) keep their pair; HMM/factor/vol-clock fixes.
-DATASET_BUILD_VERSION = "a0925c"
+# a0926a: windows where a pair has no sequences are skipped (were zero-filled with
+# NaN per-pair labels); rows overlapping the previous window are dropped.
+DATASET_BUILD_VERSION = "a0926a"
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")
