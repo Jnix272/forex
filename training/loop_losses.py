@@ -199,6 +199,30 @@ def _compute_loss(
     return base
 
 
+def _per_sample_direction_loss(logits: torch.Tensor, y_cls_idx: torch.Tensor) -> torch.Tensor:
+    """Per-sample direction loss, shape (B,), matching the training objective.
+
+    3-class heads (last dim == 3) use cross-entropy. Single-logit heads, shape
+    (B,), (B, 1) or multi-pair (B, P), use BUY-vs-SELL BCE on tradable rows
+    (class != 1), averaged over pairs; samples with no tradable pair are NaN.
+    """
+    logits = logits.float()
+    batch = logits.shape[0]
+    y_idx = y_cls_idx.long().clamp(0, 2)
+    if logits.ndim >= 2 and logits.shape[-1] == 3 and y_idx.numel() * 3 == logits.numel():
+        ce = torch.nn.functional.cross_entropy(logits.reshape(-1, 3), y_idx.reshape(-1), reduction="none")
+        return ce.reshape(batch, -1).mean(dim=1)
+    if logits.ndim == 2 and logits.shape[1] == 1:
+        logits = logits[:, 0]
+    y_idx = y_idx.reshape(logits.shape)
+    trade = (y_idx != 1).float()
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, (y_idx == 2).float(), reduction="none") * trade
+    total = bce.reshape(batch, -1).sum(dim=1)
+    count = trade.reshape(batch, -1).sum(dim=1)
+    per_sample = total / count.clamp(min=1.0)
+    return torch.where(count > 0, per_sample, torch.full_like(per_sample, float("nan")))
+
+
 def _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classification, multitask):
     if online_miner is None or batch_idx_t is None:
         return
@@ -207,9 +231,10 @@ def _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classifica
             pred_flat = pred[0] if isinstance(pred, tuple) else pred
             if classification or multitask:
                 y_cls_idx = _direction_class_index(yb, y_cls_b, classification=True)
-                per_sample = (pred_flat.argmax(-1) != y_cls_idx).float()
+                per_sample = _per_sample_direction_loss(pred_flat, y_cls_idx)
             else:
-                per_sample = torch.abs(pred_flat.ravel() - yb.ravel())
+                err = torch.abs(pred_flat.float() - _match_target_shape(pred_flat, yb).float())
+                per_sample = err.reshape(err.shape[0], -1).mean(dim=1)
             online_miner.update_batch(
                 batch_idx_t.detach().cpu().numpy(),
                 per_sample.detach().cpu().numpy(),

@@ -103,10 +103,13 @@ def compute_dynamic_si_lambda(
 
 
 class SynapticIntelligence(nn.Module):
+    _PERSISTENT_PREFIXES = ("omega_", "path_integral_", "cached_params_")
+
     def __init__(
         self,
         model: nn.Module,
         epsilon: float = 1e-3,
+        omega_decay: float = 1.0,
     ):
         """
         Initialize Synaptic Intelligence.
@@ -114,10 +117,18 @@ class SynapticIntelligence(nn.Module):
         Args:
             model: The PyTorch model to track.
             epsilon: Small constant to avoid division by zero in importance calculation.
+            omega_decay: Multiplier applied to the accumulated Ω before adding a new
+                task's importance. 1.0 is classic SI (unbounded sum over tasks). When
+                ``update_omega`` runs every epoch, use < 1 so Ω stays bounded at
+                roughly ``importance / (1 - omega_decay)`` instead of growing
+                linearly with epoch count.
         """
         super().__init__()
+        if not 0.0 <= float(omega_decay) <= 1.0:
+            raise ValueError(f"omega_decay must be in [0, 1], got {omega_decay}")
         self.model = model
         self.epsilon = epsilon
+        self.omega_decay = float(omega_decay)
 
         self.params = {n: p for n, p in self.model.named_parameters() if p.requires_grad}
 
@@ -192,11 +203,38 @@ class SynapticIntelligence(nn.Module):
             # Use absolute value for path integral to ensure positive importance,
             # as non-convexity can sometimes result in small negative values locally.
             importance = torch.abs(path_int) / (delta_theta_total**2 + self.epsilon)
+            importance = torch.nan_to_num(importance, nan=0.0, posinf=0.0, neginf=0.0)
+            if self.omega_decay < 1.0:
+                omega.mul_(self.omega_decay)
             omega.add_(importance)
 
             # Reset for the next task
             cached_p.copy_(p.data)
             path_int.zero_()
+
+    def get_state(self) -> dict[str, torch.Tensor]:
+        """Ω, path integral and θ* only (not the wrapped model's weights)."""
+        return {
+            name: buf.detach().cpu().clone()
+            for name, buf in self.named_buffers(recurse=False)
+            if name.startswith(self._PERSISTENT_PREFIXES)
+        }
+
+    def load_state(self, state: dict[str, torch.Tensor]) -> int:
+        """Restore buffers saved by ``get_state``; returns the number restored.
+
+        Buffers whose name or shape no longer match (architecture change) are
+        skipped and keep their fresh initial values.
+        """
+        own = dict(self.named_buffers(recurse=False))
+        restored = 0
+        for name, value in (state or {}).items():
+            buf = own.get(name)
+            if buf is None or not isinstance(value, torch.Tensor) or buf.shape != value.shape:
+                continue
+            buf.copy_(value.to(device=buf.device, dtype=buf.dtype))
+            restored += 1
+        return restored
 
     def penalty(self) -> torch.Tensor:
         r"""

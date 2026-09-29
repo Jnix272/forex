@@ -21,12 +21,18 @@ class ElasticWeightConsolidation(nn.Module):
         *,
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         classification: bool = False,
+        batch_loss_fn: Callable[[nn.Module, object], tuple[torch.Tensor | None, int]] | None = None,
     ):
         """
         Initialize EWC and compute Fisher Information Matrix diagonal.
 
         ``loss_fn(outputs, labels)`` should match the supervised training loss.
         When omitted, classification uses cross-entropy and regression uses MSE.
+
+        ``batch_loss_fn(model, batch) -> (loss, n_samples)`` takes precedence and
+        receives the raw loader batch, for objectives that need more than
+        ``(features, labels)`` (e.g. a direction sidecar or sequence truncation).
+        Return ``(None, 0)`` to skip a batch.
         """
         super().__init__()
         self.model = model
@@ -35,6 +41,7 @@ class ElasticWeightConsolidation(nn.Module):
         self.max_samples = max_samples
         self.classification = bool(classification)
         self.loss_fn = loss_fn
+        self.batch_loss_fn = batch_loss_fn
 
         self.params = {n: p for n, p in self.model.named_parameters() if p.requires_grad}
 
@@ -109,6 +116,17 @@ class ElasticWeightConsolidation(nn.Module):
                 break
 
             self.model.zero_grad()
+
+            if self.batch_loss_fn is not None:
+                loss, n_batch = self.batch_loss_fn(self.model, batch)
+                if loss is None or n_batch <= 0 or not torch.isfinite(loss):
+                    continue
+                loss.backward()
+                for n, p in self.params.items():
+                    if p.grad is not None:
+                        fisher[n] += p.grad.data**2
+                samples_processed += int(n_batch)
+                continue
 
             if isinstance(batch, (tuple, list)) and len(batch) >= 2:
                 features, labels = batch[0].to(self.device), batch[1].to(self.device)

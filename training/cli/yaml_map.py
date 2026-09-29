@@ -133,6 +133,7 @@ _YAML_MAP = {
     "training.si_dynamic": "si_dynamic",
     "training.si_lambda_min": "si_lambda_min",
     "training.si_lambda_max": "si_lambda_max",
+    "training.si_omega_decay": "si_omega_decay",
     # Framework selection (new)
     "training.training_framework": "training_framework",
     "training.pretrain_framework": "pretrain_framework",

@@ -1455,8 +1455,15 @@ def parse_args():
         type=float,
         default=1.0,
         help="SI penalty weight (default: 1.0). "
-        "When the FeatureStabilityMonitor is active, this base lambda is "
-        "scaled per epoch by 1/(1 + max_shift^2) as the SI dynamic lambda.",
+        "With si_dynamic enabled (training profile / run.yaml), this base lambda is "
+        "scaled per epoch by 1/(1 + max_shift^2) and clamped to [si_lambda_min, si_lambda_max].",
+    )
+    p.add_argument(
+        "--si-omega-decay",
+        type=float,
+        default=0.9,
+        help="Decay applied to accumulated SI importance before each per-epoch update "
+        "(default: 0.9; 1.0 = classic unbounded SI sum).",
     )
 
     p.add_argument("--enable-per", action="store_true", help="Enable Prioritized Experience Replay (PER).")

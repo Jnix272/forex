@@ -61,8 +61,9 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     for yaml_key, dest in _YAML_MAP.items():
         if yaml_key.startswith("distillation.") and not distillation_enabled:
             continue
-        section, key = yaml_key.split(".", 1)
-        val = (cfg.get(section) or {}).get(key)
+        val = cfg
+        for part in yaml_key.split("."):
+            val = val.get(part) if isinstance(val, dict) else None
         if val is None:
             continue
         if dest is None:
@@ -83,14 +84,21 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
             defaults["training_adversarial"] = adv
     if isinstance(cfg.get("curriculum"), dict):
         miner_fb = cfg["curriculum"].get("miner_feedback")
-        if isinstance(miner_fb, dict):
-            defaults["curriculum_miner_feedback"] = bool(miner_fb.get("enabled", False))
+        if isinstance(miner_fb, dict) and "enabled" in miner_fb:
+            defaults["curriculum_miner_feedback"] = bool(miner_fb["enabled"])
         sp = cfg["curriculum"].get("self_paced")
-        if isinstance(sp, dict):
-            defaults["use_self_paced"] = bool(sp.get("enabled", False))
+        if isinstance(sp, dict) and "enabled" in sp:
+            defaults["use_self_paced"] = bool(sp["enabled"])
         lw = cfg["curriculum"].get("loss_weighting")
-        if isinstance(lw, dict):
-            defaults["use_loss_weighting"] = bool(lw.get("enabled", False))
+        if isinstance(lw, dict) and "enabled" in lw:
+            defaults["use_loss_weighting"] = bool(lw["enabled"])
+
+    # Dests explicitly set by YAML; the per-model training profile must not
+    # overwrite these (see training/cli/profile.py::_apply_training_profile).
+    prior_explicit = parser.get_default("_yaml_explicit_keys") or ()
+    defaults["_yaml_explicit_keys"] = frozenset(prior_explicit) | frozenset(
+        k for k in defaults if not k.startswith("_")
+    )
     if isinstance(cfg.get("feature_ablation"), dict):
         defaults["feature_ablation"] = cfg["feature_ablation"]
 

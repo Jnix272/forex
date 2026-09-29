@@ -200,6 +200,7 @@ from training.loop_losses import (  # noqa: E402
     _apply_online_miner,
     _build_train_loss,
     _compute_loss,
+    _per_sample_direction_loss,
     build_criterion,
 )
 from training.loop_optim import (  # noqa: E402
@@ -1253,6 +1254,7 @@ def supervised_train(
                 easy_quantile=0.30,
                 boost_factor=2.0,
                 decay_factor=0.90,
+                row_ids=train_idx,
             )
             print(f"[OnlineMiner] Created for {model_name} ({len(train_idx):,} samples)")
             # -- Seed miner with live-feedback hard examples from orchestrator ---
@@ -1266,10 +1268,15 @@ def supervised_train(
                         open(_fb_path, encoding="utf-8").read()
                     )
                     _fb_store._metrics = []
-                    # Build priority weights aligned to train_idx timestamps
-                    # (timestamps are bar indices here; exact alignment happens via
-                    #  nearest-neighbor matching in get_priority_weights)
-                    _base_ts = train_idx.astype(np.int64)
+                    # get_priority_weights matches live-trade epoch seconds, so
+                    # the cache's decision-bar timestamps (t_ns) are required;
+                    # row indices would never fall within the 1h match window.
+                    import zarr as _zarr_fb
+
+                    _fb_z = _zarr_fb.open(str(cache_path), mode="r")
+                    if "t_ns" not in _fb_z:
+                        raise ValueError("cache has no t_ns timestamps")
+                    _base_ts = np.asarray(_fb_z["t_ns"][:], dtype=np.int64)[train_idx] // 1_000_000_000
                     _fw = _fb_store.get_priority_weights(len(train_idx), _base_ts, hard_boost=3.0)
                     # Inject into miner EMA so hard live examples are oversampled
                     # from the very first epoch without waiting for loss accumulation.
@@ -1353,6 +1360,7 @@ def supervised_train(
     _resume_chunk_history: list | None = None
     _resume_chunk_streak: int | None = None
     _resume_feat_state: dict | None = None
+    _resume_si_state: dict | None = None
 
     if args.resume and last_path.exists():
         ck = torch.load(last_path, map_location=device)
@@ -1391,6 +1399,7 @@ def supervised_train(
         _resume_chunk_history = list(ck.get("chunk_sharpe_history", history.get("val_sharpe", [])))
         _resume_chunk_streak = int(ck.get("chunk_worse_streak", 0))
         _resume_feat_state = ck.get("feat_stability_state")
+        _resume_si_state = ck.get("si_state")
         # Restore dynamic early-stop state
         _des_no_improve = int(ck.get("no_improve", 0))
         _des_ema = ck.get("des_ema", None)
@@ -1709,27 +1718,41 @@ def supervised_train(
         try:
             print("[EWC] Computing Fisher Information Matrix (max 1000 samples)...")
 
-            def _ewc_loss_fn(outputs, labels):
-                # Mirror the active criterion when possible
-                if multitask or classification:
-                    if isinstance(outputs, tuple):
-                        outputs = outputs[0]
-                    if labels.dtype.is_floating_point:
-                        y = (labels.reshape(-1).clamp(-1, 1) + 1).round().long()
-                    else:
-                        y = labels.reshape(-1).long()
-                    y = y.clamp(0, max(1, outputs.shape[-1] - 1))
-                    return nn.functional.huber_loss(outputs.squeeze(), y.float())
+            def _ewc_batch_loss(_m, batch):
+                # Fisher must use the training direction objective (y_cls sidecar,
+                # BCE on tradable rows for single-logit heads), not the raw reward.
+                prepared = _prepare_train_batch(
+                    batch,
+                    device,
+                    seq_len=args.seq_len,
+                    feature_mask=None,
+                    adversarial_gen=None,
+                    adversarial_feature_names=None,
+                )
+                if prepared is None:
+                    return None, 0
+                xb, yb, y_cls_b = prepared[0], prepared[1], prepared[2]
+                outputs = _m(xb)
                 pred = outputs[0] if isinstance(outputs, tuple) else outputs
-                return nn.functional.mse_loss(pred.reshape(-1), labels.reshape(-1).float()[: pred.numel()])
+                if multitask or classification:
+                    y_idx = _direction_class_index(yb, y_cls_b, classification=True)
+                    per_sample = _per_sample_direction_loss(pred, y_idx)
+                    valid = torch.isfinite(per_sample)
+                    if not bool(valid.any()):
+                        return None, 0
+                    return per_sample[valid].mean(), int(valid.sum())
+                tgt = yb.reshape(-1).float()
+                p = pred.reshape(-1)
+                n = min(p.numel(), tgt.numel())
+                return nn.functional.mse_loss(p[:n], tgt[:n]), int(xb.shape[0])
 
             _ewc = ElasticWeightConsolidation(
                 model,
                 train_ds,
                 device,
                 max_samples=1000,
-                loss_fn=_ewc_loss_fn,
                 classification=bool(multitask or classification),
+                batch_loss_fn=_ewc_batch_loss,
             )
             print("[EWC] Initialized successfully. Fisher diagonal locked.")
         except Exception as e:
@@ -1751,15 +1774,20 @@ def supervised_train(
                     model.initialize_parameters(dummy_in)
                 except Exception:
                     pass
-            _si = SynapticIntelligence(model, epsilon=1e-3)
-            print("[SI] Initialized successfully. Tracking path integral.")
+            _si_decay = float(getattr(args, "si_omega_decay", 0.9))
+            _si = SynapticIntelligence(model, epsilon=1e-3, omega_decay=_si_decay)
+            if _resume_si_state:
+                _n_si = _si.load_state(_resume_si_state)
+                print(f"[Resume] Restored SI state ({_n_si}/{len(_resume_si_state)} buffers)")
+            print(f"[SI] Initialized successfully. Tracking path integral (omega_decay={_si_decay}).")
         except Exception as e:
             _si = None
             print(f"[SI] Failed to initialize SI (continuing without SI): {e}")
 
     # ── Dynamic SI λ (regime drift / volatility scaling) ─────────────────
-    # Computed per-epoch from the FeatureStabilityMonitor's max feature shift
-    # (see the Feature Stability Monitor block inside the epoch loop):
+    # When args.si_dynamic is set, computed per-epoch from the
+    # FeatureStabilityMonitor's max feature shift (see the Feature Stability
+    # Monitor block inside the epoch loop):
     #     λ_epoch = si_lambda * 1 / (1 + max_shift²)
     # so the SI penalty relaxes during regime shocks and re-locks after they
     # stabilize. No per-batch state is needed.
@@ -1978,14 +2006,16 @@ def supervised_train(
             _feat_mask = _feat_stability.get_mask(device=device)
             _stab_report = _feat_stability.report()
 
-            # Dynamic SI scaling based on regime drift / volatility
+            # Dynamic SI scaling based on regime drift / volatility (si_dynamic only;
+            # otherwise si_lambda is used as a static weight).
             _max_shift = float(_stab_report["feat_max_shift"])
-            _dyn_w = 1.0 / (1.0 + (_max_shift**2))
-            epoch_si_lambda = epoch_si_lambda * _dyn_w
-            # Clamp to per-model bounds from profile (si_lambda_min / si_lambda_max)
-            _si_lmin = float(getattr(args, "si_lambda_min", 0.0))
-            _si_lmax = float(getattr(args, "si_lambda_max", epoch_si_lambda))
-            epoch_si_lambda = max(_si_lmin, min(_si_lmax, epoch_si_lambda))
+            if bool(getattr(args, "si_dynamic", False)):
+                _dyn_w = 1.0 / (1.0 + (_max_shift**2))
+                epoch_si_lambda = epoch_si_lambda * _dyn_w
+                # Clamp to per-model bounds from profile (si_lambda_min / si_lambda_max)
+                _si_lmin = float(getattr(args, "si_lambda_min", 0.0))
+                _si_lmax = float(getattr(args, "si_lambda_max", epoch_si_lambda))
+                epoch_si_lambda = max(_si_lmin, min(_si_lmax, epoch_si_lambda))
 
             if _stab_report["feat_frozen"] > 0 or _stab_report["feat_noisy"] > 0:
                 _log_info(
@@ -2070,26 +2100,19 @@ def supervised_train(
                             f"[LabelMagnitudeGate] Epoch {ep + 1}: "
                             f"tier≤{_max_tier} → {len(ep_train_idx):,}/{len(train_idx):,} samples"
                         )
-        if _curriculum_mgr is not None:
-            _cm_mask = _curriculum_mgr.get_inclusion_mask(ep)
-            # Apply mask to ep_train_idx by intersecting with allowed indices
-            _allowed = np.where(_cm_mask)[0]
-            ep_train_idx = np.intersect1d(ep_train_idx, _allowed)
-            if len(ep_train_idx) < 50:
-                ep_train_idx = train_idx
         # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
         if _curriculum_mgr is not None:
             try:
                 # Get per-sample losses from online miner for self-paced/loss weighting
                 epoch_losses = None
                 if _miner_feedback_enabled and _online_miner is not None:
-                    epoch_losses = _online_miner._loss_buffer[-1].copy()
+                    epoch_losses = _online_miner.epoch_losses()
                     # Also get forgetting/easy ratios for curriculum pace control
                     _forgetting_rate = float(_online_miner.get_forgotten_mask().mean())
                     _easy_ratio = float(_online_miner.get_easy_mask().mean())
                 else:
-                    _forgetting_rate = 0.0
-                    _easy_ratio = 0.0
+                    _forgetting_rate = None
+                    _easy_ratio = None
 
                 _cm_info = _curriculum_mgr.update(
                     ep,
@@ -2097,9 +2120,11 @@ def supervised_train(
                     forgetting_rate=_forgetting_rate,
                     easy_ratio=_easy_ratio,
                 )
-                _cm_mask = _curriculum_mgr.get_inclusion_mask()
-                if len(_cm_mask) == len(ep_train_idx) and float(_cm_mask.mean()) < 0.999:
-                    _ep_cm_idx = ep_train_idx[_cm_mask]
+                # The mask is per train position; map to dataset rows so it composes
+                # with earlier gating (warmup / label-magnitude) of ep_train_idx.
+                _cm_mask = np.asarray(_curriculum_mgr.get_inclusion_mask(), dtype=bool)
+                if len(_cm_mask) == len(train_idx) and float(_cm_mask.mean()) < 0.999:
+                    _ep_cm_idx = np.intersect1d(ep_train_idx, train_idx[_cm_mask])
                     if len(_ep_cm_idx) >= 50:
                         ep_train_idx = _ep_cm_idx
                         _log_info(
@@ -2254,9 +2279,9 @@ def supervised_train(
             _online_miner.end_epoch()
             # Feed per-sample losses back into the curriculum so self-paced /
             # loss-weighting difficulty updates use real training losses.
-            if _curriculum_mgr is not None:
+            _epoch_losses_for_curriculum = _online_miner.epoch_losses()
+            if _curriculum_mgr is not None and _epoch_losses_for_curriculum is not None:
                 try:
-                    _epoch_losses_for_curriculum = _online_miner._loss_buffer[-1].copy()
                     _curriculum_mgr.set_losses(_epoch_losses_for_curriculum)
                 except Exception as _cl_exc:
                     _log_warn(f"[Curriculum] set_losses failed: {_cl_exc}")
@@ -2328,11 +2353,6 @@ def supervised_train(
                 break
         else:
             _ctrl_stop_counter = 0
-
-        # ── Online miner: end epoch (update forgetting tracker) ──────────
-        if _online_miner is not None:
-            _online_miner.end_epoch()
-        # ──────────────────────────────────────────────────────────────────
 
         # ── SI: end epoch (update parameter importance) ───────────────────
         if _si is not None:
@@ -2728,6 +2748,7 @@ def supervised_train(
                 "chunk_sharpe_history": _chunk_sharpe_history,
                 "chunk_worse_streak": _chunk_worse_streak,
                 "feat_stability_state": _feat_stability.get_state(),
+                "si_state": _si.get_state() if _si is not None else None,
             },
             last_path,
             metadata={

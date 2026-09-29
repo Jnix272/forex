@@ -54,7 +54,12 @@ _leak_check_features_sample, _label_contamination_check = _load_helpers_from_sou
 
 
 def _build_minimal_zarr(
-    cache_dir: Path, n_samples: int = 256, seq_len: int = 16, n_features: int = 8, leak_factor: float | None = None
+    cache_dir: Path,
+    n_samples: int = 256,
+    seq_len: int = 16,
+    n_features: int = 8,
+    leak_factor: float | None = None,
+    t_ns: np.ndarray | None = None,
 ):
     """Write a tiny Zarr cache shaped like the real one.
 
@@ -84,6 +89,9 @@ def _build_minimal_zarr(
         z.create_array("y", shape=(n_samples,), chunks=(64,), dtype="float32", overwrite=True)
         z["y"][:] = y
         z["X"].attrs["columns"] = [f"f{i}" for i in range(n_features)]
+        if t_ns is not None:
+            z.create_array("t_ns", shape=(n_samples,), chunks=(64,), dtype="int64", overwrite=True)
+            z["t_ns"][:] = t_ns
     else:
         compressor = Blosc(cname="lz4", clevel=1, shuffle=Blosc.BITSHUFFLE)
         z = zarr.open(str(cache_dir), mode="w")
@@ -106,7 +114,17 @@ def _build_minimal_zarr(
         )
         z["y"][:] = y
         z["X"].attrs["columns"] = [f"f{i}" for i in range(n_features)]
+        if t_ns is not None:
+            z.create_dataset("t_ns", shape=(n_samples,), chunks=(64,), dtype="int64", overwrite=True)
+            z["t_ns"][:] = t_ns
     return cache_dir
+
+
+def _read_y(cache: Path) -> np.ndarray:
+    import zarr
+
+    group = zarr.open_group(str(cache)) if int(zarr.__version__.split(".")[0]) >= 3 else zarr.open(str(cache), mode="r")
+    return np.asarray(group["y"][:], dtype=np.float32)
 
 
 class _Args:
@@ -220,6 +238,72 @@ def test_label_contamination_check_detects_violation():
         assert result["ok"] is False, f"Expected violation, got {result}"
         assert result["violations"] > 0
         print(f"OK: contamination check detected {result['violations']} violations")
+
+
+def test_leak_check_sample_indices_match_rows_and_bound_chunks():
+    """Returned indices must identify the exact rows sampled, and sampling
+    must stay within ``max_chunks`` chunks (each touched chunk is fully read)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "test.zarr"
+        _build_minimal_zarr(cache, n_samples=1024)
+        X_2d, _names, sel = _leak_check_features_sample(cache, max_sample=40, return_indices=True, max_chunks=4)
+        assert len(sel) == X_2d.shape[0] == 40
+        import zarr
+
+        group = zarr.open_group(str(cache)) if int(zarr.__version__.split(".")[0]) >= 3 else zarr.open(str(cache), mode="r")
+        np.testing.assert_array_equal(X_2d, np.asarray(group["X"][:, -1, :])[sel])
+        assert len(np.unique(sel // 64)) <= 4
+
+
+def test_check_future_leak_flags_planted_leak_when_subsampled():
+    """Regression: with fewer samples than rows, labels must come from the
+    sampled rows. Pairing sampled features with y[:n] hid real leaks."""
+    from data.dataset_manifest import DatasetManifest
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "test.zarr"
+        _build_minimal_zarr(cache, n_samples=1024, leak_factor=10.0)
+        X_2d, names, sel = _leak_check_features_sample(cache, max_sample=200, return_indices=True)
+        flagged = DatasetManifest.check_future_leak(
+            pd.DataFrame(X_2d, columns=names), _read_y(cache)[sel].tolist(), max_abs_corr=0.30
+        )
+        assert flagged and flagged[0]["feature"] == "f0"
+
+
+def test_check_future_leak_rejects_mismatched_lengths():
+    from data.dataset_manifest import DatasetManifest
+
+    feat_df = pd.DataFrame({"f0": np.arange(10, dtype=np.float32)})
+    try:
+        DatasetManifest.check_future_leak(feat_df, list(range(20)), max_abs_corr=0.30)
+    except ValueError:
+        return
+    raise AssertionError("Expected ValueError for mismatched feature/label lengths")
+
+
+def test_label_contamination_check_uses_real_timestamps():
+    bar = 300_000_000_000
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "test.zarr"
+        _build_minimal_zarr(cache, t_ns=np.arange(256, dtype=np.int64) * bar + 1_600_000_000_000_000_000)
+        result = _label_contamination_check(cache, _Args())
+        assert result["ok"] is True
+        assert result["note"] == "t_ns"
+        assert result["total_checked"] == 256
+
+
+def test_label_contamination_check_flags_unordered_or_missing_timestamps():
+    bar = 300_000_000_000
+    t = np.arange(256, dtype=np.int64) * bar + 1_600_000_000_000_000_000
+    t[100] = t[50]
+    t[200] = -1
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "test.zarr"
+        _build_minimal_zarr(cache, t_ns=t)
+        result = _label_contamination_check(cache, _Args())
+        assert result["ok"] is False
+        assert result["missing_timestamps"] == 1
+        assert result["out_of_order"] >= 1
 
 
 def test_assert_fold_isolation_runs_on_normal_split():

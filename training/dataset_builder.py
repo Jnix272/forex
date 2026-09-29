@@ -668,14 +668,22 @@ def _load_scaler_npz(cache_path: Path):
 def _leak_check_features_sample(
     cache_path: Path | str,
     max_sample: int = 5000,
-) -> tuple[np.ndarray, list[str]] | None:
-    """Read a small random sample of the *last-timestep* feature values from the
-    Zarr cache for future-leak correlation scanning.
+    return_indices: bool = False,
+    max_chunks: int = 64,
+):
+    """Read a sample of the *last-timestep* feature values from the Zarr cache
+    for future-leak correlation scanning.
 
     Returns ``(X_2d, feature_names)`` where ``X_2d`` has shape
     ``(sample_n, n_features)`` - i.e. the feature vector from the final bar of
     each sampled sequence window (the bar the model actually predicts from).
+    With ``return_indices=True`` returns ``(X_2d, feature_names, row_indices)``
+    so labels can be taken from exactly the same rows.
     Returns ``None`` when the cache is not a Zarr store or has no feature data.
+
+    Rows are drawn from at most ``max_chunks`` evenly spaced chunks: every
+    touched chunk is fully decompressed, so spreading samples over all chunks
+    of a multi-GB cache would effectively read the whole feature tensor.
     """
     _cp = Path(cache_path)
     # zarr v2 writes .zgroup; v3 writes .zmetadata / .zarr.json. Check either.
@@ -707,15 +715,28 @@ def _leak_check_features_sample(
             feat_names = [str(c) for c in (attrs.get("columns", []) or [])]
         if len(feat_names) != int(X.shape[-1]):
             feat_names = [f"f{i}" for i in range(int(X.shape[-1]))]
-        # Sample up to max_sample rows; take the last timestep (column index -1)
-        # so each row is the feature vector the model sees for that sample.
         sample_n = min(max_sample, n_total)
         if sample_n == n_total:
+            sel = np.arange(n_total, dtype=np.int64)
             X_sample = np.asarray(X[:, -1, :], dtype=np.float32)
         else:
-            step = max(1, n_total // sample_n)
-            sel = np.arange(0, n_total, step)[:sample_n]
-            X_sample = np.asarray(X[sel, -1, :], dtype=np.float32)
+            chunk_rows = int((getattr(X, "chunks", None) or (n_total,))[0]) or n_total
+            n_chunks = -(-n_total // chunk_rows)
+            use_chunks = np.unique(np.linspace(0, n_chunks - 1, num=min(max_chunks, n_chunks)).round().astype(np.int64))
+            per_chunk = -(-sample_n // len(use_chunks))
+            parts: list[np.ndarray] = []
+            sel_parts: list[np.ndarray] = []
+            for c in use_chunks:
+                start = int(c) * chunk_rows
+                stop = min(start + chunk_rows, n_total)
+                local = np.unique(np.linspace(0, stop - start - 1, num=min(per_chunk, stop - start)).round().astype(np.int64))
+                block = np.asarray(X[start:stop, -1, :], dtype=np.float32)
+                parts.append(block[local])
+                sel_parts.append(local + start)
+            sel = np.concatenate(sel_parts)[:sample_n]
+            X_sample = np.concatenate(parts, axis=0)[:sample_n]
+        if return_indices:
+            return X_sample, feat_names, sel
         return X_sample, feat_names
     except Exception:
         return None
@@ -736,6 +757,11 @@ def _label_contamination_check(
     ``i + seq_len - 1 + execution_delay`` (the first bar *after* the window
     that the trader could act on).  We therefore check that
     ``feature_ts[i] < label_ts[i]`` where ``label_ts = feature_ts + seq_len - 1 + delay``.
+
+    When the cache stores real decision-bar timestamps (``t_ns``), those are
+    used instead of row indices: missing (``-1``) or non-increasing timestamps
+    are counted as violations, because purge/embargo splitting assumes row
+    order is strict time order.
     """
     _cp = Path(cache_path)
     is_zarr_store = (
@@ -757,11 +783,37 @@ def _label_contamination_check(
         n_samples = int(z["X"].shape[0])
         if n_samples == 0:
             return {"ok": True, "violations": 0, "total_checked": 0, "note": "empty cache"}
+        t_ns = np.asarray(z["t_ns"][:], dtype=np.int64) if "t_ns" in z else None
     except Exception as _e:
         return {"ok": True, "violations": 0, "total_checked": 0, "note": f"zarr read error: {_e}"}
 
     _sl = int(seq_len) if seq_len is not None else int(getattr(args, "seq_len", 80))
     _delay = int(getattr(args, "execution_delay_bars", getattr(args, "lookahead_bars", 1)) or 1)
+
+    if t_ns is not None and len(t_ns) == n_samples:
+        try:
+            import pandas as _pd
+
+            bar_ns = int(_pd.Timedelta(str(getattr(args, "bar_freq", "5min"))).value)
+        except Exception:
+            bar_ns = 0
+        bar_ns = bar_ns if bar_ns > 0 else 300_000_000_000
+        missing = t_ns < 0
+        out_of_order = np.zeros(n_samples, dtype=bool)
+        out_of_order[1:] = t_ns[1:] <= t_ns[:-1]
+        result = DatasetManifest.check_label_contamination(
+            feature_timestamps=t_ns,
+            label_timestamps=t_ns + _delay * bar_ns,
+            max_tolerance_seconds=0.0,
+        )
+        n_missing = int(missing.sum())
+        n_disorder = int(out_of_order.sum())
+        result["violations"] = int(result["violations"]) + n_missing + n_disorder
+        result["ok"] = result["violations"] == 0
+        result["missing_timestamps"] = n_missing
+        result["out_of_order"] = n_disorder
+        result["note"] = "t_ns"
+        return result
     # Feature timestamp = window start index; label timestamp = window start + offset
     feat_ts = np.arange(n_samples, dtype=np.int64)
     label_ts = feat_ts + (_sl - 1) + _delay
@@ -3797,16 +3849,16 @@ def _build_multipair_dataset(
         # the correlation scan (see ``DatasetManifest.check_future_leak``). Now we
         # read a small sample of last-timestep features from the Zarr cache and
         # let the correlation check actually run.
-        _feats = _leak_check_features_sample(cache_path, max_sample=5000)
+        _feats = _leak_check_features_sample(cache_path, max_sample=5000, return_indices=True)
         _fwd_ret = None
-        if str(cache_path).endswith(".zarr") and Path(cache_path).is_dir():
+        if _feats is not None and str(cache_path).endswith(".zarr") and Path(cache_path).is_dir():
             import zarr as _zarr
 
             _z: Any = _zarr.open(str(cache_path), mode="r")
             if "y" in _z:
-                _fwd_ret = np.asarray(_z["y"][:], dtype=np.float32)
+                _fwd_ret = np.asarray(_z["y"][:], dtype=np.float32)[_feats[2]]
         if _feats is not None and _fwd_ret is not None and len(_fwd_ret) > 0:
-            _X_2d, _feat_names = _feats
+            _X_2d, _feat_names, _ = _feats
             import pandas as _pd
 
             _feat_df = _pd.DataFrame(_X_2d, columns=_feat_names)
@@ -4480,16 +4532,16 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
     try:
         # FIX: previously passed ``None`` as feature_df. Now we use the same
         # helper to load a sample of last-timestep features from the cache.
-        _feats = _leak_check_features_sample(cache_path, max_sample=5000)
+        _feats = _leak_check_features_sample(cache_path, max_sample=5000, return_indices=True)
         _fwd_ret = None
-        if str(cache_path).endswith(".zarr") and Path(cache_path).is_dir():
+        if _feats is not None and str(cache_path).endswith(".zarr") and Path(cache_path).is_dir():
             import zarr as _zarr
 
             _z: Any = _zarr.open(str(cache_path), mode="r")
             if "y" in _z:
-                _fwd_ret = np.asarray(_z["y"][:], dtype=np.float32)
+                _fwd_ret = np.asarray(_z["y"][:], dtype=np.float32)[_feats[2]]
         if _feats is not None and _fwd_ret is not None and len(_fwd_ret) > 0:
-            _X_2d, _feat_names = _feats
+            _X_2d, _feat_names, _ = _feats
             import pandas as _pd
 
             _feat_df = _pd.DataFrame(_X_2d, columns=_feat_names)

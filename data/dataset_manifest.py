@@ -253,9 +253,11 @@ class DatasetManifest:
         else:
             fwd = np.asarray(forward_returns, dtype=np.float32)
 
-        min_len = min(len(feature_df), len(fwd))
-        feature_df = feature_df.iloc[:min_len]
-        fwd = fwd[:min_len]
+        if len(feature_df) != len(fwd):
+            raise ValueError(
+                f"check_future_leak: feature rows ({len(feature_df)}) and forward returns ({len(fwd)}) "
+                "must be the same samples; truncating would correlate unrelated rows."
+            )
 
         flagged = []
         for col in feature_df.columns:

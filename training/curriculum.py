@@ -412,19 +412,28 @@ class CurriculumManager:
             self.adaptive_controller = CurriculumController(config=config.adaptive)
 
         self._freeze_counter: int = 0
+        self._last_weights: np.ndarray | None = None
 
     def update(
         self,
         epoch: int,
         val_metrics: dict[str, float] | None = None,
         losses: np.ndarray = None,
-        forgetting_rate: float = 0.0,
-        easy_ratio: float = 0.0,
+        forgetting_rate: float | None = None,
+        easy_ratio: float | None = None,
     ) -> dict[str, Any]:
-        """Update all curriculum components and return combined sample weights."""
+        """Update all curriculum components and return combined sample weights.
+
+        Miner-feedback pacing (freeze / accelerate) only runs when
+        ``forgetting_rate`` and ``easy_ratio`` are supplied, so loss-only
+        refreshes (``set_losses``) do not reset the freeze counter.
+        """
         self.current_epoch = epoch
         weights = np.ones(self.n_samples, dtype=float)
         info = {"epoch": epoch}
+        has_miner_feedback = forgetting_rate is not None and easy_ratio is not None
+        forgetting_rate = float(forgetting_rate or 0.0)
+        easy_ratio = float(easy_ratio or 0.0)
 
         # Store miner feedback for pace control
         info["forgetting_rate"] = forgetting_rate
@@ -441,10 +450,15 @@ class CurriculumManager:
             info["difficulty_level"] = self.difficulty_curriculum.current_level
             info["inclusion_rate"] = mask.mean()
 
-            # Miner feedback controls difficulty pacing based on model forgetting and ease.\n# - forgetting_threshold: if forgetting_rate exceeds this, the curriculum is frozen for a number of epochs (freeze_patience) before easing back.\n# - easy_threshold: if easy_ratio exceeds this, the curriculum is accelerated to increase difficulty.
+            # Miner feedback controls difficulty pacing:
+            # - forgetting_rate > forgetting_threshold freezes the curriculum and,
+            #   after freeze_patience epochs, eases back one pace step.
+            # - easy_ratio > easy_threshold accelerates difficulty.
             # NOTE: current_level is a FLOAT FRACTION in [start_level, max_level],
             # not an integer step count -- adjust by pace-step increments.
-            if forgetting_rate > self.config.forgetting_threshold:
+            if not has_miner_feedback:
+                pass
+            elif forgetting_rate > self.config.forgetting_threshold:
                 info["curriculum_frozen"] = True
                 self._freeze_counter += 1
                 if self._freeze_counter >= self.config.freeze_patience and self.difficulty_curriculum:
@@ -478,7 +492,8 @@ class CurriculumManager:
             weights *= sp_weights
             info["self_paced_pace"] = self.self_paced.get_pace(epoch)
 
-        # Update loss-based weighting
+        # Update loss-based weighting (compute once: compute_weights advances an EMA)
+        lw_weights = None
         if self.loss_weighting and losses is not None:
             lw_weights = self.loss_weighting.compute_weights(losses, epoch)
             info["loss_weighting_stats"] = {
@@ -504,8 +519,8 @@ class CurriculumManager:
             weights = self.difficulty_curriculum.get_difficulty_weights()
         elif self.config.mode == "self_paced" and self.self_paced:
             weights = self.self_paced.v.copy()
-        elif self.config.mode == "loss_weighting" and self.loss_weighting and losses is not None:
-            weights = self.loss_weighting.compute_weights(losses, epoch)
+        elif self.config.mode == "loss_weighting" and lw_weights is not None:
+            weights = lw_weights
         elif self.config.mode == "adaptive" and self.adaptive_controller:
             # Adaptive doesn't directly provide sample weights
             weights = np.ones(self.n_samples)
@@ -516,18 +531,26 @@ class CurriculumManager:
                 w *= self.difficulty_curriculum.get_difficulty_weights() ** self.config.difficulty_weight
             if self.self_paced:
                 w *= self.self_paced.v ** self.config.self_paced_weight
-            if self.loss_weighting and losses is not None:
-                w *= self.loss_weighting.compute_weights(losses, epoch) ** self.config.loss_weight
+            if lw_weights is not None:
+                w *= lw_weights ** self.config.loss_weight
             # Normalize
             w = w / (w.mean() + 1e-8)
             weights = w
 
         info["weights"] = weights
         info["epoch"] = epoch
+        self._last_weights = np.asarray(weights, dtype=float)
         return info
 
     def get_sample_weights(self, losses: np.ndarray | None = None) -> np.ndarray:
-        """Get current combined sample weights, optionally updated from per-sample losses."""
+        """Get current combined sample weights, optionally updated from per-sample losses.
+
+        Without ``losses`` this returns the weights from the last ``update``
+        instead of re-running it (a loss-free re-run would drop loss weighting
+        and re-apply pacing).
+        """
+        if losses is None and self._last_weights is not None:
+            return self._last_weights.copy()
         return self.update(self.current_epoch, losses=losses).get("weights", np.ones(self.n_samples))
 
     def get_inclusion_mask(self) -> np.ndarray:

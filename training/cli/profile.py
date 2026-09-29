@@ -189,6 +189,9 @@ def _apply_training_profile(args, model_name: str, cli_overrides: frozenset, log
         "rl_finetune": tprofile.rl_finetune,
     }
 
+    # Precedence: CLI > explicit run.yaml keys > training profile > argparse default.
+    yaml_explicit = frozenset(getattr(args, "_yaml_explicit_keys", None) or ())
+
     features_report = {}
     report_keys = {
         "curriculum_manager": "curriculum_manager_mode",
@@ -198,25 +201,26 @@ def _apply_training_profile(args, model_name: str, cli_overrides: frozenset, log
     }
 
     for label, dest in report_keys.items():
-        yaml_val = getattr(args, dest, None)
-        prof_val = training_fields.get(dest)
-
         if dest in cli_overrides:
-            source = "CLI"
-            val = getattr(args, dest, None)
+            source, val = "CLI", getattr(args, dest, None)
+        elif dest in yaml_explicit:
+            source, val = "yaml", getattr(args, dest, None)
         else:
-            if yaml_val != prof_val:
-                source = "profile"
-            else:
-                source = "yaml"
-            val = prof_val
+            source, val = "profile", training_fields.get(dest)
         features_report[label] = {"mode": val, "source": source}
 
+    yaml_kept: list[str] = []
     for dest, value in training_fields.items():
         if dest in cli_overrides:
             continue
+        if dest in yaml_explicit:
+            if getattr(args, dest, None) != value:
+                yaml_kept.append(f"{dest}={getattr(args, dest, None)}")
+            continue
         setattr(args, dest, value)
         log_parts.append(f"{dest}={value}")
+    if yaml_kept:
+        log_parts.append("yaml_overrides_profile[" + " ".join(yaml_kept) + "]")
 
     args._training_features_report = features_report
 

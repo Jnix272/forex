@@ -46,6 +46,10 @@ _LR_FLOOR = 1e-6
 _LR_CEIL = 1e-2
 _DO_FLOOR = 0.05
 _DO_CEIL = 0.60
+# Smoke/debug runs (epochs=1) must never become the cap for real training runs.
+_EP_FLOOR = 12
+# Fewer epochs than this cannot distinguish early/late peaks.
+_MIN_EPOCHS_FOR_PATTERN = 4
 
 
 class TrainingMemory:
@@ -147,7 +151,7 @@ class TrainingMemory:
 
         # epoch pattern
         val_sharpe_curve: list[float] = hist.get("val_sharpe", [])
-        if val_sharpe_curve and b_ep is not None and t_ep and t_ep > 0:
+        if val_sharpe_curve and b_ep is not None and t_ep and t_ep >= _MIN_EPOCHS_FOR_PATTERN:
             peak_frac = b_ep / t_ep
             if peak_frac < 0.35:
                 pattern = "early_peak"
@@ -214,7 +218,7 @@ class TrainingMemory:
         current_lr = float(args.get("lr", self._data.get("recommended_lr", 5e-5)))
         current_do = float(args.get("dropout", self._data.get("recommended_dropout", 0.25)))
         current_pat = int(args.get("patience", self._data.get("recommended_patience", 6)))
-        current_maxep = int(args.get("epochs", self._data.get("recommended_max_epochs", 24)))
+        current_maxep = max(_EP_FLOOR, int(self._data.get("recommended_max_epochs") or 24))
 
         new_lr = current_lr
         new_do = current_do
@@ -238,7 +242,7 @@ class TrainingMemory:
                 new_lr = max(_LR_FLOOR, current_lr * 0.5)
                 new_do = min(_DO_CEIL, current_do + 0.05)
                 new_pat = max(3, current_pat - 1)
-                new_maxep = max(12, b_ep + 4) if b_ep is not None else current_maxep
+                new_maxep = max(_EP_FLOOR, b_ep + 4) if b_ep is not None else current_maxep
 
         # Early stopping: best epoch was very early
         if t_ep > 0 and b_ep is not None and b_ep < t_ep * 0.25:
@@ -305,6 +309,7 @@ class TrainingMemory:
 
         # Only lower max epochs if pattern is early_peak (cap at best+4)
         if rec_ep is not None and hasattr(args, "epochs") and pattern == "early_peak":
+            rec_ep = max(_EP_FLOOR, int(rec_ep))
             cur_ep = int(getattr(args, "epochs", rec_ep))
             if cur_ep > rec_ep:
                 args.epochs = rec_ep

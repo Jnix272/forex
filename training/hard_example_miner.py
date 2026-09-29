@@ -149,6 +149,9 @@ class OnlineHardExampleMiner:
     easy_quantile   : loss quantile below which a sample is "easy" (deprioritised)
     boost_factor    : multiplier for forgotten/hard sample replication
     decay_factor    : EMA decay applied to per-sample scores each epoch
+    row_ids         : dataset row index of each tracked sample. Batches report
+                      dataset rows, which only equal positions 0..n_samples-1
+                      when the training split starts at row 0 and is contiguous.
     """
 
     def __init__(
@@ -160,8 +163,10 @@ class OnlineHardExampleMiner:
         easy_quantile: float = 0.30,
         boost_factor: float = 2.0,
         decay_factor: float = 0.90,
+        row_ids: np.ndarray | None = None,
     ):
         self.n_samples = n_samples
+        self._set_row_ids(row_ids)
         self.window_size = max(2, window_size)
         self.hard_quantile = min(max(float(hard_quantile), 0.5), 1.0)
         self.forget_window = max(2, forget_window)
@@ -177,6 +182,31 @@ class OnlineHardExampleMiner:
         self._epoch = 0
         self._forgetting_tracker = ForgettingTracker(n_samples, max_history=window_size + 2)
 
+    def _set_row_ids(self, row_ids) -> None:
+        if row_ids is None:
+            self._row_ids = None
+            return
+        rows = np.asarray(row_ids, dtype=np.int64).ravel()
+        if len(rows) != self.n_samples:
+            raise ValueError(f"row_ids has {len(rows)} entries, expected n_samples={self.n_samples}")
+        self._row_ids = rows
+        self._row_sorter = np.argsort(rows, kind="stable")
+        self._rows_sorted = rows[self._row_sorter]
+
+    def _rows_to_positions(self, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Map dataset row indices to miner positions; returns (positions, valid)."""
+        if self._row_ids is None:
+            valid = (rows >= 0) & (rows < self.n_samples)
+            return np.where(valid, rows, 0), valid
+        if self.n_samples == 0:
+            return np.zeros_like(rows), np.zeros(len(rows), dtype=bool)
+        at = np.clip(np.searchsorted(self._rows_sorted, rows), 0, self.n_samples - 1)
+        valid = self._rows_sorted[at] == rows
+        return self._row_sorter[at], valid
+
+    def _positions_to_rows(self, positions: np.ndarray) -> np.ndarray:
+        return positions if self._row_ids is None else self._row_ids[positions]
+
     def begin_epoch(self) -> None:
         """Prepare a new epoch: roll the buffer, clear per-epoch accumulators."""
         if self._epoch > 0:
@@ -185,15 +215,22 @@ class OnlineHardExampleMiner:
         self._epoch += 1
 
     def update_batch(self, sample_indices: np.ndarray, per_sample_losses: np.ndarray) -> None:
-        """Accumulate per-sample losses from one training batch."""
+        """Accumulate per-sample losses from one training batch.
+
+        ``sample_indices`` are dataset row indices. Non-finite losses (e.g. rows
+        with no tradable target) are ignored rather than recorded.
+        """
         indices = np.asarray(sample_indices, dtype=np.int64).ravel()
         losses = np.asarray(per_sample_losses, dtype=np.float32).ravel()
         if len(indices) == 0 or len(losses) == 0:
             return
-        valid = (indices >= 0) & (indices < self.n_samples)
+        if len(indices) != len(losses):
+            raise ValueError(f"update_batch: {len(indices)} indices but {len(losses)} losses")
+        positions, valid = self._rows_to_positions(indices)
+        valid &= np.isfinite(losses)
         if not np.any(valid):
             return
-        self._loss_buffer[-1, indices[valid]] = losses[valid]
+        self._loss_buffer[-1, positions[valid]] = losses[valid]
 
     def end_epoch(self) -> None:
         """Finalise the current epoch: update EMA scores and forgetting tracker."""
@@ -216,9 +253,12 @@ class OnlineHardExampleMiner:
         recent = self._loss_buffer[-min(self._epoch, self.window_size) :, :]
         mean_recent = np.nanmean(recent, axis=0)
         # Blend: equal weight between rolling mean and EMA for stability
-        blended = 0.5 * np.where(np.isnan(mean_recent), 0.0, mean_recent) + 0.5 * self._ema_score
-        threshold = np.nanquantile(blended, self.hard_quantile)
-        return (blended >= threshold) & ~np.isnan(mean_recent)
+        observed = ~np.isnan(mean_recent)
+        if not np.any(observed):
+            return np.zeros(self.n_samples, dtype=bool)
+        blended = 0.5 * np.where(observed, mean_recent, 0.0) + 0.5 * self._ema_score
+        threshold = np.quantile(blended[observed], self.hard_quantile)
+        return (blended >= threshold) & observed
 
     def get_forgotten_mask(self) -> np.ndarray:
         """Return boolean mask of samples that were learned then forgotten."""
@@ -238,20 +278,25 @@ class OnlineHardExampleMiner:
         forgotten_factor: float = 2.0,
         easy_downsample: bool = True,
     ) -> np.ndarray:
-        """Return base_indices augmented with hard and forgotten samples."""
+        """Return base_indices (dataset rows) augmented with hard and forgotten
+        samples. Only rows already in ``base_indices`` are boosted or dropped, so
+        samples excluded by curriculum/warmup gating are never re-introduced."""
         base = np.asarray(base_indices, dtype=np.int64)
         if len(base) == 0:
             return base
 
-        hard_mask = self.get_hard_mask()
-        forgotten_mask = self.get_forgotten_mask()
-        easy_mask = self.get_easy_mask()
+        base_positions, in_miner = self._rows_to_positions(base)
+        in_base = np.zeros(self.n_samples, dtype=bool)
+        in_base[base_positions[in_miner]] = True
+        hard_mask = self.get_hard_mask() & in_base
+        forgotten_mask = self.get_forgotten_mask() & in_base
+        easy_mask = self.get_easy_mask() & in_base
         rng = np.random.default_rng()
 
         augmented = list(base)
 
         # Oversample hard
-        hard_idx = np.where(hard_mask)[0]
+        hard_idx = self._positions_to_rows(np.where(hard_mask)[0])
         if len(hard_idx) > 0:
             n_extra_hard = max(0, int(len(hard_idx) * (hard_factor - 1.0)))
             if n_extra_hard > 0:
@@ -259,7 +304,7 @@ class OnlineHardExampleMiner:
                 augmented.extend(extra.tolist())
 
         # Oversample forgotten (higher priority)
-        forget_idx = np.where(forgotten_mask)[0]
+        forget_idx = self._positions_to_rows(np.where(forgotten_mask)[0])
         if len(forget_idx) > 0:
             n_extra_forget = max(0, int(len(forget_idx) * (forgotten_factor - 1.0)))
             if n_extra_forget > 0:
@@ -268,10 +313,11 @@ class OnlineHardExampleMiner:
 
         # Optionally downsample easy
         if easy_downsample and np.any(easy_mask):
-            easy_idx_set = set(np.where(easy_mask)[0].tolist())
-            keep_frac = min(1.0, 0.5 * len(base) / max(int(np.sum(easy_mask)), 1))
-            n_keep = max(1, int(int(np.sum(easy_mask)) * keep_frac))
-            keep_set = set(rng.choice(np.where(easy_mask)[0], size=n_keep, replace=False).tolist())
+            easy_rows = self._positions_to_rows(np.where(easy_mask)[0])
+            easy_idx_set = set(easy_rows.tolist())
+            keep_frac = min(1.0, 0.5 * len(base) / max(len(easy_rows), 1))
+            n_keep = max(1, int(len(easy_rows) * keep_frac))
+            keep_set = set(rng.choice(easy_rows, size=n_keep, replace=False).tolist())
             augmented = [i for i in augmented if i not in easy_idx_set or i in keep_set]
 
         result = np.array(augmented, dtype=np.int64)
@@ -288,8 +334,19 @@ class OnlineHardExampleMiner:
         return result
 
     def get_hard_indices(self) -> np.ndarray:
-        """Return indices of consistently hard samples (convenience)."""
-        return np.where(self.get_hard_mask())[0]
+        """Return dataset row indices of consistently hard samples (convenience)."""
+        return self._positions_to_rows(np.where(self.get_hard_mask())[0])
+
+    def epoch_losses(self) -> np.ndarray | None:
+        """Latest epoch's per-position losses with unobserved samples filled by
+        the observed median; ``None`` if nothing was observed. Consumers such as
+        curriculum loss-weighting cannot handle NaN."""
+        losses = self._loss_buffer[-1].copy()
+        observed = np.isfinite(losses)
+        if not np.any(observed):
+            return None
+        losses[~observed] = float(np.median(losses[observed]))
+        return losses
 
     @property
     def current_epoch(self) -> int:
@@ -308,6 +365,7 @@ class OnlineHardExampleMiner:
             "ema_score": self._ema_score.tolist(),
             "epoch": self._epoch,
             "forgetting_tracker": self._forgetting_tracker.state_dict(),
+            "row_ids": None if self._row_ids is None else self._row_ids.tolist(),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -321,6 +379,7 @@ class OnlineHardExampleMiner:
         self._loss_buffer = np.array(state.get("loss_buffer", [[], []]), dtype=np.float32)
         self._ema_score = np.array(state.get("ema_score", []), dtype=np.float32)
         self._epoch = state.get("epoch", 0)
+        self._set_row_ids(state.get("row_ids"))
         ft_state = state.get("forgetting_tracker", {})
         if ft_state:
             self._forgetting_tracker.load_state_dict(ft_state)
