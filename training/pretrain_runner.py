@@ -38,7 +38,6 @@ from pretrain.extended_trainers import (
     PatchMaskedTrainer,
     VAESeqTrainer,
 )
-from pretrain.hard_example_mining import PretrainHardExampleMiner
 from training.cache_integrity import _promotion_holdout_n, _trainable_max_index
 from training.core import (
     _TRAIN_LOGGER,
@@ -333,6 +332,62 @@ def _read_json_dict(path: Path) -> dict:
     return {}
 
 
+def _state_transfer_fraction(src_state: dict, target: nn.Module) -> float:
+    """Fraction of ``target``'s state tensors present in ``src_state`` with the same shape."""
+    tgt = target.state_dict()
+    if not tgt:
+        return 0.0
+    matched = sum(1 for k, v in tgt.items() if k in src_state and tuple(src_state[k].shape) == tuple(v.shape))
+    return matched / len(tgt)
+
+
+def _pretrain_lr_for_epoch(base_lr: float, epoch: int, total_epochs: int, warmup: int = 3) -> float:
+    """Linear warmup then cosine decay to 5% of ``base_lr`` across the outer pretrain loop."""
+    total_epochs = max(1, int(total_epochs))
+    if total_epochs == 1:
+        return float(base_lr)
+    warmup = max(1, min(int(warmup), total_epochs // 2 or 1))
+    if epoch < warmup:
+        return float(base_lr) * (epoch + 1) / warmup
+    progress = (epoch - warmup) / max(1, total_epochs - warmup - 1)
+    return float(base_lr) * (0.05 + 0.95 * 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress))))
+
+
+def _pretrain_reuse_blocker(
+    report: dict,
+    ckpt: str,
+    *,
+    cache_path: str,
+    trainable_windows: int,
+    method: str,
+) -> str | None:
+    """Why an existing encoder checkpoint must not be reused on resume (None = reusable).
+
+    Reuse requires the same acceptance criteria as the supervised transfer plus the
+    same dataset window and method, so a rebuilt cache or a changed fold layout
+    re-runs pretraining instead of silently loading a stale encoder.
+    """
+    if not report:
+        return "no pretrain_report.json"
+    if report.get("status") != "completed":
+        return f"status={report.get('status')}"
+    if report.get("quality_gate_result") != "passed":
+        return f"quality_gate_result={report.get('quality_gate_result')}"
+    if not report.get("scaled_inputs"):
+        return "encoder trained on unscaled inputs"
+    _prev_method = report.get("method", report.get("method_actual"))
+    if _prev_method != method:
+        return f"method {_prev_method!r} != {method!r}"
+    if str(report.get("cache_path") or "") != str(cache_path):
+        return "different cache_path"
+    if int(report.get("trainable_windows_used_by_pretrain") or -1) != int(trainable_windows):
+        return "different pretrain window"
+    sha = report.get("checkpoint_sha256")
+    if not sha or sha != _sha256(ckpt):
+        return "checkpoint hash differs from the report"
+    return None
+
+
 def _update_pretrain_report(args, updates: dict) -> None:
     path = _pretrain_report_path(args)
     report = _read_json_dict(path)
@@ -446,34 +501,40 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
     backbone, and saves a ``model_state`` checkpoint at ``ckpt`` so the standard
     supervised-transfer path can load it.
     """
-    from pretrain.multi_task import pretrain_multi_task
+    from pretrain.multi_task import create_multi_task_pretrainer
 
     _epochs = max(1, int(getattr(args, "pretrain_epochs", 30) or 30))
     _bs = max(4, min(int(getattr(args, "pretrain_batch", 256) or 256), int(n_features) * args.seq_len, 2048))
     _bs = max(4, _bs // 8 * 8) if _bs > 8 else _bs
-    print(f"[Pretrain] Multi-task pretrainer (Improvement #3) | epochs={_epochs} batch={_bs} windows={len(windows)}")
-
-    try:
-        trainer, history = pretrain_multi_task(
-            windows,
-            seq_len=args.seq_len,
-            n_features=n_features,
-            epochs=_epochs,
-            batch_size=_bs,
-            device=device,
-            silent=False,
-        )
-    except Exception as exc:
-        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to built-in pretrain.")
-        return None
 
     target = model.backbone if hasattr(model, "backbone") else model
     if hasattr(target, "module"):
         target = target.module
+    try:
+        trainer = create_multi_task_pretrainer(windows, seq_len=args.seq_len, n_features=n_features, device=str(device))
+    except Exception as exc:
+        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to built-in pretrain.")
+        return None
+    # The multi-task trainer builds its own encoder; only pretrain if its weights
+    # can actually land in this model's backbone (the supervised loader needs >=60%).
+    _frac = _state_transfer_fraction(trainer.encoder.state_dict(), target)
+    if _frac < 0.6:
+        print(
+            f"[Pretrain] Multi-task encoder is not transferable to {type(target).__name__} "
+            f"({_frac:.0%} of backbone tensors match); using the built-in trainer instead."
+        )
+        return None
+    print(f"[Pretrain] Multi-task pretrainer (Improvement #3) | epochs={_epochs} batch={_bs} windows={len(windows)}")
+
+    try:
+        history = trainer.pretrain(windows, epochs=_epochs, batch_size=_bs, silent=False)
+    except Exception as exc:
+        print(f"[Pretrain] Multi-task pretrainer failed ({exc}); falling back to built-in pretrain.")
+        return None
+
     _enc_state = trainer.encoder.state_dict()
     try:
         _missing, _unexpected = target.load_state_dict(_enc_state, strict=False)
-        _frac = 1.0 - (len(_missing) / max(1, len(_enc_state)))
         print(
             f"[Pretrain] Multi-task encoder → backbone | loaded={_frac:.0%} "
             f"missing={len(_missing)} unexpected={len(_unexpected)}"
@@ -493,7 +554,9 @@ def _run_multi_task_pretrain(model, windows, ckpt, n_features, args, device):
                 "method": "multi_task",
                 "epochs": int(_epochs),
                 "checkpoint_path": str(ckpt),
-                "final_loss": float(history.get("loss", 0.0)) if isinstance(history, dict) else 0.0,
+                "final_loss": (
+                    float((history.get("loss") or [float("nan")])[-1]) if isinstance(history, dict) else None
+                ),
             },
         )
     except Exception as exc:
@@ -764,7 +827,8 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                         # P12: supervised-loss hard examples from an earlier run
                         # do not belong in an unsupervised task (opt-in only).
                         _valid_he = []
-                    _he_spans = [(i, i + 1) for i in _valid_he[: int(n_windows * 0.2)]]  # max 20% hard examples
+                    # Spans are (start, length): one window per hard example, max 20%.
+                    _he_spans = [(int(i), 1) for i in _valid_he[: int(n_windows * 0.2)]]
                     if _he_spans:
                         print(
                             f"[Pretrain] Injected {len(_he_spans):,} hard examples from {len(_he_indices):,} total ({len(_valid_he)} valid)."
@@ -815,6 +879,26 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     ckpt = str(Path(args.checkpoint_dir) / f"contrastive_encoder{'_regime' if use_regime else ''}.pt")
     _holdout_n = _promotion_holdout_n(_source_n_total, args)
     _embargo_n = _embargo_bars(args)
+    # Resume must run before the "started" report update below: overwriting the
+    # status made _load_pretrained_encoder refuse the reused encoder.
+    if getattr(args, "resume", False) and os.path.exists(ckpt):
+        _reuse_why = _pretrain_reuse_blocker(
+            _read_json_dict(_pretrain_report_path(args)),
+            ckpt,
+            cache_path=str(cache_path),
+            trainable_windows=int(n_total),
+            method=_method,
+        )
+        if _reuse_why is None:
+            print(f"[Pretrain] Resume: reusing existing checkpoint {Path(ckpt).name}")
+            # A-H2: load with a report + assertion instead of silently swallowing
+            # the exception (a failed load here would leave a random encoder).
+            _enc = encoder.module if hasattr(encoder, "module") else encoder
+            _state = torch.load(ckpt, map_location=device, weights_only=True)
+            _strict_load_report(_enc, _state, "PretrainResume", min_frac_loaded=0.6)
+            _update_pretrain_report(args, {"resume_reused_at": datetime.now(UTC).isoformat()})
+            return model
+        print(f"[Pretrain] Resume: existing {Path(ckpt).name} not reusable ({_reuse_why}); re-running pretraining.")
     _update_pretrain_report(
         args,
         {
@@ -860,25 +944,6 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             f"Pretrain window overlaps promotion holdout "
             f"(pretrain_end={n_total}, holdout_start={max(0, _source_n_total - _holdout_n)})"
         )
-    if getattr(args, "resume", False) and os.path.exists(ckpt):
-        print(f"[Pretrain] Resume: skipping, loading existing checkpoint {Path(ckpt).name}")
-        # A-H2: load with a report + assertion instead of silently swallowing
-        # the exception (a failed load here would leave a random encoder).
-        _enc = encoder.module if hasattr(encoder, "module") else encoder
-        try:
-            _state = torch.load(ckpt, map_location=device, weights_only=True)
-        except Exception:
-            _state = torch.load(ckpt, map_location=device, weights_only=True)
-        _strict_load_report(_enc, _state, "PretrainResume", min_frac_loaded=0.6)
-        _update_pretrain_report(
-            args,
-            {
-                "status": "resume_loaded_existing",
-                "checkpoint_path": str(ckpt),
-                "quality_gate_result": "loaded_existing_checkpoint",
-            },
-        )
-        return model
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     # Compute a VRAM-safe batch size for the contrastive trainer.
     # With no_grad on pos/neg views, only 1 encoder pass retains activation graphs.
@@ -1124,9 +1189,17 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     _best_loss = float("inf")
     _stale_epochs = 0
     _stopped_early = False
+    _base_pt_lr = float(getattr(args, "pretrain_lr", PRETRAIN.get("pretrain_lr", 1e-4)))
+    _pt_opt = getattr(trainer, "optimizer", None) or getattr(trainer, "opt", None)
     try:
         _last_w = windows
         for _ep in range(target_epochs):
+            # Trainers are called one epoch at a time, so their internal warmup /
+            # cosine restarts every call; drive the schedule across outer epochs.
+            if _pt_opt is not None and hasattr(_pt_opt, "param_groups"):
+                _ep_lr = _pretrain_lr_for_epoch(_base_pt_lr, _ep, target_epochs)
+                for _pg in _pt_opt.param_groups:
+                    _pg["lr"] = _ep_lr
             if _method in _PRETRAIN_MULTI_BLOCK:
                 # Multi-block: run _n_blocks fresh slices per epoch, silent except last
                 _block_losses = []
@@ -1284,38 +1357,50 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
     # P4: a pretext that does not beat a trivial baseline on held-out windows,
     # or whose loss rose over training, taught the encoder nothing.
     _heldout = {}
+    _gate_fail: tuple[str, str] | None = None  # (quality_gate_result, detail)
+    _heldout_gate_error: str | None = None
     try:
         from pretrain.loss_scaling import normalized_mse_loss
 
         _vd = trainer.diagnostics(_val_windows) if hasattr(trainer, "diagnostics") else {}
         _heldout = {k: float(v) for k, v in (_vd or {}).items() if isinstance(v, (int, float))}
+        # BYOL / JEPA / etc. have no held-out pretext metric and never raise
+        # RepresentationCollapseError, so this is their only collapse gate.
+        if len(_val_windows) >= 4 and bool((_vd or {}).get("collapsed", False)):
+            _gate_fail = (
+                "failed_embedding_collapse",
+                f"{_method.upper()} held-out embeddings collapsed (std={_heldout.get('embed_std', 0.0):.6f})",
+            )
         _metric_key = next((k for k in ("masked_mse", "forecast_mse", "recon_loss") if k in _heldout), None)
-        if _metric_key is not None:
+        if _gate_fail is None and _metric_key is not None:
             _xv = torch.as_tensor(_val_windows[: min(512, len(_val_windows))])
             _baseline = float(normalized_mse_loss(torch.zeros_like(_xv), _xv).item())
             _heldout["baseline_mse"] = _baseline
             _beats = _heldout[_metric_key] < 0.95 * _baseline
             _falling = len(all_losses) < 2 or all_losses[-1] < all_losses[0]
             if not (_beats and _falling):
-                _why = (
+                _gate_fail = (
+                    "failed_heldout_baseline",
                     f"held-out {_metric_key}={_heldout[_metric_key]:.4f} vs baseline {_baseline:.4f}"
-                    f"{'' if _falling else '; training loss did not fall'}"
+                    f"{'' if _falling else '; training loss did not fall'}",
                 )
-                print(f"\n[Pretrain] Quality Gate Failed: {_why}. Discarding pretrain weights.")
-                _update_pretrain_report(
-                    args,
-                    {
-                        "status": "discarded",
-                        "quality_gate_result": "failed_heldout_baseline",
-                        "quality_gate_detail": _why,
-                        "heldout_diagnostics": _heldout,
-                        "loss_history": [float(x) for x in all_losses],
-                        "discarded_files": _discard_encoder_files(ckpt),
-                    },
-                )
-                return build_model(args.model, n_features, args).to(device)
     except Exception as _hg_e:
-        print(f"[Pretrain] held-out gate skipped: {_hg_e}")
+        _heldout_gate_error = f"{type(_hg_e).__name__}: {_hg_e}"
+        print(f"[Pretrain] held-out gate could not be evaluated ({_heldout_gate_error}); encoder will not be transferred.")
+    if _gate_fail is not None:
+        print(f"\n[Pretrain] Quality Gate Failed: {_gate_fail[1]}. Discarding pretrain weights.")
+        _update_pretrain_report(
+            args,
+            {
+                "status": "discarded",
+                "quality_gate_result": _gate_fail[0],
+                "quality_gate_detail": _gate_fail[1],
+                "heldout_diagnostics": _heldout,
+                "loss_history": [float(x) for x in all_losses],
+                "discarded_files": _discard_encoder_files(ckpt),
+            },
+        )
+        return build_model(args.model, n_features, args).to(device)
 
     # Quality gate - embedding spread for reconstruction-style methods; uniformity for contrastive
     _quality_gate = "passed"
@@ -1386,33 +1471,14 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                 model = build_model(args.model, n_features, args).to(device)
                 return model
 
+    if _heldout_gate_error is not None:
+        _quality_gate = "unverified_heldout_gate_error"
+
     avg_loss = sum(all_losses) / max(len(all_losses), 1)
     if _stopped_early:
         print(f"[Pretrain] Done (early handoff). avg_loss={avg_loss:.4f}")
     else:
         print(f"[Pretrain] Done. avg_loss={avg_loss:.4f}")
-
-    # Compute feature vulnerability from hard examples for adversarial training (Task 2)
-    try:
-        _he_path = Path("logs/hard_examples.json")
-        if _he_path.exists():
-            import json
-
-            _he_data = json.loads(_he_path.read_text(encoding="utf-8"))
-            _he_indices = _he_data.get("indices", [])
-            if _he_indices:
-                # Load full training data to compute vulnerability
-                # Use the same data reader as pretraining
-                x_reader = getattr(trainer, "train_loader", type("", (), {"dataset": []})).dataset
-                _X_full = np.asarray(x_reader[:n_total])  # (n_total, seq_len, n_features)
-                _miner = PretrainHardExampleMiner()
-                _vuln = _miner.compute_feature_vulnerability(_X_full, _he_indices, method="gradient_norm")
-                _miner.save_vulnerability_scores(_vuln)
-                print(
-                    f"[Pretrain] Computed feature vulnerability for {len(_vuln)} features -> logs/hard_feature_dims.json"
-                )
-    except Exception as _vuln_e:
-        print(f"[Pretrain] Feature vulnerability computation failed: {_vuln_e}")
 
     _update_pretrain_report(
         args,
@@ -1438,6 +1504,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             "diagnostics": _latest_diag,
             "heldout_diagnostics": _heldout,
             "quality_gate_result": _quality_gate,
+            "heldout_gate_error": _heldout_gate_error,
             "checkpoint_path": str(ckpt),
             "checkpoint_sha256": _sha256(ckpt),
             "scaled_inputs": True,

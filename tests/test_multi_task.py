@@ -575,27 +575,29 @@ def test_full_pretraining_pipeline():
 
 
 def test_run_multi_task_pretrain_helper(tmp_path):
-    """C3 wiring: _run_multi_task_pretrain trains + saves a usable encoder ckpt."""
+    """C3 wiring: _run_multi_task_pretrain trains + saves a usable encoder ckpt
+    when the backbone can receive the multi-task encoder's weights."""
     import argparse
+    import copy
     import os
 
     import torch
 
+    from pretrain.multi_task import create_multi_task_pretrainer
     from training.train_gpu import _run_multi_task_pretrain
 
     windows = np.random.randn(60, 16, 8).astype(np.float32)
+    compatible = copy.deepcopy(
+        create_multi_task_pretrainer(windows, seq_len=16, n_features=8, device="cpu").encoder
+    )
 
     class _Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.backbone = torch.nn.Sequential(
-                torch.nn.Linear(8, 16),
-                torch.nn.ReLU(),
-                torch.nn.Linear(16, 16),
-            )
+            self.backbone = compatible
 
     model = _Model()
-    args = argparse.Namespace(pretrain_epochs=1, pretrain_batch=64, seq_len=16)
+    args = argparse.Namespace(pretrain_epochs=1, pretrain_batch=64, seq_len=16, checkpoint_dir=str(tmp_path))
     ckpt = str(tmp_path / "contrastive_encoder.pt")
     out = _run_multi_task_pretrain(model, windows, ckpt, 8, args, torch.device("cpu"))
     assert out is not None

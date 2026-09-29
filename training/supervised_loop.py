@@ -1813,8 +1813,16 @@ def supervised_train(
             try:
                 _vuln = PretrainHardExampleMiner.load_vulnerability_scores()
                 if _vuln is not None and len(_vuln) > 0:
-                    _feature_eps_multipliers = _vuln
-                    print(f"[Adversarial] Loaded feature vulnerability scores ({len(_vuln)} dims)")
+                    _vuln = np.asarray(_vuln, dtype=np.float32).reshape(-1)
+                    # A stale file from another dataset would scale the wrong features.
+                    if len(_vuln) != int(n_features) or not np.isfinite(_vuln).all():
+                        print(
+                            f"[Adversarial] Ignoring feature vulnerability scores: {len(_vuln)} dims "
+                            f"vs {int(n_features)} features (or non-finite values)"
+                        )
+                    else:
+                        _feature_eps_multipliers = _vuln
+                        print(f"[Adversarial] Loaded feature vulnerability scores ({len(_vuln)} dims)")
             except Exception as _vuln_e:
                 print(f"[Adversarial] Could not load vulnerability scores: {_vuln_e}")
 
