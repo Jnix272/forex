@@ -97,7 +97,7 @@ def _release_timestamp_utc(report_dates: pd.Series) -> pd.Series:
     """
     rd = pd.to_datetime(report_dates)
     # Days from the report weekday to Friday within the same week.
-    offsets = rd.dt.weekday.apply(lambda wd: 4 - int(wd))
+    offsets = 4 - rd.dt.weekday
     release_dates = rd.dt.normalize() + pd.to_timedelta(offsets, unit="D")
     release_dates = release_dates + pd.Timedelta(hours=COT_RELEASE_TIME_ET.hour, minutes=COT_RELEASE_TIME_ET.minute)
     if ZoneInfo is not None:
