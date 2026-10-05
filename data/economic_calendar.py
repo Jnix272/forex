@@ -258,7 +258,7 @@ class EcoCalendarFeatureBuilder:
 
         # Filter to high-impact only
         df = df[df["impact"] == "High"].copy()
-        df["datetime"] = df["datetime"].apply(_to_utc)
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=True, format="mixed")
         return df.sort_values("datetime").reset_index(drop=True)
 
     def build(self, bars: pd.DataFrame) -> pd.DataFrame:
