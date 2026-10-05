@@ -38,3 +38,61 @@ def test_missing_dashboard_file_handling():
 def test_headless_execution_feature_coverage():
     """Placeholder: verify dashboard covers all feature groups (requires Streamlit test harness)."""
     pytest.skip("Requires Streamlit AppTest - not yet integrated")
+
+
+def test_cors_default_allowed_origins(monkeypatch):
+    """Test default trusted CORS origins allow requests with matching Origin header."""
+    from fastapi.testclient import TestClient
+    from monitoring.dashboard.app import create_dashboard_app
+
+    monkeypatch.delenv("DASHBOARD_CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+
+    app = create_dashboard_app()
+    client = TestClient(app)
+
+    # Allowed origin
+    res = client.get("/api/health", headers={"Origin": "http://localhost:9090"})
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://localhost:9090"
+
+    # Disallowed origin
+    res_untrusted = client.get("/api/health", headers={"Origin": "http://malicious-domain.com"})
+    assert res_untrusted.status_code == 200
+    assert res_untrusted.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_custom_allowed_origins_param():
+    """Test explicitly setting allowed_origins parameter in create_dashboard_app."""
+    from fastapi.testclient import TestClient
+    from monitoring.dashboard.app import create_dashboard_app
+
+    app = create_dashboard_app(allowed_origins=["http://trusted.domain.com"])
+    client = TestClient(app)
+
+    res = client.get("/api/health", headers={"Origin": "http://trusted.domain.com"})
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://trusted.domain.com"
+
+    res_untrusted = client.get("/api/health", headers={"Origin": "http://localhost:9090"})
+    assert res_untrusted.status_code == 200
+    assert res_untrusted.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_env_var_allowed_origins(monkeypatch):
+    """Test configuring CORS origins via DASHBOARD_CORS_ORIGINS environment variable."""
+    from fastapi.testclient import TestClient
+    from monitoring.dashboard.app import create_dashboard_app
+
+    monkeypatch.setenv("DASHBOARD_CORS_ORIGINS", "http://env-trusted.com, http://env-trusted-2.com")
+
+    app = create_dashboard_app()
+    client = TestClient(app)
+
+    res = client.get("/api/health", headers={"Origin": "http://env-trusted.com"})
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://env-trusted.com"
+
+    res_untrusted = client.get("/api/health", headers={"Origin": "http://localhost:9090"})
+    assert res_untrusted.status_code == 200
+    assert res_untrusted.headers.get("access-control-allow-origin") is None
