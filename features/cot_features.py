@@ -1,5 +1,10 @@
 import polars as pl
 
+# Weekly report; 21 days tolerates holiday-delayed releases. Older values are
+# treated as missing: a discontinued series (e.g. a CFTC contract rename) must
+# not be forward-filled for years.
+COT_MAX_AGE = pl.duration(days=21)
+
 
 def add_cot_features(df: pl.DataFrame, cot_df: pl.DataFrame, pair: str) -> pl.DataFrame:
     """
@@ -47,18 +52,23 @@ def add_cot_features(df: pl.DataFrame, cot_df: pl.DataFrame, pair: str) -> pl.Da
 
     # Select columns to join
     cols_to_join = ["timestamp_utc", "net_hedge_fund", "net_commercial", "cot_hf_mom_4w", "cot_hf_zscore_52w"]
-    pair_cot_clean = pair_cot.select(cols_to_join)
+    pair_cot_clean = (
+        pair_cot.select(cols_to_join)
+        .with_columns(pl.col("timestamp_utc").cast(df.schema["timestamp_utc"]))
+        .with_columns(pl.col("timestamp_utc").alias("_cot_release"))
+    )
 
     # Perform backward-looking asof join
     df = df.join_asof(pair_cot_clean, on="timestamp_utc", strategy="backward")
 
-    # Forward-fill nulls (for ticks before the first COT report), then fill remaining with 0
+    # Before the first report or after the series goes stale -> neutral 0.
+    fresh = pl.col("_cot_release").is_not_null() & ((pl.col("timestamp_utc") - pl.col("_cot_release")) <= COT_MAX_AGE)
     df = df.with_columns(
         [
-            pl.col("net_hedge_fund").fill_null(strategy="forward").fill_null(0.0).alias("cot_net_hf"),
-            pl.col("net_commercial").fill_null(strategy="forward").fill_null(0.0).alias("cot_net_comm"),
-            pl.col("cot_hf_mom_4w").fill_null(strategy="forward").fill_null(0.0),
-            pl.col("cot_hf_zscore_52w").fill_null(strategy="forward").fill_null(0.0),
+            pl.when(fresh).then(pl.col("net_hedge_fund")).otherwise(None).cast(pl.Float64).fill_null(0.0).alias("cot_net_hf"),
+            pl.when(fresh).then(pl.col("net_commercial")).otherwise(None).cast(pl.Float64).fill_null(0.0).alias("cot_net_comm"),
+            pl.when(fresh).then(pl.col("cot_hf_mom_4w")).otherwise(None).cast(pl.Float64).fill_null(0.0).alias("cot_hf_mom_4w"),
+            pl.when(fresh).then(pl.col("cot_hf_zscore_52w")).otherwise(None).cast(pl.Float64).fill_null(0.0).alias("cot_hf_zscore_52w"),
         ]
     )
 
@@ -75,6 +85,6 @@ def add_cot_features(df: pl.DataFrame, cot_df: pl.DataFrame, pair: str) -> pl.Da
     )
 
     # Drop intermediate columns
-    df = df.drop(["net_hedge_fund", "net_commercial", "cot_hf_zscore_52w"])
+    df = df.drop(["net_hedge_fund", "net_commercial", "cot_hf_zscore_52w", "_cot_release"])
 
     return df

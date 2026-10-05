@@ -30,6 +30,7 @@ from config.settings import (
     EXECUTION as SETTINGS_EXECUTION,
 )
 from config.strategy_profiles import STRATEGY_PROFILES, strategy_profile
+from training.train_utils import EARLY_STOP_METRICS
 
 # Sub-module re-exports (these are the split pieces)
 from .hardware import apply_hardware_profile
@@ -39,6 +40,7 @@ from .helpers import (
     _collect_cli_profile_overrides,
     _set_global_seed,
     _slug_part,
+    _warn_unsupported_training_options,
 )
 from .profile import (
     _apply_model_profile,
@@ -226,6 +228,22 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--early-stop-patience", type=int, default=10, help="Stop training if val metric does not improve for this many epochs (0=disabled).")
     p.add_argument(
+        "--early-stop-metric",
+        type=str,
+        default="auto",
+        choices=list(EARLY_STOP_METRICS),
+        help="Checkpoint-selection / early-stop metric. auto=honest Sharpe CI low when "
+        "available else val loss; val_loss; sharpe (val Sharpe proxy); cost_sharpe "
+        "(cost-aware Sharpe). Sharpe metrics are higher-is-better.",
+    )
+    p.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum improvement of the early-stop metric that resets patience "
+        "(in the metric's own units, e.g. Sharpe for cost_sharpe).",
+    )
+    p.add_argument(
         "--batch-size", type=int, default=2048, help="Batch size -- 2048 optimal for 20M samples on RTX 4090"
     )
     p.add_argument("--lr", type=float, default=5e-5)
@@ -291,11 +309,12 @@ def parse_args():
     )
     p.add_argument(
         "--curriculum-manager",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable the unified CurriculumManager (difficulty + self-paced + "
         "loss-weighted + adaptive) as an extra per-epoch sample filter "
-        "(Improvement #4). Default: off (existing curriculum unchanged).",
+        "(Improvement #4). YAML: curriculum.manager.enabled (default off). "
+        "curriculum.self_paced / loss_weighting / miner_feedback only act through the manager.",
     )
     p.add_argument(
         "--curriculum-manager-mode",
@@ -550,6 +569,28 @@ def parse_args():
     )
     p.add_argument("--sharpe-weight", type=float, default=0.2, help="Sharpe proxy weight for sharpe_huber loss")
     p.add_argument(
+        "--huber-delta",
+        type=float,
+        default=None,
+        help="Huber delta for regression / multitask return terms (default: settings.TRAINING.huber_delta).",
+    )
+    p.add_argument(
+        "--mixup-alpha", type=float, default=0.2, help="Beta(alpha, alpha) for --use-mixup (loss-space mixup)."
+    )
+    p.add_argument("--mixup-prob", type=float, default=0.5, help="Probability a training batch is mixed (--use-mixup).")
+    p.add_argument(
+        "--use-mixup",
+        dest="use_mixup",
+        action=argparse.BooleanOptionalAction,
+        help="Loss-space MixUp on training batches (not applied during direction warmup).",
+    )
+    p.add_argument(
+        "--use-volatility-sampler",
+        dest="use_volatility_sampler",
+        action=argparse.BooleanOptionalAction,
+        help="Unsupported by the streaming Zarr loader; setting it only emits a warning.",
+    )
+    p.add_argument(
         "--sharpe-annualization-factor",
         type=float,
         default=None,
@@ -571,6 +612,21 @@ def parse_args():
         type=float,
         default=0.85,
         help="Minimum confidence required to execute a trade during validation (Disagreement Gating).",
+    )
+    p.add_argument(
+        "--trade-deadband",
+        "--deadband",
+        dest="trade_deadband",
+        type=float,
+        default=0.0,
+        help="Conviction deadband hurdle rate: filters out trades where predicted return/score <= deadband.",
+    )
+    p.add_argument(
+        "--trade-min-confidence",
+        dest="trade_min_confidence",
+        type=float,
+        default=None,
+        help="Minimum action probability required to trigger BUY/SELL (otherwise HOLD).",
     )
     p.add_argument("--num-workers", type=int, default=8, help="DataLoader workers -- 8 is sweet spot for H100/A100")
     p.add_argument(
@@ -706,7 +762,8 @@ def parse_args():
         "--feature-ablation-keep-groups",
         type=str,
         default="",
-        help="Comma-separated curriculum feature groups to keep; all other grouped features are zeroed.",
+        help="Comma-separated curriculum feature groups to keep; features of all other groups are zeroed. "
+        "Features that belong to no curriculum group are always kept.",
     )
 
     p.add_argument(
@@ -715,9 +772,26 @@ def parse_args():
         default="",
         help="Comma-separated exact feature names to zero for this run.",
     )
+    p.add_argument(
+        "--feature-ablation-keep-features",
+        type=str,
+        default="",
+        help="Comma-separated exact feature names or base names to keep; all others are zeroed.",
+    )
+    p.add_argument(
+        "--feature-ablation-drop-ungrouped",
+        action="store_true",
+        default=False,
+        help="When keep-groups is active, also zero features that belong to no curriculum group.",
+    )
 
     # Pre-training & Ablation
-    p.add_argument("--pretrain", action="store_true", help="Enable contrastive pre-training")
+    p.add_argument(
+        "--pretrain",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable contrastive pre-training (--no-pretrain overrides pretrain.enabled: true).",
+    )
     p.add_argument("--ablate-pretrain", action="store_true", help="Run ablation test on pretraining vs no-pretraining")
 
     # Pre-training
@@ -882,13 +956,23 @@ def parse_args():
     p.add_argument(
         "--multitask",
         action="store_true",
-        help="Replace single prediction head with MultiTaskHead (direction CE + magnitude Huber + confidence BCE)",
+        help="Replace single prediction head with MultiTaskHead (direction BCE + magnitude Huber + confidence BCE)",
     )
     p.add_argument(
         "--mt-w-ret", type=float, default=0.5, help="Multi-task loss weight for return_hat Huber term (default 0.5)"
     )
     p.add_argument(
         "--mt-w-conf", type=float, default=0.3, help="Multi-task loss weight for confidence BCE term (default 0.3)"
+    )
+    p.add_argument(
+        "--mt-w-quantile", type=float, default=0.2, help="Multi-task loss weight for the return quantile (pinball) term."
+    )
+    p.add_argument(
+        "--mt-entropy-weight",
+        type=float,
+        default=0.0,
+        help="Direction-entropy bonus weight: subtracts weight * mean binary entropy of the "
+        "direction probability to discourage collapsed (all-one-side) predictions.",
     )
     p.add_argument(
         "--direction-probe",
@@ -954,7 +1038,7 @@ def parse_args():
     )
     p.add_argument(
         "--train-ensemble",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=bool(SETTINGS_ENSEMBLE.get("enabled", False)),
         help="After supervised training, train the EnsembleMetaLearner "
         "with diversity penalty across all trained base models",
@@ -973,7 +1057,7 @@ def parse_args():
     )
     p.add_argument(
         "--deploy-ensemble",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=bool(SETTINGS_ENSEMBLE.get("deploy", False)),
         help="After ensemble ONNX export, atomically promote it to production_best.onnx for the C++ server.",
     )
@@ -1003,7 +1087,12 @@ def parse_args():
     )
 
     # RL
-    p.add_argument("--rl-train", action="store_true")
+    p.add_argument(
+        "--rl-train",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run RL after supervised training (--no-rl-train overrides rl.enabled: true).",
+    )
     p.add_argument("--rl-algo", type=str, default="dqn", choices=["dqn", "ppo"])
     p.add_argument("--rl-episodes", type=int, default=500)
     p.add_argument(
@@ -1446,6 +1535,13 @@ def parse_args():
         help="Enable Elastic Weight Consolidation to prevent catastrophic forgetting.",
     )
     p.add_argument("--ewc-lambda", type=float, default=1000.0, help="EWC penalty weight (default: 1000.0).")
+    p.add_argument(
+        "--ewc-lambda-ramp",
+        type=float,
+        default=0.0,
+        help="Linear EWC lambda ramp: effective lambda = ewc_lambda * (1 + ramp * epoch/epochs). "
+        "0 = constant lambda.",
+    )
 
     p.add_argument(
         "--enable-si", action="store_true", help="Enable Synaptic Intelligence (SI) to prevent catastrophic forgetting."
@@ -1455,8 +1551,9 @@ def parse_args():
         type=float,
         default=1.0,
         help="SI penalty weight (default: 1.0). "
-        "With si_dynamic enabled (training profile / run.yaml), this base lambda is "
-        "scaled per epoch by 1/(1 + max_shift^2) and clamped to [si_lambda_min, si_lambda_max].",
+        "With si_dynamic enabled (training profile / run.yaml), the per-epoch lambda is "
+        "si_lambda_min + (si_lambda_max - si_lambda_min) / (1 + max_shift^2): si_lambda_max "
+        "in a stable regime, si_lambda_min under heavy feature drift.",
     )
     p.add_argument(
         "--si-omega-decay",
@@ -1586,7 +1683,9 @@ def parse_args():
         f"[Strategy] {args.strategy_mode} | bars={args.bar_freq} | seq_len={args.seq_len} | "
         f"lookahead={args.lookahead_bars}(dynamic:trending=20,ranging=12,volatile=6) | "
         f"TP/SL={args.profit_target_atr}/{args.stop_loss_atr} ATR | "
-        f"early_stop=dynamic(patience={getattr(args, 'early_stop_patience', 10)},EMA+LR-halve+adaptive)"
+        f"early_stop=dynamic(metric={getattr(args, 'early_stop_metric', 'auto')},"
+        f"patience={getattr(args, 'early_stop_patience', 10)},"
+        f"min_delta={getattr(args, 'early_stop_min_delta', 0.0)},EMA+LR-halve+adaptive)"
     )
     if args.quick_mode:
         # Synthetic/quick smokes are too small for purged walk-forward
@@ -1624,7 +1723,9 @@ def parse_args():
         print("[FineTune] Warm-start mode: walk-forward CV disabled (single embargoed split).")
     if getattr(args, "fair_sweep", False):
         args.model_profile = False
-    args._cli_profile_overrides = _collect_cli_profile_overrides()
+    args._cli_profile_overrides = _collect_cli_profile_overrides(p)
+    args._primary_model = str(getattr(args, "model", "") or "").lower().strip()
+    _warn_unsupported_training_options(args)
     _sync_runtime_config(args)
 
     # -- Risk engine (Improvement #1): optional live/dry-run enforcement config. --

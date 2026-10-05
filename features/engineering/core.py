@@ -153,8 +153,13 @@ def _join_asof_available(
     right: pl.DataFrame | None,
     *,
     delay_minutes: int = _DEFAULT_PIT_DELAY_MINUTES,
+    keep_available_as: str | None = None,
 ) -> pl.DataFrame:
-    """Backward asof join on when information became knowable (available_time)."""
+    """Backward asof join on when information became knowable (available_time).
+
+    ``keep_available_as`` keeps the matched row's available_time under that
+    column name (e.g. to measure staleness / decay since the last event).
+    """
     if right is None or len(right) == 0 or "timestamp_utc" not in left.columns:
         return left
     left_dtype = left.schema["timestamp_utc"]
@@ -166,6 +171,8 @@ def _join_asof_available(
     if "timestamp_utc" in right_join.columns:
         right_join = right_join.drop("timestamp_utc")
     right_join = right_join.with_columns(pl.col("available_time").cast(left_dtype))
+    if keep_available_as:
+        right_join = right_join.with_columns(pl.col("available_time").alias(keep_available_as))
     out = left.join_asof(
         right_join,
         left_on="timestamp_utc",
@@ -257,10 +264,13 @@ class FeatureEngineer:
             regime_window=_ca_rw,
             lags=ca_lags,
         )
-        _fc = yaml_fc if yaml_fc else FC
-        self.feature_cache_enabled = bool((_fc or {}).get("enabled", True))
-        self.ofi_z_threshold = float((_fc or {}).get("ofi_z_threshold", 2.0))
-        slow = list((_fc or {}).get("slow_cols") or [])
+        # YAML keys override settings.FEATURE_CACHE per key (merge, not replace).
+        # Informational only: caching happens in data.feature_cache.WindowFeatureCache
+        # at dataset-build time; feature values never depend on these attributes.
+        _fc = {**(FC or {}), **(yaml_fc if isinstance(yaml_fc, dict) else {})}
+        self.feature_cache_enabled = bool(_fc.get("enabled", True))
+        self.ofi_z_threshold = float(_fc.get("ofi_z_threshold", 2.0))
+        slow = list(_fc.get("slow_cols") or [])
         self.slow_cols = ["hurst_exponent" if c == "hurst" else c for c in slow]
         self.enable_regime_gate = bool(enable_regime_gate)
         self.enable_quality_gate = bool(enable_quality_gate)
@@ -649,8 +659,9 @@ class FeatureEngineer:
         if sentiment is not None:
             if "timestamp_utc" in sentiment.columns:
                 sentiment = sentiment.with_columns(pl.col("timestamp_utc").cast(pl.Datetime("ns", "UTC")))
-            F = _join_asof_available(F, sentiment)
+            F = _join_asof_available(F, sentiment, keep_available_as="_sentiment_event_time")
             F = sentiment_tiers(F, decay_lam=self.dl, fb_dim=self.fb)
+            F = F.drop("_sentiment_event_time", strict=False)
         else:
             F = F.with_columns(
                 [

@@ -59,7 +59,7 @@ Write-Host "[Phase 1] Sizing: RCK confidence-scaled (0.02..max_lots) | Hedge: pe
 
 while ($true) {
     & "d:/forex-main/.venv311/Scripts/python.exe" -u trading/live_engine.py `
-        --broker oanda `
+        --broker paper `
         --pairs $Pairs `
         --model ensemble `
         --equity $Equity `

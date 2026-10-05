@@ -353,6 +353,7 @@ from training.dataset_builder import (
 from training.feature_ablation import (
     _atomic_copy,
 )
+from training.train_utils import early_stop_metric_maximizes
 
 # -----------------------------------------------------------------------------
 # CLI - re-exported from training/gpu_cli.py
@@ -575,17 +576,14 @@ def main():
         print(f"[Discord] Initialization failed: {e}")
         alerter = None
 
-    # Load persistent training memory and apply conservative nudges unless this
-
-    # run is intended to be a clean baseline/fresh start.
-
+    # Load persistent training memory unless this run is intended to be a clean
+    # baseline/fresh start. Nudges are applied once, per model (after the model
+    # profile), so they are not compounded across the global and per-model args.
     if bool(getattr(args, "training_memory", True)):
         try:
             from training.training_memory import TrainingMemory
 
             _train_memory = TrainingMemory(path="logs/training_memory.json")
-
-            _train_memory.apply_to_args(args)
 
             print(f"[TrainingMemory] {_train_memory.summary()}")
 
@@ -854,7 +852,7 @@ def main():
                 h, bv = supervised_train(model_name, cache_path, n_samples, n_features, ta, device, n_gpus, run=None)  # noqa: B023, RUF059
                 return bv
 
-            direction = "minimize" if getattr(model_args, 'early_stop_metric', 'val_loss') == "val_loss" else "maximize"
+            direction = "maximize" if early_stop_metric_maximizes(getattr(model_args, "early_stop_metric", "auto")) else "minimize"
             import optuna
 
             study = optuna.create_study(direction=direction, pruner=optuna.pruners.MedianPruner())
@@ -880,6 +878,14 @@ def main():
         _pretrain_ablation_models = _parse_pretrain_ablation_models(getattr(model_args, "pretrain_ablation_models", ""))
 
         _run_ablation = (_abl_arg == "true") or (_abl_arg == "auto" and model_name in _pretrain_ablation_models)
+        if _run_ablation and not bool(getattr(model_args, "pretrain", False)):
+            # Without pretraining the "pretrained" arm is identical to the baseline,
+            # so the ablation would just train the same model twice.
+            print(
+                f"[Ablation] Skipped for {model_name}: pretrain.enabled is false "
+                f"(pretrain_ablation={_abl_arg} has nothing to compare)."
+            )
+            _run_ablation = False
         if _run_ablation:
             _baseline_done, _baseline_reason = _baseline_ablation_completion_status(
                 model_name, model_args.checkpoint_dir, model_args
@@ -1275,7 +1281,7 @@ def main():
                 _m_key = "best_metric"
                 valid_folds = [f for f in cv_hist if f.get(_m_key) is not None]
                 if valid_folds:
-                    if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe":
+                    if early_stop_metric_maximizes(getattr(model_args, "early_stop_metric", "auto")):
                         best_entry = max(valid_folds, key=lambda x: x[_m_key])
                     else:
                         best_entry = min(valid_folds, key=lambda x: x[_m_key])
@@ -1680,7 +1686,7 @@ def main():
                     float(v) for v in (_fold_metrics or []) if v is not None and np.isfinite(float(v))
                 ]
 
-                if getattr(model_args, 'early_stop_metric', 'val_loss') == "sharpe":
+                if early_stop_metric_maximizes(getattr(model_args, "early_stop_metric", "auto")):
                     if _mem_metric_values:
                         _tm_sharpe = max(_mem_metric_values)
 

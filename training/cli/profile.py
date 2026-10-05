@@ -90,7 +90,7 @@ def _normalize_architecture_profile(profile: dict, model_name: str) -> dict:
 
 
 def _apply_model_profile(args, model_name: str, *, enabled: bool = True):
-    """Merge architecture_config(name) onto args; explicit CLI overrides win."""
+    """Merge architecture_config(name) onto args; explicit CLI / YAML values win."""
     if not enabled:
         return args
     try:
@@ -113,8 +113,22 @@ def _apply_model_profile(args, model_name: str, *, enabled: bool = True):
         args.recipe_name = recipe_name
         log_parts.append(f"recipe={recipe_name}")
 
+    # Precedence: CLI > explicit run.yaml keys > architecture profile > argparse default.
+    # YAML model.*/training.* values describe the configured (primary) model; other
+    # architectures in an --all-models queue keep their own profile dimensions.
+    primary = str(getattr(args, "_primary_model", "") or "").lower().strip()
+    yaml_explicit = (
+        frozenset(getattr(args, "_yaml_explicit_keys", None) or ())
+        if (not primary or primary == str(model_name).lower().strip())
+        else frozenset()
+    )
+    yaml_kept: list[str] = []
     for dest, value in normalized.items():
         if dest in cli_overrides or not hasattr(args, dest):
+            continue
+        if dest in yaml_explicit:
+            if getattr(args, dest, None) != value:
+                yaml_kept.append(f"{dest}={getattr(args, dest, None)}")
             continue
         setattr(args, dest, value)
         if dest == "lr":
@@ -125,6 +139,8 @@ def _apply_model_profile(args, model_name: str, *, enabled: bool = True):
             log_parts.append(f"weight_decay={float(value):.3e}")
         else:
             log_parts.append(f"{dest}={value}")
+    if yaml_kept:
+        log_parts.append("yaml_overrides_arch_profile[" + " ".join(yaml_kept) + "]")
 
     # Apply training profile (adversarial, curriculum, miner, pretrain, SWA, etc.)
     _apply_training_profile(args, model_name, cli_overrides, log_parts)

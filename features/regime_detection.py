@@ -403,103 +403,182 @@ def fit_regime_hmm(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+@njit(cache=True)
+def _forward_filter_segment(framelogprob: np.ndarray, log_transmat: np.ndarray, log_alpha0: np.ndarray, start_fresh: bool):
+    """Normalised forward filter: returns P(S_t | O_{1:t}) and the final log-alpha.
+
+    ``log_alpha0`` is the normalised log posterior at the bar before the segment
+    (or the log start distribution when ``start_fresh``).
+    """
+    n, k = framelogprob.shape
+    out = np.empty((n, k), dtype=np.float64)
+    prev = log_alpha0.copy()
+    cur = np.empty(k, dtype=np.float64)
+    for t in range(n):
+        for j in range(k):
+            if t == 0 and start_fresh:
+                cur[j] = prev[j] + framelogprob[t, j]
+            else:
+                m = -np.inf
+                for i in range(k):
+                    v = prev[i] + log_transmat[i, j]
+                    if v > m:
+                        m = v
+                s = 0.0
+                for i in range(k):
+                    s += np.exp(prev[i] + log_transmat[i, j] - m)
+                cur[j] = m + np.log(s) + framelogprob[t, j]
+        m = cur.max()
+        s = 0.0
+        for j in range(k):
+            s += np.exp(cur[j] - m)
+        norm = m + np.log(s)
+        for j in range(k):
+            prev[j] = cur[j] - norm
+            out[t, j] = np.exp(prev[j])
+    return out, prev
+
+
+def _fit_hmm_window(Z: np.ndarray, n_states: int, random_state: int, prev: dict | None, vol_col: int) -> dict:
+    """Fit a GaussianHMM on standardised ``Z`` and return params with states
+    sorted by ascending mean of ``vol_col`` (0 = low vol ... n-1 = high vol).
+
+    Warm-starts from ``prev`` so consecutive refits converge in a few EM steps
+    and stay aligned with the previous state ordering.
+    """
+    import warnings
+
+    kw = dict(
+        n_components=n_states,
+        covariance_type="full",
+        n_iter=30 if prev is not None else 100,
+        tol=1e-3,
+        random_state=random_state,
+        min_covar=1e-4,
+    )
+    def _fit(warm: dict | None):
+        if warm is not None:
+            # EM cannot revive zero transition/start mass, so a state that died in
+            # one window would stay dead forever; mix in a uniform floor.
+            m = GaussianHMM(init_params="", **kw)
+            m.startprob_ = np.full(n_states, 1.0 / n_states)
+            m.transmat_ = 0.9 * warm["transmat"] + 0.1 / n_states
+            m.means_ = warm["means"]
+            m.covars_ = warm["covars"]
+        else:
+            m = GaussianHMM(**{**kw, "n_iter": 100})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.fit(Z)
+        return m
+
+    def _params(m) -> dict:
+        means = np.asarray(m.means_, dtype=float)
+        covars = np.asarray(m.covars_, dtype=float)
+        if covars.ndim == 2:
+            covars = np.stack([np.diag(c) for c in covars])
+        transmat = np.asarray(m.transmat_, dtype=float)
+        startprob = np.asarray(m.startprob_, dtype=float)
+        if not (np.isfinite(means).all() and np.isfinite(covars).all()):
+            raise ValueError("non-finite HMM emission parameters")
+        # States never left in the window get all-zero / NaN transmat rows.
+        transmat = np.where(np.isfinite(transmat), transmat, 0.0)
+        bad = transmat.sum(axis=1) <= 0
+        transmat[bad] = 1.0 / n_states
+        transmat = transmat / transmat.sum(axis=1, keepdims=True)
+        startprob = np.where(np.isfinite(startprob), startprob, 0.0)
+        startprob = startprob / startprob.sum() if startprob.sum() > 0 else np.full(n_states, 1.0 / n_states)
+        eye = np.eye(covars.shape[-1])
+        covars = np.stack([0.5 * (c + c.T) + 1e-4 * eye for c in covars])
+        order = np.argsort(means[:, vol_col], kind="stable")
+        return {
+            "startprob": startprob[order],
+            "transmat": transmat[np.ix_(order, order)],
+            "means": means[order],
+            "covars": covars[order],
+        }
+
+    if prev is not None:
+        try:
+            model = _fit(prev)
+            occ = np.bincount(model.predict(Z), minlength=n_states) / max(1, len(Z))
+            if occ.min() >= 0.02:
+                return _params(model)
+        except Exception:
+            pass
+    return _params(_fit(None))
+
+
 def _causal_hmm_decode(
     feat: np.ndarray,
     n_states: int = 3,
-    min_fit: int = 120,
-    refit_every: int = 20,
+    min_fit: int = 1000,
+    refit_every: int = 500,
     random_state: int = 42,
+    fit_window: int = 2000,
+    vol_col: int = 1,
+    skip_head: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Causal-ish HMM decode: fit params on a warm-up prefix only, then decode.
+    """Causal rolling-refit HMM decode.
 
-    Fitting on the full series lets future bars influence early state posteriors
-    (look-ahead). We instead:
-
-    1. Fit GaussianHMM parameters on ``feat[:min_fit]`` only.
-    2. Decode the full series with those frozen params.
-    3. Lag posteriors / states by 1 bar so bar ``t`` never sees ``t``'s return
-       in the smoothed posterior used as a feature.
-
-    ``refit_every`` is retained for API compatibility but unused (full expanding
-    refits are O(n²) and too slow for production feature builds).
+    Every ``refit_every`` bars (starting at ``min_fit``) a GaussianHMM is fitted
+    on the trailing ``fit_window`` bars only, standardised with that window's
+    mean/std, and used to filter the next segment. States are ordered by the
+    mean of ``vol_col`` so ``regime_class`` means 0 = low vol, 1 = normal,
+    2 = high vol consistently across refits, build windows and live (labeling
+    relies on that mapping). The first ``skip_head`` rows (rolling-feature
+    warm-up, e.g. zero volatility) are never fitted on: they would otherwise
+    claim a degenerate state that no later bar matches. Bars before
+    ``skip_head + min_fit`` carry uniform probs and state 1 (normal). Output is
+    lagged one bar so bar ``t`` never sees its own return.
     """
-    del refit_every  # API compat
     n = len(feat)
     probs = np.full((n, n_states), 1.0 / max(1, n_states), dtype=np.float64)
-    states = np.zeros(n, dtype=np.int32)
-    if n < min_fit or not _HMMLEARN_OK:
+    states = np.full(n, min(1, n_states - 1), dtype=np.int32)
+    min_fit = max(int(min_fit), 2 * n_states + 10)
+    refit_every = max(1, int(refit_every))
+    fit_window = max(int(fit_window), min_fit)
+    skip_head = max(0, int(skip_head))
+    if n <= skip_head + min_fit or not _HMMLEARN_OK:
         return probs, states
 
+    from scipy.stats import multivariate_normal
+
+    X = np.nan_to_num(np.asarray(feat, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    causal = np.full((n, n_states), 1.0 / n_states, dtype=np.float64)
+    decoded = np.zeros(n, dtype=bool)
+    params: dict | None = None
+    log_alpha: np.ndarray | None = None
+    _EPS = 1e-12
     try:
-        model = RegimeHMM(n_states=n_states, random_state=random_state)
-        model.set_features(feat[:min_fit])
-        model.fit(feat[:min_fit])
+        for t0 in range(skip_head + min_fit, n, refit_every):
+            t1 = min(n, t0 + refit_every)
+            W = X[max(skip_head, t0 - fit_window) : t0]
+            mu = W.mean(axis=0)
+            sd = W.std(axis=0) + 1e-9
+            try:
+                params = _fit_hmm_window((W - mu) / sd, n_states, random_state, params, vol_col)
+            except Exception:
+                if params is None:
+                    continue
+            assert params is not None
+            Z = (X[t0:t1] - mu) / sd
+            flp = np.empty((t1 - t0, n_states))
+            for i in range(n_states):
+                flp[:, i] = multivariate_normal.logpdf(
+                    Z, mean=params["means"][i], cov=params["covars"][i], allow_singular=True
+                )
+            flp = np.nan_to_num(flp, nan=-1e6, neginf=-1e6)
+            log_A = np.log(np.clip(params["transmat"], _EPS, 1.0))
+            fresh = log_alpha is None
+            la0 = np.log(np.clip(params["startprob"], _EPS, 1.0)) if fresh else log_alpha
+            seg, log_alpha = _forward_filter_segment(flp, log_A, la0, fresh)
+            causal[t0:t1] = seg
+            decoded[t0:t1] = True
 
-        # Extract frozen parameters from fitted model
-        hmm_model = model._model
-        if hmm_model is None or model._mean is None or model._std is None:
-            raise RuntimeError("RegimeHMM fit failed to populate model parameters")
-
-        covars_obj = getattr(hmm_model, "covars_", None)
-        if covars_obj is None:
-            raise RuntimeError("RegimeHMM fit failed to populate covariance parameters")
-
-        transmat = model.transition_.copy()
-        startprob = np.asarray(hmm_model.startprob_).copy()
-        means = np.asarray(hmm_model.means_).copy()
-        covars = np.asarray(covars_obj).copy()
-        mean_scaler = model._mean
-        std_scaler = model._std
-
-        # Manually decode full series with frozen parameters (no refit)
-        # Standardize full features with warm-up mean/std
-        Z_full = (np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0) - mean_scaler) / std_scaler
-
-        # Compute log-likelihood for each state at each timestep
-        from scipy.stats import multivariate_normal
-
-        n = len(feat)
-        framelogprob = np.zeros((n, n_states))
-        for i in range(n_states):
-            # Symmetrise + small ridge: a constant input column or a sparsely
-            # populated state gave a singular covariance, the decode raised, and
-            # every window fell back to uniform "regime" probabilities.
-            c = np.asarray(covars[i], dtype=float)
-            if c.ndim == 1:
-                c = np.diag(c)
-            c = 0.5 * (c + c.T) + 1e-4 * np.eye(c.shape[0])
-            framelogprob[:, i] = multivariate_normal.logpdf(
-                Z_full, mean=means[i], cov=c, allow_singular=True
-            )
-
-        # Forward algorithm with frozen parameters.
-        # Guard against exact-zero probabilities (a state absent from the warm-up
-        # yields startprob_/transmat entries of 0.0 -> log(0) = -inf, which
-        # propagates as NaN through logsumexp). Clip to a tiny positive floor.
-        from scipy.special import logsumexp
-
-        _EPS = 1e-12
-        startprob = np.clip(startprob, _EPS, 1.0)
-        transmat = np.clip(transmat, _EPS, 1.0)
-
-        logprob = np.zeros((n, n_states))
-        logprob[0] = np.log(startprob) + framelogprob[0]
-        for t in range(1, n):
-            # log P(S_t | O_{1:t}) = logsumexp(log P(S_{t-1} | O_{1:t-1}) + log A_{S_{t-1}, S_t}) + log P(O_t | S_t)
-            logprob[t] = logsumexp(logprob[t - 1, :, np.newaxis] + np.log(transmat.T), axis=0) + framelogprob[t]
-
-        # Normalize to get causal probabilities
-        log_norm = np.asarray(logsumexp(logprob, axis=1, keepdims=True), dtype=float)
-        causal_probs = np.exp(logprob - log_norm)
-
-        # Get states (argmax)
-        raw_s = np.argmax(causal_probs, axis=1)
-
-        # 1-bar lag: feature at t uses posterior known at t-1
-        probs[1:] = causal_probs[:-1]
+        raw_s = np.where(decoded, np.argmax(causal, axis=1), states).astype(np.int32)
+        probs[1:] = causal[:-1]
         states[1:] = raw_s[:-1]
-        probs[0] = 1.0 / n_states
-        states[0] = 0
     except Exception as exc:
         import logging
 
@@ -508,7 +587,7 @@ def _causal_hmm_decode(
             exc,
         )
         probs[:] = 1.0 / max(1, n_states)
-        states[:] = 0
+        states[:] = min(1, n_states - 1)
     return probs, states
 
 
@@ -538,7 +617,7 @@ def vol_regime_probs_polars(
     _rolling_mean_causal(abs_ret, vol, window)
 
     feat = np.column_stack([ret, vol])
-    probs, _ = _causal_hmm_decode(feat, n_states=n_states, min_fit=max(window * 2, 120))
+    probs, _ = _causal_hmm_decode(feat, n_states=n_states, skip_head=window)
 
     out = {f"vol_regime_state_{s}_prob": probs[:, s] for s in range(n_states)}
     return pl.DataFrame(out)
@@ -567,14 +646,19 @@ def vol_regime_quantile_probs(n_states: int = 3, window: int = 60) -> list:
 
 
 @njit(parallel=True, cache=True)
-def _scan_outcomes_numba_parallel(close, hurst_rs_arr, hurst_dfa_arr, fractal_arr, hurst_window, fractal_window, step):
+def _scan_outcomes_numba_parallel(close, ret, hurst_rs_arr, hurst_dfa_arr, fractal_arr, hurst_window, fractal_window, step):
+    """Hurst (R/S, DFA) on log returns; Higuchi fractal dimension on the price path.
+
+    Both Hurst estimators integrate their input, so feeding price levels (already
+    integrated) pins H at the 0.95 clip and makes ``regime_label`` constant.
+    """
     n = len(close)
-    
+
     h_steps = (n - hurst_window + step - 1) // step
     for idx in prange(h_steps):
         i = hurst_window + idx * step
         if i >= n: continue
-        w = close[i - hurst_window : i]
+        w = ret[i - hurst_window + 1 : i]
         w_clean = w[np.isfinite(w)]
         if len(w_clean) > 0:
             h_rs = _hurst_rs_numba(w_clean)
@@ -621,25 +705,22 @@ def detect_regimes_polars(
     _rolling_mean_causal(abs_ret, vol, window)
     feat = np.column_stack([ret, vol])
 
-    probs, states = _causal_hmm_decode(
-        feat,
-        n_states=n_states,
-        min_fit=max(window * 2, 120),
-    )
+    probs, states = _causal_hmm_decode(feat, n_states=n_states, skip_head=window)
 
     hurst_rs_arr = np.full(n, 0.5)
     hurst_dfa_arr = np.full(n, 0.5)
     fractal_arr = np.full(n, 1.5)
     step = max(1, int(step))
     
+    close = np.asarray(close, dtype=np.float64)
     if _NUMBA_OK:
         _scan_outcomes_numba_parallel(
-            close, hurst_rs_arr, hurst_dfa_arr, fractal_arr,
+            close, ret, hurst_rs_arr, hurst_dfa_arr, fractal_arr,
             hurst_window, fractal_window, step
         )
     else:
         for i in range(hurst_window, n, step):
-            w = close[i - hurst_window : i]
+            w = ret[i - hurst_window + 1 : i]
             hurst_rs_arr[i : i + step] = hurst_rs(w)
             hurst_dfa_arr[i : i + step] = hurst_dfa(w)
         for i in range(fractal_window, n, step):

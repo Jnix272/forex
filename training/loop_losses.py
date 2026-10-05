@@ -22,7 +22,6 @@ from models.architectures import (
     OverconfidencePenalty,
 )
 from training.direction_control import (
-    _class_prior_tensor,
     _class_weights_tensor,
     _direction_class_index,
 )
@@ -35,6 +34,27 @@ from training.gpu_losses import (
 from training.synaptic_intelligence import apply_si_loss
 
 _OVERCONF_PENALTY: OverconfidencePenalty | None = None  # D: set in supervised_train
+_MIXUP: Any = None  # MixupBatch when training.use_mixup; set per run in supervised_train
+
+
+def _apply_direction_entropy_bonus(loss, pred, crit, direction_only: bool):
+    """Subtract ``crit.entropy_weight * mean entropy`` of the direction head (anti-collapse)."""
+    weight = float(getattr(crit, "entropy_weight", 0.0) or 0.0)
+    if weight <= 0.0 or direction_only or not isinstance(pred, tuple):
+        return loss
+    logits = pred[0].float()
+    if logits.ndim >= 2 and logits.shape[-1] == 3:
+        logp = torch.log_softmax(logits, dim=-1)
+        ent = -(logp.exp() * logp).sum(dim=-1)
+    else:
+        logp = torch.nn.functional.logsigmoid(logits)
+        log1mp = torch.nn.functional.logsigmoid(-logits)
+        p = logp.exp()
+        ent = -(p * logp + (1.0 - p) * log1mp)
+    ent = ent[torch.isfinite(ent)]
+    if ent.numel() == 0:
+        return loss
+    return loss - weight * ent.mean().to(loss.dtype)
 
 def _apply_bet_size(base: torch.Tensor, bet_size: torch.Tensor | None) -> torch.Tensor:
     if bet_size is None or base.numel() <= 1:
@@ -378,6 +398,12 @@ def _build_train_loss(
     relaxes under severe distribution shift and re-locks when the regime
     stabilizes.
     """
+    _pairing = None
+    if _MIXUP is not None and not direction_only:
+        _pairing = _MIXUP.sample_pairing(int(xb.shape[0]), device=xb.device)
+    if _pairing is not None:
+        _lam, _perm = _pairing
+        xb = _lam * xb + (1.0 - _lam) * xb[_perm]
     pred = model(xb)
     _tuple_out = isinstance(pred, tuple)
     if _tuple_out and sample_weight_lookup is not None and batch_idx_t is not None:
@@ -392,29 +418,42 @@ def _build_train_loss(
                 bet_size_b = _sw if bet_size_b is None else bet_size_b.float() * _sw
         except (IndexError, ValueError, TypeError):
             pass
-    loss = _compute_loss(
-        pred,
-        crit,
-        yb,
-        classification,
-        y_cls=y_cls_b,
-        y_conf=y_conf_b,
-        multitask=multitask,
-        direction_only=direction_only,
-        bet_size=bet_size_b,
-    )
-    if not _tuple_out and sample_weight_lookup is not None and batch_idx_t is not None:
-        loss = _apply_curriculum_weights(
-            loss,
+
+    def _loss_vs(perm):
+        def _take(t):
+            return t if (perm is None or t is None) else t[perm]
+
+        tgt_loss = _compute_loss(
             pred,
-            yb,
             crit,
+            _take(yb),
             classification,
-            batch_idx_t,
-            sample_weight_lookup,
+            y_cls=_take(y_cls_b),
+            y_conf=_take(y_conf_b),
+            multitask=multitask,
+            direction_only=direction_only,
+            bet_size=_take(bet_size_b),
         )
-    _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classification, multitask)
-    if hasattr(loader, "update_priorities") and batch_idx_t is not None:
+        if not _tuple_out and sample_weight_lookup is not None and batch_idx_t is not None:
+            tgt_loss = _apply_curriculum_weights(
+                tgt_loss,
+                pred,
+                _take(yb),
+                crit,
+                classification,
+                _take(batch_idx_t),
+                sample_weight_lookup,
+            )
+        return tgt_loss
+
+    if _pairing is None:
+        loss = _loss_vs(None)
+        _apply_online_miner(online_miner, pred, yb, y_cls_b, batch_idx_t, classification, multitask)
+    else:
+        # Per-sample losses on mixed inputs would corrupt the miner's hardness EMA.
+        loss = _lam * _loss_vs(None) + (1.0 - _lam) * _loss_vs(_perm)
+    loss = _apply_direction_entropy_bonus(loss, pred, crit, direction_only)
+    if _pairing is None and hasattr(loader, "update_priorities") and batch_idx_t is not None:
         try:
             loader.update_priorities(batch_idx_t, loss.detach())
         except Exception as exc:
@@ -442,29 +481,16 @@ def build_criterion(
     Huber / asymmetric / directional_huber / sharpe_huber regression,
     weighted CE on {-1,0,+1}, or MultiTaskLoss.
     MultiTaskLoss is selected when --multitask is passed and combines:
-      w_dir*CE(direction) + w_ret*Huber(return_hat) + w_conf*BCE(confidence)
+      w_dir*BCE(direction) + w_ret*Huber(return_hat) + w_conf*BCE(confidence)
+      + w_quantile*pinball(q_low/q_high) [+ w_sharpe when loss=sharpe_huber]
     """
     multitask = getattr(args, "multitask", False)
-    d = float(TRAINING.get("huber_delta", 1.0))
-
+    _hd = getattr(args, "huber_delta", None)
+    d = float(_hd) if _hd is not None else float(TRAINING.get("huber_delta", 1.0))
     per_pair_heads = getattr(args, "per_pair_heads", False)
-    if per_pair_heads:
-        return MultiPairMultiTaskLoss(
-            w_dir=1.0,
-            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
-            w_conf=float(getattr(args, "mt_w_conf", 0.3)),
-            huber_delta=d,
-            focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
-            class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
-            label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
-            target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
-            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
-            quantiles=(0.05, 0.95),
-        ).to(device)
 
-    if multitask:
+    def _mt_class_weights_and_sharpe():
         cw = None
-        cp = None
         if cache_path is not None and train_idx is not None:
             cw = _class_weights_tensor(
                 cache_path,
@@ -472,18 +498,38 @@ def build_criterion(
                 device,
                 use_direction_sidecar=True,
             )
-            cp = _class_prior_tensor(
-                cache_path,
-                train_idx,
-                device,
-                use_direction_sidecar=True,
-            )
-        loss_str = getattr(args, "loss", "huber").lower()
+        loss_str = str(getattr(args, "loss", "huber") or "huber").lower()
         w_sharpe = float(getattr(args, "sharpe_weight", 0.0)) if loss_str == "sharpe_huber" else 0.0
-        from training.train_gpu import _sharpe_ann_factor
-        sharpe_ann = _sharpe_ann_factor(args) if w_sharpe > 0 else 1.0
-        del cp  # the class prior now enters through class_weights only
-        return MultiTaskLoss(  # type: ignore
+        sharpe_ann = 1.0
+        if w_sharpe > 0:
+            from training.train_gpu import _sharpe_ann_factor
+
+            sharpe_ann = _sharpe_ann_factor(args)
+        return cw, w_sharpe, sharpe_ann
+
+    if per_pair_heads:
+        cw, w_sharpe, sharpe_ann = _mt_class_weights_and_sharpe()
+        crit_pp = MultiPairMultiTaskLoss(
+            w_dir=1.0,
+            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
+            w_conf=float(getattr(args, "mt_w_conf", 0.3)),
+            huber_delta=d,
+            class_weights=cw,
+            w_sharpe=w_sharpe,
+            sharpe_ann=sharpe_ann,
+            focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
+            class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
+            label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
+            target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
+            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
+            quantiles=(0.05, 0.95),
+        ).to(device)
+        crit_pp.entropy_weight = float(getattr(args, "mt_entropy_weight", 0.0) or 0.0)
+        return crit_pp
+
+    if multitask:
+        cw, w_sharpe, sharpe_ann = _mt_class_weights_and_sharpe()
+        crit_mt = MultiTaskLoss(  # type: ignore
             class_weights=cw,
             w_dir=1.0,
             w_ret=float(getattr(args, "mt_w_ret", 0.5)),
@@ -498,6 +544,8 @@ def build_criterion(
             w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
             quantiles=(0.05, 0.95),
         ).to(device)  # type: ignore
+        crit_mt.entropy_weight = float(getattr(args, "mt_entropy_weight", 0.0) or 0.0)
+        return crit_mt
 
     if args.loss == "cross_entropy":
         print("[Warning] cross_entropy is deprecated for primary objective. Defaulting to HuberLoss.")

@@ -76,6 +76,36 @@ CMD_STOP = "stop"
 CMD_SHUTDOWN = "shutdown"
 
 
+def prune_old_sidecar_logs(log_dir: str | Path, retention_days: int | float | None, keep_run: str = "") -> list[Path]:
+    """Delete ``sidecar_*`` log/JSONL files older than ``retention_days`` (mtime).
+
+    Files of the current run are never removed. ``retention_days`` <= 0 / None
+    disables cleanup. Returns the removed paths.
+    """
+    if not retention_days or float(retention_days) <= 0:
+        return []
+    root = Path(log_dir)
+    if not root.is_dir():
+        return []
+    cutoff = time.time() - float(retention_days) * 86400.0
+    keep_prefix = f"sidecar_{keep_run}." if keep_run else None
+    removed: list[Path] = []
+    for p in root.glob("sidecar_*"):
+        if not p.is_file() or (keep_prefix and p.name.startswith(keep_prefix)):
+            continue
+        if not (p.suffix in (".log", ".jsonl") or ".log." in p.name):
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                removed.append(p)
+        except OSError as exc:
+            _SIDECAR_LOGGER.warning(f"Sidecar retention: could not remove {p}: {exc}")
+    if removed:
+        _SIDECAR_LOGGER.info(f"Sidecar retention: removed {len(removed)} file(s) older than {retention_days}d")
+    return removed
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDECAR PROCESS (runs in a separate OS process)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +457,10 @@ class Sidecar:
         """Start the sidecar. Returns True on success."""
         if not self.enabled:
             return False
+
+        prune_old_sidecar_logs(self.log_dir, self.retention_days, keep_run=self.run_name)
+        if self.enable_discord:
+            _SIDECAR_LOGGER.warning("Sidecar enable_discord=True is not implemented; alerts are not shipped to Discord.")
 
         if self.mode == "process":
             self._sidecar = SidecarProcess(

@@ -8,7 +8,7 @@ backtest:
   lots: 0.1
   max_spread_clamp: 0.0050
   mc_sims: 500
-  min_confidence: 0.45
+  min_confidence: 0.52
   min_spread_clamp: 0.00005
   slippage_pips: 0.7
   stop_pips: 12.0
@@ -48,26 +48,26 @@ curriculum:
   difficulty_spread_threshold_hard: 2.0
   # ── Online Miner → Curriculum feedback (new) ─
   miner_feedback:
-    enabled: true
+    enabled: false
     models: "haelt,tft,transformer"  # comma-separated, e.g. "haelt,tft,transformer"
     forgetting_threshold: 0.15
     easy_threshold: 0.60
     freeze_patience: 1
   # ── Self-Paced Learning (new) ─
   self_paced:
-    enabled: true
+    enabled: false
     pace: "linear"
     lambda_pace: 1.0
     models: "haelt,tft,transformer"  # comma-separated
   # ── Loss-Based Weighting (new) ─
   loss_weighting:
-    enabled: true
+    enabled: false
     scheme: "focal"
     focal_gamma: 2.0
     models: "haelt,tft,transformer"  # comma-separated
   feature_groups:
-    # Always-on core indicators (formerly FEATURE_MASK orphans). epoch_unfreeze
-    # values fit training.epochs=6 so staged groups actually unlock.
+    # Always-on core indicators (formerly FEATURE_MASK orphans). Staged groups
+    # unlock by epoch 5 (training.epochs=40), via input masking.
     core:
       always_on: true
       epoch_unfreeze: 0
@@ -125,8 +125,8 @@ curriculum:
       - carry_chf
       - yield_curve_slope
     execution_cost:
-      always_on: false
-      epoch_unfreeze: 1
+      always_on: true
+      epoch_unfreeze: 0
       features:
       - spread_pips
       - spread_zscore
@@ -276,8 +276,8 @@ data:
   expected_pair_years: 10  # Data span 2015-01-01 → 2025-12-30 = ~10 years
   chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number
   shuffle_buffer_size: 16384  # Cross-chunk shuffle reservoir size (0 to disable)
-  use_feature_cache: false    # Load pre-built feature cache instead of running FE per window
-  feature_cache_dir: "data/features"  # Directory for feature cache parquet files
+  use_feature_cache: true     # Window feature cache (dataset build only); active only if feature_cache.enabled is also true
+  feature_cache_dir: "data/features"  # Cache root: windows/<PAIR>/ and slow/<PAIR>/ parquet (zstd)
   pair: EURUSD
   pair_align: outer
   pair_embed_dim: 16
@@ -328,10 +328,10 @@ pip_sizes:
 # this one wholesale (YAML keeps the last duplicate), silently dropping keys.
 # label_smoothing / use_mixup / use_volatility_sampler live under `training:` only.
 direction_training:
-  max_pred_class_share: 1.0
-  min_pred_class_share: 0.0
-  min_recall: 0.0
-  min_true_class_share: 0.02
+  max_pred_class_share: 0.80
+  min_pred_class_share: 0.05
+  min_recall: 0.05
+  min_true_class_share: 0.15
   probe: false
   probe_epochs: 2
   probe_samples: 4096
@@ -398,16 +398,25 @@ execution:
   slippage_vol_window: 120
 # ── Feature-ablation experiment config (specify groups or features to drop) ─
 feature_ablation:
+  enabled: true
+  name: top_80_predictive
+  keep_groups:
+    - momentum
+    - microstructure
+    - execution_cost
+  drop_ungrouped: true
   drop_features: []
-  drop_groups: []
-  enabled: false
-  keep_groups: []
-  name: full_features
+  keep_features: []
 # ── Feature cache: slow-changing columns (sentiment, COT, macro) ────────────
+# Keys include pair, window+warmup, bar freq, feature code fingerprint, features.* windows
+# and COT/news/eco/sentiment/cross-asset inputs, so stale entries are never served.
 feature_cache:
   enabled: true
-  ofi_z_threshold: 2.0
-  regime_window: 60
+  ofi_z_threshold: 2.0   # accepted but unused (no consumer; would change feature layout vs live)
+  regime_window: 60      # accepted but unused (regime window is features.regime_window)
+  # slow_cols: stored separately, keyed by bars + code + only their own side inputs
+  # (sentiment/news, eco, COT); reused when only unrelated inputs change.
+  # Conservative: the full feature build still runs on a window miss.
   slow_cols:
   - sentiment_decayed
   - eco_surprise
@@ -463,7 +472,7 @@ monitoring:
   drift_ks_pvalue_threshold: 0.05
   drift_live_samples: 5000
   drift_psi_threshold: 0.2
-# ── Multi-task loss: direction (CE) + return (Huber) + confidence (BCE) + Sharpe ─
+# ── Multi-task loss: direction (BCE) + return (Huber) + confidence (BCE) + quantile + Sharpe ─
 multitask:
   class_balance_weight: 1.0
   direction_weight_floor: 0.5
@@ -485,7 +494,7 @@ optuna:
   metric: val_sharpe
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/forex_4pair_2015_2025_haelt
+  checkpoint_dir: checkpoints/forex_4pair_2008_2025
   data_cache: ./data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:
@@ -585,7 +594,7 @@ rl:
     gamma: 0.99
     lr: 0.0001
     target_update: 100
-  enabled: true
+  enabled: false
   encoder_obs: true
   episode_len: 2048
   episodes: 500
@@ -633,14 +642,20 @@ training:
   sacs_enabled: false
   # One multitask head per pair on that pair's own label (was a 4-pair average).
   per_pair_heads: true
+  # Conviction deadband hurdle rate (Option 1): filters out micro-noise trades below expected return hurdle
+  deadband: 0.15
+  trade_deadband: 0.15
+  # Raised confidence threshold on action_proba (up from 0.45)
+  min_confidence: 0.52
+  trade_min_confidence: 0.52
   # Equal total weight per calendar year of training rows.
   period_balance: true
   batch_size: 256
-  enable_ewc: true
+  enable_ewc: false
   ewc_lambda: 400.0
-  enable_si: true
+  enable_si: false
   si_lambda: 0.5
-  si_dynamic: true
+  si_dynamic: false
   si_lambda_min: 0.05
   si_lambda_max: 2.0
   cross_asset_mode: auto
@@ -690,12 +705,12 @@ training:
   # sharpe_annualization_factor: null  # auto-detect: sqrt(252*288/30) ≈ 49.2 for 5m full-day FX
   fx_full_day: true  # FX is 24/5 — use full-day bars-per-day (288 for 5m)
   sharpe_weight: 0.5
-  swa_enabled: true
+  swa_enabled: false
   swa_lr: 5.0e-06
   swa_start_frac: 0.75
   training_memory: true
   use_mixup: true
-  use_volatility_sampler: true
+  use_volatility_sampler: false  # unsupported by the streaming Zarr loader (warns if true)
   val_split: 0.2
   weight_decay: 0.01  # applied to weights only; LayerNorm/bias are excluded
   # ── Adversarial training (new) ─
@@ -719,12 +734,12 @@ validation:
   embargo_bars: 60
   method: purged_embargo
   min_train_size: 50000
-  n_splits: 7
+  n_splits: 6 
   purge_bars: 120
 # ── Walk-forward cross-validation ──────────────────────────────────────────
 walk_forward:
   enabled: true
-  folds: 7
+  folds: 6
 # ── XGBoost baseline model config ──────────────────────────────────────────
 xgboost:
   colsample_bytree: 0.8
@@ -733,7 +748,7 @@ xgboost:
   eval_metric: ''
   feature_importance: true
   feature_importance_top_n: 50
-  folds: 5
+  folds: 6
   gamma: 0.1
   learning_rate: 0.05
   max_depth: 6
@@ -762,7 +777,7 @@ catboost:
   colsample_bylevel: 0.8
   l2_leaf_reg: 1.0
   early_stopping_rounds: 15
-  folds: 5
+  folds: 6
   tune: false
   tune_trials: 20
   max_samples: 500000

@@ -42,10 +42,43 @@ def action_proba(outputs) -> torch.Tensor:
     return torch.stack([(1 - p_buy) * p_trade, 1 - p_trade, p_buy * p_trade], dim=-1)
 
 
-def decide(outputs, threshold: float | None = None) -> torch.Tensor:
-    """Positions in {-1, 0, +1} (float), shaped like the direction logits."""
+def decide(
+    outputs,
+    threshold: float | None = None,
+    deadband: float = 0.0,
+) -> torch.Tensor:
+    """Positions in {-1, 0, +1} (float), shaped like the direction logits.
+
+    Parameters
+    ----------
+    outputs : tuple | Tensor
+        Model predictions. Either (logits, ret_hat, conf, ...) or a Tensor.
+    threshold : float | None
+        Confidence threshold on max(proba) (default 0.45 from settings).
+    deadband : float
+        Hurdle rate / conviction deadband:
+        - If outputs is a tuple with return predictions ret_hat (outputs[1]):
+          requires |ret_hat| > deadband, and ret_hat must agree in sign with
+          direction d. Predictions below the hurdle collapse to 0 (HOLD).
+        - If outputs is a Tensor (regression):
+          requires |outputs| > deadband. Values in [-deadband, +deadband]
+          become 0 (HOLD).
+    """
     thr = DEFAULT_THRESHOLD if threshold is None else float(threshold)
     proba = action_proba(outputs)
     top, idx = proba.max(dim=-1)
     d = idx.float() - 1.0
-    return torch.where(top >= thr, d, torch.zeros_like(d))
+    d = torch.where(top >= thr, d, torch.zeros_like(d))
+
+    if deadband > 0.0:
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 1 and outputs[1] is not None:
+            ret_hat = outputs[1].float()
+            if ret_hat.shape != d.shape:
+                ret_hat = ret_hat.reshape(d.shape)
+            hurdle_mask = (ret_hat.abs() > float(deadband)) & ((ret_hat * d) >= 0)
+            d = torch.where(hurdle_mask, d, torch.zeros_like(d))
+        elif isinstance(outputs, torch.Tensor):
+            out_f = outputs.float()
+            d = torch.where(out_f.abs() > float(deadband), torch.sign(out_f), torch.zeros_like(out_f))
+    return d
+

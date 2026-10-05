@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from config.settings import PRETRAIN
+from training.train_utils import early_stop_metric_maximizes
 from pretrain.contrastive import (
     BYOLTrainer,
     CrossAssetTSCLTrainer,
@@ -437,7 +438,7 @@ def _fold_history_summary(folds: list | None, metric_name: str = "sharpe") -> di
         if loss and train_loss:
             final_gaps.append(float(loss[-1]) - float(train_loss[-1]))
 
-    maximize_metric = str(metric_name).lower() == "sharpe"
+    maximize_metric = early_stop_metric_maximizes(metric_name)
     best_metric = None
     if best_metrics:
         best_metric = max(best_metrics) if maximize_metric else min(best_metrics)
@@ -721,7 +722,8 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
 
     handoff_min_delta = float(getattr(args, "pretrain_handoff_min_delta", 0.0))
     handoff_loss = float(getattr(args, "pretrain_handoff_loss", float("-inf")))
-    handoff_enabled = handoff_loss > float("-inf")
+    handoff_patience = max(0, int(getattr(args, "pretrain_handoff_patience", 0) or 0))
+    handoff_enabled = handoff_loss > float("-inf") or handoff_patience > 0
     print(f"\n[Pretrain] {mode_str} | target_epochs={target_epochs}{' (handoff enabled)' if handoff_enabled else ''}")
 
     # Reduce VRAM fragmentation (recommended by PyTorch OOM diagnostics)
@@ -1333,6 +1335,13 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
                     print(f"[Pretrain] Handoff: reached loss threshold {handoff_loss:.4f} at epoch {_epochs_done}.")
                     _stopped_early = True
                     break
+                if handoff_patience > 0 and _stale_epochs >= handoff_patience:
+                    print(
+                        f"[Pretrain] Handoff: no loss improvement > {handoff_min_delta:g} for "
+                        f"{_stale_epochs} epoch(s) (patience={handoff_patience}) at epoch {_epochs_done}."
+                    )
+                    _stopped_early = True
+                    break
 
 
 
@@ -1492,6 +1501,7 @@ def run_pretrain(model, cache_path, n_features, args, device, run=None):
             "handoff": {
                 "enabled": bool(handoff_enabled),
                 "min_delta": float(handoff_min_delta),
+                "patience": int(handoff_patience),
                 "loss_threshold": None if handoff_loss == float("-inf") else float(handoff_loss),
             },
             "average_pretrain_loss": float(avg_loss),

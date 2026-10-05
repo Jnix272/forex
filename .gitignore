@@ -117,6 +117,9 @@ data/store/
 # Local tooling caches
 .agents/
 .opencode/
+.codex/
+.tmp/
+*.bak
 vcpkg/
 
 # C++ dependencies and build outputs

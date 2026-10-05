@@ -22,12 +22,28 @@ except Exception:  # pragma: no cover - fallback for very old runtimes
 CONTRACT_MAP = {
     "EURO FX - CHICAGO MERCANTILE EXCHANGE": "EURUSD",
     "BRITISH POUND STERLING - CHICAGO MERCANTILE EXCHANGE": "GBPUSD",
+    "BRITISH POUND - CHICAGO MERCANTILE EXCHANGE": "GBPUSD",
     "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE": "USDJPY",
     "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE": "AUDUSD",
     "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE": "USDCAD",
     "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE": "USDCHF",
     "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE": "NZDUSD",
+    "NZ DOLLAR - CHICAGO MERCANTILE EXCHANGE": "NZDUSD",
 }
+# CFTC contract codes survive market renames (GBP/NZD were renamed in Feb 2022,
+# which silently dropped them from name-only matching). Primary key for mapping.
+CONTRACT_CODE_MAP = {
+    "099741": "EURUSD",
+    "096742": "GBPUSD",
+    "097741": "USDJPY",
+    "232741": "AUDUSD",
+    "090741": "USDCAD",
+    "092741": "USDCHF",
+    "112741": "NZDUSD",
+}
+# Yearly TFF files only start mid-2010; earlier history lives in one archive.
+HISTORY_ARCHIVE_URL = "https://www.cftc.gov/files/dea/history/fin_fut_txt_2006_2016.zip"
+HISTORY_ARCHIVE_LAST_YEAR = 2016
 
 CFTC_TZ = "America/New_York"
 # TFF reports measure positioning as of Tuesday but are released the following
@@ -107,32 +123,58 @@ def _existing_years(parquet_path: Path) -> set[int]:
     return set()
 
 
-def download_cot_data(start_year=2008, end_year=None, *, retries=4, sleep_s=1.0):
+def _read_zip_csv(content: bytes) -> pd.DataFrame:
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        with z.open(z.namelist()[0]) as f:
+            return pd.read_csv(f, low_memory=False)
+
+
+def _map_pairs(df: pd.DataFrame) -> pd.Series:
+    """Map rows to pairs by CFTC contract code, falling back to market name."""
+    pair = pd.Series(pd.NA, index=df.index, dtype="object")
+    if "CFTC_Contract_Market_Code" in df.columns:
+        codes = df["CFTC_Contract_Market_Code"].astype(str).str.strip().str.zfill(6)
+        pair = codes.map(CONTRACT_CODE_MAP)
+    names = df["Market_and_Exchange_Names"].astype(str).str.strip()
+    return pair.fillna(names.map(CONTRACT_MAP))
+
+
+def download_cot_data(start_year=2008, end_year=None, *, retries=4, sleep_s=1.0, refresh=False):
     if end_year is None:
         end_year = datetime.now().year
 
     out_dir = OUT_FILE.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    have_years = _existing_years(OUT_FILE)
+    have_years = set() if refresh else _existing_years(OUT_FILE)
+    todo = [y for y in range(start_year, end_year + 1) if y not in have_years]
+    for y in sorted(set(range(start_year, end_year + 1)) - set(todo)):
+        print(f"Skipping {y} (already present in {OUT_FILE.name})")
     all_data = []
 
-    # Financial Futures (TFF) report
-    for year in range(start_year, end_year + 1):
-        if year in have_years:
-            print(f"Skipping {year} (already present in {OUT_FILE.name})")
+    archive_years = [y for y in todo if y <= HISTORY_ARCHIVE_LAST_YEAR]
+    if archive_years:
+        print(f"Downloading {HISTORY_ARCHIVE_URL} (years {archive_years[0]}-{archive_years[-1]}) ...")
+        try:
+            df = _read_zip_csv(_download_with_retries(HISTORY_ARCHIVE_URL, retries=retries, sleep_s=sleep_s, timeout=120))
+            df["_archive"] = True
+            all_data.append(df)
+            print(f"  -> Successfully parsed {len(df)} archive rows")
+        except Exception as e:
+            print(f"  -> Archive failed ({e}); falling back to yearly files")
+            archive_years = []
+        time.sleep(max(0.0, float(sleep_s)))
+
+    # Financial Futures (TFF) report, yearly files
+    for year in todo:
+        if year in archive_years:
             continue
         url = f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip"
         print(f"Downloading {url} ...")
         try:
-            content = _download_with_retries(url, retries=retries, sleep_s=sleep_s)
-            with zipfile.ZipFile(io.BytesIO(content)) as z:
-                txt_filename = z.namelist()[0]
-                with z.open(txt_filename) as f:
-                    df = pd.read_csv(f, low_memory=False)
-                    df["Year"] = year
-                    all_data.append(df)
-                    print(f"  -> Successfully parsed {len(df)} rows for {year}")
+            df = _read_zip_csv(_download_with_retries(url, retries=retries, sleep_s=sleep_s))
+            all_data.append(df)
+            print(f"  -> Successfully parsed {len(df)} rows for {year}")
         except Exception as e:
             print(f"  -> Failed to download/parse {year}: {e}")
         # Be polite to the CFTC host between yearly requests.
@@ -150,15 +192,13 @@ def download_cot_data(start_year=2008, end_year=None, *, retries=4, sleep_s=1.0)
     # Clean up column values (older files have trailing whitespace)
     full_df["Market_and_Exchange_Names"] = full_df["Market_and_Exchange_Names"].str.strip()
 
-    # Filter to only the Forex contracts we care about
-    full_df = full_df[full_df["Market_and_Exchange_Names"].isin(CONTRACT_MAP.keys())]
+    # Map to our standard pair names and keep only the FX contracts we trade
+    full_df["pair"] = _map_pairs(full_df)
+    full_df = full_df[full_df["pair"].notna()].copy()
 
     if len(full_df) == 0:
         print("No FX contracts found in downloaded data.")
         return
-
-    # Map to our standard pair names
-    full_df["pair"] = full_df["Market_and_Exchange_Names"].map(CONTRACT_MAP)
 
     # Convert report dates to the public RELEASE datetime in UTC (anti look-ahead).
     # Older TFF files (≤2012) use "Report_Date_as_MM_DD_YYYY"; newer use "Report_Date_as_YYYY-MM-DD".
@@ -170,8 +210,9 @@ def download_cot_data(start_year=2008, end_year=None, *, retries=4, sleep_s=1.0)
     if date_col is None:
         raise KeyError("Cannot find a report-date column in the downloaded data")
     full_df = full_df.dropna(subset=[date_col]).copy()
-    full_df["_report_date"] = pd.to_datetime(full_df[date_col])
+    full_df["_report_date"] = pd.to_datetime(full_df[date_col], format="mixed")
     full_df["report_year"] = full_df["_report_date"].dt.year
+    full_df = full_df[full_df["report_year"].between(start_year, end_year) & full_df["report_year"].isin(todo)].copy()
     full_df["timestamp_utc"] = _release_timestamp_utc(full_df["_report_date"])
     full_df.drop(columns=["_report_date"], inplace=True)
 
@@ -205,7 +246,7 @@ def download_cot_data(start_year=2008, end_year=None, *, retries=4, sleep_s=1.0)
     clean_df.loc[usd_base, ["net_hedge_fund", "net_commercial"]] *= -1
 
     # Merge with any existing data (incremental append) and dedup.
-    if OUT_FILE.exists():
+    if OUT_FILE.exists() and not refresh:
         try:
             prev = pd.read_parquet(OUT_FILE)
             clean_df = pd.concat([prev, clean_df], ignore_index=True, sort=False)
@@ -226,6 +267,7 @@ def parse_args():
     p.add_argument("--retries", type=int, default=4)
     p.add_argument("--sleep", type=float, default=1.0, help="Base seconds to sleep/backoff between requests.")
     p.add_argument("--dry-run", action="store_true", help="Parse args and print the plan without downloading.")
+    p.add_argument("--refresh", action="store_true", help="Re-download every year and rewrite the parquet from scratch.")
     return p.parse_args()
 
 
@@ -233,7 +275,7 @@ if __name__ == "__main__":
     args = parse_args()
     end_year = args.end_year if args.end_year is not None else datetime.now().year
     if args.dry_run:
-        have = _existing_years(OUT_FILE)
+        have = set() if args.refresh else _existing_years(OUT_FILE)
         todo = [y for y in range(args.start_year, end_year + 1) if y not in have]
         print(f"[DRY-RUN] Would download years: {todo or '(none; all present)'}")
         print(f"[DRY-RUN] Output: {OUT_FILE}")
@@ -243,4 +285,5 @@ if __name__ == "__main__":
             end_year=end_year,
             retries=args.retries,
             sleep_s=args.sleep,
+            refresh=args.refresh,
         )

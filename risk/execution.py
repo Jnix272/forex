@@ -43,6 +43,7 @@ class RegimePositionSizer:
         lot_size=10_000.0,
         pip_size=0.0001,
         min_stop_pips=10.0,
+        unknown_scale=None,
     ):
         # Pull canonical defaults from LIVE_RISK; constructor args override
         _rs = _LR.get("regime_scale", {})
@@ -57,6 +58,16 @@ class RegimePositionSizer:
         mean_rev_penalty = mean_rev_penalty if mean_rev_penalty is not None else _rs.get("mean_rev", 0.75)
         vol_target = vol_target if vol_target is not None else _LR.get("target_annual_vol", 0.10)
         max_pos_pct = max_pos_pct if max_pos_pct is not None else _LR.get("max_position_pct", 0.05)
+        if unknown_scale is None:
+            unknown_scale = _rs.get("unknown")
+        if unknown_scale is None:
+            # No explicit scale for an undetectable regime: size as the most
+            # conservative configured regime.
+            unknown_scale = min(
+                [float(v) for v in _rs.values() if isinstance(v, (int, float))]
+                + [float(corr_crisis_scale), float(mean_rev_penalty)]
+            )
+        self.unknown_scale = float(unknown_scale)
         self.base_k = base_kelly
         self.max_k = max_kelly
         self.min_k = min_kelly
@@ -78,11 +89,20 @@ class RegimePositionSizer:
             return atr
         return atr / (pip_size or self.pip_size)
 
+    @staticmethod
+    def _regime_unknown(hurst) -> bool:
+        try:
+            return hurst is None or not np.isfinite(float(hurst))
+        except (TypeError, ValueError):
+            return True
+
     def _regime_scale(self, corr_avg=0.0, hurst=0.5, corr_break=0.0):
         scale = 1.0
         if corr_avg > self.cr_thresh or corr_break > 0:
             scale *= self.cr_scale
-        if hurst > self.h_trend:
+        if self._regime_unknown(hurst):
+            scale *= self.unknown_scale
+        elif hurst > self.h_trend:
             scale *= self.t_bonus
         elif hurst < self.h_mr:
             scale *= self.mr_pen
@@ -132,6 +152,8 @@ class RegimePositionSizer:
         reg_desc = (
             "crisis"
             if corr_avg > self.cr_thresh
+            else "unknown"
+            if self._regime_unknown(hurst)
             else "trending"
             if hurst > self.h_trend
             else "mean_rev"
@@ -387,7 +409,11 @@ class PortfolioVaR:
 
     DEFAULT_NOTIONAL_PER_LOT = 100_000.0  # standard FX lot
 
-    def __init__(self, confidence=0.99, horizon=1, pip_value=10.0, max_var_pct=0.02, notional_per_lot=None):
+    def __init__(self, confidence=None, horizon=1, pip_value=None, max_var_pct=None, notional_per_lot=None):
+        # Read LIVE_RISK at construction (after any run-YAML risk: overlay).
+        confidence = float(confidence if confidence is not None else _LR.get("var_confidence", 0.99))
+        pip_value = float(pip_value if pip_value is not None else _LR.get("pip_value", 10.0))
+        max_var_pct = float(max_var_pct if max_var_pct is not None else _LR.get("var_max_pct", 0.02))
         self.conf = confidence
         self.horizon = horizon
         self.pv = pip_value  # legacy: only used by max_allowed_lots

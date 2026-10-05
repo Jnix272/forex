@@ -295,13 +295,36 @@ class LineageConfig:
 
 @dataclass
 class FeatureStoreConfig:
-    """Feature store configuration"""
+    """Feature store configuration.
+
+    ``root`` is canonical (same key as run.yaml ``feature_store.root``);
+    ``path`` is accepted as a legacy alias and always mirrors ``root``.
+    """
 
     enabled: bool = True
     store_type: str = "parquet"  # "parquet", "delta"
-    path: str = "./feature_store"
+    root: str | None = None
+    path: str | None = None
     partition_cols: list[str] = field(default_factory=lambda: ["pair", "year", "month", "day"])
     compression: str = "zstd"
+    registry_db: str = "registry.db"
+    data_root: str = "features"
+    default_strategy: str = "eager_batch"
+    auto_materialize: bool = True
+    incremental_lookback_bars: int = 100
+    job_queue: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.root and self.path and str(self.root) != str(self.path):
+            import warnings
+
+            warnings.warn(
+                f"feature_store.root={self.root!r} and legacy feature_store.path={self.path!r} differ; using root",
+                stacklevel=2,
+            )
+        resolved = str(self.root or self.path or "./feature_store")
+        self.root = resolved
+        self.path = resolved
 
 
 @dataclass

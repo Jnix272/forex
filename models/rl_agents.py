@@ -37,6 +37,44 @@ RL_AGENT_STATE_DIM = 5
 #: Size of the ScalingAction space (0=HOLD ... 9=CLOSE_ALL).
 RL_ACTION_COUNT = len(ScalingAction)
 
+# settings.RL / YAML spellings -> agent constructor parameter names.
+_AGENT_KWARG_ALIASES = {
+    "clip_epsilon": "clip",
+    "entropy_coeff": "entropy_coef",
+    "value_coeff": "value_coef",
+    "gae_lambda": "lam",
+}
+
+# Keys always supplied explicitly by callers; never taken from config dicts.
+_AGENT_RESERVED_KWARGS = frozenset({"self", "obs_size", "n_actions", "device"})
+
+
+def filter_agent_kwargs(agent_cls, kwargs: dict | None, *, context: str = "RL") -> dict:
+    """Map config keys onto ``agent_cls.__init__`` and drop the ones it cannot take.
+
+    ``settings.RL['ppo']`` / YAML ``rl.ppo`` carry keys such as ``n_steps`` or
+    ``clip_epsilon`` that PPOAgent does not accept (TypeError at construction).
+    Dropped keys are reported instead of silently swallowed.
+    """
+    import inspect
+
+    params = inspect.signature(agent_cls.__init__).parameters
+    named = {
+        n for n, p in params.items()
+        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and n not in _AGENT_RESERVED_KWARGS
+    }
+    out: dict = {}
+    dropped: list[str] = []
+    for key, value in (kwargs or {}).items():
+        canon = _AGENT_KWARG_ALIASES.get(str(key), str(key))
+        if canon in named:
+            out[canon] = value
+        elif canon not in _AGENT_RESERVED_KWARGS:
+            dropped.append(str(key))
+    if dropped:
+        print(f"[{context}] WARN: {getattr(agent_cls, '__name__', agent_cls)} ignores config keys {sorted(dropped)}")
+    return out
+
 
 def build_action_mask(position_lots: float, max_lots: float) -> np.ndarray:
     """Validity mask for the 10-action ScalingAction space.
@@ -945,7 +983,9 @@ if TORCH:
             use_lstm: bool = False,
             **kwargs,
         ):
-            self.use_lstm = use_lstm
+            if use_lstm:
+                print("[RL] WARN: DQNAgent has no LSTM backbone; use_lstm=True ignored (MLP Q-network)")
+            self.use_lstm = False
             self.obs_size = int(obs_size)
             self.n_actions = int(n_actions)
             self.hidden = int(hidden)

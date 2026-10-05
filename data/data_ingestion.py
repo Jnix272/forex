@@ -601,14 +601,25 @@ def _filter_market_holidays(bars: pl.DataFrame) -> pl.DataFrame:
 # KNOWN DATA GAPS (EMBARGOES)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Known data gaps that should be embargoed (no training sequences should cross these)
+# Known data gaps that should be embargoed (no training sequences should cross these).
 # Format: {pair: [(start_date, end_date, reason), ...]}
+# Last audited: 2026-09-29 via DuckDB daily-count gap scan (gap_audit_duckdb.py).
+# Only genuine Dukascopy source gaps are listed here — DuckDB/parquet cache
+# coverage gaps (e.g. USDCAD 2024, EURUSD 2025) are intentionally excluded.
 KNOWN_DATA_GAPS = {
     "GBPUSD": [
-        ("2018-11-23", "2019-01-02", "39-day hole: missing Dukascopy data Nov 2018 - Jan 2019"),
+        # Brexit-era data hole: June 2017 → Jan 2018 (confirmed 54-day DuckDB gap,
+        # plus surrounding fragmentation Jun-Sep 2017). Old 2018-11 entry REMOVED —
+        # now filled (2.28M ticks verified in DuckDB).
+        ("2017-06-13", "2018-01-01", "~140-day hole cluster: missing Dukascopy GBPUSD Jun 2017 - Jan 2018 (Brexit era)"),
     ],
     "USDJPY": [
-        ("2009-06-01", "2009-06-30", "6.9-day hole: missing Dukascopy data June 2009"),
+        # GFC-era fragmentation: multiple genuine Dukascopy source gaps across H2 2008.
+        # Old 2009-06 entry REMOVED — now filled (707k ticks verified in DuckDB).
+        ("2008-06-09", "2008-07-30", "~35-day hole cluster: missing Dukascopy USDJPY Jun-Jul 2008 (GFC onset)"),
+        ("2008-08-05", "2009-01-01", "~105-day hole cluster: missing Dukascopy USDJPY Aug 2008 - Jan 2009 (GFC crash)"),
+        # 2012 data fragmentation (5-month cluster of gaps).
+        ("2012-07-20", "2012-12-25", "~110-day hole cluster: missing Dukascopy USDJPY Jul-Dec 2012"),
     ],
 }
 

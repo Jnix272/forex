@@ -71,15 +71,35 @@ class FeatureStore:
         self,
         root: str | Path = "data/feature_store",
         registry: FeatureRegistry = None,
+        *,
+        registry_db: str = "registry.db",
+        data_root: str = "features",
+        compression: str = "zstd",
+        default_strategy: MaterializationStrategy | str = MaterializationStrategy.EAGER_BATCH,
+        incremental_lookback_bars: int = 100,
+        code_version: str | None = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.registry = registry or REGISTRY
 
-        # Paths
-        self.db_path = self.root / "registry.db"
-        self.data_root = self.root / "features"
+        # Paths (relative registry_db / data_root resolve under root)
+        db = Path(registry_db)
+        self.db_path = db if db.is_absolute() else self.root / db
+        dr = Path(data_root)
+        self.data_root = dr if dr.is_absolute() else self.root / dr
         self.data_root.mkdir(parents=True, exist_ok=True)
+        self.compression = str(compression or "zstd")
+        self.default_strategy = MaterializationStrategy(
+            default_strategy.value if isinstance(default_strategy, MaterializationStrategy) else str(default_strategy)
+        )
+        self.incremental_lookback_bars = int(incremental_lookback_bars)
+        # Materializations are only reused when computed by the same feature code.
+        if code_version is None:
+            from feature_store.fingerprint import feature_store_code_fingerprint
+
+            code_version = feature_store_code_fingerprint()[:16]
+        self.code_version = str(code_version)
 
         # Optional OHLCV frame for bar-backed materializers (set via set_bars /
         # materialize(..., bars=...)). Macro features can run without it.
@@ -173,10 +193,15 @@ class FeatureStore:
                         data_hash TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         strategy TEXT NOT NULL,      -- MaterializationStrategy
+                        code_version TEXT NOT NULL DEFAULT '',
                         PRIMARY KEY (feature_name, start_ts, end_ts),
                         FOREIGN KEY (feature_name) REFERENCES features(name)
                     )
                 """)
+            _mat_cols = {r[1] for r in conn.execute("PRAGMA table_info(materializations)").fetchall()}
+            if "code_version" not in _mat_cols:
+                # Legacy rows keep '' and therefore never match a real code version.
+                conn.execute("ALTER TABLE materializations ADD COLUMN code_version TEXT NOT NULL DEFAULT ''")
 
             # Lineage / dependency graph.
             # NOTE: Only `downstream` carries a FK back to the features
@@ -380,9 +405,9 @@ class FeatureStore:
                 row = conn.execute(
                     """
                     SELECT 1 FROM materializations
-                    WHERE feature_name = ? AND start_ts <= ? AND end_ts >= ?
+                    WHERE feature_name = ? AND start_ts <= ? AND end_ts >= ? AND code_version = ?
                 """,
-                    (feature_name, start.isoformat(), end.isoformat()),
+                    (feature_name, start.isoformat(), end.isoformat(), self.code_version),
                 ).fetchone()
             return row is not None
 
@@ -393,9 +418,9 @@ class FeatureStore:
                 rows = conn.execute(
                     """
                     SELECT start_ts, end_ts FROM materializations
-                    WHERE feature_name = ? ORDER BY start_ts
+                    WHERE feature_name = ? AND code_version = ? ORDER BY start_ts
                 """,
-                    (feature_name,),
+                    (feature_name, self.code_version),
                 ).fetchall()
             return [(datetime.fromisoformat(r[0]), datetime.fromisoformat(r[1])) for r in rows]
 
@@ -432,7 +457,7 @@ class FeatureStore:
         feature_names: str | list[str],
         start: datetime,
         end: datetime,
-        strategy: MaterializationStrategy = MaterializationStrategy.EAGER_BATCH,
+        strategy: MaterializationStrategy | None = None,
         force: bool = False,
         bars: pl.DataFrame | None = None,
     ) -> dict[str, pl.DataFrame]:
@@ -445,6 +470,8 @@ class FeatureStore:
         """
         if bars is not None:
             self.set_bars(bars)
+        if strategy is None:
+            strategy = self.default_strategy
         if isinstance(feature_names, str):
             feature_names = [feature_names]
 
@@ -544,7 +571,9 @@ class FeatureStore:
             raise ValueError("Feature DataFrame must have 'timestamp_utc' column")
 
         # Write Parquet
-        df.write_parquet(path, compression="zstd")
+        tmp = path.with_name(path.name + ".tmp")
+        df.write_parquet(tmp, compression=self.compression)
+        tmp.replace(path)
 
         # Compute stats
         feature_col = next(c for c in df.columns if c != "timestamp_utc")
@@ -571,18 +600,19 @@ class FeatureStore:
             conn.execute(
                 """
                     INSERT OR REPLACE INTO materializations
-                    (feature_name, start_ts, end_ts, path, rows, data_hash, created_at, strategy)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (feature_name, start_ts, end_ts, path, rows, data_hash, created_at, strategy, code_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feature_name,
                     start.isoformat(),
                     end.isoformat(),
-                    str(path.relative_to(self.root)),
+                    str(path.relative_to(self.root)) if path.is_relative_to(self.root) else str(path),
                     len(df),
                     data_hash,
                     now,
-                    strategy.value,
+                    MaterializationStrategy(getattr(strategy, "value", strategy)).value,
+                    self.code_version,
                 ),
             )
 
@@ -614,10 +644,11 @@ class FeatureStore:
         feature_name: str,
         start: datetime,
         end: datetime,
-        strategy: MaterializationStrategy = MaterializationStrategy.EAGER_BATCH,
+        strategy: MaterializationStrategy | None = None,
         priority: int = 0,
     ) -> int:
         """Add materialization job to queue."""
+        strategy = strategy or self.default_strategy
         with self._lock:
             with self._connect() as conn:
                 now = datetime.now(UTC).isoformat()
@@ -665,6 +696,43 @@ class FeatureStore:
                 (status, datetime.now(UTC).isoformat(), error, job_id),
             )
 
+    def process_pending_jobs(self, max_workers: int = 1, limit: int = 100) -> dict[str, int]:
+        """Run queued materialization jobs (feature_store.job_queue.max_workers threads)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        jobs = self.get_pending_jobs(limit=limit)
+
+        def _run(job: dict) -> bool:
+            self.mark_job_started(job["id"])
+            try:
+                self.materialize(
+                    job["feature_name"],
+                    datetime.fromisoformat(job["start_ts"]),
+                    datetime.fromisoformat(job["end_ts"]),
+                    strategy=MaterializationStrategy(job["strategy"]),
+                )
+                self.mark_job_done(job["id"])
+                return True
+            except Exception as e:
+                self.mark_job_done(job["id"], error=str(e))
+                return False
+
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
+            results = list(pool.map(_run, jobs))
+        return {"done": sum(results), "failed": len(results) - sum(results)}
+
+    def serve_job_queue(self, max_workers: int = 1, poll_interval_sec: float = 60.0, max_polls: int | None = None) -> None:
+        """Poll the job queue every ``poll_interval_sec`` (feature_store.job_queue.*)."""
+        import time as _time
+
+        polls = 0
+        while max_polls is None or polls < max_polls:
+            self.process_pending_jobs(max_workers=max_workers)
+            polls += 1
+            if max_polls is not None and polls >= max_polls:
+                break
+            _time.sleep(max(0.0, float(poll_interval_sec)))
+
     # ──────────────────────────────────────────────────────────────────────
     # INCREMENTAL / ON-DEMAND HELPERS
     # ──────────────────────────────────────────────────────────────────────
@@ -677,7 +745,7 @@ class FeatureStore:
         return max(r[1] for r in ranges)
 
     def needs_incremental_update(
-        self, feature_name: str, lookback_bars: int = 100
+        self, feature_name: str, lookback_bars: int | None = None
     ) -> tuple[bool, datetime | None, datetime | None]:
         """
         Check if feature needs incremental update.
@@ -686,6 +754,8 @@ class FeatureStore:
         Uses attached bars (or bars.parquet) when present; otherwise compares
         latest materialization to ``now`` with a ``lookback_bars``-minute pad.
         """
+        if lookback_bars is None:
+            lookback_bars = self.incremental_lookback_bars
         latest = self.get_latest_timestamp(feature_name)
         end = datetime.now(UTC)
         if latest is None:

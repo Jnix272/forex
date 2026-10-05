@@ -15,7 +15,14 @@ import torch.nn as nn
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from config.settings import BACKTEST, RISK, RL, SIZING
-from models.rl_agents import DQNAgent, ForexTradingEnv, PPOAgent, evaluate_agent, train_agent
+from models.rl_agents import (
+    DQNAgent,
+    ForexTradingEnv,
+    PPOAgent,
+    evaluate_agent,
+    filter_agent_kwargs,
+    train_agent,
+)
 from training.cache_integrity import (
     _load_rl_market_from_cache,
     _on_disk_sequence_count,
@@ -193,17 +200,34 @@ def _encode_rl_observations(cache_path, start: int, n_env: int, n_features: int,
             return np.asarray(_Xm[start + a : start + b], dtype=np.float32)
 
     embs = []
+    batch = max(16, min(int(batch), 256))
+    _enc_dev = device
     with torch.no_grad():
-        for a in range(0, n_env, batch):
+        a = 0
+        while a < n_env:
             b = min(a + batch, n_env)
-            xb = torch.as_tensor(_read(a, b), dtype=torch.float32, device=device)
-            xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
-            h = encoder(xb)
-            if h.ndim == 3:
-                h = h[:, -1, :]
-            if hasattr(core, "proj") and not isinstance(core.proj, nn.Identity):
-                h = core.proj(h)
-            embs.append(h.float().cpu().numpy())
+            try:
+                xb = torch.as_tensor(_read(a, b), dtype=torch.float32, device=_enc_dev)
+                xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
+                h = encoder(xb)
+                if h.ndim == 3:
+                    h = h[:, -1, :]
+                if hasattr(core, "proj") and not isinstance(core.proj, nn.Identity):
+                    h = core.proj(h)
+                embs.append(h.float().cpu().numpy())
+                a = b
+            except torch.cuda.OutOfMemoryError:
+                del_xb = locals().pop("xb", None)
+                del del_xb
+                torch.cuda.empty_cache()
+                if batch > 16:
+                    batch = max(16, batch // 2)
+                    print(f"[RL] Encoder-obs OOM; retrying with batch={batch}")
+                else:
+                    print("[RL] Encoder-obs OOM at min batch; moving encoder to CPU")
+                    core.to("cpu")
+                    _enc_dev = torch.device("cpu")
+                    batch = 64
     if saved_head is not None:
         encoder.head = saved_head
     return np.concatenate(embs, axis=0).astype(np.float32)
@@ -322,6 +346,120 @@ def _save_rl_checkpoint(agent, ckpt_dir: Path, algo: str, tag: str) -> Path:
     # with the same unwrapping idiom.
     _safe_save({"model_state": sd}, path)
     return path
+
+
+_ARCH_ATTRS = ("hidden", "use_lstm", "lstm_hidden", "hist_len")
+
+
+def _agent_constructor_kwargs(agent, algo_kw: dict) -> dict:
+    """JSON-safe kwargs that rebuild ``agent`` with the same architecture in live."""
+    out = {k: v for k, v in (algo_kw or {}).items() if isinstance(v, (int, float, str, bool)) or v is None}
+    for attr in _ARCH_ATTRS:
+        val = getattr(agent, attr, None)
+        if isinstance(val, (int, float, bool)):
+            out[attr] = val
+    return out
+
+
+def _write_rl_best_meta(ckpt_dir: Path, algo: str, args, env, agent_kwargs: dict, val_summary: dict, source: str) -> Path:
+    meta = {
+        "model": args.model,
+        "algo": algo,
+        "val_sharpe": float(val_summary.get("sharpe", 0.0)),
+        "val_return_pct": float(val_summary.get("total_return_pct", 0.0)),
+        "val_n_trades": int(val_summary.get("n_trades", 0) or 0),
+        "obs_size": int(env.obs_size),
+        "n_actions": int(env.n_actions),
+        "encoder_obs": bool(getattr(args, "rl_encoder_obs", True)),
+        "agent_kwargs": dict(agent_kwargs or {}),
+        "saved_by": source,
+        "saved_at": datetime.now(UTC).isoformat(),
+    }
+    path = ckpt_dir / f"rl_{algo}_best.json"
+    _safe_save_json(meta, path)
+    return path
+
+
+def _resolve_supervised_ckpt(ckpt_dir: Path, model: str) -> Path:
+    sup_ckpt = ckpt_dir / model / f"{model}_best.pt"
+    if not sup_ckpt.is_file():
+        sup_ckpt = ckpt_dir / f"{model}_best.pt"
+    if not sup_ckpt.is_file():
+        sup_ckpt = ckpt_dir.parent / model / f"{model}_best.pt"
+    return sup_ckpt
+
+
+def _export_rl_best_onnx(ckpt_dir: Path, algo: str, args, n_features: int, n_actions: int) -> Path | None:
+    """Export rl_{algo}_best.pt (+ execution graph) so ONNX never lags the .pt."""
+    try:
+        from inference.onnx_inference import export_rl_execution_to_onnx, export_rl_to_onnx
+
+        rl_best = ckpt_dir / f"rl_{algo}_best.pt"
+        sup_ckpt = _resolve_supervised_ckpt(ckpt_dir, str(args.model))
+        seq_len = int(getattr(args, "seq_len", 60))
+        rl_onnx = ckpt_dir / f"rl_{algo}_best.onnx"
+        export_rl_to_onnx(
+            rl_checkpoint=str(rl_best),
+            supervised_checkpoint=str(sup_ckpt),
+            model_name=str(args.model),
+            seq_len=seq_len,
+            n_features=int(n_features),
+            output_path=str(rl_onnx),
+            algo=algo,
+            device="cpu",
+        )
+        print(f"[RL] Exported ONNX -> {rl_onnx}")
+        rl_exec_onnx = ckpt_dir / f"rl_{algo}_execution.onnx"
+        export_rl_execution_to_onnx(
+            rl_checkpoint=str(rl_best),
+            supervised_checkpoint=str(sup_ckpt),
+            model_name=str(args.model),
+            seq_len=seq_len,
+            n_features=int(n_features),
+            output_path=str(rl_exec_onnx),
+            algo=algo,
+            device="cpu",
+        )
+        _safe_save_json(
+            {
+                "model_name": f"rl_{algo}_execution",
+                "source_checkpoint": str(rl_best),
+                "source_onnx": str(rl_exec_onnx),
+                "direction_model": "Use MODEL_PATH for the ensemble/supervised 3-logit direction model.",
+                "runtime_env": "Set EXECUTION_MODEL_PATH to this ONNX in the C++ server.",
+                "inputs": {
+                    "features": [1, seq_len, int(n_features)],
+                    "agent_state": [1, 5],
+                },
+                "outputs": {"action_logits": [1, int(n_actions)]},
+                "actions": {
+                    "0": "HOLD",
+                    "1": "OPEN_LONG",
+                    "2": "OPEN_SHORT",
+                    "3": "SCALE_IN_25",
+                    "4": "SCALE_IN_50",
+                    "5": "SCALE_IN_100",
+                    "6": "SCALE_OUT_25",
+                    "7": "SCALE_OUT_50",
+                    "8": "SCALE_OUT_100",
+                    "9": "CLOSE_ALL",
+                },
+            },
+            ckpt_dir / f"rl_{algo}_execution.json",
+        )
+        print(f"[RL] Exported execution ONNX -> {rl_exec_onnx}")
+        return rl_onnx
+    except Exception as exc:
+        # A stale ONNX next to a newer .pt would be deployed/served by mistake.
+        for stale in (ckpt_dir / f"rl_{algo}_best.onnx", ckpt_dir / f"rl_{algo}_execution.onnx"):
+            try:
+                if stale.exists():
+                    stale.unlink()
+                    print(f"[RL] Removed stale {stale.name} (does not match rl_{algo}_best.pt)")
+            except OSError:
+                pass
+        print(f"[RL] ONNX export skipped: {exc}")
+        return None
 
 
 def _production_onnx_paths(args) -> tuple[Path, Path]:
@@ -451,6 +589,43 @@ def _signal_cpp_server_reload(prod_onnx: Path) -> Path | None:
     return reload_flag
 
 
+def _deploy_promotion_check(artifact_dir: Path, source_checkpoint: Path | None) -> tuple[bool, str]:
+    """Require a valid PromotionGate certificate bound to ``source_checkpoint``.
+
+    Same artifact the live engine accepts (validation.gate_policy): current
+    gate_version, CERTIFIED status, no rejection reasons, file hashes intact -
+    plus the certificate must hash exactly the checkpoint being deployed, so a
+    PASS issued for another model/run cannot authorise this graph.
+    """
+    from validation.gate_policy import check_gate_artifact, sha256_file
+
+    if source_checkpoint is None or not Path(source_checkpoint).is_file():
+        return False, f"source checkpoint missing: {source_checkpoint}"
+    src = Path(source_checkpoint).resolve()
+    src_hash = sha256_file(src)
+    cands = [artifact_dir / "promotion_gate.json", src.parent / "promotion_gate.json"]
+    reasons: list[str] = []
+    for cand in dict.fromkeys(cands):
+        if not cand.is_file():
+            continue
+        try:
+            doc = json.loads(cand.read_text(encoding="utf-8"))
+        except Exception as exc:
+            reasons.append(f"{cand}: unreadable ({exc})")
+            continue
+        ok, why = check_gate_artifact(doc)
+        if not ok:
+            reasons.append(f"{cand}: {why}")
+            continue
+        hashes = doc.get("artifact_hashes") or {}
+        bound = any(Path(p).resolve() == src and d == src_hash for p, d in hashes.items())
+        if not bound:
+            reasons.append(f"{cand}: certificate does not cover {src.name} (sha256 {src_hash[:12]})")
+            continue
+        return True, f"promotion gate OK: {cand}"
+    return False, "; ".join(reasons) or f"no promotion_gate.json in {artifact_dir}"
+
+
 def _deploy_onnx_to_cpp_server(
     onnx_path: Path,
     args,
@@ -458,7 +633,10 @@ def _deploy_onnx_to_cpp_server(
     artifact_dir: Path,
     source_checkpoint: Path | None = None,
 ) -> dict:
-    """Atomically promote an exported ONNX graph to the C++ server path."""
+    """Atomically promote an exported ONNX graph to the C++ server path.
+
+    Refuses unless a passing, checkpoint-bound PromotionGate certificate exists.
+    """
     result = {
         "model_name": model_name,
         "source_checkpoint": str(source_checkpoint) if source_checkpoint else None,
@@ -470,6 +648,19 @@ def _deploy_onnx_to_cpp_server(
         "error": None,
     }
     try:
+        gate_ok, gate_why = _deploy_promotion_check(artifact_dir, source_checkpoint)
+        result["promotion_gate"] = {"ok": gate_ok, "reason": gate_why}
+        if not gate_ok:
+            result["status"] = "refused"
+            result["error"] = f"promotion gate not passed: {gate_why}"
+            print(f"[Deploy] REFUSED {model_name} -> production: promotion gate not passed ({gate_why})")
+            try:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                _safe_save_json(result, artifact_dir / "cpp_deployment.json")
+            except Exception as exc:
+                print(f"[Deploy] Could not write {model_name} cpp_deployment.json: {exc}")
+            return result
+        print(f"[Deploy] {model_name}: {gate_why}")
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX artifact does not exist: {onnx_path}")
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -643,14 +834,16 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
 
     dev = str(device)
     _algo = str(args.rl_algo).lower()
-    _algo_kw = _rl_algo_kwargs(args, _algo)
+    _agent_cls = DQNAgent if _algo == "dqn" else PPOAgent
     _use_lstm = bool(getattr(args, "rl_use_lstm", False))
-    if _algo == "dqn":
-        agent = DQNAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, use_lstm=_use_lstm, **_algo_kw)
-    else:
-        agent = PPOAgent(obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, use_lstm=_use_lstm, **_algo_kw)
-    if _use_lstm:
+    _algo_kw = filter_agent_kwargs(_agent_cls, _rl_algo_kwargs(args, _algo), context="RL")
+    _algo_kw.pop("use_lstm", None)
+    agent = _agent_cls(
+        obs_size=train_env.obs_size, n_actions=train_env.n_actions, device=dev, use_lstm=_use_lstm, **_algo_kw
+    )
+    if bool(getattr(agent, "use_lstm", False)):
         print(f"[RL] LSTM backbone enabled for {args.model}")
+    _agent_kwargs = _agent_constructor_kwargs(agent, _algo_kw)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -732,6 +925,10 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
             if _ep_sharpe >= _min_val_sharpe and _ep_sharpe > _best_val_sharpe:
                 _best_val_sharpe = _ep_sharpe
                 _save_rl_checkpoint(_agent, ckpt_dir, _algo, "best")
+                _write_rl_best_meta(
+                    ckpt_dir, _algo, args, train_env, _agent_kwargs, _ep_vs, source=f"episode_{ep + 1}"
+                )
+                _export_rl_best_onnx(ckpt_dir, _algo, args, int(n_features), int(train_env.n_actions))
                 _best_saved = True
 
     returns = train_agent(
@@ -770,94 +967,35 @@ def run_rl(cache_path, n_features, args, device, n_samples=None, run=None):
         if _val_sharpe >= _min_val_sharpe and _val_sharpe > _best_val_sharpe:
             _best_val_sharpe = _val_sharpe
             _save_rl_checkpoint(agent, ckpt_dir, _algo, "best")
-            meta = {
-                "model": args.model,
-                "algo": _algo,
-                "val_sharpe": _val_sharpe,
-                "val_return_pct": float(val_summary["total_return_pct"]),
-                "obs_size": int(train_env.obs_size),
-                "n_actions": int(train_env.n_actions),
-                "encoder_obs": bool(getattr(args, "rl_encoder_obs", True)),
-            }
-            with (ckpt_dir / f"rl_{_algo}_best.json").open("w", encoding="utf-8") as _rl_meta_fp:
-                json.dump(meta, _rl_meta_fp, indent=2)
+            _write_rl_best_meta(ckpt_dir, _algo, args, train_env, _agent_kwargs, val_summary, source="final")
+            _export_rl_best_onnx(ckpt_dir, _algo, args, int(n_features), int(train_env.n_actions))
             _best_saved = True
-            try:
-                from inference.onnx_inference import export_rl_execution_to_onnx, export_rl_to_onnx
-
-                rl_best = ckpt_dir / f"rl_{_algo}_best.pt"
-                sup_ckpt = ckpt_dir / args.model / f"{args.model}_best.pt"
-                if not sup_ckpt.is_file():
-                    sup_ckpt = ckpt_dir / f"{args.model}_best.pt"
-                if not sup_ckpt.is_file():
-                    sup_ckpt = ckpt_dir.parent / args.model / f"{args.model}_best.pt"
-                rl_onnx = ckpt_dir / f"rl_{_algo}_best.onnx"
-                export_rl_to_onnx(
-                    rl_checkpoint=str(rl_best),
-                    supervised_checkpoint=str(sup_ckpt),
-                    model_name=str(args.model),
-                    seq_len=int(getattr(args, "seq_len", 60)),
-                    n_features=int(n_features),
-                    output_path=str(rl_onnx),
-                    algo=_algo,
-                    device="cpu",
-                )
-                print(f"[RL] Exported ONNX -> {rl_onnx}")
-                rl_exec_onnx = ckpt_dir / f"rl_{_algo}_execution.onnx"
-                export_rl_execution_to_onnx(
-                    rl_checkpoint=str(rl_best),
-                    supervised_checkpoint=str(sup_ckpt),
-                    model_name=str(args.model),
-                    seq_len=int(getattr(args, "seq_len", 60)),
-                    n_features=int(n_features),
-                    output_path=str(rl_exec_onnx),
-                    algo=_algo,
-                    device="cpu",
-                )
-                _safe_save_json(
-                    {
-                        "model_name": f"rl_{_algo}_execution",
-                        "source_checkpoint": str(rl_best),
-                        "source_onnx": str(rl_exec_onnx),
-                        "direction_model": "Use MODEL_PATH for the ensemble/supervised 3-logit direction model.",
-                        "runtime_env": "Set EXECUTION_MODEL_PATH to this ONNX in the C++ server.",
-                        "inputs": {
-                            "features": [1, int(getattr(args, "seq_len", 60)), int(n_features)],
-                            "agent_state": [1, 5],
-                        },
-                        "outputs": {"action_logits": [1, int(train_env.n_actions)]},
-                        "actions": {
-                            "0": "HOLD",
-                            "1": "OPEN_LONG",
-                            "2": "OPEN_SHORT",
-                            "3": "SCALE_IN_25",
-                            "4": "SCALE_IN_50",
-                            "5": "SCALE_IN_100",
-                            "6": "SCALE_OUT_25",
-                            "7": "SCALE_OUT_50",
-                            "8": "SCALE_OUT_100",
-                            "9": "CLOSE_ALL",
-                        },
-                    },
-                    ckpt_dir / f"rl_{_algo}_execution.json",
-                )
-                print(f"[RL] Exported execution ONNX -> {rl_exec_onnx}")
-                if bool(getattr(args, "deploy_rl", False)):
-                    args._n_features = int(n_features)
-                    _deploy_onnx_to_cpp_server(
-                        rl_onnx,
-                        args,
-                        model_name=f"rl_{_algo}",
-                        artifact_dir=ckpt_dir,
-                        source_checkpoint=rl_best,
-                    )
-            except Exception as exc:
-                print(f"[RL] ONNX export/deploy skipped: {exc}")
             print(f"[RL] Saved best policy  {ckpt_dir / f'rl_{_algo}_best.pt'}")
+        elif _val_sharpe < _min_val_sharpe:
+            print(
+                f"[RL] Final val Sharpe {_val_sharpe:.3f} below min_val_sharpe {_min_val_sharpe:.3f} "
+                "-- rl_*_best not updated"
+            )
         else:
             print(
-                f"[RL] Val Sharpe {_val_sharpe:.3f} below min_val_sharpe {_min_val_sharpe:.3f} "
-                "-- rl_*_best not updated"
+                f"[RL] Final val Sharpe {_val_sharpe:.3f} does not beat mid-training best "
+                f"{_best_val_sharpe:.3f} -- keeping existing rl_{_algo}_best"
+            )
+
+    if bool(getattr(args, "deploy_rl", False)):
+        rl_onnx = ckpt_dir / f"rl_{_algo}_best.onnx"
+        if not _best_saved:
+            print(f"[RL] Deploy skipped: no rl_{_algo}_best met min_val_sharpe {_min_val_sharpe:.3f} this run")
+        elif not rl_onnx.is_file():
+            print(f"[RL] Deploy skipped: {rl_onnx.name} missing (ONNX export failed)")
+        else:
+            args._n_features = int(n_features)
+            _deploy_onnx_to_cpp_server(
+                rl_onnx,
+                args,
+                model_name=f"rl_{_algo}",
+                artifact_dir=ckpt_dir,
+                source_checkpoint=ckpt_dir / f"rl_{_algo}_best.pt",
             )
 
     _save_rl_checkpoint(agent, ckpt_dir, _algo, "last")

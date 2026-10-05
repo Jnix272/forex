@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import RL
 from inference._scaler_load import apply_inference_scaler
-from inference.onnx_inference import torch_load_safe
-from models.rl_agents import DQNAgent, PPOAgent
+from inference.onnx_inference import _checkpoint_state_dict, torch_load_safe
+from models.rl_agents import DQNAgent, PPOAgent, filter_agent_kwargs
 from trading.inference_engines import BaseInferenceEngine
 from trading.live_actions import LiveAction, scaling_action_to_live_action
 
@@ -134,15 +134,22 @@ class RLInferenceAgent(BaseInferenceEngine):
         self._encoder = encoder_any
 
         ckpt = torch_load_safe(rl_checkpoint, map_location=self.device)
+        if isinstance(ckpt, dict) and ckpt.get("model_type") != "RLEnsemble":
+            # rl_runner saves {"model_state": state_dict}; loading the envelope
+            # itself with strict=False left the policy randomly initialised.
+            ckpt = _checkpoint_state_dict(ckpt)
         meta_path = Path(rl_checkpoint).parent / f"rl_{self.algo}_best.json"
         obs_size = None
         n_actions = None
+        meta_agent_kwargs: dict | None = None
         if meta_path.is_file():
             import json
 
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             obs_size = int(meta.get("obs_size", 0)) or None
             n_actions = int(meta.get("n_actions", 0)) or None
+            if isinstance(meta.get("agent_kwargs"), dict):
+                meta_agent_kwargs = dict(meta["agent_kwargs"])
 
         if obs_size is None:
             obs_size = self._infer_obs_size() + 5
@@ -166,19 +173,20 @@ class RLInferenceAgent(BaseInferenceEngine):
         if n_actions is not None and n_actions < 3:
             n_actions = 10
 
-        algo_kw = dict(RL.get(self.algo, {}))
         if self.algo == "ensemble" or (isinstance(ckpt, dict) and ckpt.get("model_type") == "RLEnsemble"):
             from models.rl_advanced import RLEnsemble
 
             self.algo = "ensemble"
             self._agent = RLEnsemble.load_checkpoint(rl_checkpoint, device=str(self.device))
         elif self.algo == "dqn":
+            algo_kw = self._agent_kwargs(DQNAgent, meta_agent_kwargs)
             self._agent = DQNAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
             agent_any = cast(Any, self._agent)
             self._report_load(agent_any.policy_net.load_state_dict(ckpt, strict=False))
             agent_any.target_net.load_state_dict(agent_any.policy_net.state_dict())
             agent_any.eps = 0.0
         else:
+            algo_kw = self._agent_kwargs(PPOAgent, meta_agent_kwargs)
             self._agent = PPOAgent(obs_size=obs_size, n_actions=n_actions, device=str(self.device), **algo_kw)
             agent_any = cast(Any, self._agent)
             self._report_load(agent_any.net.load_state_dict(ckpt, strict=False))
@@ -227,6 +235,17 @@ class RLInferenceAgent(BaseInferenceEngine):
             if h.ndim == 3:
                 h = h[:, -1, :]
         return int(h.shape[-1])
+
+    def _agent_kwargs(self, agent_cls, meta_agent_kwargs: dict | None) -> dict:
+        """Constructor kwargs saved at training time (rl_{algo}_best.json), else
+        settings.RL[algo] filtered to the agent signature."""
+        if meta_agent_kwargs is not None:
+            return filter_agent_kwargs(agent_cls, meta_agent_kwargs, context="RLInference")
+        print(
+            f"[RLInference] WARN: rl_{self.algo}_best.json has no agent_kwargs; rebuilding "
+            f"{agent_cls.__name__} from settings.RL['{self.algo}'] (architecture may differ from training)"
+        )
+        return filter_agent_kwargs(agent_cls, dict(RL.get(self.algo, {})), context="RLInference")
 
     @staticmethod
     def _infer_obs_from_ckpt(ckpt) -> int | None:

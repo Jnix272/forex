@@ -37,6 +37,28 @@ def _default_extra_cost_pips() -> float:
         return 1.0
 
 
+#: Per-pair trade filters for honest eval. USDCAD has the widest spreads
+#: (median ~1.1 pip, p99 ~4) and lowest volatility, so it only trades when the
+#: spread is <= 1.5 pips and the expected 30-bar move (ATR*sqrt(h)) is >= 3x
+#: the round-trip cost. Override via honest_ctx["trade_filters"].
+DEFAULT_TRADE_FILTERS: dict = {
+    "USDCAD": {"max_spread_pips": 1.5, "min_move_cost_mult": 3.0},
+}
+
+
+def load_aux_arrays(cache_path: str | Path) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return (t_ns, atr_pairs) from a Zarr cache, or None for any missing array."""
+    try:
+        import zarr  # type: ignore
+
+        root = zarr.open(str(cache_path), mode="r")
+        t = np.asarray(root["t_ns"][:]) if "t_ns" in root else None
+        a = np.asarray(root["atr_pairs"][:]) if "atr_pairs" in root else None
+        return t, a
+    except Exception:
+        return None, None
+
+
 def _pair_pip(name: str | None) -> float | None:
     if not name or name.startswith("pair_"):
         return None
@@ -63,6 +85,11 @@ def net_pnl_metrics(
     min_trades: int = 30,
     extra_cost_pips: float | None = None,
     pip_size: float | None = None,
+    t_ns: np.ndarray | None = None,
+    atr: np.ndarray | None = None,
+    skip_gap_windows: bool = False,
+    max_spread_pips: float | None = None,
+    min_move_cost_mult: float = 0.0,
 ) -> dict:
     """Net-of-cost, non-overlapping per-trade metrics.
 
@@ -87,6 +114,24 @@ def net_pnl_metrics(
 
     ok = (idx + h) < len(close)
     d, idx = d[ok], idx[ok]
+    # Trade filters: bars that fail become HOLD (kept in place so the
+    # non-overlapping decimation below still steps every h samples).
+    if skip_gap_windows and t_ns is not None:
+        _t = np.asarray(t_ns, dtype=np.int64).reshape(-1)
+        _bar = float(np.median(np.diff(_t[: min(len(_t), 100_000)]))) or 1.0
+        d = np.where((_t[idx + h] - _t[idx]) > h * _bar * 1.01, 0.0, d)
+    _pip_f = float(pip_size) if pip_size else None
+    if max_spread_pips is not None and spread is not None:
+        _p = _pip_f or float(np.where(close[idx] > 20.0, 0.01, 0.0001).mean())
+        _sp_all = np.nan_to_num(np.asarray(spread, dtype=np.float64).reshape(-1)[idx], nan=0.0)
+        d = np.where(_sp_all > float(max_spread_pips) * _p, 0.0, d)
+    if min_move_cost_mult and atr is not None:
+        _p = _pip_f or float(np.where(close[idx] > 20.0, 0.01, 0.0001).mean())
+        _a = np.nan_to_num(np.asarray(atr, dtype=np.float64).reshape(-1)[idx], nan=0.0)
+        _sp_f = (np.nan_to_num(np.asarray(spread, dtype=np.float64).reshape(-1)[idx], nan=0.0)
+                 if spread is not None else 0.0)
+        _extra = (extra_cost_pips if extra_cost_pips is not None else _default_extra_cost_pips()) * _p
+        d = np.where(_a * math.sqrt(h) < float(min_move_cost_mult) * (np.abs(_sp_f) + _extra), 0.0, d)
     # Non-overlapping: one decision every h samples.
     d, idx = d[::h], idx[::h]
     traded = d != 0
@@ -179,6 +224,10 @@ def pooled_pair_metrics(
     pair_names: list[str] | None = None,
     bars_per_year: int = 288 * FX_DAYS_PER_YEAR,
     min_trades: int = 30,
+    t_ns: np.ndarray | None = None,
+    atr_pairs: np.ndarray | None = None,
+    skip_gap_windows: bool = False,
+    trade_filters: dict | None = None,
 ) -> dict:
     """Per-pair honest metrics for (N, P) directions, plus a pooled portfolio.
 
@@ -191,11 +240,17 @@ def pooled_pair_metrics(
     names = pair_names or [f"pair_{k}" for k in range(n_p)]
     per_pair, pooled, pooled_gross, pooled_cost, pooled_idx = {}, [], [], [], []
     for k in range(n_p):
+        _tf = (DEFAULT_TRADE_FILTERS if trade_filters is None else trade_filters).get(names[k], {})
         m = net_pnl_metrics(
             d[:, k], sample_idx, close_pairs[:, k],
             None if spread_pairs is None else spread_pairs[:, k],
             horizon, bars_per_year=bars_per_year, min_trades=min_trades,
             pip_size=_pair_pip(names[k]),
+            t_ns=t_ns,
+            atr=None if atr_pairs is None else atr_pairs[:, k],
+            skip_gap_windows=skip_gap_windows,
+            max_spread_pips=_tf.get("max_spread_pips"),
+            min_move_cost_mult=float(_tf.get("min_move_cost_mult", 0.0) or 0.0),
         )
         r = m.pop("_net_returns", None)
         ix = m.pop("_idx", None)

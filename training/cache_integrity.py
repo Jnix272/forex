@@ -186,7 +186,11 @@ def _get_cache_path(args) -> Path:
 # datetime index (fresh downloads) keep their pair; HMM/factor/vol-clock fixes.
 # a0926a: windows where a pair has no sequences are skipped (were zero-filled with
 # NaN per-pair labels); rows overlapping the previous window are dropped.
-DATASET_BUILD_VERSION = "a0926a"
+# a0929a: Hurst on returns, rolling-HMM regime_class, sentiment event-time decay,
+# COT staleness cap. From here on the manifest also carries a source/input
+# fingerprint (see _compute_build_fingerprint), so later code edits are caught
+# even without a bump.
+DATASET_BUILD_VERSION = "a0929a"
 
 
 _RL_MARKET_ZARR_KEYS = ("close", "atr", "spread")
@@ -432,23 +436,178 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 
 
-def _compute_content_hash(args) -> str:
-    """Compute a deterministic hash of the dataset generation parameters to prevent stale reuse."""
-    if args is None:
-        return "no_args"
+_COT_PARQUET_PATH = Path("data/raw/cot/cot_financials_cleaned.parquet")
 
-    # Collect core features and builder configurations
-    state = {
-        "features": getattr(args, "_feat_names", []),
-        "seq_len": getattr(args, "seq_len", 80),
-        "lookahead": getattr(args, "lookahead_bars", 30),
-        "target": getattr(args, "target_col", ""),
-        "bar_freq": getattr(args, "bar_freq", "5m"),
+
+def _dataset_side_inputs(args) -> list[str]:
+    """Raw files joined into the features that are not tick data (COT, news, calendar)."""
+    from data.historical_news import _DEFAULT_CAL_FILE, _DEFAULT_NEWS_FILE
+
+    paths = [str(_COT_PARQUET_PATH)]
+    news_mode = str(getattr(args, "historical_news_mode", "calendar") or "calendar").lower()
+    if news_mode != "off":
+        paths.append(str(getattr(args, "historical_news_file", None) or _DEFAULT_NEWS_FILE))
+        paths.append(str(getattr(args, "economic_calendar_file", None) or _DEFAULT_CAL_FILE))
+    return paths
+
+
+def _compute_build_fingerprint(args) -> dict:
+    """Code/input/config fingerprint recorded in the manifest and the resume file.
+
+    Kept out of the cache *name* on purpose: an edit to a feature module should
+    invalidate (and, with auto_rebuild_on_mismatch, rebuild) the existing cache,
+    not silently start a second multi-GB dataset next to it.
+    """
+    from feature_store.fingerprint import (
+        effective_feature_scales,
+        feature_code_fingerprint,
+        inputs_fingerprint,
+        stable_digest,
+    )
+
+    inputs_hash, inputs = inputs_fingerprint(_dataset_side_inputs(args))
+    feature_config = {
+        "feature_scales": effective_feature_scales(),
+        "features": {str(k): v for k, v in sorted(FEATURES.items())},
+    }
+    return {
+        "build_version": DATASET_BUILD_VERSION,
+        "code_fingerprint": feature_code_fingerprint(),
+        "inputs_fingerprint": inputs_hash,
+        "inputs": inputs,
+        "feature_config": feature_config,
+        "feature_config_hash": stable_digest(feature_config, 16),
     }
 
-    # Convert to a stable JSON string
-    state_str = json.dumps(state, sort_keys=True)
-    return hashlib.sha256(state_str.encode("utf-8")).hexdigest()
+
+def _compute_content_hash(args, fingerprint: dict | None = None) -> str:
+    """Deterministic hash of everything that decides the cache contents.
+
+    Covers builder parameters plus the build fingerprint (feature code, raw side
+    inputs, indicator windows, build version). Feature *names* are deliberately
+    excluded: they are only known after a build, so including them made the
+    pre-build hash never equal the post-build one.
+    """
+    if args is None:
+        return "no_args"
+    fp = fingerprint if fingerprint is not None else _compute_build_fingerprint(args)
+    try:
+        seq_len = int(_effective_max_seq_len(args))
+    except Exception:
+        seq_len = int(getattr(args, "seq_len", 80) or 80)
+    state = {
+        "seq_len": seq_len,
+        "lookahead": int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30))),
+        "target": _cache_target_col(args),
+        "bar_freq": str(getattr(args, "bar_freq", "5m")),
+        "build_version": fp.get("build_version"),
+        "code_fingerprint": fp.get("code_fingerprint"),
+        "inputs_fingerprint": fp.get("inputs_fingerprint"),
+        "feature_config_hash": fp.get("feature_config_hash"),
+    }
+    return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _current_build_fingerprint(args) -> dict:
+    """Fingerprint pinned at build start (``args._build_fingerprint``) or computed now."""
+    fp = getattr(args, "_build_fingerprint", None)
+    if isinstance(fp, dict) and fp.get("code_fingerprint"):
+        return fp
+    return _compute_build_fingerprint(args)
+
+
+def _pin_build_fingerprint(args) -> dict:
+    """Freeze the fingerprint for this build so a mid-build edit cannot relabel it."""
+    fp = _compute_build_fingerprint(args)
+    fp["content_hash"] = _compute_content_hash(args, fp)
+    try:
+        args._build_fingerprint = fp
+    except Exception:
+        pass
+    return fp
+
+
+def _manifest_fingerprint_fields(args) -> dict:
+    """Keys every per-cache manifest must carry for stale-cache detection."""
+    fp = _current_build_fingerprint(args)
+    return {
+        "content_hash": fp.get("content_hash") or _compute_content_hash(args, fp),
+        "build_version": fp.get("build_version"),
+        "code_fingerprint": fp.get("code_fingerprint"),
+        "inputs_fingerprint": fp.get("inputs_fingerprint"),
+        "feature_config_hash": fp.get("feature_config_hash"),
+        "feature_config": fp.get("feature_config"),
+        "inputs": fp.get("inputs"),
+    }
+
+
+def _fingerprint_mismatch_details(manifest: dict, current: dict) -> list[str]:
+    parts = []
+    for key, label in (
+        ("build_version", "build version"),
+        ("code_fingerprint", "feature/label source code"),
+        ("inputs_fingerprint", "raw side inputs (COT/news/calendar)"),
+        ("feature_config_hash", "features.* indicator windows"),
+    ):
+        old, new = manifest.get(key), current.get(key)
+        if old != new:
+            parts.append(f"{label} changed ({str(old)[:8]} -> {str(new)[:8]})")
+    return parts
+
+
+# -----------------------------------------------------------------------------
+# Resume state (multi-pair window builder)
+# -----------------------------------------------------------------------------
+
+
+def _resume_path(cache_path) -> Path:
+    return Path(str(cache_path) + "_resume.json")
+
+
+def _write_resume_state(cache_path, window_idx: int, content_hash: str | None) -> None:
+    payload = {
+        "last_completed_window_idx": int(window_idx),
+        "content_hash": content_hash,
+        "build_version": DATASET_BUILD_VERSION,
+        "cache_name": Path(str(cache_path)).name,
+    }
+    tmp = Path(str(_resume_path(cache_path)) + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, _resume_path(cache_path))
+
+
+def _read_resume_idx(cache_path, content_hash: str | None) -> int:
+    """Last completed window of a resumable build, or -1.
+
+    A resume file without a matching content hash (legacy file, other code
+    version, other inputs) is deleted: resuming from it would skip windows that
+    were never written with the current code.
+    """
+    rp = _resume_path(cache_path)
+    if not rp.exists():
+        return -1
+    try:
+        state = json.loads(rp.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    idx = state.get("last_completed_window_idx", -1) if isinstance(state, dict) else -1
+    cached = state.get("content_hash") if isinstance(state, dict) else None
+    if not content_hash or cached != content_hash or not isinstance(idx, int):
+        print(
+            f"[Data] Ignoring stale resume state {rp.name} "
+            f"(recorded hash {str(cached)[:8]}, current {str(content_hash)[:8]}) - deleting it."
+        )
+        _clear_resume_state(cache_path)
+        return -1
+    return int(idx)
+
+
+def _clear_resume_state(cache_path) -> None:
+    for p in (_resume_path(cache_path), Path(str(_resume_path(cache_path)) + ".tmp")):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
@@ -489,11 +648,23 @@ def _validate_cache_integrity(cache_path: str, args=None) -> tuple[bool, str]:
 
         if manifest:
             if args:
-                current_hash = _compute_content_hash(args)
-                cached_hash = manifest.get("content_hash", "missing")
-                if current_hash != "no_args" and cached_hash != "missing" and current_hash != cached_hash:
+                current_fp = _current_build_fingerprint(args)
+                current_hash = current_fp.get("content_hash") or _compute_content_hash(args, current_fp)
+                cached_hash = manifest.get("content_hash")
+                if not cached_hash:
+                    msg = (
+                        "manifest has no content_hash/code fingerprint (built before fingerprinting) - "
+                        "cannot prove it matches the current feature code and inputs"
+                    )
+                    if getattr(args, "auto_rebuild_on_mismatch", False):
+                        problems.append(msg)
+                    else:
+                        _log_warn(f"[Data] {msg}; reusing because auto_rebuild_on_mismatch is off")
+                elif current_hash != "no_args" and current_hash != cached_hash:
+                    details = _fingerprint_mismatch_details(manifest, current_fp)
                     problems.append(
-                        f"feature content hash mismatch (cached: {cached_hash[:8]}, current: {current_hash[:8]})"
+                        f"feature content hash mismatch (cached: {str(cached_hash)[:8]}, current: {current_hash[:8]})"
+                        + (f": {'; '.join(details)}" if details else "")
                     )
             try:
                 expected_pairs = _get_pairs(args)

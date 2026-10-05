@@ -16,6 +16,30 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+EARLY_STOP_METRICS: tuple[str, ...] = ("auto", "val_loss", "sharpe", "cost_sharpe")
+
+
+def early_stop_metric_maximizes(metric: object) -> bool:
+    """True when ``metric`` is higher-is-better (Sharpe variants)."""
+    return str(metric or "auto").strip().lower() in ("sharpe", "cost_sharpe")
+
+
+def dynamic_si_lambda(base: float, max_shift: float, lam_min=None, lam_max=None) -> float:
+    """Regime-aware SI weight: ``lam_max`` in a stable regime, ``lam_min`` under heavy drift.
+
+    ``w = 1 / (1 + max_shift**2)`` in (0, 1] interpolates linearly between the
+    bounds, so both ends are reachable. Missing bounds default to ``base``.
+    """
+    base = float(base)
+    lo = base if lam_min is None else float(lam_min)
+    hi = base if lam_max is None else float(lam_max)
+    if hi < lo:
+        lo, hi = hi, lo
+    shift = float(max_shift) if np.isfinite(max_shift) else 0.0
+    w = 1.0 / (1.0 + shift * shift)
+    return lo + (hi - lo) * w
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MixupBatch - time-series MixUp augmentation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,6 +68,19 @@ class MixupBatch:
     def __init__(self, alpha: float = 0.2, p: float = 0.5):
         self.alpha = alpha
         self.p = p
+
+    def sample_pairing(self, bsz: int, device=None) -> tuple[float, torch.Tensor] | None:
+        """Draw (lam, perm) for loss-space mixup, or None when this batch is not mixed.
+
+        ``lam`` is folded to >= 0.5 so the original sample stays dominant; the
+        caller mixes inputs and combines ``lam*L(y) + (1-lam)*L(y[perm])``, which
+        works for any target layout (BCE direction, multitask, per-pair).
+        """
+        if self.alpha <= 0.0 or bsz < 2 or np.random.random() > self.p:
+            return None
+        lam = float(np.random.beta(self.alpha, self.alpha))
+        lam = max(lam, 1.0 - lam)
+        return lam, torch.randperm(bsz, device=device)
 
     def __call__(
         self,

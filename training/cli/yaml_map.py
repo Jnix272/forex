@@ -2,6 +2,27 @@
 
 from __future__ import annotations
 
+# Alias YAML key -> canonical YAML key for the same dest. When both are set the
+# canonical key wins (a conflict warning is printed if the values differ).
+_YAML_ALIASES = {
+    "direction_training.use_mixup": "training.use_mixup",
+    "direction_training.use_volatility_sampler": "training.use_volatility_sampler",
+    "direction_training.label_smoothing": "training.label_smoothing",
+    "training.patience": "training.early_stop_patience",
+}
+
+# YAML keys that are accepted for documentation / other tools but have no effect
+# on training; a one-time "unused" warning is printed when they are set.
+_YAML_UNUSED_KEYS = {
+    "curriculum.chunk_early_stop_patience": "chunk-level early stopping is not implemented",
+    "curriculum.chunk_early_stop_min_batches": "chunk-level early stopping is not implemented",
+    "curriculum.difficulty_spread_threshold": "difficulty tiers are built from |y| percentiles; not read",
+    "curriculum.difficulty_spread_threshold_hard": "difficulty tiers are built from |y| percentiles; not read",
+    "curriculum.calibration.max_class_prior_delta": "curriculum subset calibration is not implemented",
+    "curriculum.calibration.min_class_share": "curriculum subset calibration is not implemented",
+    "training.num_classes": "the direction head is a single BCE logit; num_classes is not read",
+}
+
 # Maps YAML keys (section.key) -> argparse dest names
 _YAML_MAP = {
     "strategy.mode": "strategy_mode",
@@ -37,6 +58,12 @@ _YAML_MAP = {
     "model.dropout": "dropout",
     "training.epochs": "epochs",
     "training.early_stop_patience": "early_stop_patience",
+    "training.patience": "early_stop_patience",  # alias; early_stop_patience wins
+    "training.early_stop_metric": "early_stop_metric",
+    "training.early_stop_min_delta": "early_stop_min_delta",
+    "training.huber_delta": "huber_delta",
+    "training.mixup_alpha": "mixup_alpha",
+    "training.mixup_prob": "mixup_prob",
     "training.batch_size": "batch_size",
     "training.lr": "lr",
     "training.seq_len": "seq_len",
@@ -59,6 +86,10 @@ _YAML_MAP = {
     "training.per_pair_heads": "per_pair_heads",
     "training.cv_refit_final": "cv_refit_final",
     "training.period_balance": "period_balance",
+    "training.deadband": "trade_deadband",
+    "training.trade_deadband": "trade_deadband",
+    "training.min_confidence": "trade_min_confidence",
+    "training.trade_min_confidence": "trade_min_confidence",
     "training.sacs_eps": "sacs_eps",
     "training.sacs_n_samples": "sacs_n_samples",
     "training.sacs_sharpness_weight": "sacs_sharpness_weight",
@@ -97,6 +128,7 @@ _YAML_MAP = {
     "multitask.enabled": "multitask",
     "multitask.w_ret": "mt_w_ret",
     "multitask.w_conf": "mt_w_conf",
+    "multitask.w_quantile": "mt_w_quantile",
     "multitask.class_balance_weight": "mt_class_balance_weight",
     "multitask.entropy_weight": "mt_entropy_weight",
     "multitask.direction_weight_floor": "mt_direction_weight_floor",
@@ -128,6 +160,7 @@ _YAML_MAP = {
     # Continuous learning (EWC / Synaptic Intelligence)
     "training.enable_ewc": "enable_ewc",
     "training.ewc_lambda": "ewc_lambda",
+    "training.ewc_lambda_ramp": "ewc_lambda_ramp",
     "training.enable_si": "enable_si",
     "training.si_lambda": "si_lambda",
     "training.si_dynamic": "si_dynamic",
@@ -144,6 +177,9 @@ _YAML_MAP = {
     "pretrain.framework": "pretrain_framework",
     # RL framework (new)
     "rl.framework": "rl_framework",
+    # Unified CurriculumManager (default off; sync.py warns when its sub-features are inert)
+    "curriculum.manager.enabled": "curriculum_manager",
+    "curriculum.manager.mode": "curriculum_manager_mode",
     # Curriculum miner feedback (new)
     "curriculum.miner_feedback.enabled": "curriculum_miner_feedback",
     "curriculum.miner_feedback.models": "curriculum_miner_models",
@@ -247,6 +283,8 @@ _YAML_MAP = {
     "diversity_loss.same_role_mult": "same_role_mult",
     "data.integrity_gate": "integrity_gate",
     "data.auto_rebuild_on_mismatch": "auto_rebuild_on_mismatch",
+    "data.use_feature_cache": "use_feature_cache",
+    "data.feature_cache_dir": "feature_cache_dir",
     "paths.checkpoint_dir": "checkpoint_dir",
     "paths.data_cache": "data_cache",
     # XGBoost baseline

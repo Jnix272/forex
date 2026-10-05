@@ -811,6 +811,34 @@ def create_curriculum_manager(
     return CurriculumManager(config, n_samples, difficulty_scores)
 
 
+def label_gate_max_tier(
+    epoch: int,
+    total_epochs: int,
+    difficulty_schedule: list | None,
+    active_stage: int | None = None,
+) -> int | None:
+    """Highest difficulty tier (0=easy, 1=medium, 2=hard) the label-magnitude gate admits.
+
+    With a ``difficulty_schedule`` the tier is the schedule's ``max_difficulty``
+    for ``epoch`` (``active_stage`` when the caller already resolved it), so
+    ``max_difficulty: 2`` admits every sample. Without a schedule the legacy
+    decay applies: tier 0 for the first quarter of training, tier 1 until the
+    half-way point, then ``None`` (no gating).
+    """
+    if difficulty_schedule:
+        if active_stage is not None:
+            return int(active_stage)
+        tier = None
+        for entry in sorted(difficulty_schedule, key=lambda e: int(e.get("epoch_start", 0))):
+            if int(epoch) >= int(entry.get("epoch_start", 0)) and entry.get("max_difficulty") is not None:
+                tier = int(entry["max_difficulty"])
+        return tier
+    gate_epochs = max(1, int(total_epochs) // 2)
+    if int(epoch) >= gate_epochs:
+        return None
+    return 0 if int(epoch) < gate_epochs // 2 else 1
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 7. Export
 # ════════════════════════════════════════════════════════════════════════════
@@ -827,4 +855,5 @@ __all__ = [
     "SelfPacedLearning",
     "compute_difficulty_scores",
     "create_curriculum_manager",
+    "label_gate_max_tier",
 ]

@@ -382,17 +382,19 @@ def validate_epoch(
     multitask: bool = False,
     feature_mask: torch.Tensor | None = None,
     sharpe_ann_factor: float | None = None,
-        direction_only: bool = False,
-        rl_mode: bool = False,
-        lookahead_bars: int = 1,
-        sharpe_non_overlapping: bool = True,
-        return_per_trade_sharpe: bool = True,
-        *,
-        tx_cost_bps: float = 0.0,      # transaction cost in basis points per trade (0.3 pct = 30 bps)
-        close_prices: torch.Tensor | None = None,  # per-sample close price for computing actual returns
-        pip_size: float = 0.0001,      # pip size for FX pair
-        honest_ctx: dict | None = None,  # {sample_idx, close, spread, horizon, bars_per_year} -> real net PnL
-    ):
+    direction_only: bool = False,
+    rl_mode: bool = False,
+    lookahead_bars: int = 1,
+    sharpe_non_overlapping: bool = True,
+    return_per_trade_sharpe: bool = True,
+    *,
+    tx_cost_bps: float = 0.0,      # transaction cost in basis points per trade (0.3 pct = 30 bps)
+    close_prices: torch.Tensor | None = None,  # per-sample close price for computing actual returns
+    pip_size: float = 0.0001,      # pip size for FX pair
+    honest_ctx: dict | None = None,  # {sample_idx, close, spread, horizon, bars_per_year} -> real net PnL
+    deadband: float = 0.0,         # conviction deadband hurdle rate (filters micro-noise trades)
+    min_confidence: float | None = None,  # confidence gate threshold on action_proba
+):
     """Run one validation epoch in eager FP32 by default.
 
     Autocast is off unless ``amp=True`` is passed explicitly - validation is
@@ -443,14 +445,14 @@ def validate_epoch(
         nonlocal correct, n_acc, pred_counts, true_counts, confusion, logits_sum, probs_sum, diag_true_counts
         
         if logits.ndim == 1 or logits.shape[-1] == 1:
-            pred_cls = (torch.sign(logits).long() + 1).reshape(-1).clamp(0, 2)
-            probs = torch.zeros(logits.shape[0], 3, device=logits.device)
-            probs.scatter_(1, pred_cls.unsqueeze(-1).clamp(0, 2), 1.0)
+            pred_cls = (torch.sign(logits).long() + 1).clamp(0, 2)
+            probs = torch.zeros(pred_cls.numel(), 3, device=logits.device)
+            probs.scatter_(1, pred_cls.reshape(-1, 1).clamp(0, 2), 1.0)
             logits_3d = probs.clone()
         else:
             pred_cls = logits.argmax(-1)
-            probs = torch.softmax(logits.float(), dim=-1)
-            logits_3d = logits.float()
+            probs = torch.softmax(logits.float(), dim=-1).reshape(-1, logits.shape[-1])
+            logits_3d = logits.float().reshape(-1, logits.shape[-1])
 
         correct += (pred_cls.reshape(-1) == y_cls_idx.reshape(-1)).sum()
         n_acc += int(y_cls_idx.numel())
@@ -552,7 +554,7 @@ def validate_epoch(
                         total += loss
                         # S8: the shared live decision rule (confidence-gated, HOLD
                         # allowed), not sign(logit) on every row.
-                        d = decide(pred)
+                        d = decide(pred, threshold=min_confidence, deadband=deadband)
                         _onehot = torch.nn.functional.one_hot((d + 1).long().clamp(0, 2), 3).float()
                         _accumulate_class_diag(_onehot, y_cls_idx.reshape(d.shape))
                     elif classification:
@@ -572,7 +574,7 @@ def validate_epoch(
                             continue
                         total += loss
                         pred_cls = _accumulate_class_diag(pred, y_cls_idx)
-                        d = pred_cls.float() - 1.0
+                        d = decide(pred, threshold=min_confidence, deadband=deadband) if (min_confidence is not None or deadband > 0) else (pred_cls.float() - 1.0)
                     else:
                         loss = _compute_loss(
                             pred,
@@ -594,7 +596,15 @@ def validate_epoch(
                         total += loss
                         correct += (torch.sign(pred) == torch.sign(yb_reg)).sum()
                         n_acc += int(yb_reg.numel())
-                        d = torch.sign(pred)
+                        if deadband > 0.0:
+                            pred_f = pred.float()
+                            d = torch.where(
+                                pred_f > float(deadband),
+                                torch.ones_like(pred_f),
+                                torch.where(pred_f < -float(deadband), -torch.ones_like(pred_f), torch.zeros_like(pred_f)),
+                            )
+                        else:
+                            d = torch.sign(pred)
 
                 yb_for_returns = _match_target_shape(d, yb.float())
                 if (rl_mode or y_cls_b is not None) and y_cls_b is not None:
@@ -610,7 +620,15 @@ def validate_epoch(
                         _full = torch.zeros(_b_rows, _np_h)
                     else:
                         # One position per row: average multi-output signs, re-sign.
-                        _d_row = torch.sign(_d2.mean(dim=1))
+                        if deadband > 0.0:
+                            _mean_d = _d2.mean(dim=1)
+                            _d_row = torch.where(
+                                _mean_d.abs() > float(deadband),
+                                torch.sign(_mean_d),
+                                torch.zeros_like(_mean_d),
+                            )
+                        else:
+                            _d_row = torch.sign(_d2.mean(dim=1))
                         _full = torch.zeros(_b_rows)
                     if _b_keep is not None and not bool(_b_keep.all()):
                         _full[_b_keep.detach().cpu().bool()] = _d_row
@@ -801,6 +819,10 @@ def validate_epoch(
                         int(honest_ctx.get("horizon", lookahead_bars)),
                         pair_names=honest_ctx.get("pair_names"),
                         bars_per_year=int(honest_ctx.get("bars_per_year", 288 * 260)),
+                        t_ns=honest_ctx.get("t_ns"),
+                        atr_pairs=honest_ctx.get("atr_pairs"),
+                        skip_gap_windows=bool(honest_ctx.get("skip_gap_windows", True)),
+                        trade_filters=honest_ctx.get("trade_filters"),
                     )
                     _pp = " ".join(
                         f"{k}={v['sharpe_net']:.2f}({v['n_trades']})" for k, v in _hm["per_pair"].items()
@@ -827,14 +849,21 @@ def validate_epoch(
         except Exception as _he:
             print(f"[Val][honest] failed: {_he}")
     validate_epoch.last_cost_sharpe = cost_sharpe
+    _hm_final = getattr(validate_epoch, "last_honest", None)
+    validate_epoch.last_n_trades = int(_hm_final.get("n_trades", 0)) if _hm_final else n_trades
     validate_epoch.last_dir_sharpe = sharpe
     validate_epoch.last_label_sharpe = sharpe  # diagnostic only: sign x CPAR label
     validate_epoch.last_ann_factor = ann
-    _hm_final = getattr(validate_epoch, "last_honest", None)
     if _hm_final:
         # S9: the Sharpe every consumer sees (history["val_sharpe"], collapse
         # controller, early stopping, Optuna) is the price-based net Sharpe.
         return val_loss, dir_acc, float(_hm_final.get("sharpe_net", 0.0))
     return val_loss, dir_acc, sharpe
+
+
+validate_epoch.last_cost_sharpe = None
+validate_epoch.last_n_trades = 0
+validate_epoch.last_dir_sharpe = 0.0
+validate_epoch.last_honest = None
 
 

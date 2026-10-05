@@ -150,12 +150,12 @@ ensemble:
 rl:
   enabled: true
   algo: dqn
-  deploy: true
+  deploy: false
   episodes: 500
   encoder_obs: true
   episode_len: 2048
   val_frac: 0.15
-  min_val_sharpe: -999.0
+  min_val_sharpe: 0.5
 
 validation:
   embargo_bars: 60
@@ -169,7 +169,7 @@ walk_forward:
   folds: 7
 
 paths:
-  checkpoint_dir: checkpoints/forex_4pair_2015_2025_haelt
+  checkpoint_dir: checkpoints/forex_4pair_2008_2025
   data_cache: ./data/processed
 
 news:

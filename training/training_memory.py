@@ -287,8 +287,15 @@ class TrainingMemory:
             return
 
         applied = []
+        # Precedence: CLI > explicit YAML > training memory > profile/default.
+        protected = frozenset(getattr(args, "_yaml_explicit_keys", None) or ()) | frozenset(
+            getattr(args, "_cli_profile_overrides", None) or ()
+        )
+        skipped = sorted(d for d in ("lr", "dropout", "epochs") if d in protected)
+        if skipped:
+            print(f"[TrainingMemory] Not nudging explicit YAML/CLI key(s): {', '.join(skipped)}")
 
-        if rec_lr is not None and hasattr(args, "lr"):
+        if rec_lr is not None and hasattr(args, "lr") and "lr" not in protected:
             cur = float(getattr(args, "lr", rec_lr))
             if abs(cur - rec_lr) / max(abs(rec_lr), 1e-9) > 0.10:
                 # Blend: move 50% toward recommendation
@@ -297,7 +304,7 @@ class TrainingMemory:
                 args.lr = blended
                 applied.append(f"lr {cur:.2e} -> {blended:.2e} (rec={rec_lr:.2e})")
 
-        if rec_do is not None and hasattr(args, "dropout"):
+        if rec_do is not None and hasattr(args, "dropout") and "dropout" not in protected:
             cur = float(getattr(args, "dropout", rec_do))
             if abs(cur - rec_do) > 0.02:
                 blended = cur + 0.50 * (rec_do - cur)
@@ -305,10 +312,8 @@ class TrainingMemory:
                 args.dropout = round(blended, 4)
                 applied.append(f"dropout {cur:.3f} -> {blended:.3f} (rec={rec_do:.3f})")
 
-
-
         # Only lower max epochs if pattern is early_peak (cap at best+4)
-        if rec_ep is not None and hasattr(args, "epochs") and pattern == "early_peak":
+        if rec_ep is not None and hasattr(args, "epochs") and pattern == "early_peak" and "epochs" not in protected:
             rec_ep = max(_EP_FLOOR, int(rec_ep))
             cur_ep = int(getattr(args, "epochs", rec_ep))
             if cur_ep > rec_ep:

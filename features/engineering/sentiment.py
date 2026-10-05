@@ -7,21 +7,43 @@ import numpy as np
 import polars as pl
 
 
+EVENT_TIME_COL = "_sentiment_event_time"
+
+
+def _to_ns(series: pl.Series) -> np.ndarray:
+    return series.cast(pl.Datetime("ns", "UTC")).cast(pl.Int64).to_numpy()
+
+
 def sentiment_decay(s_df: pl.DataFrame, lam: float = 0.1) -> np.ndarray:
+    """Exponentially decay ``sentiment_raw`` by hours since its source event.
+
+    ``lam`` is per hour (0.1 -> ~6.9h half-life). The event time comes from
+    ``EVENT_TIME_COL`` (the asof-joined event's availability time). Without it,
+    a new event is inferred wherever the forward-filled value changes: every
+    bar of an asof-joined series is non-zero, so "last non-zero bar" would
+    reset the clock each bar and the decay would never apply.
+    """
     if s_df is None or len(s_df) == 0:
         return np.zeros(0, dtype=float)
-    import pandas as pd
 
-    ts_ns = pd.to_datetime(s_df["timestamp_utc"].to_numpy(), utc=True).view("int64").astype(np.int64)
-    # Fill null sentiment with 0 (neutral) before processing
     vals = np.nan_to_num(s_df["sentiment_raw"].to_numpy().astype(float), nan=0.0)
-    event_mask = vals != 0.0
-    last_idx = np.maximum.accumulate(np.where(event_mask, np.arange(len(vals)), -1))
+    bar_ns = _to_ns(s_df["timestamp_utc"])
     dec = np.zeros(len(vals), dtype=float)
-    valid = last_idx >= 0
+
+    if EVENT_TIME_COL in s_df.columns:
+        ev = s_df[EVENT_TIME_COL]
+        valid = ev.is_not_null().to_numpy()
+        ev_ns = _to_ns(ev.fill_null(s_df["timestamp_utc"]))
+    else:
+        idx = np.arange(len(vals))
+        changed = np.r_[True, vals[1:] != vals[:-1]] & (vals != 0.0)
+        last_idx = np.maximum.accumulate(np.where(changed, idx, -1))
+        valid = (last_idx >= 0) & (vals != 0.0)
+        ev_ns = bar_ns[np.maximum(last_idx, 0)]
+
     if valid.any():
-        elapsed = (ts_ns[valid] - ts_ns[last_idx[valid]]) / 1e9
-        dec[valid] = vals[last_idx[valid]] * np.exp(-float(lam) * elapsed)
+        elapsed_h = np.maximum(bar_ns[valid] - ev_ns[valid], 0) / 3.6e12
+        dec[valid] = vals[valid] * np.exp(-float(lam) * elapsed_h)
     return dec
 
 

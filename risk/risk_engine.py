@@ -79,25 +79,31 @@ def _calc_notional_usd(pair: str, lots: float, price: float, units_per_lot: floa
 
 
 
+def _lr(key: str, default, cast=float):
+    """default_factory reading LIVE_RISK when the config is built, not at import,
+    so a run-YAML ``risk:`` overlay applied at startup is honoured."""
+    return field(default_factory=lambda: cast(_LR.get(key, default)))
+
+
 @dataclass
 class RiskConfig:
-    """All engine limits; mirrors LIVE_RISK defaults when not supplied."""
+    """All engine limits; mirrors LIVE_RISK (read at construction) when not supplied."""
 
-    max_position_pct: float = float(_LR.get("max_position_pct", 0.05))
-    max_total_lots: float = float(_LR.get("max_total_lots", 3.0))
-    max_notional_usd: float = float(_LR.get("max_notional_usd", 250_000.0))
-    max_daily_loss_pct: float = float(_LR.get("daily_loss_limit", 0.03))
-    max_consecutive_losses: int = int(_LR.get("max_consecutive_losses", 5))
-    max_order_freq_per_min: int = int(_LR.get("max_order_freq_per_min", 10))
-    max_drawdown_halt: float = float(_LR.get("max_drawdown_halt", 0.10))
-    soft_drawdown_reduce: float = float(_LR.get("soft_drawdown_reduce", 0.05))
-    max_instrument_concentration: float = float(_LR.get("max_instrument_concentration", 0.50))
-    var_confidence: float = float(_LR.get("var_confidence", 0.99))
-    var_window: int = int(_LR.get("var_window", 500))
-    cvar_multiplier: float = float(_LR.get("cvar_multiplier", 1.5))
-    gap_move_threshold: float = float(_LR.get("gap_move_threshold", 0.02))
-    require_approval: bool = bool(_LR.get("require_approval_on_flatten", False))
-    max_leverage: float = float(_LR.get("max_leverage", 50.0))
+    max_position_pct: float = _lr("max_position_pct", 0.05)
+    max_total_lots: float = _lr("max_total_lots", 3.0)
+    max_notional_usd: float = _lr("max_notional_usd", 250_000.0)
+    max_daily_loss_pct: float = _lr("daily_loss_limit", 0.03)
+    max_consecutive_losses: int = _lr("max_consecutive_losses", 5, int)
+    max_order_freq_per_min: int = _lr("max_order_freq_per_min", 10, int)
+    max_drawdown_halt: float = _lr("max_drawdown_halt", 0.10)
+    soft_drawdown_reduce: float = _lr("soft_drawdown_reduce", 0.05)
+    max_instrument_concentration: float = _lr("max_instrument_concentration", 0.50)
+    var_confidence: float = _lr("var_confidence", 0.99)
+    var_window: int = _lr("var_window", 500, int)
+    cvar_multiplier: float = _lr("cvar_multiplier", 1.5)
+    gap_move_threshold: float = _lr("gap_move_threshold", 0.02)
+    require_approval: bool = _lr("require_approval_on_flatten", False, bool)
+    max_leverage: float = _lr("max_leverage", 50.0)
 
     @classmethod
     def from_dict(cls, data: dict | None = None, **overrides: float) -> RiskConfig:

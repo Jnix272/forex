@@ -139,18 +139,75 @@ _PROFILE_CLI_FLAGS = {
 }
 
 
-def _collect_cli_profile_overrides() -> frozenset:
-    """Dest names explicitly set on the CLI for profile-managed hyperparameters."""
+def _warn_unsupported_training_options(args) -> list[str]:
+    """One-line warnings for options that are set but have no effect in this configuration."""
+    explicit = frozenset(getattr(args, "_yaml_explicit_keys", None) or ()) | frozenset(
+        getattr(args, "_cli_profile_overrides", None) or ()
+    )
+    multitask = bool(getattr(args, "multitask", False))
+    loss = str(getattr(args, "loss", "") or "").lower()
+    msgs: list[str] = []
+    if getattr(args, "use_volatility_sampler", False):
+        msgs.append(
+            "use_volatility_sampler=true is not supported by the streaming Zarr loader "
+            "(a full-epoch stratified draw is just a permutation); ignored."
+        )
+    if multitask and "direction_weight" in explicit:
+        msgs.append(
+            f"direction_weight={getattr(args, 'direction_weight', None)} has no effect with multitask "
+            "(only the non-multitask directional_huber loss uses it; multitask w_dir is 1.0)."
+        )
+    if "sharpe_weight" in explicit and loss != "sharpe_huber":
+        msgs.append(
+            f"sharpe_weight={getattr(args, 'sharpe_weight', None)} has no effect with loss={loss} "
+            "(only loss=sharpe_huber adds the Sharpe term)."
+        )
+    floor = getattr(args, "mt_direction_weight_floor", None)
+    if multitask and floor is not None:
+        msgs.append(
+            f"multitask.direction_weight_floor={floor} is inert: the multitask direction weight "
+            "is fixed at 1.0 (never below the floor)."
+        )
+    for msg in msgs:
+        print(f"[Config] WARN: {msg}")
+    return msgs
+
+
+def _parser_option_map(parser) -> dict[str, str]:
+    """option string (incl. ``--no-x`` forms) -> dest for every parser action."""
+    out: dict[str, str] = {}
+    for action in getattr(parser, "_actions", ()):
+        dest = getattr(action, "dest", None)
+        if not dest or dest == "help":
+            continue
+        for opt in getattr(action, "option_strings", ()) or ():
+            out[opt] = dest
+    return out
+
+
+def _collect_cli_profile_overrides(parser=None, argv: list[str] | None = None) -> frozenset:
+    """Dest names explicitly passed on the CLI.
+
+    With ``parser`` every registered option is detected generically (including
+    ``--flag=value``, ``--no-flag`` and unambiguous argparse prefixes); without
+    it only the legacy profile-managed flags are recognised.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    option_map = _parser_option_map(parser) if parser is not None else dict(_PROFILE_CLI_FLAGS)
+    allow_abbrev = bool(getattr(parser, "allow_abbrev", False)) if parser is not None else False
+    long_opts = [o for o in option_map if o.startswith("--")]
     overrides: set[str] = set()
-    argv = sys.argv[1:]
-    idx = 0
-    while idx < len(argv):
-        tok = argv[idx]
-        if tok in _PROFILE_CLI_FLAGS:
-            overrides.add(_PROFILE_CLI_FLAGS[tok])
-        elif tok.startswith("--") and "=" in tok:
-            flag = tok.split("=", 1)[0]
-            if flag in _PROFILE_CLI_FLAGS:
-                overrides.add(_PROFILE_CLI_FLAGS[flag])
-        idx += 1
+    for tok in argv:
+        if tok == "--":
+            break
+        if not tok.startswith("-") or tok == "-":
+            continue
+        flag = tok.split("=", 1)[0]
+        dest = option_map.get(flag)
+        if dest is None and allow_abbrev and flag.startswith("--"):
+            matches = {option_map[o] for o in long_opts if o.startswith(flag)}
+            if len(matches) == 1:
+                dest = next(iter(matches))
+        if dest is not None:
+            overrides.add(dest)
     return frozenset(overrides)

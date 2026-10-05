@@ -23,12 +23,22 @@ DEFAULT_CACHE_DIR = "data/features"
 CACHE_VERSION = "v1"
 
 
-def feat_cache_path(pair: str, cache_dir: str = DEFAULT_CACHE_DIR, version: str = CACHE_VERSION) -> Path:
+def cache_version() -> str:
+    """Monthly-cache directory tag: schema version + feature-code fingerprint.
+
+    A fixed "v1" would keep serving features computed by older code.
+    """
+    from feature_store.fingerprint import feature_code_fingerprint
+
+    return f"{CACHE_VERSION}-{feature_code_fingerprint()[:12]}"
+
+
+def feat_cache_path(pair: str, cache_dir: str = DEFAULT_CACHE_DIR, version: str | None = None) -> Path:
     """Path to the per-pair feature cache directory."""
-    return Path(cache_dir) / version / f"{pair.upper().replace('/', '')}"
+    return Path(cache_dir) / (version or cache_version()) / f"{pair.upper().replace('/', '')}"
 
 
-def feat_cache_exists(pair: str, cache_dir: str = DEFAULT_CACHE_DIR, version: str = CACHE_VERSION) -> bool:
+def feat_cache_exists(pair: str, cache_dir: str = DEFAULT_CACHE_DIR, version: str | None = None) -> bool:
     """Check if a feature cache exists for this pair."""
     p = feat_cache_path(pair, cache_dir, version)
     return p.is_dir() and any(p.glob("*.parquet"))
@@ -218,7 +228,7 @@ def build_pair_feature_cache(
         "pair": pair,
         "start": start,
         "end": end,
-        "version": CACHE_VERSION,
+        "version": output.parent.name,
         "total_bars": total_bars,
         "months": months_processed,
         "cache_dir": str(output),
@@ -239,7 +249,7 @@ def load_cached_features(
     end: str,
     *,
     cache_dir: str = DEFAULT_CACHE_DIR,
-    version: str = CACHE_VERSION,
+    version: str | None = None,
     columns: list[str] | None = None,
 ) -> pl.DataFrame | None:
     """
@@ -526,3 +536,351 @@ def build_single_pass_dataset(
     print(f"[SinglePass] Zarr saved → {cp}")
 
     return str(cp), len(X_seq), n_total_features
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Per-window feature cache (training/dataset_builder._build_chunk)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Build-time only: the live engine never reads it, so live features are
+# unaffected. Each entry is the exact FeatureEngineer output for one
+# (pair, window) *before* the feature mask, keyed by everything that can change
+# it: the bars themselves (ticks, window range incl. warmup, bar construction),
+# every side input passed to FeatureEngineer.build (content digests), the COT
+# parquet file signature, feature-code fingerprint, dataset build version,
+# FeatureEngineer settings and features.* windows. Any failure falls back to a
+# normal feature build with a warning.
+
+WINDOW_CACHE_SCHEMA = 1
+_COT_PARQUET = Path("data/raw/cot/cot_financials_cleaned.parquet")
+
+# FeatureEngineer.build kwargs each known slow column depends on (besides bars).
+# Unknown slow columns are keyed on all inputs (conservative).
+SLOW_COL_INPUTS: dict[str, tuple[str, ...]] = {
+    "sentiment_decayed": ("sentiment", "news_events"),
+    "sentiment_raw": ("sentiment", "news_events"),
+    "eco_surprise": ("eco_act", "eco_fc", "eco_prior"),
+    "eco_revision": ("eco_act", "eco_fc", "eco_prior"),
+    "hurst_exponent": (),
+    "cot_net_hf": ("cot_data",),
+    "cot_net_comm": ("cot_data",),
+    "cot_hf_mom_4w": ("cot_data",),
+    "cot_extreme": ("cot_data",),
+}
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, msg: str) -> None:
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(f"[FeatCache] WARN: {msg}", flush=True)
+
+
+def _yaml_root(config_path: str | None = None) -> dict:
+    import os
+
+    cfg_path = os.environ.get("FOREX_CONFIG") or os.environ.get("FOREX_RUN_CONFIG") or config_path
+    if not cfg_path or not os.path.exists(str(cfg_path)):
+        return {}
+    try:
+        import yaml
+
+        with open(cfg_path, encoding="utf-8-sig") as f:
+            root = yaml.safe_load(f) or {}
+        return root if isinstance(root, dict) else {}
+    except Exception:
+        return {}
+
+
+def normalize_slow_cols(cols) -> list[str]:
+    return ["hurst_exponent" if c == "hurst" else str(c) for c in (cols or [])]
+
+
+def resolve_feature_cache_config(args=None, yaml_root: dict | None = None) -> dict:
+    """Effective feature-cache settings.
+
+    Precedence (low -> high): settings.FEATURE_CACHE, FOREX_CONFIG YAML
+    (feature_cache.* merged key by key, data.use_feature_cache,
+    data.feature_cache_dir), then parsed CLI args (args.feature_cache dict,
+    args.use_feature_cache, args.feature_cache_dir).
+
+    The cache is active only when ``feature_cache.enabled`` AND
+    ``data.use_feature_cache`` are both true.
+    """
+    try:
+        from config.settings import FEATURE_CACHE
+    except Exception:
+        FEATURE_CACHE = {}
+    fc: dict = dict(FEATURE_CACHE or {})
+    root = _yaml_root(getattr(args, "config", None)) if yaml_root is None else yaml_root
+    fc.update(root.get("feature_cache") or {})
+    data_cfg = root.get("data") or {}
+    use_cache = bool(data_cfg.get("use_feature_cache", False))
+    cache_dir = data_cfg.get("feature_cache_dir") or DEFAULT_CACHE_DIR
+    if args is not None:
+        a_fc = getattr(args, "feature_cache", None)
+        if isinstance(a_fc, dict):
+            fc.update(a_fc)
+        if getattr(args, "use_feature_cache", None) is not None:
+            use_cache = bool(args.use_feature_cache)
+        if getattr(args, "feature_cache_dir", None):
+            cache_dir = str(args.feature_cache_dir)
+    section_enabled = bool(fc.get("enabled", False))
+    return {
+        "enabled": section_enabled and use_cache,
+        "section_enabled": section_enabled,
+        "use_feature_cache": use_cache,
+        "cache_dir": str(cache_dir),
+        "slow_cols": normalize_slow_cols(fc.get("slow_cols")),
+        "ofi_z_threshold": fc.get("ofi_z_threshold"),
+        "regime_window": fc.get("regime_window"),
+    }
+
+
+def warn_unimplemented_feature_cache_keys(cfg: dict) -> None:
+    """ofi_z_threshold / feature_cache.regime_window have no consumer that would not
+    change the trained feature layout (and break live parity); say so once."""
+    if cfg.get("ofi_z_threshold") is not None:
+        _warn_once(
+            "ofi_z_threshold",
+            "feature_cache.ofi_z_threshold is accepted but not used: no feature consumes an OFI "
+            "z-score threshold, and adding one would change the feature layout vs live/checkpoints.",
+        )
+    if cfg.get("regime_window") is not None:
+        _warn_once(
+            "fc_regime_window",
+            "feature_cache.regime_window is accepted but not used: the regime window is "
+            "features.regime_window (FeatureEngineer.vol_regime_w / cross-asset regime).",
+        )
+    if cfg.get("section_enabled") and not cfg.get("use_feature_cache"):
+        _warn_once(
+            "fc_gate",
+            "feature_cache.enabled is true but data.use_feature_cache is false - window feature cache is off.",
+        )
+
+
+# ── content digests ─────────────────────────────────────────────────────────
+
+_DIGEST_MEMO: dict[int, tuple[object, str]] = {}
+
+
+def frame_digest(obj) -> str:
+    """Content digest of a feature-builder input. Raises on unsupported types so an
+    un-hashable input disables caching instead of risking a key collision."""
+    import hashlib
+    import json
+
+    if obj is None:
+        return "none"
+    memo = _DIGEST_MEMO.get(id(obj))
+    if memo is not None and memo[0] is obj:
+        return memo[1]
+    h = hashlib.sha256()
+    if isinstance(obj, pl.DataFrame):
+        h.update(b"pl")
+        h.update(json.dumps([(c, str(t)) for c, t in obj.schema.items()]).encode())
+        h.update(str(obj.height).encode())
+        if obj.height:
+            h.update(obj.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3).to_numpy().tobytes())
+    elif isinstance(obj, pl.Series):
+        h.update(b"pls" + str(obj.dtype).encode() + str(len(obj)).encode())
+        if len(obj):
+            h.update(obj.hash(seed=0, seed_1=1, seed_2=2, seed_3=3).to_numpy().tobytes())
+    elif isinstance(obj, np.ndarray):
+        h.update(b"np" + str(obj.dtype).encode() + str(obj.shape).encode())
+        h.update(np.ascontiguousarray(obj).tobytes())
+    elif isinstance(obj, dict):
+        h.update(b"dict")
+        for k in sorted(obj, key=str):
+            h.update(str(k).encode() + b"=" + frame_digest(obj[k]).encode() + b";")
+    elif isinstance(obj, (list, tuple)):
+        h.update(b"seq")
+        for v in obj:
+            h.update(frame_digest(v).encode() + b";")
+    elif isinstance(obj, (str, int, float, bool)):
+        h.update(b"s" + repr(obj).encode())
+    else:
+        import pandas as pd
+
+        if isinstance(obj, (pd.DataFrame, pd.Series)):
+            h.update(b"pd" + str(getattr(obj, "shape", "")).encode())
+            if isinstance(obj, pd.DataFrame):
+                h.update(json.dumps([(str(c), str(t)) for c, t in obj.dtypes.items()]).encode())
+            else:
+                h.update(str(obj.dtype).encode() + str(obj.name).encode())
+            h.update(pd.util.hash_pandas_object(obj, index=True).to_numpy().tobytes())
+        elif hasattr(obj, "isoformat"):
+            h.update(b"dt" + obj.isoformat().encode())
+        else:
+            raise TypeError(f"cannot digest feature input of type {type(obj).__name__}")
+    digest = h.hexdigest()
+    if isinstance(obj, (pl.DataFrame, np.ndarray)) or type(obj).__name__ in ("DataFrame", "Series"):
+        if len(_DIGEST_MEMO) > 64:
+            _DIGEST_MEMO.clear()
+        _DIGEST_MEMO[id(obj)] = (obj, digest)
+    return digest
+
+
+def _simple_state(obj, depth: int = 1) -> dict:
+    out: dict = {}
+    for k, v in sorted(vars(obj).items()):
+        if k.startswith("_"):
+            continue
+        if isinstance(v, (int, float, str, bool)) or v is None:
+            out[k] = v
+        elif isinstance(v, (list, tuple)) and all(isinstance(x, (int, float, str, bool)) for x in v):
+            out[k] = list(v)
+        elif depth > 0 and hasattr(v, "__dict__") and not callable(v):
+            out[k] = _simple_state(v, depth - 1)
+    return out
+
+
+def fe_settings_digest(fe) -> str:
+    from feature_store.fingerprint import effective_feature_scales, stable_digest
+
+    return stable_digest({"fe": _simple_state(fe), "feature_scales": effective_feature_scales()}, 32)
+
+
+class WindowFeatureCache:
+    """Atomic parquet cache of FeatureEngineer output per (pair, window)."""
+
+    def __init__(self, cache_dir: str | Path = DEFAULT_CACHE_DIR, slow_cols=None, build_version: str = ""):
+        self.root = Path(cache_dir)
+        self.slow_cols = normalize_slow_cols(slow_cols)
+        self.build_version = str(build_version)
+        self.stats = {"hits": 0, "misses": 0, "slow_hits": 0, "slow_writes": 0, "errors": 0}
+
+    @classmethod
+    def from_config(cls, cfg: dict, build_version: str = "") -> WindowFeatureCache | None:
+        if not cfg.get("enabled"):
+            return None
+        return cls(cfg.get("cache_dir") or DEFAULT_CACHE_DIR, cfg.get("slow_cols"), build_version)
+
+    # ── keys ────────────────────────────────────────────────────────────
+    def key_parts(self, *, pair, bars, fe, fe_kwargs, win_start, bar_freq, seq_len) -> dict:
+        from feature_store.fingerprint import feature_code_fingerprint, file_signature
+
+        return {
+            "schema": WINDOW_CACHE_SCHEMA,
+            "build_version": self.build_version,
+            "code": feature_code_fingerprint(),
+            "polars": pl.__version__,
+            "pair": str(pair).upper(),
+            "win_start": str(win_start) if win_start else None,
+            "bar_freq": str(bar_freq),
+            "seq_len": int(seq_len),
+            "bars": frame_digest(bars),
+            "fe_settings": fe_settings_digest(fe),
+            "cot_file": file_signature(_COT_PARQUET),
+            "inputs": {str(k): frame_digest(v) for k, v in sorted(fe_kwargs.items())},
+        }
+
+    def _slow_parts(self, parts: dict) -> dict:
+        needed: set[str] = set()
+        for col in self.slow_cols:
+            deps = SLOW_COL_INPUTS.get(col)
+            needed.update(parts["inputs"].keys() if deps is None else deps)
+        needed.add("pair")
+        slow = {k: v for k, v in parts.items() if k != "inputs"}
+        slow["inputs"] = {k: v for k, v in parts["inputs"].items() if k in needed}
+        slow["slow_cols"] = sorted(self.slow_cols)
+        return slow
+
+    @staticmethod
+    def _hash(parts: dict) -> str:
+        from feature_store.fingerprint import stable_digest
+
+        return stable_digest(parts)
+
+    def window_path(self, parts: dict) -> Path:
+        h = self._hash(parts)
+        return self.root / "windows" / parts["pair"] / h[:2] / f"{h}.parquet"
+
+    def slow_path(self, parts: dict) -> Path:
+        h = self._hash(self._slow_parts(parts))
+        return self.root / "slow" / parts["pair"] / h[:2] / f"{h}.parquet"
+
+    # ── io ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _atomic_write(df: pl.DataFrame, path: Path) -> None:
+        import os
+        import uuid
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            df.write_parquet(tmp, compression="zstd")
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+    @staticmethod
+    def _read(path: Path) -> pl.DataFrame | None:
+        if not path.exists():
+            return None
+        try:
+            return pl.read_parquet(path)
+        except Exception as e:
+            _warn_once(f"corrupt:{path}", f"unreadable cache entry {path.name} ({e}); recomputing")
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return None
+
+    # ── main entry ──────────────────────────────────────────────────────
+    def get_or_build(self, build_fn, *, pair, bars, fe, fe_kwargs, win_start, bar_freq, seq_len) -> pl.DataFrame:
+        try:
+            parts = self.key_parts(
+                pair=pair, bars=bars, fe=fe, fe_kwargs=fe_kwargs, win_start=win_start, bar_freq=bar_freq, seq_len=seq_len
+            )
+            path = self.window_path(parts)
+            cached = self._read(path)
+        except Exception as e:
+            self.stats["errors"] += 1
+            _warn_once(f"key:{type(e).__name__}", f"cache key failed ({e}); computing features without cache")
+            return build_fn()
+        if cached is not None:
+            self.stats["hits"] += 1
+            return cached
+
+        self.stats["misses"] += 1
+        F = build_fn()
+        try:
+            F = self._apply_slow_cols(F, parts)
+            self._atomic_write(F, path)
+        except Exception as e:
+            self.stats["errors"] += 1
+            _warn_once(f"write:{type(e).__name__}", f"cache write failed ({e}); features used uncached")
+        return F
+
+    def _apply_slow_cols(self, F: pl.DataFrame, parts: dict) -> pl.DataFrame:
+        """Slow columns are stored separately, keyed only by the inputs they depend on.
+
+        When a cached slow entry matches (its inputs are unchanged) its values replace
+        the freshly computed ones; with deterministic feature code they are identical,
+        so this pins slow columns across changes to unrelated inputs. FeatureEngineer
+        has no per-column entry point, so the full build still runs on a window miss.
+        """
+        cols = [c for c in self.slow_cols if c in F.columns]
+        if not cols or "timestamp_utc" not in F.columns:
+            return F
+        spath = self.slow_path(parts)
+        slow = self._read(spath)
+        if slow is not None and slow.height == F.height and all(c in slow.columns for c in cols):
+            if slow["timestamp_utc"].cast(F.schema["timestamp_utc"]).equals(F["timestamp_utc"]):
+                self.stats["slow_hits"] += 1
+                return F.with_columns([slow[c].cast(F.schema[c]).alias(c) for c in cols])
+        self._atomic_write(F.select(["timestamp_utc", *cols]), spath)
+        self.stats["slow_writes"] += 1
+        return F
+
+    def summary(self) -> str:
+        s = self.stats
+        return (
+            f"[FeatCache] windows hit={s['hits']} miss={s['misses']} slow_hit={s['slow_hits']} "
+            f"errors={s['errors']} dir={self.root}"
+        )

@@ -113,6 +113,8 @@ from training.feature_ablation import (
     _build_feature_ablation_mask,
     _feature_ablation_config,
 )
+from training.curriculum import label_gate_max_tier
+from training.train_utils import MixupBatch, dynamic_si_lambda, early_stop_metric_maximizes
 from training.gpu_cli import (
     _apply_model_profile,
     _model_build_args,
@@ -561,6 +563,30 @@ def _load_pretrained_encoder(model: nn.Module, args, device) -> bool:
     return True
 
 
+def _strip_param_prefix(name: str) -> str:
+    for prefix in ("_orig_mod.", "module."):
+        while name.startswith(prefix):
+            name = name[len(prefix):]
+    return name
+
+
+def _ewc_set_anchor(ewc, anchor_state: dict) -> int:
+    """Copy ``anchor_state`` (unwrapped param names) into the EWC ``saved_*`` buffers."""
+    anchors = {_strip_param_prefix(k): v for k, v in anchor_state.items()}
+    n_set = 0
+    for name in list(getattr(ewc, "params", {}).keys()):
+        src = anchors.get(_strip_param_prefix(name))
+        if src is None:
+            continue
+        buf = getattr(ewc, f"saved_{name.replace('.', '_')}", None)
+        if buf is None or tuple(buf.shape) != tuple(src.shape):
+            continue
+        with torch.no_grad():
+            buf.copy_(src.to(device=buf.device, dtype=buf.dtype))
+        n_set += 1
+    return n_set
+
+
 def _warm_start_from_checkpoint(model: nn.Module, args, device, model_name: str) -> bool:
     """B-C2: load prior production / best weights into the model so a fine-tune
     run CONTINUES from the deployed model instead of training from scratch.
@@ -754,11 +780,12 @@ def supervised_train(
         RICH_DISPLAY = False
 
     if RICH_DISPLAY and not getattr(args, "no_rich", False):
+        _es_metric_disp = str(getattr(args, "early_stop_metric", "auto") or "auto").lower()
         _rich_display = _RichDisplay(
             model_name=model_name,
             total_epochs=args.epochs,
-            metric_name="val_loss",
-            higher_is_better=False,
+            metric_name=_es_metric_disp if early_stop_metric_maximizes(_es_metric_disp) else "val_loss",
+            higher_is_better=early_stop_metric_maximizes(_es_metric_disp),
         )
 
     if getattr(args, "model_profile", True) and not getattr(args, "_profile_applied", False):
@@ -991,11 +1018,24 @@ def supervised_train(
                     close_pairs=_cp, spread_pairs=_sp, n_pairs=int(_cp.shape[1]),
                     pair_names=_pnames if len(_pnames) == _cp.shape[1] else None,
                 )
+                from training.honest_eval import load_aux_arrays
+
+                _hc_t, _hc_atr = load_aux_arrays(cache_path)
+                _honest_ctx.update(
+                    t_ns=_hc_t, atr_pairs=_hc_atr,
+                    skip_gap_windows=bool(getattr(args, "honest_skip_gap_windows", True)),
+                )
             print(f"[Val][honest] enabled: {len(_hc_close):,} cached prices, spread={'yes' if _hc_spread is not None else 'no'}")
         else:
             print("[Val][honest] WARN: cache has no 'close' array; selection falls back to label-based cost_sharpe")
     except Exception as _hc_e:
         print(f"[Val][honest] WARN: price arrays unavailable ({_hc_e})")
+    _deadband = float(getattr(args, "trade_deadband", 0.0) or getattr(args, "deadband", 0.0) or 0.0)
+    _min_conf = getattr(args, "trade_min_confidence", None) or getattr(args, "min_confidence", None)
+    if _min_conf is not None:
+        _min_conf = float(_min_conf)
+    if _deadband > 0.0 or _min_conf is not None:
+        print(f"[ConvictionGate] deadband={_deadband:.4f} min_confidence={_min_conf}")
     val_ds = ZarrStreamDataset(
         cache_path,
         np.sort(val_idx),
@@ -1115,8 +1155,16 @@ def supervised_train(
             # Fail loudly: a silent no-op here means pretraining was wasted.
             raise RuntimeError(f"[PretrainΓåÆSup] encoder transfer failed: {_pe}") from _pe
     # B-C2: warm-start from prior production/best weights (fine-tune mode).
+    _warm_started = False
+    _ewc_anchor_state: dict[str, torch.Tensor] | None = None
     if getattr(args, "finetune_warm_start", False):
-        _warm_start_from_checkpoint(model, args, device, model_name)
+        _warm_started = bool(_warm_start_from_checkpoint(model, args, device, model_name))
+        if _warm_started and getattr(args, "enable_ewc", False):
+            # EWC anchors on the warm-started (prior task) weights, even if a
+            # same-run resume later overwrites the live parameters.
+            _ewc_anchor_state = {
+                n: p.detach().to("cpu", copy=True) for n, p in _core_model(model).named_parameters()
+            }
 
     # -- Teacher Model for Distillation --
     teacher_model = None
@@ -1171,15 +1219,26 @@ def supervised_train(
         cache_path=cache_path if (classification or multitask) else None,
         train_idx=train_idx if (classification or multitask) else None,
     )
-    direction_crit = nn.HuberLoss(delta=float(getattr(args, "huber_delta", 1.5))).to(device)  # type: ignore
+    _hd = getattr(args, "huber_delta", None)
+    direction_crit = nn.HuberLoss(delta=float(_hd if _hd is not None else 1.5)).to(device)  # type: ignore
     # D: OverconfidencePenalty -- active for regression modes only.
     # R5: state lives in training.loop_losses (read by _compute_loss there).
     if not classification and getattr(args, "overconf_penalty", True):
-        _oc_w = float(getattr(args, "overconf_weight", 0.3))
-        _oc_t = float(getattr(args, "overconf_threshold", 0.6))
+        _oc_w = float(getattr(args, "overconf_weight", 0.3) or 0.3)
+        _oc_t = float(getattr(args, "overconf_threshold", 0.6) or 0.6)
         _loop_losses._OVERCONF_PENALTY = OverconfidencePenalty(conf_threshold=_oc_t, weight=_oc_w).to(device)  # type: ignore
     else:
         _loop_losses._OVERCONF_PENALTY = None
+    _loop_losses._MIXUP = None
+    if bool(getattr(args, "use_mixup", False)):
+        _mx_alpha = float(getattr(args, "mixup_alpha", 0.2) or 0.0)
+        _mx_prob = float(getattr(args, "mixup_prob", 0.5) or 0.0)
+        if _mx_alpha > 0.0 and _mx_prob > 0.0:
+            _loop_losses._MIXUP = MixupBatch(alpha=_mx_alpha, p=_mx_prob)
+            print(
+                f"[Mixup] Loss-space mixup ON (alpha={_mx_alpha:g}, p={_mx_prob:g}); "
+                "skipped during direction warmup; online miner not updated on mixed batches."
+            )
     opt = build_adamw(model.named_parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Gradient accumulation: effective batch = batch_size x accum_steps
     _accum = max(1, int(getattr(args, "grad_accum_steps", 1)))
@@ -1361,6 +1420,9 @@ def supervised_train(
     _resume_chunk_streak: int | None = None
     _resume_feat_state: dict | None = None
     _resume_si_state: dict | None = None
+    _des_restored = False
+    _resume_best_score: float | None = None
+    _resume_best_epoch: int | None = None
 
     if args.resume and last_path.exists():
         ck = torch.load(last_path, map_location=device)
@@ -1406,6 +1468,14 @@ def supervised_train(
         _des_best_ema = float(ck.get("des_best_ema", float("inf")))
         _des_lr_halved = bool(ck.get("des_lr_halved", False))
         _des_prev_difficulty = int(ck.get("des_prev_difficulty", -1))
+        _des_restored = bool(ck)
+        _same_metric = str(ck.get("early_stop_metric", "")).lower() == str(
+            getattr(args, "early_stop_metric", "auto") or "auto"
+        ).strip().lower()
+        if _same_metric and ck.get("best_select_score") is not None:
+            _resume_best_score = float(ck["best_select_score"])
+        if ck.get("best_epoch") is not None:
+            _resume_best_epoch = int(ck["best_epoch"])
         print(f"[Resume] Loaded exact state from {last_path} (epoch {start_ep})")
     elif args.resume and best_path.exists() and fold_id is None:
         core = _core_model(model)
@@ -1429,6 +1499,11 @@ def supervised_train(
     _sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
     _best_sacs_score: float = float("inf")  # lower = better (sharpness-penalized val loss)
     _best_from_warmup = False  # current best came from a direction-only warmup epoch
+    _best_is_fallback = False  # current best was scored on val loss because the metric was unavailable
+    _best_epoch_idx: int | None = None
+    if start_ep > 0 and _resume_best_score is not None:
+        _best_sacs_score = _resume_best_score
+        _best_epoch_idx = _resume_best_epoch
 
     if start_ep == 0:
         best_val_loss = float("inf")
@@ -1516,34 +1591,32 @@ def supervised_train(
                 active = int(entry["seq_len"])
         return active
 
+    # Feature-group staging is done by input masking (see the curriculum mask in the
+    # epoch loop). Encoder freezing until the earliest group unlock is opt-in via
+    # curriculum.freeze_encoder_until_unfreeze; the previous code claimed to freeze
+    # but left every parameter trainable.
+    _freeze_encoder = bool(_CURR.get("freeze_encoder_until_unfreeze", False)) if isinstance(_CURR, dict) else False
+    _earliest_unfreeze = min(
+        (int(g.get("epoch_unfreeze", 0)) for g in _feat_groups.values() if not g.get("always_on", True)),
+        default=0,
+    )
+
     def _unfreeze_features_for_epoch(model_ref, ep: int) -> None:
-        """A4: Unfreeze parameter groups that correspond to slow feature layers."""
-        # We can't freeze individual feature-group neurons post-hoc, but we CAN
-        # freeze the first N encoder layers and gradually unfreeze them.
-        # Here we use a pragmatic approach: freeze all but the last layer for
-        # early epochs, then progressively unfreeze.
+        """A4: optionally train only head/norm/out_proj before the first feature-group unlock."""
         core = _core_model(model_ref)
-        # Collect named parameters to freeze/unfreeze
-        earliest_unfreeze = min(
-            (g["epoch_unfreeze"] for g in _feat_groups.values() if not g.get("always_on", True)),
-            default=10,
-        )
-        if ep < earliest_unfreeze:
-            # Freeze all non-essential layers (keep head + last encoder layer trainable)
-            for name, param in core.named_parameters():
-                if _is_uninitialized_parameter(param):
-                    continue
-                # Keep output head and final normalisation always trainable
-                if any(k in name for k in ("head", "norm", "out_proj")):
-                    param.requires_grad_(True)
-                else:
-                    param.requires_grad_(ep >= 0)  # always requires_grad; gradient zeroed via scheduler
-            return
-        # After earliest_unfreeze: all parameters are trainable
-        for param in core.parameters():
+        freeze = _freeze_encoder and ep < _earliest_unfreeze
+        n_frozen = 0
+        for name, param in core.named_parameters():
             if _is_uninitialized_parameter(param):
                 continue
-            param.requires_grad_(True)
+            trainable = (not freeze) or any(k in name for k in ("head", "norm", "out_proj"))
+            param.requires_grad_(trainable)
+            n_frozen += int(not trainable)
+        if freeze and ep == start_ep:
+            _log_info(
+                f"[Curriculum] Encoder frozen until epoch {_earliest_unfreeze + 1} "
+                f"({n_frozen} parameter tensor(s); head/norm/out_proj trainable)"
+            )
 
     # -- B: Difficulty curriculum -- load diff sidecar once, filter each epoch -
     _diff_arr = _load_diff_array(cache_path, n_samples)
@@ -1595,6 +1668,14 @@ def supervised_train(
     _feature_ablation_mask = (
         torch.from_numpy(_feature_ablation_mask_np).to(device) if _feature_ablation_mask_np is not None else None
     )
+    _feature_ablation_mask_list = (
+        [float(v) for v in _feature_ablation_mask_np.tolist()] if _feature_ablation_mask_np is not None else None
+    )
+    if _feature_ablation_report.get("enabled") and _feature_ablation_mask is None:
+        _log_warn(
+            f"[FeatureAblation] {model_name}: ablation enabled but no mask was built "
+            f"({_feature_ablation_report.get('warning', 'unknown reason')}); training on all features."
+        )
 
     if _feature_ablation_report.get("enabled"):
         _log_info(
@@ -1699,6 +1780,14 @@ def supervised_train(
         except Exception as _cs_exc:
             print(f"[Train] Warning: could not save crash checkpoint: {_cs_exc}")
 
+    # Label-magnitude gate: curriculum.label_magnitude_gate (default true). With a
+    # difficulty_schedule the allowed tier is its max_difficulty; without one the
+    # legacy decay (tier 0 -> 1 -> all over the first half of training) applies.
+    _lmg_enabled = bool(_CURR.get("label_magnitude_gate", True)) if isinstance(_CURR, dict) else True
+    _lmg_last_tier: int | None = -1
+    if not _lmg_enabled:
+        _log_info("[LabelMagnitudeGate] Disabled (curriculum.label_magnitude_gate: false)")
+
     # Initialize curriculum variables for reporting/fallback
     _active_seq_len = args.seq_len
     _active_diff_stage = 0
@@ -1713,8 +1802,9 @@ def supervised_train(
 
     # -- Advanced Training Mechanics: EWC & Adversarial --
     _ewc = None
-    if getattr(args, "enable_ewc", False) and start_ep > 0:
-        # We only compute EWC if we are resuming from a previous trained state
+    if getattr(args, "enable_ewc", False) and _warm_started:
+        # EWC protects the prior task: it engages when this run warm-starts from a
+        # previously trained checkpoint (--finetune-warm-start), not on a same-run resume.
         try:
             print("[EWC] Computing Fisher Information Matrix (max 1000 samples)...")
 
@@ -1754,16 +1844,21 @@ def supervised_train(
                 classification=bool(multitask or classification),
                 batch_loss_fn=_ewc_batch_loss,
             )
+            if start_ep > 0 and _ewc_anchor_state is not None:
+                _n_anchor = _ewc_set_anchor(_ewc, _ewc_anchor_state)
+                print(f"[EWC] Resumed warm-start run: anchored {_n_anchor} parameter(s) to the warm-start weights.")
             print("[EWC] Initialized successfully. Fisher diagonal locked.")
         except Exception as e:
             _ewc = None
             print(f"[EWC] Failed to initialize EWC (continuing without EWC): {e}")
     elif getattr(args, "enable_ewc", False):
+        _why = "same-run resume" if start_ep > 0 else "fresh run"
         print(
-            "[EWC] --enable-ewc set but start_ep == 0 (fresh run): no prior trained "
-            "state exists to protect, so EWC is deferred. It will engage on a resume "
-            "run (start_ep > 0)."
+            f"[EWC] --enable-ewc set but this is a {_why} without a warm-start checkpoint: "
+            "there is no prior task to protect, so EWC is off. It engages with "
+            "--finetune-warm-start when prior weights are loaded."
         )
+    _ewc_ramp = max(0.0, float(getattr(args, "ewc_lambda_ramp", 0.0) or 0.0))
     _si = None
     if getattr(args, "enable_si", False):
         try:
@@ -1863,6 +1958,30 @@ def supervised_train(
     # P3-2: when --curriculum-callback is set, the provider is built through the
     # create_curriculum_callback() factory (CustomCurriculumAdapter) instead of
     # create_curriculum_manager(); both expose the same provider surface used below.
+    # Per-feature model gating: self_paced.models / loss_weighting.models restrict
+    # each feature independently (previously one allowed feature enabled both).
+    _sp_models = str(getattr(args, "self_paced_models", "") or "").strip()
+    _sp_allowed = True
+    if _sp_models:
+        _sp_allowed = model_name.lower() in [m.strip().lower() for m in _sp_models.split(",")]
+
+    _lw_models = str(getattr(args, "loss_weighting_models", "") or "").strip()
+    _lw_allowed = True
+    if _lw_models:
+        _lw_allowed = model_name.lower() in [m.strip().lower() for m in _lw_models.split(",")]
+
+    _use_sp = bool(getattr(args, "use_self_paced", False)) and _sp_allowed
+    _use_lw = bool(getattr(args, "use_loss_weighting", False)) and _lw_allowed
+    _mt_focal = float(getattr(args, "mt_focal_gamma", 0.0) or 0.0)
+    _lw_scheme = str(getattr(args, "loss_weighting_scheme", "focal") or "focal").lower()
+    if _use_lw and multitask and _mt_focal > 0 and _lw_scheme == "focal" and getattr(args, "curriculum_manager", False):
+        _use_lw = False
+        _log_info(
+            f"[CurriculumManager] loss_weighting (focal) disabled for {model_name}: "
+            f"multitask.focal_gamma={_mt_focal:g} already applies focal weighting in the loss "
+            "(avoids double focal)."
+        )
+
     _curriculum_mgr = None
     _cm_mode = str(getattr(args, "curriculum_manager_mode", "combined") or "combined")
     if getattr(args, "curriculum_manager", False):
@@ -1881,7 +2000,7 @@ def supervised_train(
                     "max_level": int(getattr(args, "curriculum_start_level", 1) or 1)
                     + int(getattr(args, "curriculum_n_levels", 9) or 9),
                     "total_epochs": max(1, int(args.epochs)),
-                    "use_loss_weighting": bool(getattr(args, "use_loss_weighting", False)),
+                    "use_loss_weighting": _use_lw,
                 }
                 _curriculum_provider = create_curriculum_callback(
                     "custom",
@@ -1903,11 +2022,11 @@ def supervised_train(
                     # Self-paced config
                     sp_pace=str(getattr(args, "self_paced_pace", "linear")),
                     sp_lambda=float(getattr(args, "self_paced_lambda", 1.0)),
-                    use_self_paced=bool(getattr(args, "use_self_paced", False)),
+                    use_self_paced=_use_sp,
                     # Loss weighting config
                     lw_scheme=str(getattr(args, "loss_weighting_scheme", "focal")),
                     focal_gamma=float(getattr(args, "loss_weighting_focal_gamma", 2.0)),
-                    use_loss_weighting=bool(getattr(args, "use_loss_weighting", False)),
+                    use_loss_weighting=_use_lw,
                     # Miner feedback config
                     forgetting_threshold=float(getattr(args, "curriculum_forgetting_threshold", 0.15)),
                     easy_threshold=float(getattr(args, "curriculum_easy_threshold", 0.60)),
@@ -1932,18 +2051,6 @@ def supervised_train(
         and _curriculum_mgr is not None
     )
 
-    # Self-paced / loss weighting model gating (computed after curriculum build;
-    # used only to guard the _cm_wl application at the sample-weight lookup site).
-    _sp_models = str(getattr(args, "self_paced_models", "") or "").strip()
-    _sp_allowed = True
-    if _sp_models:
-        _sp_allowed = model_name.lower() in [m.strip().lower() for m in _sp_models.split(",")]
-
-    _lw_models = str(getattr(args, "loss_weighting_models", "") or "").strip()
-    _lw_allowed = True
-    if _lw_models:
-        _lw_allowed = model_name.lower() in [m.strip().lower() for m in _lw_models.split(",")]
-
     _ema_model = None
 
     # ── Dynamic early-stop state ──────────────────────────────────────────────
@@ -1952,16 +2059,26 @@ def supervised_train(
     _des_ema_alpha: float = 0.3            # EMA smoothing (higher = more reactive)
     _des_base_patience: int = int(getattr(args, "early_stop_patience", 10))
     _des_lr_min: float = float(getattr(args, "lr", 5e-5)) * 1e-3  # floor: 0.1% of initial LR
-    # Mutable state — overwritten by resume restore below if args.resume
-    _des_ema: float | None = None
-    _des_no_improve: int = 0
-    _des_lr_halved: bool = False
-    _des_best_ema: float = float("inf")
-    _des_prev_difficulty: int = -1         # curriculum stage tracker (reset counter on advance)
+    # Mutable state; keep the values restored from the resume checkpoint.
+    if not _des_restored:
+        _des_ema: float | None = None
+        _des_no_improve: int = 0
+        _des_lr_halved: bool = False
+        _des_best_ema: float = float("inf")
+        _des_prev_difficulty: int = -1         # curriculum stage tracker (reset counter on advance)
 
-    # Early-stop metric flags — defined here so they're in scope inside the epoch loop.
-    stop_on_sharpe = getattr(args, "early_stop_metric", "val_loss") == "sharpe"
-    stop_on_cost_sharpe = getattr(args, "early_stop_metric", "val_loss") == "cost_sharpe"
+    # Early-stop metric: auto (honest CI low when available, else val loss),
+    # val_loss, sharpe or cost_sharpe. Sharpe metrics are maximized; internally
+    # every selection score is lower-is-better (Sharpe scores are negated).
+    _es_metric = str(getattr(args, "early_stop_metric", "auto") or "auto").strip().lower()
+    stop_on_sharpe = _es_metric == "sharpe"
+    stop_on_cost_sharpe = _es_metric == "cost_sharpe"
+    _es_min_delta = max(0.0, float(getattr(args, "early_stop_min_delta", 0.0) or 0.0))
+    print(
+        f"[EarlyStop] metric={_es_metric} "
+        f"({'higher' if early_stop_metric_maximizes(_es_metric) else 'lower'} is better) "
+        f"patience={_des_base_patience} min_delta={_es_min_delta:g}"
+    )
 
     for ep in epoch_bar:
         if _TRAIN_LOGGER is not None:
@@ -2006,7 +2123,9 @@ def supervised_train(
         epoch_si_lambda = float(getattr(args, "si_lambda", 1.0))
         try:
             _stab_pool = locals().get("ep_train_idx", train_idx)
-            _sample_idx = np.random.choice(_stab_pool, size=min(512, len(_stab_pool)), replace=False)
+            # Use a contiguous slice from the first chunk instead of random choice scattered
+            # across all 98 Zarr chunks (avoiding ~14 GB single-threaded decompression stall).
+            _sample_idx = np.sort(_stab_pool[: min(512, len(_stab_pool))])
             _samp_ds = ZarrStreamDataset(cache_path, _sample_idx, shuffle_chunks=False, scaler=_scaler)
             _samp_dl = DataLoader(_samp_ds, batch_size=512, shuffle=False, num_workers=0)
             _samp_xb, _ = next(iter(_samp_dl))
@@ -2018,12 +2137,12 @@ def supervised_train(
             # otherwise si_lambda is used as a static weight).
             _max_shift = float(_stab_report["feat_max_shift"])
             if bool(getattr(args, "si_dynamic", False)):
-                _dyn_w = 1.0 / (1.0 + (_max_shift**2))
-                epoch_si_lambda = epoch_si_lambda * _dyn_w
-                # Clamp to per-model bounds from profile (si_lambda_min / si_lambda_max)
-                _si_lmin = float(getattr(args, "si_lambda_min", 0.0))
-                _si_lmax = float(getattr(args, "si_lambda_max", epoch_si_lambda))
-                epoch_si_lambda = max(_si_lmin, min(_si_lmax, epoch_si_lambda))
+                epoch_si_lambda = dynamic_si_lambda(
+                    epoch_si_lambda,
+                    _max_shift,
+                    getattr(args, "si_lambda_min", None),
+                    getattr(args, "si_lambda_max", None),
+                )
 
             if _stab_report["feat_frozen"] > 0 or _stab_report["feat_noisy"] > 0:
                 _log_info(
@@ -2056,12 +2175,22 @@ def supervised_train(
                 _zeroed_cnt = 0
                 _missing_cnt = 0
                 _missing_sample: list[str] = []
+                # Multipair schemas prefix columns as "PAIR::feature"; match on the
+                # suffix so every pair's copy of a staged feature is masked.
+                _schema_positions: dict[str, list[int]] = {}
+                for _si_pos, _s_name in enumerate(_schema):
+                    _s_name = str(_s_name)
+                    _schema_positions.setdefault(_s_name, []).append(_si_pos)
+                    if "::" in _s_name:
+                        _schema_positions.setdefault(_s_name.split("::")[-1], []).append(_si_pos)
                 for g_name, g_cfg in _feat_groups.items():
                     if not g_cfg.get("always_on", True) and ep < g_cfg.get("epoch_unfreeze", 0):
                         for f_name in g_cfg.get("features", []):
-                            if f_name in _schema:
-                                _curr_mask[_schema.index(f_name)] = 0.0
-                                _zeroed_cnt += 1
+                            _positions = _schema_positions.get(str(f_name))
+                            if _positions:
+                                for _pos in sorted(set(_positions)):
+                                    _curr_mask[_pos] = 0.0
+                                    _zeroed_cnt += 1
                             else:
                                 _missing_cnt += 1
                                 if len(_missing_sample) < 8:
@@ -2085,6 +2214,11 @@ def supervised_train(
         except Exception as _curr_exc:
             _log_warn(f"[Curriculum] Mask generation failed: {_curr_exc}")
 
+        # Static feature-ablation mask: composed into the per-epoch mask every epoch
+        # (train and validation) so ablated features never reach the model.
+        if _feature_ablation_mask is not None:
+            _feat_mask = _feature_ablation_mask if _feat_mask is None else _feat_mask * _feature_ablation_mask
+
         # Reset frozen features if difficulty stage increased
         # -- B: Difficulty curriculum -- rebuild dataloader with filtered indices --
         ep_train_idx = train_idx
@@ -2093,21 +2227,20 @@ def supervised_train(
         # total_epochs so the model first learns clear directional moves.
         # Only active when _diff_arr was built from |y| (or loaded from sidecar)
         # AND no CurriculumManager is running (avoids double-gating).
-        if _curriculum_mgr is None and _diff_arr is not None:
-            _total_eps = max(1, int(args.epochs))
-            _gate_epochs = max(1, _total_eps // 2)
-            if ep < _gate_epochs:
-                # Unlock easy (0) first, add medium (1) at epoch _gate_epochs//2
-                _max_tier = 0 if ep < _gate_epochs // 2 else 1
+        if _curriculum_mgr is None and _diff_arr is not None and _lmg_enabled:
+            _max_tier = label_gate_max_tier(ep, int(args.epochs), _diff_sched, _active_diff_stage)
+            if _max_tier is not None and _max_tier < int(np.max(_diff_arr[train_idx], initial=0)):
                 _tier_mask = _diff_arr[train_idx] <= _max_tier
                 _gated = train_idx[_tier_mask]
                 if len(_gated) >= 50:
                     ep_train_idx = _gated
-                    if ep == 0 or ep == _gate_epochs // 2:
+                    if _max_tier != _lmg_last_tier:
                         _log_info(
                             f"[LabelMagnitudeGate] Epoch {ep + 1}: "
-                            f"tier≤{_max_tier} → {len(ep_train_idx):,}/{len(train_idx):,} samples"
+                            f"tier≤{_max_tier} → {len(ep_train_idx):,}/{len(train_idx):,} samples "
+                            f"({'difficulty_schedule' if _diff_sched else 'legacy decay'})"
                         )
+            _lmg_last_tier = _max_tier
         # -- Unified CurriculumManager (Improvement #4): apply inclusion mask --
         if _curriculum_mgr is not None:
             try:
@@ -2169,17 +2302,18 @@ def supervised_train(
             except Exception as _cm_exc:
                 _log_warn(f"[CurriculumManager] Epoch {ep + 1} update failed: {_cm_exc}")
         _cm_wl = None if _period_wl is None else _period_wl.copy()
-        if _curriculum_mgr is not None and (_sp_allowed or _lw_allowed):
+        if _curriculum_mgr is not None and (_use_sp or _use_lw):
             try:
+                _cm_w = np.asarray(_curriculum_mgr.get_sample_weights(), dtype=np.float64)
+                if _cm_w.shape[0] != len(train_idx):
+                    raise ValueError(f"{_cm_w.shape[0]} weights for {len(train_idx)} train samples")
                 if _cm_wl is None:
                     _cm_wl = np.ones(n_samples, dtype=np.float64)
-                _cm_wl[train_idx] *= np.asarray(
-                    _curriculum_mgr.get_sample_weights(),
-                    dtype=np.float64,
-                )
+                _cm_wl[train_idx] *= _cm_w
             except Exception as _cm_wl_exc:
+                # Keep the period-balance weights; only the curriculum factor is dropped.
                 _log_warn(f"[CurriculumManager] Sample-weight lookup failed: {_cm_wl_exc}")
-                _cm_wl = None
+                _cm_wl = None if _period_wl is None else _period_wl.copy()
         _direction_warmup_active = bool(
             use_direction_targets and multitask and ep < max(0, int(getattr(args, "direction_warmup_epochs", 2)))
         )
@@ -2269,7 +2403,8 @@ def supervised_train(
                 adversarial_gen=_adversarial,
                 adversarial_feature_names=_adv_feature_names or None,
                 ewc_module=_ewc,
-                ewc_lambda=float(getattr(args, "ewc_lambda", 400.0)) * (1.0 + float(ep) / max(1, int(getattr(args, "epochs", 40)))),
+                ewc_lambda=float(getattr(args, "ewc_lambda", 400.0))
+                * (1.0 + _ewc_ramp * float(ep) / max(1, int(getattr(args, "epochs", 40)))),
                 si_module=_si,
                 si_lambda=epoch_si_lambda,
                 sample_weight_lookup=_cm_wl,
@@ -2324,6 +2459,8 @@ def supervised_train(
                 tx_cost_bps=float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0,  # ~6 bps round-trip for 1.5-pip spread
                 pip_size=float(LABELING.get("pip_size", 0.0001)),
                 honest_ctx=_honest_ctx,
+                deadband=_deadband,
+                min_confidence=_min_conf,
             )
             _class_counts = getattr(validate_epoch, "last_class_counts", {"pred": [0, 0, 0], "true": [0, 0, 0]})
             _cost_sharpe_val = getattr(validate_epoch, "last_cost_sharpe", None)
@@ -2340,7 +2477,14 @@ def supervised_train(
         val_pbar.close()
 
         # TrainingController: detect overfit / Sharpe collapse and act
-        _ctrl_resp = _train_ctrl.evaluate_epoch(ep + 1, float(tl), float(vl), float(v_sh), dir_acc=float(da))
+        # Curriculum adaptation (min_stable_sharpe / collapse thresholds) is judged on
+        # the cost-aware Sharpe when available; the gross proxy overstates tradability.
+        _ctrl_sharpe = (
+            float(_cost_sharpe_val)
+            if _cost_sharpe_val is not None and math.isfinite(float(_cost_sharpe_val))
+            else float(v_sh)
+        )
+        _ctrl_resp = _train_ctrl.evaluate_epoch(ep + 1, float(tl), float(vl), _ctrl_sharpe, dir_acc=float(da))
         _ctrl_curriculum = {"seq_frozen": _seq_frozen}
         _ctrl_applied = _train_ctrl.apply_responses(
             _ctrl_resp,
@@ -2387,10 +2531,11 @@ def supervised_train(
                 _swa_model.update_parameters(model)
                 _swa_scheduler.step()
 
-        if _ema_model is None:
-            _ema_model = copy.deepcopy(_core_model(model)).to(device)
-        else:
-            ExponentialMovingAverage.update_module(_core_model(model), _ema_model, alpha=0.99)
+        if bool(getattr(args, "ema_enabled", False)):
+            if _ema_model is None:
+                _ema_model = copy.deepcopy(_core_model(model)).to(device)
+            else:
+                ExponentialMovingAverage.update_module(_core_model(model), _ema_model, alpha=0.99)
 
         lr = opt.param_groups[0]["lr"]
         el = time.time() - t0
@@ -2560,20 +2705,49 @@ def supervised_train(
         if _best_from_warmup and not _direction_warmup_active:
             _best_sacs_score = float("inf")
             _best_from_warmup = False
-        if _select_on_honest and not _sacs_enabled:
+        _score_is_fallback = False
+        _score_is_metric = False
+        if stop_on_cost_sharpe or stop_on_sharpe:
+            _metric_val = _cost_sharpe_val if stop_on_cost_sharpe else v_sh
+            _n_trades_val = int(
+                getattr(validate_epoch, "last_n_trades", (getattr(validate_epoch, "last_honest", None) or {}).get("n_trades", 0))
+                or 0
+            )
+            if stop_on_cost_sharpe and _n_trades_val < 30:
+                # When trades are filtered out (e.g. conviction deadband holds 0 position),
+                # cost_sharpe is 0.0000. Do NOT treat <30 trades as a valid trading metric,
+                # otherwise dynamic early stopping considers 0.0000 an unbeatable baseline
+                # and terminates the training run prematurely.
+                _score_is_fallback = True
+            elif _metric_val is not None and math.isfinite(float(_metric_val)):
+                _sacs_score = -float(_metric_val)
+                _score_is_metric = True
+                if _best_is_fallback:
+                    _best_sacs_score = float("inf")
+                    _best_is_fallback = False
+            else:
+                # Metric unavailable this epoch: keep a val-loss placeholder best
+                # that the first real metric epoch replaces.
+                _score_is_fallback = True
+        elif _select_on_honest and not _sacs_enabled:
             _sacs_score = -float(_hm_sel.get("sharpe_net_ci_low", 0.0))
-        improved = _sacs_score < _best_sacs_score
+        if _score_is_fallback and _best_sacs_score < float("inf") and not _best_is_fallback:
+            improved = False
+        else:
+            improved = _sacs_score < _best_sacs_score
         if getattr(args, "_refit_fixed_epochs", False):
             # Final refit on all pre-holdout data: epoch count fixed from CV, the
             # "validation" rows are inside training, so keep the last epoch.
             improved = True
         if improved:
             _best_from_warmup = _direction_warmup_active
+            _best_is_fallback = _score_is_fallback
 
         if improved:
             best_sharpe = v_sh
             best_val_loss = vl
             _best_sacs_score = _sacs_score
+            _best_epoch_idx = int(ep)
             if _cost_sharpe_val is not None:
                 best_cost_sharpe = _cost_sharpe_val
 
@@ -2583,7 +2757,12 @@ def supervised_train(
         _warmup_done = ep >= int(getattr(args, "lr_warmup_epochs", 0))
 
         # ── Dynamic Early Stop ────────────────────────────────────────────────
-        if _des_base_patience > 0 and _warmup_done and not getattr(args, "_refit_fixed_epochs", False):
+        if (
+            _des_base_patience > 0
+            and _warmup_done
+            and not _score_is_fallback
+            and not getattr(args, "_refit_fixed_epochs", False)
+        ):
             # Fix-1: Curriculum stage advance resets counter — a difficulty jump
             # causes a temporary val_loss spike that shouldn't trigger early stop.
             _cur_difficulty = int(
@@ -2600,11 +2779,15 @@ def supervised_train(
             # Use SACS score as the base (already sharpness-penalised) so dynamic stop
             # and SACS checkpoint selection agree on what "better" means. Fall back to
             # vl when SACS is disabled.
-            _des_base_score = _sacs_score if (_sacs_enabled or _select_on_honest) else vl
+            _des_base_score = _sacs_score if (_sacs_enabled or _select_on_honest or _score_is_metric) else vl
             # No SI/EWC credit: subtracting a term that grows with the epoch count made
             # the composite "improve" on its own, so patience never ran out. When
-            # selecting on the honest CI bound the score already is the Sharpe signal.
-            _composite = _des_base_score if _select_on_honest else _des_base_score - 0.1 * _sharpe_signal
+            # selecting on a Sharpe metric (honest CI / sharpe / cost_sharpe) the score
+            # already is the (negated) Sharpe signal.
+            if _select_on_honest or _score_is_metric:
+                _composite = _des_base_score
+            else:
+                _composite = _des_base_score - 0.1 * _sharpe_signal
 
             # EMA-smooth the composite (reduces single-epoch noise)
             if _des_ema is None:
@@ -2617,7 +2800,7 @@ def supervised_train(
             _adaptive_patience = int(_des_base_patience * (0.5 + _progress))  # 50%→150% of base
 
             # Check EMA improvement
-            if _des_ema < _des_best_ema - 1e-6:
+            if _des_ema < _des_best_ema - max(1e-6, _es_min_delta):
                 _des_best_ema = _des_ema
                 _des_no_improve = 0
             else:
@@ -2674,6 +2857,12 @@ def supervised_train(
                 "timestamp": datetime.now(UTC).isoformat(),
                 "fold_id": fold_id,
             }
+            if _feature_ablation_mask_list is not None:
+                ckpt_meta["feature_ablation"] = {
+                    "name": _feature_ablation_report.get("name"),
+                    "masked_count": _feature_ablation_report.get("masked_count"),
+                    "mask": _feature_ablation_mask_list,
+                }
             _safe_save(core.state_dict(), best_path, metadata=ckpt_meta)
             with open(cfg_path, "w", encoding="utf-8") as _cfg_fp:
                 json.dump(
@@ -2691,6 +2880,12 @@ def supervised_train(
                         "best_cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
                         "best_metric": float(_cost_sharpe_val) if stop_on_cost_sharpe and _cost_sharpe_val is not None else (float(v_sh) if stop_on_sharpe else float(vl)),
                         "best_metric_name": "cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
+                        "early_stop_metric": _es_metric,
+                        "feature_ablation_masked": (
+                            int(_feature_ablation_report.get("masked_count") or 0)
+                            if _feature_ablation_mask_list is not None
+                            else 0
+                        ),
                         "best_train_loss": tl,
                         "train_val_loss_gap": float(vl - tl),
                         "epoch": ep,
@@ -2746,6 +2941,10 @@ def supervised_train(
                 "scaler_state": amp_sc.state_dict() if args.amp and device.type == "cuda" else None,
                 "best_val_loss": best_val_loss,
                 "best_sharpe": best_sharpe,
+                "best_cost_sharpe": best_cost_sharpe,
+                "best_select_score": None if _best_is_fallback else float(_best_sacs_score),
+                "best_epoch": _best_epoch_idx,
+                "early_stop_metric": _es_metric,
                 "no_improve": _des_no_improve,
                 "des_ema": _des_ema,
                 "des_best_ema": _des_best_ema,
@@ -2757,6 +2956,7 @@ def supervised_train(
                 "chunk_worse_streak": _chunk_worse_streak,
                 "feat_stability_state": _feat_stability.get_state(),
                 "si_state": _si.get_state() if _si is not None else None,
+                "feature_ablation_mask": _feature_ablation_mask_list,
             },
             last_path,
             metadata={
@@ -2840,7 +3040,9 @@ def supervised_train(
     else:
         _has_cost_hist = False
 
-    if history["val_sharpe"]:
+    if _best_epoch_idx is not None and 0 <= int(_best_epoch_idx) < len(history.get("val_loss") or []):
+        _best_ep = int(_best_epoch_idx)
+    elif history["val_sharpe"]:
         if stop_on_cost_sharpe and _has_cost_hist:
             _best_ep = int(history["cost_aware_sharpe"].index(max(history["cost_aware_sharpe"])))
         elif stop_on_sharpe:
@@ -2963,6 +3165,15 @@ def supervised_train(
     # -- SACS: Sharpness-Aware Checkpoint Selection -----------------------------
     print("\n[SACS] Running Sharpness-Aware Checkpoint Selection...")
     sacs_candidates = {"Active": model}
+    # The epoch picked by the early-stop metric must stay a candidate; otherwise
+    # SACS always replaces it with the last-epoch / SWA / EMA weights.
+    if best_path.exists() and not getattr(args, "_refit_fixed_epochs", False):
+        try:
+            _best_ckpt_model = copy.deepcopy(_core_model(model))
+            _best_ckpt_model.load_state_dict(torch.load(best_path, map_location=device))
+            sacs_candidates["BestEpoch"] = _best_ckpt_model
+        except Exception as _bc_e:
+            print(f"[SACS] Best-epoch checkpoint not added as candidate: {_bc_e}")
     if _swa_enabled and _swa_started and _swa_model is not None:
         sacs_candidates["SWA"] = _swa_model.module
     if _ema_model is not None:
@@ -2997,8 +3208,28 @@ def supervised_train(
                 sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                 return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
                 direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
+                deadband=_deadband, min_confidence=_min_conf,
             )
             c_cost = getattr(validate_epoch, "last_cost_sharpe", None)
+
+            # Degenerate-candidate guard: a model that collapses to one class or
+            # takes no trades scores exactly 0 and would otherwise beat every
+            # trading candidate whose honest net Sharpe is negative.
+            _cc = getattr(validate_epoch, "last_class_counts", None) or {}
+            _pred_cc = [float(x) for x in (_cc.get("pred") or [])]
+            _pred_tot = sum(_pred_cc)
+            _min_share = float(getattr(args, "sacs_min_pred_share", 0.05))
+            _hm_c = getattr(validate_epoch, "last_honest", None)
+            _reject_reason = None
+            if _pred_tot > 0 and min(_pred_cc) / _pred_tot < _min_share:
+                _reject_reason = (
+                    f"class-balance fail (min pred share {min(_pred_cc) / _pred_tot:.4f} < {_min_share})"
+                )
+            elif _hm_c is not None and float(_hm_c.get("n_trades", 0) or 0) <= 0:
+                _reject_reason = "zero honest trades"
+            if _reject_reason is not None:
+                print(f"[SACS] {cand_name}: REJECTED - {_reject_reason}")
+                continue
 
             # Sharpness = mean metric change over N ε-ball perturbations.
             # For loss-based selection: sharpness is how much loss rises.
@@ -3018,6 +3249,7 @@ def supervised_train(
                     sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
                     return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
                     direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
+                    deadband=_deadband, min_confidence=_min_conf,
                 )
                 p_cost_i = getattr(validate_epoch, "last_cost_sharpe", None)
                 if stop_on_cost_sharpe and c_cost is not None and p_cost_i is not None:
@@ -3061,10 +3293,18 @@ def supervised_train(
         print(f"[SACS] Best model: {best_sacs_name} with robust score {best_sacs_score:.4f}. Saving to {best_path}.")
         _safe_save(best_sacs_state, best_path)
         _core_model(model).load_state_dict(best_sacs_state)
+    else:
+        print("[SACS] WARNING: all candidates rejected (degenerate/no trades); keeping existing best-epoch checkpoint.")
     # ---------------------------------------------------------------------------
 
     if stop_on_cost_sharpe:
         print(f"\n[Train] Best cost-aware Sharpe (after tx costs): {best_cost_sharpe:.4f}  ->  {best_path}")
+        if sidecar is not None:
+            try:
+                sidecar.stop()
+            except Exception:
+                pass
+        return history, best_cost_sharpe
     elif stop_on_sharpe:
         print(f"\n[Train] Best val Sharpe (proxy): {best_sharpe:.4f}  ->  {best_path}")
 

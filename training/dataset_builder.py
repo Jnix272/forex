@@ -37,17 +37,23 @@ from labeling.triple_barrier_labeling import compute_triple_barrier_labels
 from training.cache_integrity import (
     _cache_target_col,
     _clamp_n_samples_to_disk,
+    _clear_resume_state,
+    _current_build_fingerprint,
     _delete_cache_artifacts,
     _effective_window_days,
     _get_cache_path,
     _iter_date_windows,
+    _manifest_fingerprint_fields,
     _market_bar_arrays_from_feats,
+    _pin_build_fingerprint,
     _postprocess_cache_integrity_check,
+    _read_resume_idx,
     _real_data_window_days,
     _resolve_cross_asset_source,
     _validate_cache_integrity,
     _verify_dataset,
     _warn_multitask_cache_sidecars,
+    _write_resume_state,
 )
 from training.config_validate import _effective_max_seq_len
 from training.core import _FIRST_CHUNK_COLS, _TRAIN_LOGGER
@@ -607,6 +613,12 @@ def _fit_scaler_from_cache(cache_path: Path, scaler, max_sample: int = 50000) ->
         X_flat = X_data.reshape(-1, X_data.shape[-1])
     else:
         X_flat = X_data
+
+    # Sub-sample AFTER flatten so max_sample caps 2D rows (not 3D sequences).
+    # Without this, 50k sequences × 120 timesteps = 6M rows → 26 GB in float64.
+    if X_flat.shape[0] > max_sample:
+        rng_idx = np.linspace(0, X_flat.shape[0] - 1, max_sample, dtype=np.int64)
+        X_flat = X_flat[rng_idx]
 
     _finite_mask = np.isfinite(X_flat).all(axis=1)
     X_finite = X_flat[_finite_mask]
@@ -1620,6 +1632,34 @@ def _sequence_quality_reason_masks(
     return out
 
 
+# Per-window FeatureEngineer output cache (data/feature_cache.WindowFeatureCache);
+# None = disabled. Set per build by _configure_feature_window_cache.
+_FEATURE_WINDOW_CACHE = None
+
+
+def _configure_feature_window_cache(args=None, cfg: dict | None = None):
+    """Enable/disable the window feature cache for this process from YAML/args."""
+    global _FEATURE_WINDOW_CACHE
+    from data.feature_cache import (
+        WindowFeatureCache,
+        resolve_feature_cache_config,
+        warn_unimplemented_feature_cache_keys,
+    )
+    from training.cache_integrity import DATASET_BUILD_VERSION
+
+    try:
+        cfg = cfg if cfg is not None else resolve_feature_cache_config(args)
+        warn_unimplemented_feature_cache_keys(cfg)
+        _FEATURE_WINDOW_CACHE = WindowFeatureCache.from_config(cfg, build_version=DATASET_BUILD_VERSION)
+    except Exception as e:
+        print(f"[FeatCache] WARN: could not configure feature cache ({e}); building without it")
+        _FEATURE_WINDOW_CACHE = None
+        cfg = {"enabled": False}
+    if _FEATURE_WINDOW_CACHE is not None:
+        print(f"[FeatCache] Window feature cache ON -> {_FEATURE_WINDOW_CACHE.root}")
+    return cfg
+
+
 # ─── Unified COT loader (used by main, parallel-worker, and single-pair paths) ─
 # Hard-coded path matches the dataset-builder convention; the audit dated
 # 2026-08-07 flagged divergent (silent) loads across call sites.
@@ -1911,6 +1951,7 @@ def _build_chunk(
 
     # DS-002: when win_start is set, bars include warmup prefix - build with
     # warmup context then keep only the target window (EMA/MACD cold-start safe).
+    _all_bars = bars
     if win_start:
         import pandas as pd
 
@@ -1918,16 +1959,37 @@ def _build_chunk(
         _ws_lit = pl.lit(ws_dt)
         warmup_bars = bars.filter(pl.col("timestamp_utc") < _ws_lit)
         target_bars = bars.filter(pl.col("timestamp_utc") >= _ws_lit)
-        if len(warmup_bars) > 0 and len(target_bars) >= seq_len + 10:
-            F = fe.build_with_warmup(target_bars, warmup_bars, **_fe_kwargs)
-            bars = target_bars
-        else:
-            F = fe.build(bars, **_fe_kwargs)
+        _use_warmup = len(warmup_bars) > 0 and len(target_bars) >= seq_len + 10
+
+        def _fe_build():
+            if _use_warmup:
+                return fe.build_with_warmup(target_bars, warmup_bars, **_fe_kwargs)
+            out = fe.build(_all_bars, **_fe_kwargs)
             if len(target_bars) > 0:
-                F = F.filter(pl.col("timestamp_utc") >= _ws_lit)
-                bars = target_bars
+                out = out.filter(pl.col("timestamp_utc") >= _ws_lit)
+            return out
+
+        if _use_warmup or len(target_bars) > 0:
+            bars = target_bars
     else:
-        F = fe.build(bars, **_fe_kwargs)
+
+        def _fe_build():
+            return fe.build(_all_bars, **_fe_kwargs)
+
+    _wcache = _FEATURE_WINDOW_CACHE
+    if _wcache is not None:
+        F = _wcache.get_or_build(
+            _fe_build,
+            pair=pair,
+            bars=_all_bars,
+            fe=fe,
+            fe_kwargs=_fe_kwargs,
+            win_start=win_start,
+            bar_freq=bar_freq,
+            seq_len=seq_len,
+        )
+    else:
+        F = _fe_build()
 
     # Normalize join-key precision once (pandas bridges often emit μs).
     _ts_ns = pl.Datetime("ns", "UTC")
@@ -2847,6 +2909,7 @@ def _parallel_window_worker(worker_args: dict):
         historical_news_file = worker_args.get("historical_news_file")
         economic_calendar_file = worker_args.get("economic_calendar_file")
         cot_data_path = worker_args.get("cot_data_path")
+        _configure_feature_window_cache(cfg=worker_args.get("feature_cache_cfg") or {"enabled": False})
 
         from config.settings import FEATURES
         from data.sources import ForexDataManager
@@ -3309,15 +3372,16 @@ def _build_multipair_dataset(
         mgr = ForexDataManager(verbose=True)
         _build_workers = max(1, int(getattr(args, "dataset_build_workers", 1) or 1))
 
+        _resume_hash = _current_build_fingerprint(args).get("content_hash")
         resume_idx = -1
         if getattr(args, "_resume_zarr", False):
-            try:
-                import json
-
-                with open(str(cache_path) + "_resume.json") as f:
-                    resume_idx = json.load(f).get("last_completed_window_idx", -1)
-            except Exception:
-                pass
+            resume_idx = _read_resume_idx(cache_path, _resume_hash)
+            if resume_idx < 0:
+                # No trustworthy record of what the partial store holds: start over
+                # instead of appending a full rebuild onto it.
+                args._resume_zarr = False
+        else:
+            _clear_resume_state(cache_path)
 
         def _load_window_ticks(win_start, win_end):
             """Load ticks for all pairs with DS-002 warmup overlap before win_start."""
@@ -3379,6 +3443,7 @@ def _build_multipair_dataset(
                         "max_bad_frac": float(getattr(args, "max_bad_frac", 0.05)),
                         "max_zero_frac": float(getattr(args, "max_zero_frac", 0.80)),
                         "scaler_type": str(getattr(args, "scaler_type", "robust") or "robust"),
+                        "feature_cache_cfg": getattr(args, "_feature_cache_cfg", None),
                     }
                 )
 
@@ -3445,12 +3510,9 @@ def _build_multipair_dataset(
                             )
 
                     try:
-                        import json as _json_mod
-
-                        with open(str(cache_path) + "_resume.json", "w") as _rf:
-                            _json_mod.dump({"last_completed_window_idx": _widx}, _rf)
-                    except Exception:
-                        pass
+                        _write_resume_state(cache_path, _widx, _resume_hash)
+                    except Exception as _rs_err:
+                        print(f"[MultiPair] WARN: could not write resume state ({_rs_err})")
 
                     del _batch_results[_widx]
 
@@ -3565,12 +3627,9 @@ def _build_multipair_dataset(
                     del pair_ticks, X_seq, y_seq, y_cls_seq, pq_seq, diff_seq
                     del close_seq, atr_seq, spread_seq
                     try:
-                        import json
-
-                        with open(str(cache_path) + "_resume.json", "w") as f:
-                            json.dump({"last_completed_window_idx": window_idx}, f)
-                    except Exception:
-                        pass
+                        _write_resume_state(cache_path, window_idx, _resume_hash)
+                    except Exception as _rs_err:
+                        print(f"[MultiPair] WARN: could not write resume state ({_rs_err})")
                     gc.collect()
             finally:
                 if _pool is not None:
@@ -3701,6 +3760,9 @@ def _build_multipair_dataset(
         z_store.attrs["lookahead_bars"] = int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"]))
         import json
 
+        _fp_fields = _manifest_fingerprint_fields(args)
+        z_store.attrs["content_hash"] = _fp_fields["content_hash"]
+        z_store.attrs["build_version"] = _fp_fields["build_version"]
         meta = {
             "total_samples": int(total_samples),
             "n_features": int(n_features),
@@ -3713,6 +3775,7 @@ def _build_multipair_dataset(
             "has_rl_market": True,
             "target_col": _cache_target_col(args),
             "y_cls_source": "labels.label",
+            **_fp_fields,
         }
         with open(str(cache_path) + "_manifest.json", "w") as f:
             json.dump(meta, f)
@@ -3784,6 +3847,7 @@ def _build_multipair_dataset(
                 "has_rl_market": True,
                 "target_col": _cache_target_col(args),
                 "y_cls_source": "labels.label",
+                **_manifest_fingerprint_fields(args),
             }
             with open(str(cache_path) + "_manifest.json", "w") as f:
                 json.dump(meta, f)
@@ -3812,6 +3876,7 @@ def _build_multipair_dataset(
         raise RuntimeError(f"Pair Readiness Gate Failed. See {cache_path!s}_pair_readiness_report.json")
 
     _postprocess_cache_integrity_check(str(cache_path), args, context="MultiPair")
+    _clear_resume_state(cache_path)
 
     print(f"\n[MultiPair] Dataset built: {total_samples:,} samples x {n_features} features")
     _verify_dataset(str(cache_path), args, total_samples, n_features, context="MultiPair")
@@ -3920,11 +3985,40 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             return cp.is_dir()
         return Path(_x_path(cp)).exists() and Path(_y_path(cp)).exists()
 
+    def _is_partial_build(cp: Path) -> bool:
+        if str(cp).endswith(".zarr"):
+            if not cp.is_dir():
+                return False
+            try:
+                import zarr
+
+                return "total_samples" not in zarr.open(str(cp), mode="r").attrs
+            except Exception:
+                return False
+        return not os.path.exists(str(cp) + "_meta.json")
+
+    _build_fp = _pin_build_fingerprint(args)
+    args._feature_cache_cfg = _configure_feature_window_cache(args)
+    if args.force_rebuild:
+        _force_cp = _get_cache_path(args)
+        # Delete up front: a crash before the first new window would otherwise
+        # leave the old manifest + _resume.json pointing at a half-new store.
+        _delete_cache_artifacts(str(_force_cp))
+        _clear_resume_state(_force_cp)
+
     # Multi-pair: delegate to dedicated function
     if is_multi:
         Path(args.data_cache).mkdir(parents=True, exist_ok=True)
         cache_path = _get_cache_path(args)
-        if _cache_present(cache_path) and not args.force_rebuild:
+        if (
+            _cache_present(cache_path)
+            and not args.force_rebuild
+            and _is_partial_build(cache_path)
+            and _read_resume_idx(cache_path, _build_fp.get("content_hash")) >= 0
+        ):
+            print(f"[MultiPair] Resuming partial build (fingerprint {_build_fp['content_hash'][:8]} matches).")
+            args._resume_zarr = True
+        elif _cache_present(cache_path) and not args.force_rebuild:
             ok, reason = _validate_cache_integrity(str(cache_path), args)
             if not ok:
                 if getattr(args, "auto_rebuild_on_mismatch", False):
@@ -3991,6 +4085,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
         )
         args._n_pairs = len(pairs)
         args._f_per_pair = n_features // len(pairs)
+        _after_successful_build(args, cache_str)
         return cache_str, n_samples, n_features, scaler
 
     cache_path = _get_cache_path(args)
@@ -4387,6 +4482,9 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
         z_store.attrs["strategy_mode"] = str(getattr(args, "strategy_mode", "scalping"))
         z_store.attrs["bar_freq"] = str(getattr(args, "bar_freq", "5min"))
         z_store.attrs["lookahead_bars"] = int(getattr(args, "lookahead_bars", LABELING["lookahead_bars"]))
+        _fp_fields = _manifest_fingerprint_fields(args)
+        z_store.attrs["content_hash"] = _fp_fields["content_hash"]
+        z_store.attrs["build_version"] = _fp_fields["build_version"]
         meta = {
             "total_samples": int(total_samples),
             "seq_len": int(_effective_max_seq_len(args)),
@@ -4399,6 +4497,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             "pairs": pairs,
             "target_col": _cache_target_col(args),
             "y_cls_source": "labels.label",
+            **_fp_fields,
         }
         import json
 
@@ -4475,6 +4574,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             "pairs": pairs,
             "target_col": _cache_target_col(args),
             "y_cls_source": "labels.label",
+            **_manifest_fingerprint_fields(args),
         }
         import json
 
@@ -4505,8 +4605,6 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
 
         _dm = DatasetManifest(str(Path(cache_path).parent))
         _dm.log_build_event("build_complete", n_rows=total_samples, n_features=n_features_total)
-        from training.cache_integrity import _compute_content_hash
-
         _dm.write_manifest(
             source=str(getattr(args, "data_source", "dukascopy")),
             pairs=pairs,
@@ -4523,7 +4621,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             lookahead_bars=int(getattr(args, "lookahead_bars", LABELING.get("lookahead_bars", 30))),
             embargo_bars=int(getattr(args, "embargo_bars", LABELING.get("embargo_bars", 60))),
             purge_bars=int(getattr(args, "purge_bars", 120)),
-            content_hash=_compute_content_hash(args),
+            content_hash=_manifest_fingerprint_fields(args)["content_hash"],
         )
     except Exception as _m_err:
         print(f"[Manifest] write failed ({_m_err})")
@@ -4615,7 +4713,20 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
     except Exception as _dq_e:
         print(f"[DataQuality] Report generation skipped: {_dq_e}")
 
+    _after_successful_build(args, str(cache_path))
     return str(cache_path), total_samples, n_features_total, scaler
+
+
+def _after_successful_build(args, cache_path: str) -> None:
+    """Post-build hooks that must never fail the build: cache stats + feature store."""
+    if _FEATURE_WINDOW_CACHE is not None:
+        print(_FEATURE_WINDOW_CACHE.summary())
+    try:
+        from feature_store.config import auto_materialize_after_build
+
+        auto_materialize_after_build(args, cache_path)
+    except Exception as e:
+        print(f"[FeatureStore] WARN: auto-materialize skipped ({e})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

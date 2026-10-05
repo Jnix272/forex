@@ -69,36 +69,40 @@ def _feature_ablation_config(args) -> dict:
     cli_keep_groups = _csv_set(getattr(args, "feature_ablation_keep_groups", ""))
 
     cli_drop_features = _csv_set(getattr(args, "feature_ablation_drop_features", ""))
+    cli_keep_features = _csv_set(getattr(args, "feature_ablation_keep_features", ""))
+    cli_drop_ungrouped = bool(getattr(args, "feature_ablation_drop_ungrouped", False))
 
     if cli_name:
         cfg["name"] = cli_name
-
         cfg["enabled"] = True
 
     if cli_drop_groups:
         cfg["drop_groups"] = sorted(cli_drop_groups)
-
         cfg["enabled"] = True
 
     if cli_keep_groups:
         cfg["keep_groups"] = sorted(cli_keep_groups)
-
         cfg["enabled"] = True
 
     if cli_drop_features:
         cfg["drop_features"] = sorted(cli_drop_features)
+        cfg["enabled"] = True
 
+    if cli_keep_features:
+        cfg["keep_features"] = sorted(cli_keep_features)
+        cfg["enabled"] = True
+
+    if cli_drop_ungrouped:
+        cfg["drop_ungrouped"] = True
         cfg["enabled"] = True
 
     cfg.setdefault("enabled", False)
-
     cfg.setdefault("name", "full_features")
-
     cfg.setdefault("drop_groups", [])
-
     cfg.setdefault("keep_groups", [])
-
     cfg.setdefault("drop_features", [])
+    cfg.setdefault("keep_features", [])
+    cfg.setdefault("drop_ungrouped", False)
 
     return cfg
 
@@ -131,10 +135,12 @@ def _build_feature_ablation_mask(
         return None, report
 
     drop_groups = set(report["drop_groups"])
-
     keep_groups = set(report["keep_groups"])
-
     drop_features = set(report["drop_features"])
+    keep_features = set(_csv_set(cfg.get("keep_features", [])))
+    drop_ungrouped = bool(cfg.get("drop_ungrouped", False))
+    report["keep_features"] = sorted(keep_features)
+    report["drop_ungrouped"] = drop_ungrouped
 
     group_feature_map: dict[str, set[str]] = {}
 
@@ -143,30 +149,57 @@ def _build_feature_ablation_mask(
             str(f).lower() for f in (g_cfg or {}).get("features", []) if str(f).strip()
         }
 
+    schema_bases = {_feature_base_name(str(n)).lower() for n in schema}
+    unknown_groups = sorted((drop_groups | keep_groups) - set(group_feature_map))
+    unknown_features = sorted((drop_features | keep_features) - schema_bases)
+    warnings: list[str] = []
+    if unknown_groups:
+        warnings.append(f"unknown feature group(s) {unknown_groups}; known: {sorted(group_feature_map)}")
+    if unknown_features:
+        warnings.append(f"drop/keep_features not in schema (ignored): {unknown_features[:20]}")
+    report["unknown_groups"] = unknown_groups
+    report["unknown_features"] = unknown_features
+    report["warnings"] = warnings
+    for msg in warnings:
+        print(f"[FeatureAblation] WARN: {msg}")
+
+    # keep_groups drops the *other* groups only; features that belong to no
+    # curriculum group are always kept unless drop_ungrouped=True, and a kept group wins over a dropped one.
+    kept_features: set[str] = set()
     if keep_groups:
         drop_groups |= {g for g in group_feature_map if g not in keep_groups}
+        for g in keep_groups:
+            kept_features |= group_feature_map.get(g, set())
 
     mask = np.ones(n_features, dtype=np.float32)
 
     masked_names: list[str] = []
 
     for idx, raw_name in enumerate(schema):
+        raw_str = str(raw_name).lower()
         base = _feature_base_name(str(raw_name)).lower()
 
         reason_group = None
 
-        if base in drop_features:
+        if base in drop_features or raw_str in drop_features:
             reason_group = "__explicit_features__"
 
-        elif keep_groups and not any(base in group_feature_map.get(g, set()) for g in keep_groups):
-            reason_group = "__not_in_keep_groups__"
+        elif keep_features:
+            if base in keep_features or raw_str in keep_features:
+                reason_group = None
+            else:
+                reason_group = "__not_in_keep_features__"
+
+        elif base in kept_features:
+            reason_group = None
 
         else:
             for g_name in drop_groups:
                 if base in group_feature_map.get(g_name, set()):
                     reason_group = g_name
-
                     break
+            if reason_group is None and drop_ungrouped and keep_groups:
+                reason_group = "__ungrouped__"
 
         if reason_group is not None:
             mask[idx] = 0.0

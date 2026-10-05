@@ -836,6 +836,18 @@ class LiveSafetyConfig:
     # reset at the day boundary; clearing it needs a restart (manual review).
     max_total_drawdown_pct: float = 0.15
 
+    @classmethod
+    def from_live_risk(cls, max_spread_pips: float = 2.5, live_risk: dict | None = None) -> "LiveSafetyConfig":
+        """Equity loss limits from LIVE_RISK (after the run-YAML overlay), so the
+        order gate halts at the same daily-loss / drawdown levels as RiskEngine."""
+        if live_risk is None:
+            from config.settings import LIVE_RISK as live_risk
+        return cls(
+            max_spread_pips=max_spread_pips,
+            max_daily_loss_pct=float(live_risk.get("daily_loss_limit", cls.max_daily_loss_pct)),
+            max_total_drawdown_pct=float(live_risk.get("max_drawdown_halt", cls.max_total_drawdown_pct)),
+        )
+
 
 class LiveSafetyGate:
     """Deterministic pre-trade safety checks (spread, daily loss, rate limit)."""
@@ -2144,6 +2156,18 @@ class LiveTradingEngine:
             )
         except Exception:
             self.session_limits = SessionLimitsEnforcer()
+        try:
+            from risk.yaml_risk import effective_limits_summary
+
+            self.logger.event(
+                "INFO",
+                "risk_limits",
+                f"[Live] Effective risk limits: {effective_limits_summary()}",
+                pair=self.pair,
+                var_max_pct=float(getattr(self.pvar, "max_var", 0.0)),
+            )
+        except Exception as _rl_err:
+            print(f"[Live] WARN: could not log effective risk limits ({_rl_err})")
 
         mode = (sentiment_mode or os.getenv("LIVE_SENTIMENT_MODE", "auto")).lower()
         if mode in ("off", "none", "neutral"):
@@ -2373,7 +2397,9 @@ class LiveTradingEngine:
         self.tip = TIPSearchManager(fast_agent=self.fast, slow_agent=self.slow)
 
         self.buf = LiveTickBuffer(self.pair, bar_freq=bar_freq, db_sink=self.db_sink)
-        self.safety = LiveSafetyGate(LiveSafetyConfig(max_spread_pips=max_spread_pips), starting_equity=self.equity)
+        self.safety = LiveSafetyGate(
+            LiveSafetyConfig.from_live_risk(max_spread_pips=max_spread_pips), starting_equity=self.equity
+        )
         self.drift = DriftDetector()
         self.shadow = ShadowModeDeployer()
         self.demotion = DemotionMonitor(
@@ -2778,7 +2804,9 @@ class LiveTradingEngine:
                 ts = pd.Timestamp(bars.index[-1]).to_pydatetime()
         except Exception:
             ts = datetime.now(UTC)
-        if abs(float(bias)) > 1e-9:
+        # One row per new score (not per bar) so sentiment_decayed ages from the
+        # score's arrival exactly as in training, where rows are headline events.
+        if abs(float(bias)) > 1e-9 and (not hist or abs(hist[-1][1] - float(bias)) > 1e-9):
             hist.append((ts, float(bias)))
         if not hist or pl is None:
             return None
@@ -3341,7 +3369,8 @@ class LiveTradingEngine:
             0.5 if float(var_result.get("var_pct", 0.0) or 0.0) > float(getattr(self.pvar, "max_var", 0.02)) else 1.0
         )
 
-        hurst = _last_float(features, "hurst_60", 0.5)
+        # Missing/NaN Hurst -> regime "unknown" -> risk.regime_scale.unknown in the sizer.
+        hurst = _last_float(features, "hurst_60", float("nan"))
         corr_stab = _last_float(features, "corr_break", 0.0)
         if len(_rets) >= 2:
             recent_returns = np.nan_to_num(np.asarray(_rets, dtype=np.float64), nan=0.0)
@@ -4207,7 +4236,11 @@ if __name__ == "__main__":
         default="",
         help="Comma-separated pairs (overrides --pair). If empty, attempts config/run.yaml data.pairs",
     )
-    p.add_argument("--pairs-config", default="config/run.yaml", help="YAML config path used to auto-load data.pairs")
+    p.add_argument(
+        "--pairs-config",
+        default="config/run.yaml",
+        help="Run YAML used for data.pairs and the risk: block (FOREX_RUN_CONFIG overrides the default)",
+    )
     p.add_argument("--equity", type=float, default=10_000.0)
     p.add_argument("--max-lots", type=float, default=0.5)
     p.add_argument("--model", default="haelt")
@@ -4281,6 +4314,10 @@ if __name__ == "__main__":
         help="Custom database file path for live DuckDB persistence (default: data/store/live_trading.duckdb)",
     )
     args = p.parse_args()
+    from risk.yaml_risk import apply_run_config_risk, resolve_run_config_path
+
+    args.pairs_config = str(resolve_run_config_path(args.pairs_config))
+    print(f"[Live] Run config         : {args.pairs_config}")
     prof = strategy_profile(args.strategy_mode)
     if args.bar_freq is None:
         args.bar_freq = str(prof["bar_freq"])
@@ -4302,6 +4339,12 @@ if __name__ == "__main__":
                     args.maturity_stage = str(maturity)
         except Exception:
             pass
+    # Run-YAML risk: block is the source of truth for LIVE_RISK. Applied before any
+    # guard / RiskEngine / sizer / preflight reads it. Unreadable YAML is fatal.
+    try:
+        apply_run_config_risk(args.pairs_config)
+    except Exception as _risk_err:
+        raise SystemExit(f"[Live] Refusing to start: run-config risk: block could not be applied ({_risk_err})")
     if args.max_spread_pips == 2.5 and args.strategy_mode != "scalping":
         args.max_spread_pips = float(prof["max_spread_pips"])
     if args.guard_min_confidence == 0.45 and args.strategy_mode != "scalping":

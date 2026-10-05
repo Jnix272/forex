@@ -19,7 +19,7 @@ from config.settings import (
 )
 from training.core import _GPU_CFG
 
-from .yaml_map import _YAML_MAP
+from .yaml_map import _YAML_ALIASES, _YAML_MAP, _YAML_UNUSED_KEYS
 
 # Alias map for legacy YAML regime_scale keys -> LIVE_RISK / RegimeScale names.
 _REGIME_SCALE_ALIASES = {
@@ -27,6 +27,36 @@ _REGIME_SCALE_ALIASES = {
     "ranging": "mean_rev",
     "unknown": "normal",
 }
+
+_UNUSED_WARNED: set[tuple[str, str]] = set()
+
+
+def _yaml_lookup(cfg, dotted_key: str):
+    val = cfg
+    for part in dotted_key.split("."):
+        val = val.get(part) if isinstance(val, dict) else None
+    return val
+
+
+def _norm_yaml_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _warn_unused_yaml_keys(cfg, config_path: str) -> list[str]:
+    """Print a one-time (per config path + key) warning for set-but-unused YAML keys."""
+    hits: list[str] = []
+    for key, reason in _YAML_UNUSED_KEYS.items():
+        if _yaml_lookup(cfg, key) is None:
+            continue
+        hits.append(key)
+        marker = (str(config_path), key)
+        if marker in _UNUSED_WARNED:
+            continue
+        _UNUSED_WARNED.add(marker)
+        print(f"[Config] WARN: {key} is set but unused ({reason}).")
+    return hits
 
 
 def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> None:
@@ -61,11 +91,19 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
     for yaml_key, dest in _YAML_MAP.items():
         if yaml_key.startswith("distillation.") and not distillation_enabled:
             continue
-        val = cfg
-        for part in yaml_key.split("."):
-            val = val.get(part) if isinstance(val, dict) else None
+        val = _yaml_lookup(cfg, yaml_key)
         if val is None:
             continue
+        canonical = _YAML_ALIASES.get(yaml_key)
+        if canonical is not None:
+            canon_val = _yaml_lookup(cfg, canonical)
+            if canon_val is not None:
+                if canon_val != val:
+                    print(
+                        f"[Config] WARN: {yaml_key}={val!r} conflicts with {canonical}={canon_val!r}; "
+                        f"using {canonical}."
+                    )
+                continue
         if dest is None:
             # data.use_cache=false -> force_rebuild=true
             if yaml_key == "data.use_cache":
@@ -92,6 +130,25 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
         lw = cfg["curriculum"].get("loss_weighting")
         if isinstance(lw, dict) and "enabled" in lw:
             defaults["use_loss_weighting"] = bool(lw["enabled"])
+        if not _norm_yaml_bool(defaults.get("curriculum_manager", False)):
+            # self_paced / loss_weighting / miner_feedback only act through the
+            # CurriculumManager. The manager stays off unless curriculum.manager.enabled
+            # (or --curriculum-manager) is set: its "combined" mode adds a difficulty
+            # filter that would silently restrict the training data.
+            inert = [
+                name
+                for name in ("self_paced", "loss_weighting", "miner_feedback")
+                if isinstance(cfg["curriculum"].get(name), dict)
+                and _norm_yaml_bool(cfg["curriculum"][name].get("enabled", False))
+            ]
+            if inert:
+                print(
+                    f"[Config] WARN: curriculum.{'/'.join(inert)}.enabled is true but the "
+                    "CurriculumManager is off (curriculum.manager.enabled not true), so these "
+                    "have no effect unless --curriculum-manager is passed."
+                )
+
+    _warn_unused_yaml_keys(cfg, config_path)
 
     # Dests explicitly set by YAML; the per-model training profile must not
     # overwrite these (see training/cli/profile.py::_apply_training_profile).
@@ -113,6 +170,9 @@ def _apply_yaml_config(parser: argparse.ArgumentParser, config_path: str) -> Non
 
     if isinstance(cfg.get("feature_cache"), dict):
         defaults["feature_cache"] = cfg["feature_cache"]
+
+    if isinstance(cfg.get("feature_store"), dict):
+        defaults["feature_store"] = cfg["feature_store"]
 
     if isinstance(cfg.get("maturity"), dict):
         stage = cfg["maturity"].get("stage")

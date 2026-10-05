@@ -151,7 +151,15 @@ class PipelineOrchestrator:
 
         # Feature materializer
         if self.config.feature_store.enabled:
+            from feature_store.store import create_feature_store
+
+            _fs = self.config.feature_store
             self.materializer = FeatureMaterializer(
+                feature_store=create_feature_store(
+                    store_type=_fs.store_type,
+                    base_path=_fs.path,
+                    **({"compression": _fs.compression} if _fs.store_type == "parquet" else {}),
+                ),
                 feature_store_path=self.config.feature_store.path,
                 quality_gates_dir=self.config.quality_gates.log_dir,
                 lineage_dir=self.config.lineage.path,

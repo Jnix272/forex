@@ -29,9 +29,9 @@ class TrainingController:
         self.val_sharpe_ema: float | None = None
         self.dir_acc_history: list[float] = []
         _adap = adaptation or {}
-        # How many consecutive epochs dir_acc must stay below 0.50 before acting.
+        # How many consecutive epochs dir_acc must stay below 0.33 (3-class baseline) before acting.
         self.dir_acc_below_random_window: int = int(_adap.get("dir_acc_below_random_window", 2))
-        self.dir_acc_random_threshold: float = float(_adap.get("dir_acc_random_threshold", 0.50))
+        self.dir_acc_random_threshold: float = float(_adap.get("dir_acc_random_threshold", 0.33))
         self.collapse_drop: float = float(_adap.get("collapse_drop", 0.50))
         self.collapse_min_peak: float = float(_adap.get("collapse_min_peak", 0.50))
         self.collapse_lr_mult: float = float(_adap.get("collapse_lr_mult", 0.50))
@@ -134,10 +134,13 @@ class TrainingController:
 
         # Directional accuracy gate: if the model predicts the wrong direction
         # more often than random for N consecutive epochs, lower LR and bump
-        # dropout. Unlike the Sharpe collapse gate this fires even when Sharpe
-        # is near zero (i.e. when the model is mostly predicting HOLD/zero).
+        # dropout.
+        # Guard: when val_sharpe is 0.0 (zero trades under conviction deadband),
+        # the model is intentionally holding cash/zero position to eliminate
+        # transaction costs, not guessing the wrong direction.
         if (
             len(self.dir_acc_history) >= self.dir_acc_below_random_window
+            and val_sharpe != 0.0
             and all(
                 a < self.dir_acc_random_threshold
                 for a in self.dir_acc_history[-self.dir_acc_below_random_window :]

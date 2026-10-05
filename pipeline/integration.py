@@ -91,14 +91,17 @@ def create_full_pipeline(
     orchestrator = create_orchestrator(config=config)
 
     # Create feature store
+    _fs_kwargs = {"compression": config.feature_store.compression} if config.feature_store.store_type == "parquet" else {}
     feature_store = create_feature_store(
         store_type=config.feature_store.store_type,
         base_path=config.feature_store.path,
+        **_fs_kwargs,
     )
 
     # Create materializer
     materializer = create_materializer(
         feature_store_path=config.feature_store.path,
+        feature_store=feature_store,
         quality_gates_dir=config.quality_gates.log_dir if enable_quality_gates else None,
         lineage_dir=config.lineage.path if enable_lineage else None,
     )
