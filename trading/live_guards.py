@@ -129,12 +129,30 @@ class EconomicCalendarGuard:
 
         # Build sorted, merged windows to avoid double-counting overlapping 08:30 CPI + 08:50 FOMC
         candidates: list[tuple[pd.Timestamp, pd.Timestamp, dict]] = []
-        for _, row in events_df.iterrows():
-            ts = pd.Timestamp(row["timestamp_utc"])
+        has_headline = "headline" in events_df.columns
+        has_event = "event" in events_df.columns
+        has_impact = "impact" in events_df.columns
+        has_currency = "currency" in events_df.columns
+
+        for row in events_df.itertuples():
+            ts = pd.Timestamp(row.timestamp_utc)
             event_time = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-            name = str(row.get("headline", row.get("event", "")))
+
+            headline_val = row.headline if has_headline else None
+            event_val = row.event if has_event else None
+
+            val = headline_val
+            if val is None or pd.isna(val) or str(val) == "nan":
+                val = event_val
+            if val is None or pd.isna(val) or str(val) == "nan":
+                val = ""
+            name = str(val)
             low_name = name.lower()
-            impact_raw = str(row.get("impact", "")).strip().lower()
+
+            impact_val = row.impact if has_impact else ""
+            impact_str = "" if impact_val is None or pd.isna(impact_val) else str(impact_val)
+            impact_raw = impact_str.strip().lower()
+
             # Tiered impact
             if impact_raw in ("critical", "3", "red") or "crit" in impact_raw:
                 tier = "critical"
@@ -153,10 +171,14 @@ class EconomicCalendarGuard:
             before, after, tier_flatten = self.TIER_WINDOWS.get(tier, (15, 10, False))
             # Env/config can still force flatten for critical only and only if position is in event currency
             flatten = bool(self.flatten_before_event or tier_flatten)
+
+            currency_val = row.currency if has_currency else ""
+            currency_str = "" if currency_val is None or pd.isna(currency_val) else str(currency_val)
+
             # Currency-specific flatten: only flatten if engine pair holds the event currency
             # (ECB EUR → EURUSD/GBPUSD not USDJPY), otherwise just HOLD
             if flatten:
-                ccy = str(row.get("currency", "")).upper().strip()
+                ccy = currency_str.upper().strip()
                 if ccy and ccy not in self.pair.upper():
                     flatten = False
             if before == 0 and after == 0:
@@ -164,7 +186,7 @@ class EconomicCalendarGuard:
             start = event_time - pd.Timedelta(minutes=before)
             end = event_time + pd.Timedelta(minutes=after)
             candidates.append((start, end, {
-                "event": name, "currency": str(row.get("currency","")), "impact": str(row.get("impact","")),
+                "event": name, "currency": currency_str, "impact": impact_str,
                 "event_time": event_time.isoformat(), "tier": tier, "special": special,
                 "flatten_before_event": flatten, "before": before, "after": after,
                 "minutes_to_event": (event_time - now_ts).total_seconds()/60.0,
