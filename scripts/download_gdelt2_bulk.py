@@ -80,13 +80,10 @@ def download_and_parse_gdelt(url_info):
                 if df_filtered.empty:
                     return dt, pd.DataFrame()
 
-                # Map to currency (just pick the first matching one)
-                def get_currency(r):
-                    if r["actor1"] in targets:
-                        return COUNTRY_TO_CURRENCY[r["actor1"]]
-                    return COUNTRY_TO_CURRENCY[r["actor2"]]
-
-                df_filtered["currency"] = df_filtered.apply(get_currency, axis=1)
+                # Vectorized currency mapping: pick matching actor1 currency, fallback to actor2 currency
+                actor1_currency = df_filtered["actor1"].map(COUNTRY_TO_CURRENCY)
+                actor2_currency = df_filtered["actor2"].map(COUNTRY_TO_CURRENCY)
+                df_filtered["currency"] = actor1_currency.fillna(actor2_currency)
 
                 # Convert avgtone to float
                 df_filtered["sentiment_score"] = pd.to_numeric(df_filtered["avgtone"], errors="coerce")
