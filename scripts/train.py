@@ -208,7 +208,7 @@ def main() -> int:
             print(f"[train] WARNING: {msg}\n", flush=True)
 
     py = _python_exe()
-    train_cmd = [py, str(_ROOT / "training" / "train_gpu.py"), "--config", str(args.config)]
+    train_cmd = [py, "-u", str(_ROOT / "training" / "train_gpu.py"), "--config", str(args.config)]
     if args.teacher_model:
         train_cmd.extend(["--teacher-model", args.teacher_model])
     if args.distill_weight != 0.5:

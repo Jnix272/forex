@@ -294,7 +294,7 @@ data:
   parallel_window_workers: 1
   real_data_window_days: 5
   source: dukascopy
-  start: '2008-01-01'
+  start: '2018-01-01'
   use_cache: true
   window_batch_days: 1
   # auto → Linux lz4@1 / else zstd@3 (see training.gpu_cache_io.default_zarr_compression)
@@ -504,7 +504,7 @@ optuna:
   metric: val_sharpe
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/forex_4pair_2008_2025
+  checkpoint_dir: checkpoints/haelt_modern_2018_2025
   data_cache: ./data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:

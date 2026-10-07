@@ -1,5 +1,38 @@
 ---
 
+## Session - 2026-10-07 (Modern Regime 2018–2025 HAELT GPU Training Launch)
+**Date:** 2026-10-07 02:17 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Configured Modern Regime Date Window** ([`config/run.yaml`](file:///d:/forex-main/config/run.yaml#L297)):
+  - Adjusted `start: '2018-01-01'` and `end: '2025-12-30'` to focus GPU training on the modern Forex market microstructure (7 full years of post-2018 algorithmic liquidity, COVID volatility, and global rate hikes).
+  - Updated `paths.checkpoint_dir: checkpoints/haelt_modern_2018_2025`.
+- **Unbuffered Logging Hardening** ([`scripts/train.py`](file:///d:/forex-main/scripts/train.py#L211)):
+  - Added `-u` to `train_cmd` python invocation to enforce instantaneous real-time streaming of stdout/stderr into background task log files without block-buffering delays.
+- **Launched Flagship HAELT GPU Training Run** (`task-4023`):
+  - Command: `.venv311\Scripts\python.exe -u scripts/train.py --quick`
+  - Successfully allocated **NVIDIA GeForce RTX 4060 Laptop GPU** (BF16 AMP, TF32).
+  - Verified window feature cache active (`data/features`), multi-pair basket (`EURUSD`, `USDJPY`, `USDCAD`), and unbuffered telemetry stream.
+- **Maintained Live OANDA Practice Daemon**:
+  - Live execution engine (`task-3430`) remains operational in parallel, managing open practice positions without disruption ahead of the London open.
+
+### Files Edited
+- `config/run.yaml`: Set `data.start: '2018-01-01'` and `paths.checkpoint_dir: checkpoints/haelt_modern_2018_2025`.
+- `scripts/train.py`: Added `-u` to python executable in `train_cmd` for unbuffered log streaming.
+- `docs/SESSION_REPORT.md`: Prepended session milestone.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- **Subprocess Stdout Block Buffering (Low)**: `subprocess.run` inside `scripts/train.py` buffered python standard output in non-interactive background tasks, delaying log visibility. Added `-u` to `train_cmd` invocation.
+
+---
+
 ## Session - 2026-10-07 (Uncapped Historical Data Configuration and Curriculum Sync)
 **Date:** 2026-10-07 02:12 EDT
 **Author:** Antigravity Bot
