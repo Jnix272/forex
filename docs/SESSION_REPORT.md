@@ -1,5 +1,34 @@
 ---
 
+## Session - 2026-10-07 (Threshold Sweep Tooling & Modern HAELT Wrap-Up)
+**Date:** 2026-10-07 18:58 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Prepared Rapid Out-of-Sample Threshold Sweep Tooling**:
+  - Implemented [`scripts/sweep_confidence_thresholds.py`](file:///d:/forex-main/scripts/sweep_confidence_thresholds.py) to immediately evaluate the trained HAELT modern regime checkpoints across confidence thresholds (`0.05` to `0.50`) on out-of-sample data.
+  - Scores directional conviction against real prices and spreads via `honest_eval.pooled_pair_metrics` to uncover optimal net Sharpe and trade frequency without retraining overhead.
+- **Flagship HAELT GPU Modern Regime Training Progression (`task-4023`)**:
+  - Fold 1 Epoch 6 reached **70% batch completion** (Batch 337/481) with loss dropping to **1.459**.
+  - On schedule to conclude within minutes, completing the full 2-fold modern regime experiment.
+- **Live OANDA Practice Engine Health Check (`task-3430`)**:
+  - Engine active on OANDA practice account `101-001-38834567-001`.
+  - **Account Equity / NAV**: **\$98,714.05 USD** | **Balance**: **\$98,714.05 USD** | **Open Trades**: 0.
+
+### Files Edited
+- `docs/SESSION_REPORT.md`: Prepended session progress report.
+
+### Files Added
+- `scripts/sweep_confidence_thresholds.py`: Threshold sweep utility using honest evaluation metrics over Zarr stream validation sets.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- None (tooling and monitoring session).
+
+---
+
 ## Session - 2026-10-07 (Modern HAELT GPU Training Fold 1 Final Epoch In Progress)
 **Date:** 2026-10-07 18:48 EDT
 **Author:** Antigravity Bot
