@@ -1,5 +1,40 @@
 ---
 
+## Session - 2026-10-07 (Modern HAELT GPU Training Fold 0 Complete & Calibration)
+**Date:** 2026-10-07 16:25 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Flagship HAELT GPU Modern Regime Training Milestone (`task-4023`)**:
+  - Successfully completed all **585 dataset preparation windows** across 2018–2025 modern regime.
+  - Sliced and aligned **1.154 Billion ticks** into **175,575 multi-pair joint sequences** ($175,575 \times 120 \times 438$).
+  - **Completed Fold 0 Supervised Training (6/6 Epochs)** on **NVIDIA GeForce RTX 4060 Laptop GPU**:
+    - Training loss successfully converged from **3.228 down to 1.520**.
+    - Validation loss improved from **1.724 down to 1.542**.
+    - Generated checkpoints saved in [`checkpoints/haelt_modern_2018_2025/haelt/`](file:///d:/forex-main/checkpoints/haelt_modern_2018_2025/haelt/):
+      - `haelt_fold0_best.pt` (5.7 MB)
+      - `haelt_fold0_last.pt` (17.1 MB)
+      - `haelt_fold0_best_scaler.npz` & `haelt_fold0_best_features.json`
+  - Currently executing post-training confidence calibration (`TemperatureScaler`) before transitioning into Walk-Forward Fold 1.
+- **Live OANDA Practice Engine Health Check (`task-3430`)**:
+  - Live execution engine continuously running on OANDA account `101-001-38834567-001`.
+  - **Account Equity / NAV**: **\$98,714.05 USD** | **Balance**: **\$98,714.05 USD** | **Open Trades**: 0.
+  - Sub-second pricing stream active across `EUR_USD`, `USD_CAD`, and `USD_JPY`.
+
+### Files Edited
+- `docs/SESSION_REPORT.md`: Prepended session progress report.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- None (monitoring and telemetry session).
+
+---
+
 ## Session - 2026-10-07 (Modern HAELT Dataset 91.8% Progress & Live Trading State)
 **Date:** 2026-10-07 13:40 EDT
 **Author:** Antigravity Bot
