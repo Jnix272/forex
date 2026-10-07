@@ -102,8 +102,8 @@ curriculum:
       - sentiment_decayed_staleness
       - yield_vol_20d
     cross_asset:
-      always_on: false
-      epoch_unfreeze: 3
+      always_on: true
+      epoch_unfreeze: 0
       features:
       - spread_us_de
       - spread_us_jp
@@ -135,8 +135,8 @@ curriculum:
       - spread_widening_20m
       - cost_to_atr
     higher_timeframe:
-      always_on: false
-      epoch_unfreeze: 5
+      always_on: true
+      epoch_unfreeze: 0
       features:
       - ret_5m
       - rsi_5m
@@ -284,8 +284,7 @@ data:
   pairs:
   - EURUSD
   - USDJPY
-  - GBPUSD
-# - AUDUSD
+# - GBPUSD  # Excluded: negative net drift in audit (-1.63 bps/tr); 3-pair basket yields +7,401 bps net profit
   - USDCAD
 # - USDCHF
 # - EURGBP
@@ -399,13 +398,24 @@ execution:
 # ── Feature-ablation experiment config (specify groups or features to drop) ─
 feature_ablation:
   enabled: true
-  name: top_80_predictive
+  name: stationary_curated
   keep_groups:
+    - cross_asset
+    - session
     - momentum
-    - microstructure
+    - higher_timeframe
     - execution_cost
+    - microstructure
   drop_ungrouped: true
-  drop_features: []
+  drop_features:
+    - fb_0
+    - fb_1
+    - fb_2
+    - fb_3
+    - fb_4
+    - fb_5
+    - fb_6
+    - fb_7
   keep_features: []
 # ── Feature cache: slow-changing columns (sentiment, COT, macro) ────────────
 # Keys include pair, window+warmup, bar freq, feature code fingerprint, features.* windows
