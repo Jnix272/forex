@@ -1,5 +1,34 @@
 ---
 
+## Session - 2026-10-07 (Interactive Live Terminal HUD Dashboard Deployed)
+**Date:** 2026-10-07 00:35 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Created Real-Time Interactive Terminal HUD Dashboard** ([`scripts/live_dashboard.py`](file:///d:/forex-main/scripts/live_dashboard.py)):
+  - Built an executive terminal interface using `rich` that polls live broker feeds and trade journals.
+  - **Account KPIs**: Real-time NAV equity, cash balance, active lot exposure, realized session P&L, and 5-minute candle countdown clock.
+  - **Active Positions Table**: Symbol, Direction (BUY/SELL), lot size, average fill entry price, real-time market mark, spread in pips, floating pips, and unrealized USD P&L.
+  - **Recent Closed Executions Table**: History of closed trades with exit reasons (`take_profit`, `stop_loss`, `reconciliation`), entry/exit prices, and realized dollar returns.
+  - **Multi-Pair Signal Radar**: Real-time status for `EURUSD`, `USDJPY`, and `USDCAD`.
+  - Supports continuous full-screen terminal monitoring (`python scripts/live_dashboard.py`) and single-snapshot printing (`--once`).
+  - Added Windows console character-set compatibility (`sys.stdout.reconfigure(encoding="utf-8")`) and resilient ASCII fallback badges.
+
+### Files Edited
+- `data/news/latest_headlines.json`: Live market news update.
+- `docs/SESSION_REPORT.md`: Prepended session milestone.
+
+### Files Added
+- `scripts/live_dashboard.py`: Interactive live terminal HUD script.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- **Windows Console cp1252 Rich Terminal Unicode Encoding (Low)**: Default Windows PowerShell cp1252 character-mapping raised `UnicodeEncodeError` when rendering unicode lightning/chart emoji glyphs. Reconfigured standard output to UTF-8 and sanitized badge strings with ASCII equivalents.
+
+---
+
 ## Session - 2026-10-06 (Live OANDA Practice Integration, Preflight Schema Calibration, and Multi-Pair Real-Time Execution)
 **Date:** 2026-10-06 23:55 EDT
 **Author:** Antigravity Bot
