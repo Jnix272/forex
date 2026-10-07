@@ -46,3 +46,28 @@ def test_stationary_inference_engine_threshold_override():
 
     # Reset buffer works cleanly
     engine_conservative.reset_buffer()
+
+
+def test_stationary_inference_engine_live_attributes():
+    from trading.live_actions import LiveAction
+
+    engine = StationaryEnsembleInferenceEngine(pair="USDJPY")
+    assert getattr(engine, "returns_live_actions", False) is True
+    assert getattr(engine, "seq_len", 0) == 1
+    assert getattr(engine, "n_features", 0) == 584
+
+    # Verification of action enum consistency
+    assert int(LiveAction.BUY) == 0
+    assert int(LiveAction.HOLD) == 1
+    assert int(LiveAction.SELL) == 2
+
+
+def test_stationary_inference_engine_for_pair():
+    engine_eur = StationaryEnsembleInferenceEngine(pair="EURUSD")
+    engine_jpy = engine_eur.for_pair("USDJPY")
+    assert engine_jpy.pair == "USDJPY"
+    assert engine_jpy is not engine_eur
+
+    # Same pair returns self
+    assert engine_eur.for_pair("EURUSD") is engine_eur
+

@@ -35,6 +35,10 @@ class StationaryEnsembleInferenceEngine(BaseInferenceEngine):
     Uses trained LightGBM boosters on curated stationary features with conviction hurdles.
     """
 
+    returns_live_actions: bool = True
+    seq_len: int = 1
+    n_features: int = 584
+
     def __init__(
         self,
         pair: str = "EURUSD",
@@ -47,6 +51,7 @@ class StationaryEnsembleInferenceEngine(BaseInferenceEngine):
 
         self.pair = pair.upper()
         self.model_dir = Path(model_dir)
+        self.override_threshold = override_threshold
         meta_path = self.model_dir / "metadata.json"
 
         if not meta_path.exists():
@@ -64,6 +69,18 @@ class StationaryEnsembleInferenceEngine(BaseInferenceEngine):
             raise FileNotFoundError(f"Model file for {self.pair} not found at {model_path}")
 
         self.booster = lgb.Booster(model_file=str(model_path))
+        self.last_pred_bps: float = 0.0
+
+    def for_pair(self, pair: str) -> "StationaryEnsembleInferenceEngine":
+        """Return an engine instance configured for the specified currency pair."""
+        pair_clean = pair.upper().replace("/", "").replace("_", "")
+        if pair_clean == self.pair:
+            return self
+        return StationaryEnsembleInferenceEngine(
+            pair=pair_clean,
+            model_dir=str(self.model_dir),
+            override_threshold=self.override_threshold,
+        )
 
     def predict_return(self, obs: np.ndarray) -> float:
         """Predict expected 4-hour forward return in basis points."""
@@ -77,22 +94,26 @@ class StationaryEnsembleInferenceEngine(BaseInferenceEngine):
                 f"Observation length {len(obs_1d)} insufficient for feature indices (max={max(self.curated_indices)})"
             )
         pred = float(self.booster.predict(feats)[0])
+        self.last_pred_bps = pred
         return pred
 
     def select_action(self, obs: np.ndarray) -> int:
         """
         Select trade action using conviction hurdle.
         Returns:
-            int: 0=Buy, 1=Hold, 2=Sell
+            int: 0=Buy (LiveAction.BUY), 1=Hold (LiveAction.HOLD), 2=Sell (LiveAction.SELL)
         """
+        from trading.live_actions import LiveAction
+
         pred_bps = self.predict_return(obs)
         if pred_bps > self.threshold_bps:
-            return 0  # Buy
+            return int(LiveAction.BUY)
         elif pred_bps < -self.threshold_bps:
-            return 2  # Sell
-        return 1  # Hold
+            return int(LiveAction.SELL)
+        return int(LiveAction.HOLD)
 
     def reset_buffer(self) -> None:
         """Stateless tree ensemble has no internal temporal buffer to clear."""
-        pass
+        self.last_pred_bps = 0.0
+
 

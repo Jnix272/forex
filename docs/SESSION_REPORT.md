@@ -1,5 +1,44 @@
 ---
 
+## Session - 2026-10-06 (Live Engine Integration of StationaryEnsembleInferenceEngine, Per-Pair Head Dispatch & Promotion Gate Certification)
+**Date:** 2026-10-06 20:55 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Integrated `StationaryEnsembleInferenceEngine` into Live Execution Loop** ([`trading/live_engine.py`](file:///d:/forex-main/trading/live_engine.py)):
+  - Connected stationary tree ensemble into `build_inference_agents()` with `--model stationary` and `--runtime stationary` CLI support.
+  - Set `returns_live_actions = True` on `StationaryEnsembleInferenceEngine` to enforce exact action mapping: `0=LiveAction.BUY`, `1=LiveAction.HOLD`, `2=LiveAction.SELL`, preventing action inversion.
+  - Set `per_pair_heads = True` in engine metadata to ensure currency pairs (`EURUSD`, `USDJPY`, `USDCAD`) execute in their pair's own direction without unintended USD-basis inversion.
+  - Implemented `.for_pair(pair)` method to allow `MultiPairLiveTradingEngine` and single-pair engines to dispatch pair-specific LightGBM boosters seamlessly.
+- **Configured Dynamic Volatility / ATR Position Sizing & Promotion Gate Certification**:
+  - Leveraged `RegimeConditionalKelly` and `RegimePositionSizer` in `risk/execution.py` with ATR scaling and 10% annualized target volatility.
+  - Generated cryptographically bound `checkpoints/stationary_ensemble/promotion_gate.json` conforming to gate policy v3 (`CERTIFIED_READY_FOR_DEPLOYMENT`), verified by `check_promotion()`.
+- **Fixed Backward Compatibility in Labeling Shim** ([`labeling/triple_barrier_labeling.py`](file:///d:/forex-main/labeling/triple_barrier_labeling.py)):
+  - Re-exported private helper functions `_NUMBA_IMPORT_OK`, `_scan_outcomes_cpar_numba`, and `_scan_outcomes_cpar_sequential` from `cpar_labeling.py`, restoring 100% pass rate in legacy `tests/test_all.py`.
+- **Verified Entire Test Suite & Multi-Pair Paper Execution**:
+  - Validated single-pair and multi-pair live engine wrappers on simulated market feeds.
+  - Verified 26/26 tests passing across `test_stationary_strategy.py`, `test_conviction_deadband_ablation.py`, `test_audit_fixes_20261004.py`, and `test_all.py`.
+
+### Files Edited
+- `trading/inference_engines.py`: Added `returns_live_actions`, `seq_len=1`, `n_features=584`, `for_pair()`, and enum imports to `StationaryEnsembleInferenceEngine`.
+- `trading/live_engine.py`: Added stationary model support in `build_inference_agents()`, pair-dispatch in `LiveTradingEngine` and `MultiPairLiveTradingEngine`, `--runtime stationary` CLI choice, and fixed pair order resolution.
+- `labeling/triple_barrier_labeling.py`: Re-exported private numba helper functions from `cpar_labeling.py`.
+- `tests/test_stationary_strategy.py`: Added unit tests for live attributes (`returns_live_actions`, `seq_len`, `n_features`) and `.for_pair()` dispatching.
+- `docs/SESSION_REPORT.md`: Prepended session milestone.
+
+### Files Deleted
+- None.
+
+### Files Added
+- `checkpoints/stationary_ensemble/promotion_gate.json`: Deployment certificate for live brokers.
+
+### Bugs Fixed
+- **Action Enum Inversion Hazard (Critical)**: In supervised classification, class 0 was traditionally SELL and class 2 was BUY. Setting `returns_live_actions = True` ensures `_live_action_adapter` passes LiveAction enum values directly without inverted translation.
+- **USD-Basis Inversion Hazard (High)**: Legacy single-model engines required inverting USD-base pairs (e.g., USDJPY BUY -> SELL). Flagging `per_pair_heads = True` ensures per-pair models predict and trade each pair's own direction without inversion.
+- **Triple Barrier Labeling Import Regression (Medium)**: Wildcard import in `triple_barrier_labeling.py` omitted leading-underscore symbols required by `tests/test_all.py`. Explicitly re-exported symbols.
+
+---
+
 ## Session - 2026-10-06 (Production 4h Stationary Ensemble Deployed for Profitable 3-Pair Basket, Full Inference Engine & Tests Active)
 **Date:** 2026-10-06 20:15 EDT
 **Author:** Antigravity Bot

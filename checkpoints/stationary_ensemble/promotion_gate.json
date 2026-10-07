@@ -1,0 +1,30 @@
+{
+  "status": "CERTIFIED_READY_FOR_DEPLOYMENT",
+  "quality_gate_passed": true,
+  "rejection_reasons": [],
+  "gate_version": 3,
+  "artifact_hashes": {
+    "D:\\forex-main\\checkpoints\\stationary_ensemble\\eurusd_4h_lgb.txt": "32560d75dc6f50774801c523ded1b9edb7df6467a15e571ab87fb3a5d58192f6",
+    "D:\\forex-main\\checkpoints\\stationary_ensemble\\usdjpy_4h_lgb.txt": "9b218ce3768792809aec8afabc98e86220e96db19602492cdf08f1c8a05baecd",
+    "D:\\forex-main\\checkpoints\\stationary_ensemble\\usdcad_4h_lgb.txt": "157d6050a93674faaf8e21f8a0ae0aefdeeb1bcbebb063c05a571e44b3d0c4e1",
+    "D:\\forex-main\\checkpoints\\stationary_ensemble\\metadata.json": "3b1bc3573cc09a5a74cd3e697d03cd5c69a0d8df72169029d13d79a5071e50d8"
+  },
+  "promoted": true,
+  "gate": {
+    "promoted": true,
+    "model": "stationary_ensemble",
+    "details": {
+      "pairs": [
+        "EURUSD",
+        "USDJPY",
+        "USDCAD"
+      ],
+      "hurdle_bps": {
+        "EURUSD": 4.9,
+        "USDJPY": 4.82,
+        "USDCAD": 4.54
+      }
+    }
+  },
+  "model": "stationary_ensemble"
+}

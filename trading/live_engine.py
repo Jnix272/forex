@@ -236,6 +236,7 @@ def build_inference_agents(
     checkpoint_dir: Path | None = None,
     use_rl_fast: bool = True,
     rl_algo: str = "dqn",
+    pair: str = "EURUSD",
 ) -> tuple[object, object, dict]:
     """Load fast/slow agents from active checkpoint dir or fall back to demo."""
     paths = resolve_checkpoint_paths(model_name, checkpoint_dir)
@@ -256,6 +257,39 @@ def build_inference_agents(
         print("[Live] WARN: --demo flag set - using random DemoAgent (no trained weights)")
         agent = _DemoAgent("demo")
         return agent, agent, meta
+
+    # Stationary 4-Hour Curated Feature Ensemble support
+    if (
+        str(model_name).lower() in ("stationary", "stationary_ensemble", "stationary_4h")
+        or str(runtime).lower() == "stationary"
+    ):
+        from trading.inference_engines import StationaryEnsembleInferenceEngine
+
+        model_dir = Path("checkpoints/stationary_ensemble")
+        if checkpoint_dir and (Path(checkpoint_dir) / "metadata.json").is_file():
+            model_dir = Path(checkpoint_dir)
+        elif checkpoint_dir and (Path(checkpoint_dir) / "stationary_ensemble" / "metadata.json").is_file():
+            model_dir = Path(checkpoint_dir) / "stationary_ensemble"
+
+        engine = StationaryEnsembleInferenceEngine(pair=pair, model_dir=str(model_dir))
+        meta.update({
+            "checkpoint_dir": str(engine.model_dir),
+            "pt_path": None,
+            "onnx_path": None,
+            "source": "stationary_ensemble",
+            "reload_flag": None,
+            "runtime": "stationary",
+            "demo": False,
+            "seq_len": 1,
+            "n_features": 584,
+            "model_name": model_name,
+            "arch_name": "stationary_ensemble",
+            "rl_fast": False,
+            "rl_algo": None,
+            "per_pair_heads": True,
+        })
+        print(f"[Live] Stationary ensemble loaded: {engine.pair} (threshold={engine.threshold_bps:.2f} bps, features=192/584)")
+        return engine, engine, meta
 
     arch_name = model_name
     if paths.pt_path is not None:
@@ -2383,6 +2417,10 @@ class LiveTradingEngine:
             return _adapt
 
         self._live_action_adapter = _live_action_adapter
+        if hasattr(fast_agent, "for_pair"):
+            fast_agent = fast_agent.for_pair(self.pair)
+        if hasattr(slow_model, "for_pair"):
+            slow_model = slow_model.for_pair(self.pair)
         self._agent_wrap_fast = _Wrap(fast_agent, _live_action_adapter(fast_agent), shared_pair_features=self.shared_pair_features)
         self._agent_wrap_slow = _Wrap(slow_model, _live_action_adapter(slow_model), shared_pair_features=self.shared_pair_features)
         self.fast = self._agent_wrap_fast
@@ -4022,8 +4060,8 @@ class MultiPairLiveTradingEngine:
         self.engines = [
             LiveTradingEngine(
                 broker=broker,
-                fast_agent=fast_agent,
-                slow_model=slow_model,
+                fast_agent=fast_agent.for_pair(p) if hasattr(fast_agent, "for_pair") else fast_agent,
+                slow_model=slow_model.for_pair(p) if hasattr(slow_model, "for_pair") else slow_model,
                 pair=p,
                 equity=equity,
                 max_lots=per_pair,
@@ -4243,13 +4281,13 @@ if __name__ == "__main__":
     )
     p.add_argument("--equity", type=float, default=10_000.0)
     p.add_argument("--max-lots", type=float, default=0.5)
-    p.add_argument("--model", default="haelt")
+    p.add_argument("--model", default="haelt", help="Model architecture: haelt, ensemble, tft, or stationary (4h LightGBM)")
     p.add_argument("--max-bars", type=int, default=None)
     p.add_argument(
         "--runtime",
         default="pytorch",
-        choices=["pytorch", "onnx"],
-        help="Inference backend: pytorch (CUDA) or onnx (AMD DirectML)",
+        choices=["pytorch", "onnx", "stationary"],
+        help="Inference backend: pytorch (CUDA), onnx (AMD DirectML), or stationary",
     )
     p.add_argument(
         "--sentiment-mode",
@@ -4395,6 +4433,11 @@ if __name__ == "__main__":
             "promote via promotion_gate.json before live capital."
         )
 
+    cli_pairs = [p.strip().upper() for p in args.pairs.split(",") if p.strip()]
+    yaml_pairs = _pairs_from_run_yaml(Path(args.pairs_config))
+    pair_list = cli_pairs or yaml_pairs or [args.pair.upper()]
+    print(f"[Live] Pairs: {pair_list}")
+
     fast_agent, slow_model, inference_meta = build_inference_agents(
         model_name=args.model,
         runtime=args.runtime,
@@ -4402,17 +4445,13 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         n_features=args.n_feat,
         checkpoint_dir=ckpt_paths.checkpoint_dir,
+        pair=pair_list[0] if pair_list else args.pair.upper(),
     )
     if inference_meta.get("demo") and not args.demo:
         raise SystemExit(
             "[Live] Refusing to run with DemoAgent without --demo. "
             "Train/promote a checkpoint, or pass --demo for paper testing."
         )
-
-    cli_pairs = [p.strip().upper() for p in args.pairs.split(",") if p.strip()]
-    yaml_pairs = _pairs_from_run_yaml(Path(args.pairs_config))
-    pair_list = cli_pairs or yaml_pairs or [args.pair.upper()]
-    print(f"[Live] Pairs: {pair_list}")
 
     broker_map = {"paper": PaperBroker, "lmax": LMAXBroker, "oanda": OANDABroker}
     if args.broker in ("mt5", "ibkr"):
