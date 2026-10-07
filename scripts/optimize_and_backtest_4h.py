@@ -35,7 +35,10 @@ X_all = audit_data["X"]
 idx = audit_data["idx"]
 feature_names = json.load(open("checkpoints/haelt/haelt_fold0_best_features.json"))
 m = len(X_all)
-pairs = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+ALL_PAIRS = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+pair_indices = {p: i for i, p in enumerate(ALL_PAIRS)}
+ACTIVE_PAIRS = ["EURUSD", "USDJPY", "USDCAD"]
+pairs = ACTIVE_PAIRS
 
 # Load full Zarr arrays for exact ATR and close bar paths
 zarr_path = sorted(__import__("glob").glob("data/processed/*.zarr"))[0]
@@ -95,7 +98,8 @@ for f in range(N_FOLDS):
     f_costs = np.zeros((n_va, len(pairs)), dtype=np.float32)
     f_atrs_bps = np.zeros((n_va, len(pairs)), dtype=np.float32)
 
-    for pi, pr in enumerate(pairs):
+    for i, pr in enumerate(pairs):
+        pi = pair_indices[pr]
         fwd_tr = ((close_all[idx[tr_slice] + H_BARS, pi] / close_all[idx[tr_slice], pi]) - 1.0) * 1e4
         fwd_va = ((close_all[va_idx_arr + H_BARS, pi] / close_all[va_idx_arr, pi]) - 1.0) * 1e4
         c_va = (spread_all[va_idx_arr, pi] / close_all[va_idx_arr, pi]) * 1e4
@@ -119,12 +123,12 @@ for f in range(N_FOLDS):
         mdl.fit(X_tr[m_tr], np.clip(fwd_tr[m_tr], -150, 150))
         models[(f, pr)] = mdl
 
-        f_preds[:, pi] = mdl.predict(X_va)
-        f_returns[:, pi] = np.where(m_va, fwd_va, 0.0)
-        f_costs[:, pi] = np.where(m_va, c_va, 0.0)
-        f_atrs_bps[:, pi] = np.where(m_va, atr_va_bps, 10.0)
+        f_preds[:, i] = mdl.predict(X_va)
+        f_returns[:, i] = np.where(m_va, fwd_va, 0.0)
+        f_costs[:, i] = np.where(m_va, c_va, 0.0)
+        f_atrs_bps[:, i] = np.where(m_va, atr_va_bps, 10.0)
 
-        ic = spearmanr(f_preds[m_va, pi], fwd_va[m_va]).correlation
+        ic = spearmanr(f_preds[m_va, i], fwd_va[m_va]).correlation
         print(f"  Fold {f} | {pr:>7} | Train samples: {m_tr.sum():,} | Val samples: {n_va:,} | IC: {ic:+.4f}", flush=True)
 
     fold_data.append({

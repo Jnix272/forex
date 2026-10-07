@@ -28,6 +28,18 @@ STRATEGY_PROFILES = {
         "guard_min_confidence": 0.55,
         "checkpoint_dir": "checkpoints/normal",
     },
+    "stationary": {
+        "bar_freq": "5min",
+        "seq_len": 1,
+        "lookahead_bars": 48,
+        "profit_target_atr": 3.5,
+        "take_profit_atr": 3.5,
+        "stop_loss_atr": 0.8,
+        "execution_delay_bars": 1,
+        "max_spread_pips": 2.5,
+        "guard_min_confidence": 0.40,
+        "checkpoint_dir": "checkpoints/stationary_ensemble",
+    },
 }
 
 
