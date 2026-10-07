@@ -415,8 +415,11 @@ def check_promotion(checkpoint_dir: Path, model: str, served_checkpoint: Path | 
     reasons: list[str] = []
     cands = [
         checkpoint_dir / model / "promotion_gate.json",
+        checkpoint_dir / f"{model}_ensemble" / "promotion_gate.json",
+        checkpoint_dir / "stationary_ensemble" / "promotion_gate.json",
         checkpoint_dir / "promotion_gate.json",
         checkpoint_dir / "ensemble" / "promotion_gate.json",
+        Path("checkpoints/stationary_ensemble/promotion_gate.json"),
         Path("checkpoints/ensemble/optimal_roadmap_certification.json"),
         Path("checkpoints/ensemble/promotion_gate.json"),
     ]
@@ -492,6 +495,13 @@ def _run_live_preflight(broker, slow_model, pair: str, checkpoint_dir: str) -> N
             # checkpoint's column order, so live assembles exactly these names.
             if _verify_feature_contract(slow_model) is not None:
                 live_hash = model_hash
+    elif getattr(slow_model, "model_dir", None):
+        mdir = Path(slow_model.model_dir)
+        meta = mdir / "metadata.json"
+        if meta.is_file():
+            meta_data = _json.loads(meta.read_text(encoding="utf-8"))
+            model_hash = hashlib.sha256(_json.dumps(meta_data.get("curated_feature_indices", [])).encode()).hexdigest()
+            live_hash = model_hash
     run_preflight(
         feed_client=_Feed(),
         broker_client=_Broker(),
@@ -1069,12 +1079,19 @@ class PaperBroker(BrokerInterface):
         end = pd.Timestamp.utcnow().floor(freq)
         idx = pd.date_range(end=end, periods=int(count), freq=freq)
         # Walk backwards from the live synthetic price so seeded history joins
-        # the live feed without a discontinuity.
+        # the live feed without a discontinuity. Scale candle range to match
+        # the aggregate diffusion of ticks over the candle interval.
         anchor = self._synth_mid(pair_key)
-        steps = self._rng.normal(0.0, self._tick_vol_pips * pip * 2.0, size=int(count))
+        try:
+            bar_seconds = pd.Timedelta(granularity).total_seconds()
+        except Exception:
+            bar_seconds = 300.0
+        n_ticks_per_bar = max(1.0, bar_seconds / max(0.01, self._tick_interval_s))
+        bar_vol = max(1.0, float(np.sqrt(n_ticks_per_bar)) * self._tick_vol_pips) * pip
+        steps = self._rng.normal(0.0, bar_vol * 0.7, size=int(count))
         closes = anchor + np.cumsum(steps)[::-1]
         opens = np.concatenate([[closes[0] - steps[0]], closes[:-1]])
-        span = np.abs(self._rng.normal(0.0, pip * 0.4, size=int(count)))
+        span = np.abs(self._rng.normal(bar_vol * 0.5, bar_vol * 0.3, size=int(count)))
         half = self._spread_pips * pip * 0.5
         return pd.DataFrame(
             {

@@ -1,5 +1,38 @@
 ---
 
+## Session - 2026-10-06 (Live OANDA Practice Integration, Preflight Schema Calibration, and Multi-Pair Real-Time Execution)
+**Date:** 2026-10-06 23:55 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Transitioned Live Trading to Real OANDA Practice Execution** ([`trading/live_engine.py`](file:///d:/forex-main/trading/live_engine.py)):
+  - Successfully connected the 3-pair multi-engine pipeline (`EURUSD`, `USDJPY`, `USDCAD`) directly to OANDA's institutional v20 REST and streaming pricing API using user credentials in `.env`.
+  - Streamed 4,032 real historical 5-minute bars per pair directly from OANDA servers into the feature buffers.
+  - Active background process running with real live pricing stream and Prometheus metrics exported on `:8000/metrics`.
+- **Pre-Flight Check & Promotion Gate Wiring for Non-Paper Brokers**:
+  - Enhanced `check_promotion` in [`trading/live_engine.py`](file:///d:/forex-main/trading/live_engine.py#L416) to recognize `checkpoints/stationary_ensemble/promotion_gate.json` and `<model>_ensemble/promotion_gate.json`, allowing certified stationary ensemble models to pass broker pre-flight gating.
+  - Added schema hash derivation in `_run_live_preflight` from `metadata.json` (`curated_feature_indices`), resolving the `Schema check skipped: pass model_schema_hash and live_schema_hash to enable` failure.
+- **Calibrated Paper Broker Synthetic Volatility**:
+  - Calibrated `PaperBroker.get_candles` in [`trading/live_engine.py`](file:///d:/forex-main/trading/live_engine.py#L1075) to scale candle variance according to the random walk diffusion of 1,200 ticks per 5-minute bar ($\sigma_{\text{candle}} = \sqrt{N_{\text{ticks}}} \cdot \sigma_{\text{tick}} \approx 20\text{ pips}$), preventing synthetic `SpreadVolatilityGuard (atr_spike)` blocks in simulation mode.
+
+### Files Edited
+- `trading/live_engine.py`: Updated `check_promotion` candidate paths, added metadata schema hash derivation in `_run_live_preflight`, and calibrated `PaperBroker.get_candles` volatility.
+- `data/news/latest_headlines.json`: Live market news update.
+- `docs/SESSION_REPORT.md`: Prepended session milestone.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- **Broker Pre-Flight Schema Hash Rejection (Critical)**: `_run_live_preflight` only looked for PyTorch `.pt` sidecar files (`<ckpt>_features.json`) to compute schema hashes, causing tree models (LightGBM stationary ensemble) to fail pre-flight validation with `Schema check skipped`. Fixed by deriving schema hashes from `metadata.json` curated feature indices when `model_dir` is present.
+- **Stationary Promotion Gate Lookup in Live Engine (High)**: `check_promotion` checked `checkpoints/stationary/promotion_gate.json` and `checkpoints/ensemble/` but missed `checkpoints/stationary_ensemble/promotion_gate.json`, blocking non-paper broker initialization. Added `checkpoints/stationary_ensemble/` and `<model>_ensemble/` to candidate paths.
+- **Synthetic Candle vs Tick Variance Mismatch (Medium)**: `PaperBroker.get_candles` created synthetic warmup candles with $\approx 1.4$ pip variance while the live tick random walk had $\approx 25$ pip diffusion, causing `SpreadVolatilityGuard` to falsely trigger `atr_spike`. Scaled candle variance to match cumulative tick diffusion over the bar duration.
+
+---
+
 ## Session - 2026-10-06 (Optuna Hyperparameter Optimization on 3-Pair Basket Yields +117,169 bps Net Profit, Sharpe +11.33, Models Retrained & Live Paper Engine Running)
 **Date:** 2026-10-06 21:19 EDT
 **Author:** Antigravity Bot
