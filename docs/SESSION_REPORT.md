@@ -46,6 +46,7 @@
 - `config/strategy_profiles.py`: Registered stationary strategy profile with $3.5\times$ TP and $0.8\times$ SL.
 - `checkpoints/stationary_ensemble/promotion_gate.json`: Updated gate metadata and SHA-256 hashes.
 - `data/news/latest_headlines.json`: Live news fetch update.
+- `trading/live_engine.py`: Fixed `_peer_features_fresh` to respect `per_pair_heads` and active running pair lists.
 - `docs/SESSION_REPORT.md`: Documented optimization results and deployment status.
 
 ### Files Added
@@ -59,6 +60,7 @@
 
 ### Bugs Fixed
 - **Multi-Pair Zarr Array Alignment (Medium)**: Fixed `g_zarr["close_pairs"]` indexing bug in `optimize_and_backtest_4h.py` where excluding GBPUSD caused index misalignment (index 2 pointing to GBPUSD instead of index 3 for USDCAD). Fixed by explicitly mapping through `pair_indices = {"EURUSD": 0, "USDJPY": 1, "USDCAD": 3}`.
+- **Peer Feature Block for Subsets and Per-Pair Models (High)**: When trading a subset of pairs (e.g. without GBPUSD), `_peer_features_fresh` was expecting all 4 default pairs to publish features every bar, causing decisions to be blocked with `peer_features_stale_or_missing`. Fixed by checking `per_pair_heads` (which operates on single-pair observation slices) and restricting peer checks to actively configured pairs.
 
 ---
 

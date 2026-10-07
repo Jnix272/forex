@@ -2257,6 +2257,7 @@ class LiveTradingEngine:
                 self._action_adapter = action_adapter
                 self.seq_len = int(getattr(m, "seq_len", seq_len) or seq_len)
                 self.expected_features = getattr(m, "n_features", None)
+                self.per_pair_heads = bool(getattr(m, "per_pair_heads", False))
                 self.pair_idx = int(pair_idx)
                 self.shared_pair_features = shared_pair_features
                 self._obs_buffer = _deque(maxlen=self.seq_len)
@@ -2961,13 +2962,19 @@ class LiveTradingEngine:
 
     def _peer_features_fresh(self, bars) -> bool:
         """For multi-pair models, every peer pair must have published this bar."""
+        wrap = getattr(self, "_agent_wrap_slow", None)
+        if getattr(wrap, "per_pair_heads", False) or getattr(getattr(wrap, "m", None), "per_pair_heads", False):
+            return True
         shared = getattr(self, "shared_pair_features", None)
         ts = getattr(self, "shared_pair_ts", None)
-        n_exp = getattr(self._agent_wrap_slow, "expected_features", None)
+        n_exp = getattr(wrap, "expected_features", None)
         if shared is None or ts is None or not isinstance(n_exp, (int, np.integer)) or int(n_exp) <= 146:
             return True
         key = _bar_key(bars)
-        return all(ts.get(p) == key for p in LIVE_PAIR_ORDER[: int(n_exp) // 146])
+        active = getattr(self, "active_pairs", None)
+        if active:
+            return all(ts.get(p) == key for p in active)
+        return all(ts.get(p) == key for p in LIVE_PAIR_ORDER[: int(n_exp) // 146] if p in ts)
 
     def _on_new_bar(self, bars, bar_idx: int):
         self._maybe_hot_reload()
@@ -4092,6 +4099,7 @@ class MultiPairLiveTradingEngine:
         ]
         for e in self.engines:
             e.shared_pair_ts = self.shared_pair_ts
+            e.active_pairs = [str(p).upper().replace("/", "").replace("_", "") for p in self.pairs]
         if _shared_pvar is not None:
             for e in self.engines:
                 e.pvar = _shared_pvar
