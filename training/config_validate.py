@@ -518,7 +518,7 @@ def validate_run_config(args: Any, *, verbose: bool = True) -> int:
         f"  Checkpoints : {getattr(args, 'checkpoint_dir', '?')}",
         f"  Data cache  : {getattr(args, 'data_cache', '?')}",
         f"  Strategy    : {getattr(args, 'strategy_mode', '?')} | "
-        f"{getattr(args, 'data_start', '?')} → {getattr(args, 'data_end', '?')}",
+        f"{getattr(args, 'data_start', '?')} -> {getattr(args, 'data_end', '?')}",
         f"  Pairs       : {', '.join(_get_pairs(args))}",
         f"  Walk-forward: {'ON' if getattr(args, 'walk_forward_cv', False) else 'OFF'} ({int(est['folds'])} folds)",
         f"  Epochs      : {getattr(args, 'epochs', '?')} (est. ~{est['avg_sup_epochs']:.0f} effective w/ early-stop)",
@@ -582,7 +582,7 @@ def validate_run_config(args: Any, *, verbose: bool = True) -> int:
                 lines.append(
                     f"    ⚠ {len(_skipped)}/{len(_pairs)} pairs lack data (<{_min_y} years): {', '.join(_skipped)}"
                 )
-                lines.append(f"    → Download with: python scripts/download_data.py --pairs {' '.join(_skipped)}")
+                lines.append(f"    -> Download with: python scripts/download_data.py --pairs {' '.join(_skipped)}")
                 errors.append(f"Data coverage: {len(_skipped)} pair(s) lack sufficient data")
             else:
                 _low = [r["pair"] for r in _rep if r["status"] == "LOW"]
@@ -601,6 +601,9 @@ def validate_run_config(args: Any, *, verbose: bool = True) -> int:
     lines.extend(["=" * 62, ""])
 
     if verbose:
-        print("\n".join(lines))
+        try:
+            print("\n".join(lines))
+        except UnicodeEncodeError:
+            print("\n".join(lines).encode("ascii", errors="replace").decode("ascii"))
 
     return 1 if errors else 0

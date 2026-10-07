@@ -1,5 +1,46 @@
 ---
 
+## Session - 2026-10-07 (Uncapped Historical Data Configuration and Curriculum Sync)
+**Date:** 2026-10-07 02:12 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Removed Tick Cap from Configuration** ([`config/run.yaml`](file:///d:/forex-main/config/run.yaml#L274)):
+  - Updated `n_ticks: 0` (`0 = uncapped`), allowing dataset building and ingestion to process the complete historical tick archive (2007–2026, over 800M+ real market ticks across 18 GB of compressed parquet files) rather than truncating at 20 million ticks.
+- **Synchronized Curriculum Stubs in Settings** ([`config/settings.py`](file:///d:/forex-main/config/settings.py#L1033)):
+  - Reconciled `CURRICULUM["feature_groups"]` schedule stubs (`execution_cost`, `cross_asset`, `higher_timeframe`) to match `config/run.yaml` (`epoch_unfreeze: 0, always_on: True`), resolving fail-closed pre-flight errors in `config_validate.py`.
+- **Pre-flight & Windows Unicode Hardening** ([`training/config_validate.py`](file:///d:/forex-main/training/config_validate.py), [`training/train_gpu.py`](file:///d:/forex-main/training/train_gpu.py)):
+  - Replaced non-ASCII arrows and wrapped validation prints in cp1252 error handling to prevent `UnicodeEncodeError` in Windows consoles and W&B log captures.
+  - Formatted `Ticks: all (uncapped)` display in GPU training banners when `n_ticks <= 0`.
+  - Added zero-division safeguards in `training/dataset_builder.py` for synthetic chunk percentage reporting when `n_ticks == 0`.
+- **Audited Real Historical Tick Holdings**:
+  - Queried local DuckDB archive: verified EURUSD alone contains **203,971,160 real ticks** across 2007–2026 (20 full years), and 10 currency pairs span 17.97 GB on disk.
+- **Maintained Live OANDA Practice Daemon**:
+  - Confirmed active background process `task-3430` continues executing practice orders on live pricing uninterrupted.
+
+### Files Edited
+- `config/run.yaml`: Set `data.n_ticks: 0` to uncap data ingestion.
+- `config/settings.py`: Synced `execution_cost`, `cross_asset`, and `higher_timeframe` curriculum stubs with `run.yaml`.
+- `scripts/train.py`: Added default `--epochs 6 --walk-forward-folds 2` for `--quick` smoke mode.
+- `training/config_validate.py`: Fixed Windows cp1252 character encoding crashes and ASCII formatting.
+- `training/dataset_builder.py`: Added division-by-zero guards for `n_ticks <= 0`.
+- `training/train_gpu.py`: Added `all (uncapped)` display for `n_ticks <= 0`.
+- `data/news/latest_headlines.json`: Live market news telemetry update.
+- `docs/SESSION_REPORT.md`: Prepended session milestone.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- **Curriculum Settings Drift Pre-Flight Error (High)**: `config_validate.py` threw blocking errors comparing `settings.CURRICULUM` stubs against `run.yaml` for `execution_cost`, `cross_asset`, and `higher_timeframe`. Resolved by updating `config/settings.py` stubs to match active scalping feature groups.
+- **Windows cp1252 Console UnicodeEncodeError in Config Validator (Medium)**: Unicode arrow glyphs (`→`) raised exceptions in W&B / console log capture on Windows cp1252 terminals. Replaced with ASCII `->` and added fallback character mapping.
+- **Synthetic Division-by-Zero Guard (Low)**: Setting `n_ticks: 0` could trigger zero division in synthetic progress calculation. Added `args.n_ticks > 0` guard.
+
+---
+
 ## Session - 2026-10-07 (Interactive Live Terminal HUD Dashboard Deployed)
 **Date:** 2026-10-07 00:35 EDT
 **Author:** Antigravity Bot

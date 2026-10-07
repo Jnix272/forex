@@ -218,6 +218,10 @@ def main() -> int:
 
     if args.quick:
         train_cmd.append("--quick-mode")
+        if "--epochs" not in args.extra:
+            train_cmd.extend(["--epochs", "6"])
+        if "--walk-forward-folds" not in args.extra:
+            train_cmd.extend(["--walk-forward-folds", "2"])
     if args.pretrain:
         train_cmd.append("--pretrain")
     if args.ablate_pretrain:

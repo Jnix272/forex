@@ -3668,7 +3668,7 @@ def _build_multipair_dataset(
                 n_features = n_feat
                 total_samples += len(X_seq)
                 _append_chunk(X_seq, y_seq, y_cls_seq, pq_seq, diff_seq, close_seq, atr_seq, spread_seq)
-                pct = min((args.n_ticks - n_remaining + chunk_n_ticks) / args.n_ticks * 100, 100)
+                pct = min((args.n_ticks - n_remaining + chunk_n_ticks) / args.n_ticks * 100, 100) if args.n_ticks > 0 else 100
                 print(f"  Chunk {chunk_n + 1} | {len(X_seq):,} seqs | {pct:.0f}%")
                 if not getattr(args, "_feature_schema_checked", False):
                     args._feature_schema_checked = True
@@ -4430,7 +4430,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
         elapsed = time.time() - t0
         if args.data_source == "synthetic":
             done = min((chunk_n + 1) * args.chunk_size, args.n_ticks)
-            pct = min(done / args.n_ticks * 100, 100)
+            pct = min(done / args.n_ticks * 100, 100) if args.n_ticks > 0 else 100
             print(
                 f"  Chunk {chunk_n + 1} | {n_samples_chunk:,} seqs | "
                 f"{elapsed:.1f}s | {pct:.0f}% ({total_samples:,} total)"

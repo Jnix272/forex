@@ -1030,13 +1030,13 @@ CURRICULUM = {
         "microstructure": {"epoch_unfreeze": 0, "always_on": True},
         "momentum": {"epoch_unfreeze": 0, "always_on": True},
         "session": {"epoch_unfreeze": 0, "always_on": True},
-        "execution_cost": {"epoch_unfreeze": 1, "always_on": False},
+        "execution_cost": {"epoch_unfreeze": 0, "always_on": True},
         "volatility": {"epoch_unfreeze": 2, "always_on": False},
-        "cross_asset": {"epoch_unfreeze": 3, "always_on": False},
+        "cross_asset": {"epoch_unfreeze": 0, "always_on": True},
         "news": {"epoch_unfreeze": 3, "always_on": False},
         "macro": {"epoch_unfreeze": 4, "always_on": False},
         "market_regime": {"epoch_unfreeze": 4, "always_on": False},
-        "higher_timeframe": {"epoch_unfreeze": 5, "always_on": False},
+        "higher_timeframe": {"epoch_unfreeze": 0, "always_on": True},
         # label_quality: disabled in run.yaml (features not implemented)
     },
     # A2: Chunk-level early stopping removed.

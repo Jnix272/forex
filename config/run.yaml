@@ -271,7 +271,7 @@ data:
   full_day_data: false
   integrity_gate: true
   momentum_window: 20
-  n_ticks: 20000000
+  n_ticks: 0  # 0 = uncapped (ingest all ticks in date range)
   min_pair_years: 2      # Minimum years of data per pair for multi-pair training
   expected_pair_years: 10  # Data span 2015-01-01 → 2025-12-30 = ~10 years
   chunk_rows: "auto"       # Zarr chunk rows: auto=512(single)/4096(multi), or explicit number

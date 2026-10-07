@@ -627,7 +627,8 @@ def main():
 
     print(f"\n{'=' * 62}")
     print("  Forex Scaling Model -- 20M Tick GPU Trainer")
-    print(f"  Run: {run_name}  |  Ticks: {args.n_ticks:,}  |  Mode: {_model_display}")
+    _ticks_str = "all (uncapped)" if int(getattr(args, "n_ticks", 0) or 0) <= 0 else f"{args.n_ticks:,}"
+    print(f"  Run: {run_name}  |  Ticks: {_ticks_str}  |  Mode: {_model_display}")
     if _queue_display:
         print(f"  Model queue: {_queue_display}")
     print(f"  Checkpoint dir: {args.checkpoint_dir}")
