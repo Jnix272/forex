@@ -392,7 +392,7 @@ class DataQualityGates:
         elif action == RemediationAction.FIX_OHLC:
             # Fix OHLC inconsistencies
             fixed = 0
-            if all(c in df.columns for c in ["open", "high", "low", "close"]):
+            if {"open", "high", "low", "close"}.issubset(df.columns):
                 # Ensure high >= max(open, close) and low <= min(open, close)
                 df = df.with_columns(
                     [
