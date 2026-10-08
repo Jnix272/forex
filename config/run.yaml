@@ -683,13 +683,13 @@ training:
   #                    production training; use "sharpe" only for ablation comparisons.
   early_stop_metric: cost_sharpe
   early_stop_min_delta: 0.02
-  epochs: 40
+  epochs: 25
   grad_accum_steps: 2
   grad_clip: 0.5
   label_method: cpar
   label_smoothing: 0.1
   loss: huber
-  lr: 3.0e-05
+  lr: 1.5e-05
   lr_min_ratio: 0.08
   lr_schedule: warmup_cosine
   lr_warmup_epochs: 2
@@ -697,7 +697,7 @@ training:
   max_zero_frac: 0.80
   onecycle_max_lr_mult: 10.0
   onecycle_pct_start: 0.1
-  patience: 5
+  patience: 8
   resume: false
   save_every: 5
   seed: 1337

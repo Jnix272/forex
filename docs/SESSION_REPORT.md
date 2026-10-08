@@ -1,5 +1,43 @@
 ---
 
+## Session - 2026-10-08 (Flagship 25-Epoch HAELT Modern Regime Training Launch)
+**Date:** 2026-10-08 01:10 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Full Execution of "Do All" Strategy**:
+  1. **Maintained Live Paper Trading Daemon (`task-3430`)**:
+     - Operational on OANDA practice account `101-001-38834567-001`.
+     - **Account NAV / Equity**: **\$98,714.05 USD** | **Balance**: **\$98,714.05 USD** | **Open Trades**: 0 (capital preserved).
+     - Running the certified stationary ensemble baseline model ([`checkpoints/stationary_ensemble/promotion_gate.json`](file:///d:/forex-main/checkpoints/stationary_ensemble/promotion_gate.json), out-of-sample Net Sharpe **11.33**).
+  2. **Archived Warmup Artifacts**:
+     - Preserved previous 6-epoch warmup checkpoint directory to `checkpoints/haelt_modern_2018_2025_warmup_6ep/`.
+  3. **Configured Auto-Tune Validated Hyperparameters** ([`config/run.yaml`](file:///d:/forex-main/config/run.yaml)):
+     - Updated `training.epochs: 25`.
+     - Updated `training.lr: 1.5e-05` (with cosine annealing and 2-epoch warmup).
+     - Updated `training.patience: 8`.
+  4. **Launched Flagship 25-Epoch HAELT Modern Regime Training (`task-5143`)**:
+     - Command: `.venv311\Scripts\python.exe -u scripts/train.py --full`
+     - Successfully allocated **NVIDIA GeForce RTX 4060 Laptop GPU** (BF16 AMP, TF32).
+     - **Instantaneous Zarr Cache Hit**: Loaded 191,271 multi-pair sequences ($191,271 \times 120 \times 438$) in **1.9 seconds** (completely bypassing 12+ hours of Dukascopy tick parsing).
+     - **Preflight Verification Passed**: Fold 0 preflight verified healthy class balance: Sell 43.7% / Hold 16.0% / Buy 40.3% (no collapse).
+     - Active multi-task transformer architecture (1,214,274 parameters) training on GPU.
+
+### Files Edited
+- `config/run.yaml`: Set `epochs: 25`, `lr: 1.5e-05`, `patience: 8`.
+- `docs/SESSION_REPORT.md`: Prepended session progress report.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- None (production milestone launch).
+
+---
+
 ## Session - 2026-10-07 (6-Epoch Checkpoint Evaluation & Root Cause Analysis)
 **Date:** 2026-10-07 22:10 EDT
 **Author:** Antigravity Bot
