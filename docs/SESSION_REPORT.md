@@ -1,5 +1,40 @@
 ---
 
+## Session - 2026-10-07 (6-Epoch Checkpoint Evaluation & Root Cause Analysis)
+**Date:** 2026-10-07 22:10 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Threshold Sweep & Model Diagnostic Execution (`task-4939`)**:
+  - Upgraded and ran [`scripts/sweep_confidence_thresholds.py`](file:///d:/forex-main/scripts/sweep_confidence_thresholds.py) on NVIDIA RTX 4060 Laptop GPU across 57,382 validation sequences.
+  - Verified evaluation across confidence thresholds (0.05 to 0.50).
+  - **Root Cause Identified**:
+    - `logs/auto_tune/high-impact-haelt-main_proposal.json` confirmed the 6-epoch warmup model collapsed into predicting 100% HOLD (`pred_counts: [0, 172146, 0]`, 0 trades executed under confidence gating).
+    - In the un-gated mode, random micro-predictions triggered 1,896 micro-trades where transaction frictions (8.59%) degraded returns.
+    - 6 warmup epochs are mathematically insufficient for the 1.2M parameter HAELT Transformer with 438 multi-pair features to establish crisp class separation.
+- **Permanent Asset Ready for Production Training**:
+  - The 1.154 Billion tick dataset build is permanently cached in Zarr format (`191,271` sequences, $191,271 \times 120 \times 438$), bypassing the 12+ hour Dukascopy tick ingestion phase completely.
+  - A full 25–30 epoch training push will now execute in ~1.5 to 2.5 hours of pure GPU compute.
+- **Live Trading Daemon Health (`task-3430`)**:
+  - Active on OANDA practice account `101-001-38834567-001` running the stationary ensemble model.
+  - **Account NAV / Equity**: **\$98,714.05 USD** | **Balance**: **\$98,714.05 USD** | **Open Trades**: 0 (capital preserved).
+
+### Files Edited
+- `scripts/sweep_confidence_thresholds.py`: Accelerated inference with direct chunked Zarr slicing and integrated `load_pytorch_model` from `inference.pytorch_inference`.
+- `docs/SESSION_REPORT.md`: Prepended session progress report.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- Fixed `ImportError` on missing `_load_scaler_state` in `scripts/sweep_confidence_thresholds.py` by switching to `load_inference_scaler` (Severity: Low).
+- Fixed `RuntimeError` due to MultiTask state dict key mismatch when loading HAELT checkpoints in standalone scripts (Severity: Medium).
+
+---
+
 ## Session - 2026-10-07 (Modern HAELT Flagship Run Concluded & Holdout Gate Evaluation)
 **Date:** 2026-10-07 21:52 EDT
 **Author:** Antigravity Bot

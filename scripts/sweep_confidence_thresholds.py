@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
 
 from training.honest_eval import load_aux_arrays, load_price_arrays, net_pnl_metrics, pooled_pair_metrics
 from training.model_factory import build_model
-from training.supervised_loop import ZarrStreamDataset, _load_scaler_state
+from inference._scaler_load import load_inference_scaler, SCALED_FEATURE_CLIP
 
 
 def main():
@@ -52,62 +52,60 @@ def main():
     seq_len = cfg["seq_len"]
 
     print(f"Loading checkpoint: {ckpt_path}")
-    print(f"Dataset cache: {cache_path}")
-    print(f"Validation slice: {val_range[0]} to {val_range[1]} ({len(val_idx):,} samples)")
+    print(f"Dataset cache: {cache_path}", flush=True)
+    print(f"Validation slice: {val_range[0]} to {val_range[1]} ({len(val_idx):,} samples)", flush=True)
 
-    # Load scaler state
-    scaler_path = ckpt_path.parent / ckpt_path.name.replace(".pt", "_scaler.npz")
-    scaler = _load_scaler_state(scaler_path) if scaler_path.exists() else None
+    # Build model and load weights via production inference loader
+    from inference.pytorch_inference import load_pytorch_model
+    device = torch.device(args.device)
+    model, n_features, seq_len, arch_name, scaler = load_pytorch_model(
+        str(ckpt_path),
+        model_name=cfg.get("model", "haelt"),
+        device=device,
+        cache_path=cache_path,
+    )
+    model.to(device)
+    model.eval()
 
     # Load arrays for honest evaluation
     close_pairs, spread_pairs = load_price_arrays(cache_path, pairs=True)
     t_ns, atr_pairs = load_aux_arrays(cache_path)
     pair_names = ["EURUSD", "USDJPY", "USDCAD"]
 
-    # Build model and load weights
-    device = torch.device(args.device)
-    model = build_model(
-        cfg.get("model", "haelt"),
-        n_features,
-        seq_len,
-        n_classes=3,
-        d_model=cfg.get("d_model", 256),
-        nhead=cfg.get("nhead", 8),
-        hidden_size=cfg.get("hidden_size", 256),
-        num_layers=cfg.get("num_layers", 3),
-        dropout=cfg.get("dropout", 0.35),
-    ).to(device)
+    import zarr
+    from inference._scaler_load import SCALED_FEATURE_CLIP
 
-    raw_state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    state_dict = raw_state["model_state"] if "model_state" in raw_state else raw_state
-    model.load_state_dict(state_dict)
-    model.eval()
+    root = zarr.open(str(cache_path), mode="r")
+    X = root["X"]
 
-    # Create validation dataset
-    val_ds = ZarrStreamDataset(
-        cache_path,
-        val_idx,
-        shuffle_chunks=False,
-        multitask_targets=True,
-        scaler=scaler,
-    )
-    val_dl = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
-
-    print("\nRunning GPU inference across validation batches...")
+    print("\nRunning GPU inference across validation batches...", flush=True)
     logits_list = []
+    bs = args.batch_size
+    n_total = len(val_idx)
     with torch.no_grad():
-        for batch in val_dl:
-            xb = batch[0].to(device)
-            out = model(xb)
+        for i in range(0, n_total, bs):
+            b = val_idx[i : i + bs]
+            if len(b) > 1 and b[-1] - b[0] + 1 == len(b):
+                xb = np.asarray(X[int(b[0]) : int(b[-1]) + 1], dtype=np.float32)
+            else:
+                xb = np.asarray(X.get_orthogonal_selection((b, slice(None), slice(None))), dtype=np.float32)
+            np.nan_to_num(xb, copy=False, nan=0.0, posinf=1e6, neginf=-1e6)
+            if scaler is not None:
+                shp = xb.shape
+                xb = scaler.transform(xb.reshape(-1, shp[-1])).astype(np.float32).reshape(shp)
+                np.clip(xb, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=xb)
+            out = model(torch.from_numpy(xb).to(device))
             logits = out[0] if isinstance(out, tuple) else out
             logits_list.append(logits.cpu().float())
+            if (i // bs) % 25 == 0 or i + bs >= n_total:
+                print(f"  Processed {min(i + bs, n_total):,}/{n_total:,} samples ({100.0 * min(i + bs, n_total) / n_total:.1f}%)", flush=True)
 
     all_logits = torch.cat(logits_list, dim=0)  # (N, n_classes) or (N, n_pairs, 3)
     probs = torch.softmax(all_logits, dim=-1).numpy()
-    print(f"Inference complete. Probs shape: {probs.shape}")
+    print(f"Inference complete. Probs shape: {probs.shape}", flush=True)
 
-    print("\n" + "=" * 80)
-    print(f"{'Threshold':>10} | {'Trades':>8} | {'Win Rate':>9} | {'Gross Sharpe':>13} | {'Net Sharpe':>11} | {'95% CI Low':>11} | {'Mean Net (bps)':>14}")
+    print("\n" + "=" * 80, flush=True)
+    print(f"{'Threshold':>10} | {'Trades':>8} | {'Win Rate':>9} | {'Gross Sharpe':>13} | {'Net Sharpe':>11} | {'95% CI Low':>11} | {'Mean Net (bps)':>14}", flush=True)
     print("-" * 80)
 
     best_threshold = None
