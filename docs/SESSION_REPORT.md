@@ -1,5 +1,38 @@
 ---
 
+## Session - 2026-10-07 (Modern HAELT Flagship Run Concluded & Holdout Gate Evaluation)
+**Date:** 2026-10-07 21:52 EDT
+**Author:** Antigravity Bot
+
+### What Was Done
+- **Flagship HAELT GPU Modern Regime Training Concluded (`task-4023`)**:
+  - Training completed successfully with exit code 0 across 70,197.7s (~19.5 hours total session compute).
+  - Production refit completed and promoted:
+    - [`checkpoints/haelt_modern_2018_2025/haelt/haelt_best.pt`](file:///d:/forex-main/checkpoints/haelt_modern_2018_2025/haelt/haelt_best.pt)
+    - Full artifacts: `haelt_model_card.json`, `train_summary.json`, `deployment.json`.
+  - **Promotion Gate Evaluated on 2025 Cached Holdout** (`rows [172144, 191271)`, March to December 2025):
+    - Gate safely rejected promoting 6-epoch warmup model to live trading (`REJECT`, `sharpe=-4.90`, `cost_pct=8.59%` due to unrefined threshold triggering 1,896 trades without conviction gating).
+    - Auto-Tune system created proposals in `logs/auto_tune/high-impact-haelt-main_proposal.json` recommending learning rate adjustment and conviction thresholding.
+  - **Permanent Asset Unlocked**:
+    - Complete 2018–2025 modern regime dataset (191,271 joint multi-pair sequences, $191,271 \times 120 \times 438$) permanently cached as fast Zarr (`dataset_scalping_5m_EURUSD-USDCAD-USDJPY...zarr`), enabling instantaneous re-training without data generation overhead.
+- **Live OANDA Practice Engine Health Check (`task-3430`)**:
+  - Live execution engine continuously active on OANDA practice account `101-001-38834567-001`.
+  - **Account Equity / NAV**: **\$98,714.05 USD** | **Balance**: **\$98,714.05 USD** | **Open Trades**: 0 (capital preserved).
+
+### Files Edited
+- `docs/SESSION_REPORT.md`: Prepended session progress report.
+
+### Files Added
+- None.
+
+### Files Deleted
+- None.
+
+### Bugs Fixed
+- None (milestone completion and evaluation).
+
+---
+
 ## Session - 2026-10-07 (Modern HAELT Walk-Forward Complete & Full Refit Final Epoch)
 **Date:** 2026-10-07 21:25 EDT
 **Author:** Antigravity Bot
