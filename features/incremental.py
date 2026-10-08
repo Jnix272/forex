@@ -6,7 +6,8 @@ Stateful incremental feature computation for streaming/online processing.
 
 from __future__ import annotations
 
-import pickle
+import dataclasses
+import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,17 @@ class FeatureState:
     # Version for compatibility — bump when schema changes
     version: int = 2
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert state to a dictionary for JSON serialization."""
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FeatureState:
+        """Create FeatureState from dictionary, ignoring unknown fields for safe evolution."""
+        valid_keys = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
+
 
 class IncrementalFeatureEngine:
     """
@@ -62,7 +74,7 @@ class IncrementalFeatureEngine:
 
     def _get_state_path(self, pair: str) -> Path:
         """Get state file path for a pair"""
-        return self.state_dir / f"{pair}_feature_state.pkl"
+        return self.state_dir / f"{pair}_feature_state.json"
 
     def load_state(self, pair: str) -> FeatureState:
         """Load feature state for a pair"""
@@ -74,11 +86,10 @@ class IncrementalFeatureEngine:
 
             if state_path.exists():
                 try:
-                    with open(state_path, "rb") as f:
-                        state = pickle.load(f)
-                    if not isinstance(state, FeatureState):
-                        state = FeatureState(pair=pair)
-                    elif getattr(state, "version", 1) != FeatureState.version:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    state = FeatureState.from_dict(data)
+                    if getattr(state, "version", 1) != FeatureState.version:
                         raise ValueError(
                             f"Stale FeatureState v{getattr(state, 'version', 1)} for {pair}; "
                             f"expected v{FeatureState.version}. Delete cache and recompute."
@@ -100,8 +111,8 @@ class IncrementalFeatureEngine:
         with self._lock:
             if pair in self.states:
                 try:
-                    with open(state_path, "wb") as f:
-                        pickle.dump(self.states[pair], f)
+                    with open(state_path, "w", encoding="utf-8") as f:
+                        json.dump(self.states[pair].to_dict(), f, indent=2)
                 except Exception as e:
                     print(f"[IncrementalFeatureEngine] Failed to save state for {pair}: {e}")
 
@@ -362,25 +373,28 @@ class FeatureStateStore:
         return f"{self.key_prefix}{pair}"
 
     def save(self, pair: str, state: FeatureState):
-        """Save state to Redis"""
+        """Save state to Redis using JSON serialization"""
         if self._redis is None:
             return
 
         try:
-            data = pickle.dumps(state)
+            data = json.dumps(state.to_dict())
             self._redis.set(self._get_key(pair), data)
         except Exception as e:
             print(f"[FeatureStateStore] Failed to save state for {pair}: {e}")
 
     def load(self, pair: str) -> FeatureState | None:
-        """Load state from Redis"""
+        """Load state from Redis using JSON deserialization"""
         if self._redis is None:
             return None
 
         try:
             data = self._redis.get(self._get_key(pair))
             if data:
-                return pickle.loads(data)
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                parsed = json.loads(data)
+                return FeatureState.from_dict(parsed)
         except Exception as e:
             print(f"[FeatureStateStore] Failed to load state for {pair}: {e}")
         return None
