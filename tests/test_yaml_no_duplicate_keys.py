@@ -10,10 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = sorted((ROOT / "config").glob("*.yaml")) + sorted((ROOT / "config" / "models").glob("*.yaml"))
 
 
-class _StrictLoader(yaml.SafeLoader):
-    pass
-
-
 def _no_duplicates(loader, node, deep=False):
     seen = set()
     for key_node, _ in node.value:
@@ -26,9 +22,9 @@ def _no_duplicates(loader, node, deep=False):
     return loader.construct_mapping(node, deep)
 
 
-_StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates)
+yaml.SafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates)
 
 
 @pytest.mark.parametrize("path", CONFIGS, ids=lambda p: p.name)
 def test_config_has_no_duplicate_keys(path):
-    yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLoader)
+    yaml.safe_load(path.read_text(encoding="utf-8"))
