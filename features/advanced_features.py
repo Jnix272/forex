@@ -239,7 +239,10 @@ def cot_features(index, cot_data=None):
         return F
     cot = cot_data.copy()
     cot.index = pd.to_datetime(cot.index, utc=True)
-    cot = cot.reindex(index, method="ffill").ffill().bfill()
+    # COT releases arrive with a publication delay.  Forward-fill only: a
+    # backfill would copy a future report into earlier bars at the start of
+    # the requested window.
+    cot = cot.reindex(index, method="ffill").ffill()
     ln = cot.get("long_noncom", pd.Series(0, index=index))
     sn = cot.get("short_noncom", pd.Series(0, index=index))
     F["cot_net"] = (ln - sn) / (ln + sn + 1e-9)
@@ -322,7 +325,9 @@ def rolling_hurst_fractal(bars, windows=None):
     if windows is None:
         windows = [30, 60, 120]
     c_clip = pd.Series(bars["close"]).clip(lower=1e-12)
-    log_ret = pd.Series(np.log(c_clip / c_clip.shift(1).bfill()), index=bars.index).fillna(0.0)
+    # The first return is undefined.  Keep it neutral instead of borrowing
+    # the next close to populate the prior row.
+    log_ret = pd.Series(np.log(c_clip / c_clip.shift(1)), index=bars.index).fillna(0.0)
     df = pd.DataFrame(index=bars.index)
     for w in windows:
         h = rolling_hurst(log_ret, window=w, step=1)
@@ -463,7 +468,9 @@ def compute_multipair_features(
 
     F["no_trade_score"] = ((low_vol + neutral_ofi + trend_unstable) / 3.0).clip(0.0, 1.0)
 
-    F = F.ffill().bfill().fillna(0.0)
+    # Rolling warm-up rows have no history; neutral-fill them without looking
+    # ahead to later feature values.
+    F = F.ffill().fillna(0.0)
     return pl.from_pandas(F.reset_index(drop=True))
 
 

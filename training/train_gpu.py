@@ -415,6 +415,7 @@ from training.rl_runner import (
 )
 from training.supervised_loop import (
     FeatureStabilityMonitor,
+    _fold_provenance,
     _sanitize_batch_tensors,
     train_epoch,
     validate_epoch,
@@ -851,6 +852,26 @@ def main():
                 ta.checkpoint_dir = str(Path(model_args.checkpoint_dir) / "hpo_trials" / f"trial_{trial.number}")  # noqa: B023
                 build_model(model_name, n_features, ta).to(device)  # noqa: B023
                 h, bv = supervised_train(model_name, cache_path, n_samples, n_features, ta, device, n_gpus, run=None)  # noqa: B023, RUF059
+                if str(getattr(ta, "early_stop_metric", "auto")).lower() == "cost_sharpe":
+                    _honest_scores = [
+                        float(v) for v in (h.get("cost_aware_sharpe") or [])
+                        if v is not None and np.isfinite(float(v))
+                    ]
+                    if not _honest_scores:
+                        raise RuntimeError(
+                            "HPO trial has no honest cost_sharpe (requires real prices and at least 30 trades); "
+                            "validation-loss fallback is not comparable to the Sharpe objective."
+                        )
+                elif str(getattr(ta, "early_stop_metric", "auto")).lower() == "sharpe":
+                    _honest_scores = [
+                        float(v) for v in (h.get("val_sharpe") or [])
+                        if v is not None and np.isfinite(float(v))
+                    ]
+                    if not _honest_scores:
+                        raise RuntimeError(
+                            "HPO trial has no valid honest Sharpe; validation-loss fallback is not comparable "
+                            "to the Sharpe objective."
+                        )
                 return bv
 
             direction = "maximize" if early_stop_metric_maximizes(getattr(model_args, "early_stop_metric", "auto")) else "minimize"
@@ -863,10 +884,14 @@ def main():
                 show_progress_bar=True,
                 catch=(RuntimeError,),
             )
-            if study.best_trial is None:
+            _complete_trials = [
+                t for t in study.trials
+                if t.state.name == "COMPLETE" and t.value is not None and np.isfinite(float(t.value))
+            ]
+            if not _complete_trials:
                 raise RuntimeError(
-                    f"[HPO] All {model_args.n_trials} trials failed -- "
-                    "check logs above; try scripts/optuna_tune.py for curriculum/arch search."
+                    f"[HPO] No trial produced a finite comparable objective among {model_args.n_trials} trials. "
+                    "Honest Sharpe requires real prices and at least 30 trade periods; other failures are shown above."
                 )
             for k, v in study.best_params.items():
                 setattr(model_args, k.replace("-", "_"), v)
@@ -1042,17 +1067,32 @@ def main():
                         amp_dtype=amp_dtype,
                     )
                 gate_sim = _gate_sim_for_hist(history, getattr(model_args, 'early_stop_metric', 'val_loss'))
-                cv_hist.append({"fold": fi, "best_metric": best_val, "history": history, "gate_sim": gate_sim})
-                # Per-fold gate simulation vs early_stop (mismatch fix)
-                try:
-                    vs_curve = history.get("val_sharpe", []) or []
-                    best_sh = float(max(vs_curve)) if vs_curve else 0.0
-                    promoted = gate_sim.get("promoted", False)
-                    print(f"[GateSim] Fold {fi}: val_sharpe {best_sh:.2f} → gate {'PASS' if promoted else 'REJECT'} (early_stop {getattr(model_args,'early_stop_metric','val_loss')})")
-                    from training.core import _safe_wandb_log
-                    _safe_wandb_log(wandb_run, {f"gate/fold_{fi}_promoted": int(promoted), f"gate/fold_{fi}_sharpe": best_sh})
-                except Exception:
-                    pass
+                _selected_epoch = max(1, int(history.get("selected_epoch", 1)))
+                _selected_idx = _selected_epoch - 1
+                _fold_costs = history.get("cost_aware_sharpe") or []
+                _fold_trades = history.get("honest_n_trades") or []
+                _fold_periods = history.get("honest_n_portfolio_periods") or []
+                _fold_cis = history.get("honest_sharpe_ci_low") or []
+                _fold_record = {
+                    "fold": fi,
+                    "best_metric": best_val,
+                    "history": history,
+                    "gate_sim": gate_sim,
+                    "provenance": _fold_provenance(cache_path, tr_i, va_i, model_args),
+                    "selected_epoch": _selected_epoch,
+                    "selection_metric_name": history.get("selection_metric_name"),
+                    "selected_trade_count": history.get("selected_trade_count", _fold_trades[_selected_idx] if _selected_idx < len(_fold_trades) else None),
+                    "selected_portfolio_periods": history.get("selected_portfolio_periods", _fold_periods[_selected_idx] if _selected_idx < len(_fold_periods) else None),
+                    "selected_net_sharpe_after_costs": history.get("selected_net_sharpe_after_costs", _fold_costs[_selected_idx] if _selected_idx < len(_fold_costs) else None),
+                    "selected_metric_score": history.get("selected_metric_score", best_val),
+                    "selected_val_loss": history.get("selected_val_loss"),
+                    "selected_sharpe_ci_low": history.get(
+                        "selected_sharpe_ci_low",
+                        _fold_cis[_selected_idx] if _selected_idx < len(_fold_cis) else None,
+                    ),
+                }
+                cv_hist.append(_fold_record)
+                print(f"[GateSim] Fold {fi}: skipped; promotion requires the isolated forward holdout.")
             _artifact_run_name = str(getattr(model_args, "run_name_slug", "") or _slug_part(run_name, max_len=140))
 
             _artifact_model_name = _slug_part(model_name, max_len=80)
@@ -1101,11 +1141,7 @@ def main():
             # Gate simulation for single-split (mismatch fix)
             try:
                 gate_sim = _gate_sim_for_hist_outer(history, getattr(model_args, 'early_stop_metric','val_loss'))
-                vs_curve = history.get("val_sharpe", []) or []
-                best_sh = float(max(vs_curve)) if vs_curve else 0.0
-                print(f"[GateSim] Single: val_sharpe {best_sh:.2f} → gate {'PASS' if gate_sim.get('promoted') else 'REJECT'} (early_stop {getattr(model_args,'early_stop_metric','val_loss')})")
-                from training.core import _safe_wandb_log as _swl2
-                _swl2(wandb_run, {"gate/single_promoted": int(gate_sim.get("promoted", False)), "gate/single_sharpe": best_sh})
+                print("[GateSim] Single: skipped; promotion requires the isolated forward holdout.")
                 history["gate_sim"] = gate_sim
             except Exception:
                 pass
@@ -1157,9 +1193,16 @@ def main():
         _ts_path = model_artifact_dir / "train_summary.json"
         _ts_path.parent.mkdir(parents=True, exist_ok=True)
         _ts_hist = _history_for_tune
-        _ts_sharpe_curve = _ts_hist.get("val_sharpe", [])
+        _ts_cost_curve_raw = _ts_hist.get("cost_aware_sharpe") or []
+        _ts_sharpe_curve = [float(v) for v in _ts_cost_curve_raw
+                            if v is not None and np.isfinite(float(v))]
         _ts_vloss_curve = _ts_hist.get("val_loss", [])
         _ts_tloss_curve = _ts_hist.get("train_loss", [])
+        _ts_selected_idx = max(0, int(_ts_hist.get("selected_epoch", 1) or 1) - 1)
+        _ts_selected_sharpe = _ts_cost_curve_raw[_ts_selected_idx] if _ts_selected_idx < len(_ts_cost_curve_raw) else None
+        if _ts_selected_sharpe is not None and not np.isfinite(float(_ts_selected_sharpe)):
+            _ts_selected_sharpe = None
+        _ts_selection_metric = str(_ts_hist.get("selection_metric_name", "validation_loss"))
         _ts_summary = {
             "model_name": model_name,
             "run_name": run_name,
@@ -1169,9 +1212,15 @@ def main():
             "n_features": int(n_features),
             "epochs_completed": len(_ts_tloss_curve),
             "best_val_loss": round(min(_ts_vloss_curve), 6) if _ts_vloss_curve else None,
-            "best_val_sharpe": round(max(_ts_sharpe_curve), 6) if _ts_sharpe_curve else None,
+            "best_val_sharpe": round(_ts_selected_sharpe, 6) if _ts_selected_sharpe is not None else None,
+            "best_honest_net_sharpe": round(_ts_selected_sharpe, 6) if _ts_selected_sharpe is not None else None,
+            "validation_metric_name": _ts_selection_metric,
             "final_val_loss": round(_ts_vloss_curve[-1], 6) if _ts_vloss_curve else None,
-            "final_val_sharpe": round(_ts_sharpe_curve[-1], 6) if _ts_sharpe_curve else None,
+            "final_val_sharpe": (
+                round(float(_ts_cost_curve_raw[-1]), 6)
+                if _ts_cost_curve_raw and _ts_cost_curve_raw[-1] is not None
+                and np.isfinite(float(_ts_cost_curve_raw[-1])) else None
+            ),
             "gen_gap_final": round(_ts_vloss_curve[-1] - _ts_tloss_curve[-1], 6)
             if _ts_vloss_curve and _ts_tloss_curve
             else None,
@@ -1192,16 +1241,80 @@ def main():
 
         try:
             if model_args.walk_forward_cv and "cv_hist" in locals() and cv_hist:
+                _ts_summary["folds"] = [
+                    {
+                        "fold": e.get("fold"),
+                        "provenance": e.get("provenance"),
+                        "selected_epoch": e.get("selected_epoch"),
+                        "selection_metric_name": e.get("selection_metric_name"),
+                        "selected_metric_score": e.get("selected_metric_score"),
+                        "selected_val_loss": e.get("selected_val_loss"),
+                        "selected_trade_count": e.get("selected_trade_count"),
+                        "selected_portfolio_periods": e.get("selected_portfolio_periods"),
+                        "selected_net_sharpe_after_costs": e.get("selected_net_sharpe_after_costs"),
+                        "selected_sharpe_ci_low": e.get("selected_sharpe_ci_low"),
+                    }
+                    for e in cv_hist
+                ]
                 # Always record the cost Sharpe, whatever early_stop_metric is: HPO
                 # scores on it, and it used to be -inf unless early stopping used it.
-                _fcs = [_robust_cost_sharpe(e.get("history") or {}) for e in cv_hist]
-                _fcs = [v for v in _fcs if v is not None]
+                _fcs = [e.get("selected_net_sharpe_after_costs") for e in cv_hist]
+                _fcs = [float(v) for v in _fcs if v is not None and np.isfinite(float(v))]
+                _selected_losses = [
+                    float(e["selected_val_loss"]) for e in cv_hist
+                    if e.get("selected_val_loss") is not None and np.isfinite(float(e["selected_val_loss"]))
+                ]
+                if _selected_losses:
+                    _ts_summary["fold_selected_val_losses"] = [round(v, 6) for v in _selected_losses]
+                    _ts_summary["fold_selected_val_loss_median"] = round(float(np.median(_selected_losses)), 6)
+                    _ts_summary["best_val_loss"] = _ts_summary["fold_selected_val_loss_median"]
                 if _fcs:
                     _ts_summary["fold_cost_sharpes"] = [round(v, 6) for v in _fcs]
-                    _ts_summary["best_cost_sharpe"] = round(float(np.median(_fcs)), 6)
-                # Lower 95% bootstrap bound of the honest net Sharpe at each fold's
-                # last epoch: a fold only counts as evidence when this is > 0.
-                _fci = [float(((e.get("history") or {}).get("honest_sharpe_ci_low") or [0.0])[-1]) for e in cv_hist]
+                    _ts_summary["fold_selected_cost_sharpes_median"] = round(float(np.median(_fcs)), 6)
+                    if all(e.get("selection_metric_name") in (
+                        "honest_net_sharpe", "sacs_robust_honest_net_sharpe"
+                    ) for e in cv_hist):
+                        _ts_summary["best_honest_net_sharpe"] = round(float(np.median(_fcs)), 6)
+                        _ts_summary["best_val_sharpe"] = round(float(np.median(_fcs)), 6)
+                        _ts_summary["validation_metric_name"] = (
+                            "cross_validation_sacs_robust_honest_net_sharpe"
+                            if any(e.get("selection_metric_name") == "sacs_robust_honest_net_sharpe" for e in cv_hist)
+                            else "cross_validation_honest_net_sharpe"
+                        )
+                    else:
+                        _ts_summary["best_honest_net_sharpe"] = None
+                        _ts_summary["best_val_sharpe"] = None
+                        _ts_summary["validation_metric_name"] = "validation_loss_fallback_or_mixed"
+                elif all(e.get("selection_metric_name") in (
+                    "validation_loss", "validation_loss_fallback", "sacs_robust_validation_loss"
+                ) for e in cv_hist):
+                    _loss_scores = [
+                        float(e.get("selected_metric_score", e.get("best_metric")))
+                        for e in cv_hist
+                        if e.get("selected_metric_score", e.get("best_metric")) is not None
+                        and np.isfinite(float(e.get("selected_metric_score", e.get("best_metric"))))
+                    ]
+                    if _loss_scores:
+                        _ts_summary["best_val_loss"] = round(float(np.median(_loss_scores)), 6)
+                    _ts_summary["best_honest_net_sharpe"] = None
+                    _ts_summary["best_val_sharpe"] = None
+                    _ts_summary["validation_metric_name"] = (
+                        "cross_validation_sacs_robust_validation_loss"
+                        if any(e.get("selection_metric_name") == "sacs_robust_validation_loss" for e in cv_hist)
+                        else "cross_validation_validation_loss"
+                    )
+                if all(e.get("selection_metric_name") == "sacs_robust_honest_net_sharpe" for e in cv_hist):
+                    _fcs_hpo = [e.get("selected_metric_score") for e in cv_hist]
+                else:
+                    _fcs_hpo = [_robust_cost_sharpe(e.get("history") or {}) for e in cv_hist]
+                _fcs_hpo = [v for v in _fcs_hpo if v is not None]
+                if _fcs_hpo:
+                    _ts_summary["hpo_robust_fold_cost_sharpes"] = [round(v, 6) for v in _fcs_hpo]
+                    _ts_summary["hpo_robust_cost_sharpe_median"] = round(float(np.median(_fcs_hpo)), 6)
+                    _ts_summary["best_cost_sharpe"] = round(float(np.median(_fcs_hpo)), 6)
+                # Confidence bounds and trade counts are taken at each fold's
+                # selected checkpoint epoch, matching the metric used for promotion.
+                _fci = [float(e.get("selected_sharpe_ci_low") or 0.0) for e in cv_hist]
                 _ts_summary["fold_honest_ci_low"] = [round(v, 4) for v in _fci]
                 _ts_summary["folds_ci_low_positive"] = int(sum(v > 0 for v in _fci))
                 _fb = [float(e["best_metric"]) for e in cv_hist
@@ -1210,7 +1323,8 @@ def main():
                     _ts_summary["fold_best_metrics"] = [round(v, 6) for v in _fb]
                     _ts_summary["fold_best_median"] = round(float(np.median(_fb)), 6)
                     _ts_summary["fold_positive_frac"] = round(float(np.mean([v > 0 for v in _fb])), 4)
-                    _ts_summary["fold_best_metric_name"] = getattr(model_args, "early_stop_metric", "val_loss")
+                    _fold_metric_names = sorted({str(e.get("selection_metric_name") or "unknown") for e in cv_hist})
+                    _ts_summary["fold_best_metric_name"] = _fold_metric_names[0] if len(_fold_metric_names) == 1 else "mixed:" + ",".join(_fold_metric_names)
             else:
                 _v = _robust_cost_sharpe(_ts_hist or {})
                 if _v is not None:
@@ -1666,10 +1780,13 @@ def main():
                 else:
                     _mem_final_gap = None
 
-                if len(_hist_for_mem.get("val_sharpe", [])) > 5:
-                    _mem_max_sh = max(_hist_for_mem["val_sharpe"])
-
-                    _mem_final_sh = _hist_for_mem["val_sharpe"][-1]
+                _mem_cost_sharpes = [
+                    float(v) for v in (_hist_for_mem.get("cost_aware_sharpe") or [])
+                    if v is not None and np.isfinite(float(v))
+                ]
+                if len(_mem_cost_sharpes) > 5:
+                    _mem_max_sh = max(_mem_cost_sharpes)
+                    _mem_final_sh = _mem_cost_sharpes[-1]
 
                     if _mem_max_sh - _mem_final_sh > 0.3:
                         _mem_warnings.append(f"Sharpe collapsed by {_mem_max_sh - _mem_final_sh:.3f} from peak")
@@ -1688,11 +1805,12 @@ def main():
                 ]
 
                 if early_stop_metric_maximizes(getattr(model_args, "early_stop_metric", "auto")):
-                    if _mem_metric_values:
-                        _tm_sharpe = max(_mem_metric_values)
-
-                    elif best_val is not None:
-                        _tm_sharpe = float(best_val)
+                    if _ts_summary.get("validation_metric_name") in (
+                        "honest_net_sharpe", "cross_validation_honest_net_sharpe"
+                    ):
+                        _tm_sharpe = _ts_summary.get("best_honest_net_sharpe")
+                    if _tm_sharpe is None and best_val is not None:
+                        _tm_vloss = min(_mem_metric_values) if _mem_metric_values else float(best_val)
 
                 elif best_val is not None:
                     _tm_vloss = min(_mem_metric_values) if _mem_metric_values else float(best_val)

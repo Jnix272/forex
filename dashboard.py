@@ -338,35 +338,23 @@ with tab1:
         st.info(f"**Gate Rejection Detail:** {metrics['reasons'][0]}")
 
     # Plot synthetic loss/metric curves if no actual run history log is parsed
-    st.markdown("### 📈 Training Loss & Validation Sharpe Progression")
+    st.markdown("### 📈 Training Loss & Honest After-Cost Validation Sharpe")
 
     history = metrics["history"]
     if history:
         epochs = list(range(len(history.get("train_loss", []))))
+        sharpe_epochs = list(range(len(history.get("cost_aware_sharpe", []))))
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(go.Scatter(x=epochs, y=history["train_loss"], name="Train Loss"), secondary_y=False)
         fig.add_trace(go.Scatter(x=epochs, y=history["val_loss"], name="Val Loss"), secondary_y=False)
         fig.add_trace(
-            go.Scatter(x=epochs, y=history["val_sharpe"], name="Val Sharpe (Proxy)", line={"dash": "dash"}),
+            go.Scatter(x=sharpe_epochs, y=history.get("cost_aware_sharpe", []), name="Net Sharpe after costs", line={"dash": "dash"}),
             secondary_y=True,
         )
         fig.update_layout(title="Ablation Walk-Forward Fold 0 History", xaxis_title="Epochs", height=400)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        # Render clean placeholder training charts
-        x = np.arange(1, 31)
-        train_loss = 1.10 - 0.15 * np.log(x) + np.random.normal(0, 0.01, 30)
-        val_loss = 1.09 - 0.11 * np.log(x) + np.random.normal(0, 0.01, 30)
-        sharpe = 0.01 + 0.005 * x + np.random.normal(0, 0.005, 30)
-
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(x=x, y=train_loss, name="Train Loss"), secondary_y=False)
-        fig.add_trace(go.Scatter(x=x, y=val_loss, name="Validation Loss"), secondary_y=False)
-        fig.add_trace(
-            go.Scatter(x=x, y=sharpe, name="Sharpe Proxy", line={"dash": "dash", "color": "green"}), secondary_y=True
-        )
-        fig.update_layout(title="Cross-Validation Metrics History (Simulated)", xaxis_title="Epochs", height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        st.info("No saved training history is available for this run.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2: ENSEMBLE META-LEARNER

@@ -33,9 +33,9 @@ def test_promote_best_fold_flat_dir(tmp_path):
         ckpt.write_text(f"weights fold {fold}")
 
     cv_hist = [
-        {"fold": 0, "best_metric": 1.0},
-        {"fold": 1, "best_metric": 2.5},  # best!
-        {"fold": 2, "best_metric": 0.5},
+        {"fold": 0, "best_metric": 1.0, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 1.0},
+        {"fold": 1, "best_metric": 2.5, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 2.5},  # best!
+        {"fold": 2, "best_metric": 0.5, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 0.5},
     ]
 
     _promote_best_fold(model_name, str(tmp_path), cv_hist, early_stop_metric="sharpe")
@@ -64,7 +64,7 @@ def test_promote_best_fold_nested_dir(tmp_path):
     ckpt.write_text("nested weights")
 
     cv_hist = [
-        {"fold": 0, "best_metric": 1.5},
+        {"fold": 0, "best_metric": 1.5, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 1.5},
     ]
 
     _promote_best_fold(model_name, str(tmp_path), cv_hist, early_stop_metric="sharpe")
@@ -86,15 +86,17 @@ def test_promote_best_fold_tie_breaker(tmp_path):
         cfg.write_text(
             json.dumps(
                 {
-                    "best_val_sharpe_proxy": 2.0,
+                    "best_metric_name": "cost_sharpe",
+                    "best_cost_aware_sharpe": 2.0,
+                    "val_sharpe_is_honest": True,
                     "best_val_loss": 1.0 if fold == 0 else 0.5,  # Fold 1 has lower loss!
                 }
             )
         )
 
     cv_hist = [
-        {"fold": 0, "best_metric": 2.0},
-        {"fold": 1, "best_metric": 2.0},
+        {"fold": 0, "best_metric": 2.0, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 2.0},
+        {"fold": 1, "best_metric": 2.0, "selection_metric_name": "honest_net_sharpe", "selected_net_sharpe_after_costs": 2.0},
     ]
 
     _promote_best_fold(model_name, str(tmp_path), cv_hist, early_stop_metric="sharpe")

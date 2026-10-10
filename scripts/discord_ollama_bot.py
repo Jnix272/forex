@@ -98,10 +98,9 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "epoch",
         "train_loss",
         "val_loss",
-        "val_sharpe",
-        "sharpe",
         "best_val_loss",
-        "best_sharpe",
+        "best_honest_net_sharpe",
+        "best_cost_sharpe",
         "lr",
         "model",
         "model_name",
@@ -114,7 +113,7 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     best_sharpe = None
     best_loss = None
     for row in rows:
-        for key in ("val_sharpe", "sharpe", "best_sharpe"):
+        for key in ("best_honest_net_sharpe", "best_cost_sharpe", "net_sharpe_after_costs"):
             val = row.get(key)
             if isinstance(val, (int, float)):
                 best_sharpe = val if best_sharpe is None else max(best_sharpe, val)

@@ -423,13 +423,18 @@ def _fold_history_summary(folds: list | None, metric_name: str = "sharpe") -> di
         hist = entry.get("history", {})
         if not isinstance(hist, dict):
             continue
-        sharpe = hist.get("val_sharpe") or []
+        sharpe = hist.get("cost_aware_sharpe") or []
         loss = hist.get("val_loss") or []
         train_loss = hist.get("train_loss") or []
         dir_acc = hist.get("dir_acc") or []
         if sharpe:
-            best_sharpes.append(float(max(sharpe)))
-            final_sharpes.append(float(sharpe[-1]))
+            selected_idx = max(0, int(hist.get("selected_epoch", 1) or 1) - 1)
+            selected = sharpe[selected_idx] if selected_idx < len(sharpe) else None
+            if selected is not None and np.isfinite(float(selected)):
+                best_sharpes.append(float(selected))
+            final_valid = [float(v) for v in sharpe if v is not None and np.isfinite(float(v))]
+            if final_valid:
+                final_sharpes.append(float(final_valid[-1]))
         if loss:
             best_losses.append(float(min(loss)))
             final_losses.append(float(loss[-1]))

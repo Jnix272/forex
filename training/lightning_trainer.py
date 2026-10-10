@@ -36,6 +36,41 @@ from training.model_factory import _core_model
 from training.model_factory import build_model as _build_training_model
 
 
+def _fit_train_only_scaler(cache_path: str, train_idx: np.ndarray, n_features: int):
+    """Refit normalization on this fold's train rows, never the cache-wide scaler."""
+    from sklearn.base import clone
+
+    from training.dataset_builder import _load_scaler_npz, _make_scaler
+
+    source = _load_scaler_npz(Path(cache_path))
+    scaler = clone(source) if source is not None else _make_scaler()
+    indices = np.asarray(train_idx, dtype=np.int64).reshape(-1)
+    if not len(indices):
+        raise RuntimeError("Lightning train-only scaler requires non-empty train indices")
+    try:
+        import zarr
+
+        root = zarr.open(str(cache_path), mode="r")
+        if "X" not in root:
+            raise RuntimeError("cache has no X array")
+        x = root["X"]
+        indices = indices[(indices >= 0) & (indices < len(x))]
+        take = min(50_000, len(indices))
+        rng = np.random.default_rng(int(getattr(source, "random_state", 0) or 0))
+        sample = np.sort(rng.choice(indices, take, replace=False))
+        rows = np.asarray(x.get_orthogonal_selection((sample, -1, slice(None))), dtype=np.float64)
+    except Exception as exc:
+        raise RuntimeError(f"Lightning could not read train-only feature rows: {exc}") from exc
+    rows = rows.reshape(-1, int(n_features))
+    rows = rows[np.isfinite(rows).all(axis=1)]
+    if not len(rows):
+        raise RuntimeError("Lightning train-only scaler found no finite feature rows")
+    scaler.fit(rows)
+    scaler.fit_scope_ = "train_fold"
+    scaler.training_ready_ = True
+    return scaler
+
+
 class ForexLightningModule(pl.LightningModule):
     """Lightning module wrapping Forex model architectures."""
 
@@ -148,12 +183,8 @@ class ForexLightningModule(pl.LightningModule):
             acc = (preds == y_cls.long().clamp(0, 2)).float().mean()
             self.log("val_dir_acc", acc, prog_bar=True, on_epoch=True, batch_size=xb.shape[0])
 
-        # Sharpe proxy (simplified)
-        if yb is not None and outputs.dim() == 1:
-            returns = (outputs * yb.float()).detach()
-            if returns.std() > 1e-8:
-                sharpe = returns.mean() / (returns.std() + 1e-8)
-                self.log("val_sharpe", sharpe, prog_bar=True, on_epoch=True, batch_size=xb.shape[0])
+        # Trading Sharpe is intentionally not computed here. Labels are not
+        # realized prices and cannot provide an honest after-cost return metric.
 
     def configure_optimizers(self):
         """Configure optimizer and scheduler."""
@@ -200,26 +231,27 @@ class ForexLightningModule(pl.LightningModule):
         }
 
     def on_validation_epoch_end(self):
-        """Track best metrics."""
+        """Track validation loss; this Lightning path has no honest trade metric."""
         metrics = self.trainer.callback_metrics
         val_loss = metrics.get("val_loss", float("inf"))
-        val_sharpe = metrics.get("val_sharpe", 0.0)
         self._val_losses.append(float(val_loss))
-        self._val_sharpes.append(float(val_sharpe))
 
     def get_best_metrics(self) -> dict:
-        """Return best metrics after training."""
-        if not self._val_sharpes:
-            return {"best_val_loss": float("inf"), "best_sharpe": 0.0}
+        """Return validation-loss selection; Sharpe remains unavailable."""
+        best_epoch = int(np.argmin(self._val_losses)) + 1 if self._val_losses else 0
         return {
-            "best_val_loss": min(self._val_losses),
-            "best_sharpe": max(self._val_sharpes),
-            "final_val_loss": self._val_losses[-1],
-            "final_sharpe": self._val_sharpes[-1],
+            "best_val_loss": min(self._val_losses) if self._val_losses else float("inf"),
+            "best_sharpe": None,
+            "selected_epoch": best_epoch,
+            "final_val_loss": self._val_losses[-1] if self._val_losses else float("inf"),
+            "final_sharpe": None,
             "history": {
                 "train_loss": [],
                 "val_loss": self._val_losses,
-                "val_sharpe": self._val_sharpes,
+                "val_sharpe": [],
+                "cost_aware_sharpe": [None] * len(self._val_losses),
+                "selected_epoch": best_epoch,
+                "selection_metric_name": "validation_loss",
                 "dir_acc": self._dir_accs,
             },
         }
@@ -235,6 +267,7 @@ class ForexDataModule(pl.LightningDataModule):
         val_idx: np.ndarray,
         args: Any,
         multitask: bool = False,
+        scaler: Any = None,
     ):
         super().__init__()
         self.cache_path = cache_path
@@ -242,6 +275,7 @@ class ForexDataModule(pl.LightningDataModule):
         self.val_idx = val_idx
         self.args = args
         self.multitask = multitask
+        self.scaler = scaler
         self.train_dataset = None
         self.val_dataset = None
         self._shuffle_buffer = int(getattr(args, "shuffle_buffer_size", 16384) or 16384)
@@ -255,6 +289,7 @@ class ForexDataModule(pl.LightningDataModule):
                 shuffle_buffer_size=self._shuffle_buffer,
                 multitask_targets=self.multitask,
                 return_indices=True,
+                scaler=self.scaler,
             )
             self.val_dataset = ZarrStreamDataset(
                 self.cache_path,
@@ -262,6 +297,7 @@ class ForexDataModule(pl.LightningDataModule):
                 shuffle_chunks=False,
                 multitask_targets=self.multitask,
                 return_indices=False,
+                scaler=self.scaler,
             )
 
     def train_dataloader(self):
@@ -317,11 +353,18 @@ def run_lightning_training(
     Returns:
         (history_dict, best_metrics_dict)
     """
+    if str(getattr(args, "early_stop_metric", "val_loss")).lower() in ("sharpe", "cost_sharpe"):
+        raise ValueError(
+            "The Lightning trainer only supports validation-loss selection until it is wired to the honest price-based evaluator."
+        )
     if not LIGHTNING_AVAILABLE:
         raise ImportError("PyTorch Lightning not installed. pip install pytorch-lightning")
 
     fold_suffix = f"_fold{fold_id}" if fold_id is not None else ""
     multitask = bool(getattr(args, "multitask", False))
+    if train_idx is None:
+        raise ValueError("Lightning training requires explicit train indices for leakage-safe scaling")
+    train_scaler = _fit_train_only_scaler(cache_path, train_idx, n_features)
 
     # Create DataModule
     datamodule = ForexDataModule(
@@ -330,6 +373,7 @@ def run_lightning_training(
         val_idx=val_idx,
         args=args,
         multitask=multitask,
+        scaler=train_scaler,
     )
 
     # Create Lightning Module
@@ -426,16 +470,26 @@ def run_lightning_training(
     trainer.fit(lightning_module, datamodule=datamodule)
     elapsed = time.time() - t0
 
+    if not ckpt_callback.best_model_path:
+        raise RuntimeError("Lightning produced no best validation-loss checkpoint")
+    best_checkpoint = torch.load(ckpt_callback.best_model_path, map_location=device, weights_only=False)
+    lightning_module.load_state_dict(best_checkpoint["state_dict"])
+
     # Get best metrics
     metrics = lightning_module.get_best_metrics()
     metrics["elapsed_s"] = elapsed
 
     # Save best model (matching existing checkpoint format)
     best_path = ckpt_dir / f"{model_name}{fold_suffix}_best.pt"
-    if not best_path.exists():
-        # Save if Lightning didn't save via callback
-        core = _core_model(lightning_module.model)
-        torch.save(core.state_dict(), str(best_path))
+    # Save the callback-selected validation-loss checkpoint in the common format.
+    core = _core_model(lightning_module.model)
+    torch.save(core.state_dict(), str(best_path))
+    from training.dataset_builder import _save_scaler_npz
+    _save_scaler_npz(
+        Path(cache_path), train_scaler,
+        path=best_path.with_name(best_path.stem + "_scaler.npz"),
+        fit_scope="train_fold",
+    )
 
     # Save config sidecar
     cfg_path = ckpt_dir / f"{model_name}{fold_suffix}_config.json"
@@ -451,8 +505,12 @@ def run_lightning_training(
                 "num_layers": getattr(args, "num_layers", 3),
                 "dropout": getattr(args, "dropout", 0.1),
                 "best_val_loss": metrics.get("best_val_loss", float("inf")),
-                "best_val_sharpe_proxy": metrics.get("best_sharpe", 0.0),
-                "epoch": trainer.current_epoch,
+                "best_val_sharpe": None,
+                "best_cost_aware_sharpe": None,
+                "best_metric": metrics.get("best_val_loss"),
+                "best_metric_name": "validation_loss",
+                "val_sharpe_is_honest": False,
+                "epoch": metrics.get("selected_epoch", trainer.current_epoch + 1),
                 "n_samples": n_samples,
                 "loss": args.loss,
                 "fold_id": fold_id,
@@ -464,7 +522,7 @@ def run_lightning_training(
         )
 
     print(f"[Lightning] Training complete in {elapsed:.1f}s")
-    print(f"[Lightning] Best Sharpe: {metrics.get('best_sharpe', 0):.4f}")
+    print("[Lightning] After-cost Sharpe: unavailable in this backend")
     print(f"[Lightning] Best Val Loss: {metrics.get('best_val_loss', float('inf')):.4f}")
     print(f"[Lightning] Checkpoint: {best_path}")
 

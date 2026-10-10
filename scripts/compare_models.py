@@ -30,8 +30,13 @@ def _fold_stability(model_name: str, ckpt_path: str) -> dict:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if cfg.get("best_val_sharpe_proxy") is not None:
-            sharpes.append(float(cfg["best_val_sharpe_proxy"]))
+        if (
+            cfg.get("best_metric_name") in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe")
+            and cfg.get("val_sharpe_is_honest", False)
+            and not cfg.get("validation_is_logging_only", False)
+            and (cfg.get("best_sacs_robust_score") is not None if cfg.get("best_metric_name") == "sacs_robust_honest_net_sharpe" else cfg.get("best_cost_aware_sharpe") is not None)
+        ):
+            sharpes.append(float(cfg["best_sacs_robust_score"] if cfg.get("best_metric_name") == "sacs_robust_honest_net_sharpe" else cfg["best_cost_aware_sharpe"]))
         if cfg.get("best_val_loss") is not None:
             losses.append(float(cfg["best_val_loss"]))
         if cfg.get("train_val_loss_gap") is not None:
@@ -297,7 +302,14 @@ def run_evaluation(
         {
             "params": _param_count(model, model_name),
             "train_time_s": float(meta.get("train_time_s", meta.get("train_seconds", 0.0)) or 0.0),
-            "validation_sharpe": float(meta.get("best_val_sharpe_proxy", meta.get("validation_sharpe", 0.0)) or 0.0),
+            "validation_sharpe": (
+                float(meta.get("best_sacs_robust_score") if meta.get("best_metric_name") == "sacs_robust_honest_net_sharpe" else meta.get("best_cost_aware_sharpe"))
+                if meta.get("best_metric_name") in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe")
+                and meta.get("val_sharpe_is_honest", False)
+                and not meta.get("validation_is_logging_only", False)
+                and (meta.get("best_sacs_robust_score") is not None if meta.get("best_metric_name") == "sacs_robust_honest_net_sharpe" else meta.get("best_cost_aware_sharpe") is not None)
+                else None
+            ),
             "validation_loss": float(meta.get("best_val_loss", meta.get("validation_loss", 0.0)) or 0.0),
             "confidence_mean": float(conf_arr.mean()),
             "confidence_std": float(conf_arr.std()),

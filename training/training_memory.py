@@ -31,6 +31,7 @@ Schema (all fields optional/nullable):
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -150,7 +151,10 @@ class TrainingMemory:
             self._data["sharpe_history"] = sharpe_hist[-50:]  # keep last 50
 
         # epoch pattern
-        val_sharpe_curve: list[float] = hist.get("val_sharpe", [])
+        val_sharpe_curve = [
+            float(v) for v in (hist.get("cost_aware_sharpe") or [])
+            if v is not None and math.isfinite(float(v))
+        ]
         if val_sharpe_curve and b_ep is not None and t_ep and t_ep >= _MIN_EPOCHS_FOR_PATTERN:
             peak_frac = b_ep / t_ep
             if peak_frac < 0.35:

@@ -50,13 +50,13 @@ class HPOConfig:
     brackets: int = 1
 
     max_epochs: int = 27
-    metric: str = "val_sharpe"
+    metric: str = "cost_sharpe"
     mode: str = "maximize"
     n_trials: int = 100
     seed: int = 42
 
     def __post_init__(self):
-        # Enforce metric-direction consistency (val_loss → minimize, val_sharpe → maximize)
+        # Enforce metric-direction consistency (val_loss → minimize, honest Sharpe → maximize)
         # Prevents confusion where mode field stores args.mode (e.g. "deep") not metric direction.
         metric = str(self.metric).lower()
         expected = "minimize" if metric == "val_loss" else "maximize"

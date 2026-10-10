@@ -1445,7 +1445,7 @@ class OANDABroker(BrokerInterface):
     _TICK_MAGIC  = 0x4F414E44  # "OAND"
     _TICK_STRUCT = None  # struct.Struct, lazily built
 
-    def __init__(self):
+    def __init__(self, *, paper_only: bool = False):
         self.venue = "oanda"
         self._token = (
             os.environ.get("OANDA_API_KEY")
@@ -1454,14 +1454,61 @@ class OANDABroker(BrokerInterface):
         )
         self._account_id = os.environ.get("OANDA_ACCOUNT_ID")
         env = (os.environ.get("OANDA_ENV") or "practice").strip().lower()
-        default_host = (
-            "https://api-fxtrade.oanda.com"
-            if env in ("live", "prod", "production")
-            else "https://api-fxpractice.oanda.com"
-        )
+        if env in ("live", "prod", "production"):
+            resolved_env = "live"
+            default_host = "https://api-fxtrade.oanda.com"
+        elif env in ("practice", "paper", "demo", ""):
+            resolved_env = "practice"
+            default_host = "https://api-fxpractice.oanda.com"
+        else:
+            raise ValueError(f"Unsupported OANDA_ENV={env!r}; expected practice or live")
         self._host = (
             os.environ.get("OANDA_API_URL") or os.environ.get("OANDA_API_HOST") or default_host
         ).rstrip("/")
+        self._env = resolved_env
+        self._paper_only = bool(paper_only)
+        if self._paper_only:
+            from urllib.parse import urlsplit
+
+            _api = urlsplit(self._host)
+            if resolved_env != "practice":
+                raise RuntimeError("Paper-only OANDA mode rejects OANDA_ENV=live")
+            if (
+                _api.scheme.lower() != "https"
+                or (_api.hostname or "").lower() != "api-fxpractice.oanda.com"
+                or _api.port not in (None, 443)
+                or _api.path not in ("", "/")
+                or _api.username is not None
+                or _api.password is not None
+                or _api.query
+                or _api.fragment
+            ):
+                raise RuntimeError(
+                    f"Paper-only OANDA mode rejects non-practice API host {self._host!r}; "
+                    "expected https://api-fxpractice.oanda.com"
+                )
+            _stream_override = os.environ.get("OANDA_STREAM_URL")
+            if _stream_override:
+                _stream = urlsplit(_stream_override)
+                if (
+                    _stream.scheme.lower() != "https"
+                    or (_stream.hostname or "").lower() != "stream-fxpractice.oanda.com"
+                    or _stream.port not in (None, 443)
+                    or _stream.path not in ("", "/")
+                    or _stream.username is not None
+                    or _stream.password is not None
+                    or _stream.query
+                    or _stream.fragment
+                ):
+                    raise RuntimeError(
+                        f"Paper-only OANDA mode rejects non-practice stream host {_stream_override!r}; "
+                        "expected https://stream-fxpractice.oanda.com"
+                    )
+        print(
+            f"[OANDA] environment={resolved_env} api_host={self._host} "
+            f"stream_host={os.environ.get('OANDA_STREAM_URL') or self._host.replace('://api-', '://stream-')} "
+            f"paper_only={self._paper_only}"
+        )
         self.units_per_lot = float(os.environ.get("OANDA_UNITS_PER_LOT", 10_000.0))
         self._quotes: dict[str, tuple[float, float]] = {}
 
@@ -4499,11 +4546,14 @@ if __name__ == "__main__":
         broker = BridgeBrokerAdapter(venue=venue, config=bridge_cfg)
         print(f"[Live] BrokerBridge adapter: {venue}")
     else:
-        broker = (
-            PaperBroker(initial_equity=args.equity, synthetic=not args.paper_static)
-            if args.broker == "paper"
-            else broker_map[args.broker]()
-        )
+        if args.broker == "paper":
+            broker = PaperBroker(initial_equity=args.equity, synthetic=not args.paper_static)
+        elif args.broker == "oanda":
+            # Any non-production maturity is paper-only and must be isolated
+            # from OANDA's live REST and streaming endpoints.
+            broker = OANDABroker(paper_only=_maturity != "production")
+        else:
+            broker = broker_map[args.broker]()
     # Paper broker is an intentional choice - allow its own "fallback" path trivially.
     allow_paper = bool(args.allow_paper_fallback) or args.broker == "paper"
 

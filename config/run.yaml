@@ -800,12 +800,12 @@ catboost:
 #  Model Family | Config                    | seq_len | Label         | n_ticks | Features | Build
 #  Deep (HAELT, TFT, Transformer, Mamba, GNN) | config/run_deep.yaml    | 120 | rl_reward       | 20M | 584 (4 pairs) | ~35 GB / 9h
 #  RL agents    | config/run_rl.yaml      | 60      | rl_reward       | 10M | 584 (4 pairs) | ~15 GB / 4-5h
-#  Tabular (CatBoost/XGBoost)                 | config/run_tabular.yaml | 30  | triple_barrier  | 5M  | 584→temporal→~3504 | ~500 MB / 2-3h
+#  Tabular (CatBoost/XGBoost)                 | config/run_tabular.yaml | 30  | CPAR directions | 5M  | last-bar features | ~500 MB / 2-3h
 #
-# Tabular rationale: tree models reduce the 120-bar sequence to ~6-14 summary
-# stats/feature anyway — they pay disk/memory cost for sequences they discard,
-# and learn better from clean triple-barrier directional labels than from
-# deep RL reward shaping.
+# Tabular rationale: the dataset labeler currently computes CPAR reward and a
+# discrete CPAR-derived direction label. Tree classifiers use the direction
+# label; regression runs use the synthetic reward and must not be described as
+# real-return forecasts. The labeler is not a separate classical TBM target.
 #
 # Key benefits: tabular build ~2-3h vs 9+h; ~500MB vs 35GB; 1-2GB RAM vs 35GB
 # during CatBoost/XGBoost training; separation of concerns (independent rebuild).
@@ -836,14 +836,14 @@ tabular:
     stop_loss_atr: 1.0
   training:
     seq_len: 30                # vs 120 deep / 60 RL
-    label_method: triple_barrier  # vs rl_reward for deep/RL — cleaner S/H/B for trees
+    label_method: cpar           # classifier consumes the CPAR-derived discrete direction target
   catboost:
     max_samples: 2000000
     sequence_mode: temporal    # last_bar also valid (fastest, single-bar); temporal retains 6-stat summaries
   xgboost:
     max_samples: 2000000
     sequence_mode: temporal
-  # Label alternatives: triple_barrier (recommended), rl_reward (consistent), fixed_return
+  # Label alternatives: cpar-derived directions, rl_reward, fixed_return
   # Sequence alternatives: 1=last_bar (fastest), 30=temporal w/ stats, 60=same as RL
   # Pairs alternative: 1 pair (EURUSD → 146 feats → ~876 tabular) trains 4x faster vs 4 pairs
   paths:

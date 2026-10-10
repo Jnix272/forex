@@ -401,12 +401,11 @@ def validate_epoch(
     usually not compute-bound, and AMP adds cast overhead while hurting
     Sharpe / CE numeric stability.
 
-    The returned Sharpe is the **directional** Sharpe (sign(pred) × sign(label)
-    annualized). A secondary ``cost_sharpe`` is returned via the function
-    attribute ``validate_epoch.last_cost_sharpe`` computed from actual price
-    returns minus transaction costs when ``close_prices`` and ``tx_cost_bps``
-    are provided. This enables cost-aware model selection to complement the
-    directional proxy Sharpe.
+    Returns honest price-based net Sharpe only when the price evaluator has
+    at least 30 portfolio periods; otherwise the returned Sharpe is NaN.
+    Label-derived directional and cost Sharpe values remain available only
+    as explicitly named diagnostics. ``last_cost_sharpe`` is None unless the
+    honest evaluator has enough real-price observations.
     """
     model.eval()
     total = torch.zeros(1, device=device)
@@ -791,18 +790,22 @@ def validate_epoch(
         # Always print the cost-aware diagnostic
         n_trades = int(trade_mask.sum().item())
         print(
-            f"[Val] dir_sharpe={sharpe:.4f}  cost_sharpe={cost_sharpe:.4f}  "
-            f"cost_sharpe_per_sample={cost_sharpe_per_sample:.4f}  "
+            f"[Val][label_proxy] dir_sharpe={sharpe:.4f}  label_cost_sharpe_proxy={cost_sharpe:.4f}  "
+            f"label_cost_sharpe_per_sample_proxy={cost_sharpe_per_sample:.4f}  "
             f"tx_cost={tx_cost_bps:.1f}bps  n_trades={n_trades}/{n_ret}"
         )
     else:
         print(
-            f"[Val] dir_sharpe={sharpe:.4f}  cost_sharpe=N/A (no tx_cost specified)  "
+            f"[Val][label_proxy] dir_sharpe={sharpe:.4f}  label_cost_sharpe_proxy=N/A (no tx_cost specified)  "
             f"n_trades={n_ret}"
         )
 
-    # Honest metric (real prices, spread, non-overlapping) overrides the label-based
-    # cost_sharpe so early stopping / SACS / gates select on actual net PnL.
+    # Keep the label-derived value diagnostic only.  A metric named
+    # ``cost_sharpe`` must always come from real prices and spread; otherwise
+    # selection and Optuna could optimize synthetic label units as if they
+    # were after-cost trading returns.
+    label_cost_sharpe = cost_sharpe
+    cost_sharpe = None
     validate_epoch.last_honest = None
     if honest_ctx is not None and _dir_parts:
         try:
@@ -836,10 +839,12 @@ def validate_epoch(
                     )
                     _hm.pop("_net_returns", None)
                 validate_epoch.last_honest = _hm
-                cost_sharpe = _hm["sharpe_net"]
+                _honest_observations = int(_hm.get("n_portfolio_periods", _hm.get("n_trades", 0)))
+                if _honest_observations >= 30:
+                    cost_sharpe = float(_hm["sharpe_net"])
                 print(
                     f"[Val][honest] net_sharpe={_hm['sharpe_net']:.3f} gross={_hm['sharpe_gross']:.3f} "
-                    f"trades={_hm['n_trades']} win={_hm['win_rate']:.1%} "
+                    f"trades={_hm['n_trades']} periods={_honest_observations} win={_hm['win_rate']:.1%} "
                     f"net={_hm['mean_ret_bps']:.2f}bps cost={_hm['cost_bps']:.2f}bps "
                     f"95%CI=[{_hm.get('sharpe_net_ci_low', 0.0):.2f}, {_hm.get('sharpe_net_ci_high', 0.0):.2f}] "
                     f"P(sharpe<=0)={_hm.get('sharpe_net_p_le_0', 1.0):.2f}"
@@ -848,20 +853,33 @@ def validate_epoch(
                 print(f"[Val][honest] skipped: {len(_dirs)} predictions vs {len(_sidx)} val indices")
         except Exception as _he:
             print(f"[Val][honest] failed: {_he}")
+    if cost_sharpe is None and label_cost_sharpe is not None:
+        print(f"[Val][label_proxy] cost_sharpe={label_cost_sharpe:.4f} (diagnostic only; excluded from selection)")
     validate_epoch.last_cost_sharpe = cost_sharpe
+    validate_epoch.last_label_cost_sharpe = label_cost_sharpe
     _hm_final = getattr(validate_epoch, "last_honest", None)
-    validate_epoch.last_n_trades = int(_hm_final.get("n_trades", 0)) if _hm_final else n_trades
+    validate_epoch.last_n_trades = (
+        int(_hm_final.get("n_portfolio_periods", _hm_final.get("n_trades", 0))) if _hm_final else n_trades
+    )
     validate_epoch.last_dir_sharpe = sharpe
     validate_epoch.last_label_sharpe = sharpe  # diagnostic only: sign x CPAR label
     validate_epoch.last_ann_factor = ann
-    if _hm_final:
+    _honest_observations = (
+        int(_hm_final.get("n_portfolio_periods", _hm_final.get("n_trades", 0))) if _hm_final else 0
+    )
+    if _hm_final and _honest_observations >= 30:
         # S9: the Sharpe every consumer sees (history["val_sharpe"], collapse
         # controller, early stopping, Optuna) is the price-based net Sharpe.
         return val_loss, dir_acc, float(_hm_final.get("sharpe_net", 0.0))
-    return val_loss, dir_acc, sharpe
+    if _hm_final:
+        print(f"[Val][honest] Sharpe unavailable: {_honest_observations} portfolio periods (<30 minimum)")
+    else:
+        print("[Val][honest] Sharpe unavailable; label-derived Sharpe remains diagnostic only")
+    return val_loss, dir_acc, float("nan")
 
 
 validate_epoch.last_cost_sharpe = None
+validate_epoch.last_label_cost_sharpe = None
 validate_epoch.last_n_trades = 0
 validate_epoch.last_dir_sharpe = 0.0
 validate_epoch.last_honest = None

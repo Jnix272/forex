@@ -31,8 +31,10 @@ for cfg_path in sorted(mdir.glob("*_fold*_config.json")):
         "fold": c.get("fold_id"),
         "epoch": c.get("epoch"),
         "val_loss": c.get("best_val_loss"),
-        "val_sharpe": c.get("best_val_sharpe_proxy"),
-        "honest": "yes" if c.get("val_sharpe_is_honest") else "no (label proxy)",
+        "net Sharpe after costs": c.get("best_cost_aware_sharpe") if c.get("best_metric_name") == "cost_sharpe" else None,
+        "selection metric": c.get("best_metric_name"),
+        "honest": "yes" if c.get("val_sharpe_is_honest") and c.get("best_metric_name") in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe") else "not selected on honest Sharpe",
+        "trades": c.get("honest_n_trades"),
         "sharpe CI low": c.get("honest_sharpe_ci_low"),
         "train rows": c.get("train_range"),
         "val rows": c.get("val_range"),
@@ -41,7 +43,7 @@ for cfg_path in sorted(mdir.glob("*_fold*_config.json")):
 if rows:
     st.dataframe(rows, use_container_width=True, hide_index=True)
     if not any(r["honest"] == "yes" for r in rows):
-        st.warning("These folds pre-date the honest metric: their Sharpe is the label proxy, not a price-based Sharpe.")
+        st.warning("No fold has a selected after-cost honest Sharpe. Legacy proxy values are not shown.")
 else:
     st.info("No fold configs in this directory.")
 

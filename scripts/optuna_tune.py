@@ -227,18 +227,26 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
     train_mode = summary.get("train_mode", "unknown")
     n_folds = int(summary.get("n_folds") or 1)
 
-    if val_sharpe is None:
-        sharpe_hist = history.get("val_sharpe", [])
-        val_sharpe = max(sharpe_hist) if sharpe_hist else None
+    if val_sharpe is not None and not math.isfinite(float(val_sharpe)):
+        val_sharpe = None
+    if final_sharpe is not None and not math.isfinite(float(final_sharpe)):
+        final_sharpe = None
+    if val_loss is not None and not math.isfinite(float(val_loss)):
+        val_loss = None
+    if cost_sharpe is not None and not math.isfinite(float(cost_sharpe)):
+        cost_sharpe = None
     if final_sharpe is None:
-        sharpe_hist = history.get("val_sharpe", [])
-        final_sharpe = sharpe_hist[-1] if sharpe_hist else None
+        final_curve = history.get("cost_aware_sharpe") or []
+        final_sharpe = (
+            float(final_curve[-1]) if final_curve and final_curve[-1] is not None
+            and math.isfinite(float(final_curve[-1])) else None
+        )
     if val_loss is None:
-        loss_hist = history.get("val_loss", [])
+        loss_hist = [float(v) for v in history.get("val_loss", []) if v is not None and math.isfinite(float(v))]
         val_loss = min(loss_hist) if loss_hist else None
-    if cost_sharpe is None:
-        cost_hist = history.get("cost_aware_sharpe", history.get("cost_sharpe", history.get("val_cost_sharpe", [])))
-        cost_sharpe = max(cost_hist) if cost_hist else None
+    if cost_sharpe is not None:
+        # Sharpe HPO aliases to the same robust fold-aggregated after-cost score.
+        val_sharpe = cost_sharpe
     if gen_gap is None:
         loss_hist = history.get("val_loss", [])
         train_hist = history.get("train_loss", [])
@@ -266,9 +274,9 @@ def _metric_score(metric: str, summary: dict[str, Any], history: dict[str, Any])
             return float("inf"), diagnostics
         return float(val_loss), diagnostics
 
-    if metric == "cost_sharpe":
+    if metric in ("cost_sharpe", "val_sharpe"):
         if cost_sharpe is None:
-            diagnostics["missing_metric"] = "cost_sharpe"
+            diagnostics["missing_metric"] = "honest_after_cost_sharpe"
             return float("-inf"), diagnostics
         return float(cost_sharpe), diagnostics
 
@@ -800,7 +808,6 @@ def _run_trial_process(
     latest_loss = None
     latest_sharpe = None
     latest_cost = None
-    honest_seen = False
     live_lines: list[str] = []
     try:
         assert process.stdout is not None
@@ -820,18 +827,13 @@ def _run_trial_process(
             m_sh = re.search(r"(?:val[_ ]sharpe|sharpe_proxy)[=:]\s*([-+]?\d+(?:\.\d+)?)", line, re.IGNORECASE)
             if m_sh:
                 latest_sharpe = float(m_sh.group(1))
-            # cost_sharpe objective must prune on the same metric it is scored on:
-            # the honest net-PnL Sharpe (falls back to the label-based cost_sharpe line).
-            if "[Val][honest] enabled" in line:
-                honest_seen = True  # printed before epoch 1: never report label-based values
-            m_hon = re.search(r"\[Val\]\[honest\] net_sharpe=([-+]?\d+(?:\.\d+)?)", line)
+            # cost_sharpe objective is only reported from the honest evaluator.
+            # Label-derived proxy Sharpe is a diagnostic and must never drive HPO.
+            m_hon = re.search(
+                r"\[Val\]\[honest\] net_sharpe=([-+]?\d+(?:\.\d+)?).*?periods=(\d+)", line
+            )
             if m_hon:
-                honest_seen = True
-                latest_cost = float(m_hon.group(1))
-            elif not honest_seen:
-                m_cs = re.search(r"\bcost_sharpe=([-+]?\d+(?:\.\d+)?)", line)
-                if m_cs:
-                    latest_cost = float(m_cs.group(1))
+                latest_cost = float(m_hon.group(1)) if int(m_hon.group(2)) >= 30 else None
 
             report_value = None
             if args.metric == "val_loss" and latest_loss is not None:

@@ -9,7 +9,7 @@ Improvements over v1
 * --task regression | classification   (3-class direction prediction)
 * --folds N                            Walk-forward cross-validation
 * --tune                               20-trial hyperparameter grid search
-* Real annualised Sharpe written to sidecar (validation_sharpe != 0.0)
+* Real-price after-cost Sharpe written to sidecar for non-demo runs
 * sequence_mode="temporal" feeds 6xF summary stats instead of 1 last bar
 """
 
@@ -274,6 +274,7 @@ def tune_hyperparams(
     lr: float,
     n_trials: int = 20,
     sample_weight_train: np.ndarray | None = None,
+    honest_score_fn=None,
 ) -> dict:
     """Cheap grid search; returns best CatBoost param dict."""
     keys = list(TUNE_GRID.keys())
@@ -286,6 +287,7 @@ def tune_hyperparams(
 
     best_score = -float("inf")
     best_params = {}
+    valid_honest_trials = 0
 
     print(f"[Tune] Searching {len(combos)} hyperparameter combinations...")
     for combo in combos:
@@ -307,7 +309,7 @@ def tune_hyperparams(
             )
             m.fit(X_train, y_train, sample_weight=sample_weight_train, eval_set=(X_val, y_val), verbose=False)
             preds = m.predict(X_val)
-            score = compute_dir_accuracy(preds, y_val)
+            score = honest_score_fn(preds) if honest_score_fn is not None else compute_dir_accuracy(preds, y_val)
         else:
             m = cb.CatBoostRegressor(
                 loss_function="RMSE", learning_rate=lr, eval_metric="RMSE", verbose=0, task_type=_tune_task, **params
@@ -315,12 +317,18 @@ def tune_hyperparams(
             m.fit(X_train, y_train, sample_weight=sample_weight_train, eval_set=(X_val, y_val), verbose=False)
             preds = m.predict(X_val)
             mse = float(np.mean((preds - y_val) ** 2))
-            score = -mse  # higher = better
+            score = honest_score_fn(preds) if honest_score_fn is not None else -mse  # higher = better
 
         if score > best_score:
             best_score = score
             best_params = params
             print(f"  [Tune] New best ({score:.4f}): {params}")
+        if honest_score_fn is not None and score > -1.0e5:
+            valid_honest_trials += 1
+
+    if honest_score_fn is not None and valid_honest_trials == 0:
+        print("[Tune] No candidate had 30+ honest portfolio periods; keeping configured parameters.")
+        return {}
 
     print(f"[Tune] Best params: {best_params}  score={best_score:.4f}")
     return best_params
@@ -390,6 +398,7 @@ def main():
     parser.add_argument("--tune-trials", type=int, default=20)
     parser.add_argument("--demo", action="store_true", help="Run with synthetic data for testing")
     args = parser.parse_args()
+    from training.tabular_honest_eval import evaluate_tabular_predictions
 
     cfg = _load_yaml_config(args.config)
     cb_cfg = cfg.get("catboost", {}) or {}
@@ -472,6 +481,7 @@ def main():
 
     # ── purged/embargoed split for tuning / final early-stop ──────────────────
     tr_idx, va_idx = _tune_train_val_split(N, cfg)
+    _final_val_idx = va_idx.copy()
     X_train_tab, X_val_tab = X_tab[tr_idx], X_tab[va_idx]
     y_train_target, y_val_target = y_target[tr_idx], y_target[va_idx]
     w_train, w_val = sample_weight[tr_idx], sample_weight[va_idx]
@@ -482,6 +492,17 @@ def main():
     # ── hyperparameter tuning ─────────────────────────────────────────────────
     best_params: dict = {}
     if args.tune:
+        def _tune_honest_score(predictions):
+            metrics = evaluate_tabular_predictions(
+                z_store, predictions, _final_val_idx, start_idx,
+                int(_config_get(cfg, "strategy.lookahead_bars", z_store.attrs.get("lookahead_bars", 30))),
+                args.task,
+            )
+            if metrics is None:
+                raise RuntimeError("HPO requires cached close prices for honest after-cost model selection")
+            periods = int(metrics.get("n_portfolio_periods", metrics.get("n_trades", 0)))
+            return float(metrics["sharpe_net"]) if periods >= 30 else -1.0e6
+
         best_params = tune_hyperparams(
             X_train_tab,
             y_train_target,
@@ -491,6 +512,7 @@ def main():
             lr=args.lr,
             n_trials=args.tune_trials,
             sample_weight_train=w_train,
+            honest_score_fn=None if args.demo else _tune_honest_score,
         )
 
     cb_params = _native_cb_params(
@@ -505,6 +527,7 @@ def main():
 
     # ── walk-forward CV ───────────────────────────────────────────────────────
     fold_sharpes: list[float] = []
+    fold_trade_counts: list[int | None] = []
     fold_diraccs: list[float] = []
 
     if args.folds > 0:
@@ -542,11 +565,20 @@ def main():
                 m.fit(Xtr, ytr, sample_weight=wtr, eval_set=(Xva, yva), verbose=False)
                 preds = m.predict(Xva)
 
-            sh = compute_sharpe(preds, yva_ret)
+            _honest = None if args.demo else evaluate_tabular_predictions(
+                z_store, preds, va_idx, start_idx,
+                int(_config_get(cfg, "strategy.lookahead_bars", z_store.attrs.get("lookahead_bars", 30))),
+                args.task,
+            )
+            if not args.demo and _honest is None:
+                raise RuntimeError("Tabular validation requires cached real close prices; refusing label-based Sharpe")
+            sh = compute_sharpe(preds, yva_ret) if args.demo else float(_honest["sharpe_net"])
             acc = compute_dir_accuracy(preds, yva_dir)
             fold_sharpes.append(sh)
+            fold_trade_counts.append(None if args.demo else int(_honest["n_trades"]))
             fold_diraccs.append(acc)
-            print(f"  Fold {fold_i + 1}: Sharpe={sh:+.3f}  DirAcc={acc:.3f}  n_val={len(va_idx):,}")
+            _trade_text = "demo/proxy" if args.demo else f"honest trades={_honest['n_trades']}"
+            print(f"  Fold {fold_i + 1}: net_Sharpe={sh:+.3f}  DirAcc={acc:.3f}  {_trade_text}  n_val={len(va_idx):,}")
 
         cv_sharpe = float(np.mean(fold_sharpes))
         cv_sharpe_std = float(np.std(fold_sharpes))
@@ -587,7 +619,14 @@ def main():
 
     # ── validation metrics ────────────────────────────────────────────────────
     val_preds_raw = model.model.predict(X_val_tab)
-    val_sharpe = compute_sharpe(val_preds_raw, y_val_ret)
+    _val_honest = None if args.demo else evaluate_tabular_predictions(
+        z_store, val_preds_raw, _final_val_idx, start_idx,
+        int(_config_get(cfg, "strategy.lookahead_bars", z_store.attrs.get("lookahead_bars", 30))),
+        args.task,
+    )
+    if not args.demo and _val_honest is None:
+        raise RuntimeError("Tabular validation requires cached real close prices; refusing label-based Sharpe")
+    val_sharpe = compute_sharpe(val_preds_raw, y_val_ret) if args.demo else float(_val_honest["sharpe_net"])
     val_diracc = compute_dir_accuracy(val_preds_raw, y_val_dir)
     val_mse = float(np.mean((val_preds_raw.ravel() - y_val_target.ravel()) ** 2))
     from common.math_utils import safe_corrcoef as _safe_corrcoef
@@ -595,7 +634,8 @@ def main():
     if not np.isfinite(val_corr):
         val_corr = 0.0
 
-    print(f"\n[Val] Sharpe={val_sharpe:+.3f}  DirAcc={val_diracc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}")
+    _val_trades = "demo/proxy" if args.demo else f"honest trades={_val_honest['n_trades']}"
+    print(f"\n[Val] net_Sharpe={val_sharpe:+.3f}  DirAcc={val_diracc:.3f}  MSE={val_mse:.6f}  Corr={val_corr:.4f}  {_val_trades}")
 
     # ── save model ────────────────────────────────────────────────────────────
     out_dir = Path("checkpoints")
@@ -623,6 +663,8 @@ def main():
                 "historical_news_file": news_file,
                 "train_time_s": train_time_s,
                 "validation_sharpe": val_sharpe,
+                "validation_metric": "label_proxy_demo_only" if args.demo else "honest_net_sharpe",
+                "validation_trades": None if args.demo else int(_val_honest["n_trades"]),
                 "validation_dir_acc": val_diracc,
                 "validation_loss": val_mse,
                 "validation_corr": val_corr,
@@ -631,6 +673,7 @@ def main():
                 "cv_sharpe_std": cv_sharpe_std,
                 "cv_dir_acc_mean": cv_diracc,
                 "fold_sharpes": fold_sharpes,
+                "fold_trade_counts": fold_trade_counts,
                 "params": cb_params,
                 "tuned": args.tune,
             },

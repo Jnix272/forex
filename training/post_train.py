@@ -473,18 +473,45 @@ def _generate_model_card(model_name: str, args, history_or_cv, ckpt_dir: str, n_
 
     # Extract best validation stats
     if isinstance(history_or_cv, list):  # CV run
-        best_fold = max(
-            history_or_cv, key=lambda x: x.get("best_metric", -999) if x.get("best_metric") is not None else -999
-        )
+        honest_fold_scores = []
+        for entry in history_or_cv:
+            fold_history = entry.get("history") or {}
+            # Prefer the score recorded for the actual selected checkpoint.
+            # SACS may select EMA/SWA or another candidate, so indexing the
+            # epoch curve can describe a different model than the saved one.
+            selected_score = entry.get("selected_net_sharpe_after_costs")
+            if selected_score is None:
+                selected_score = fold_history.get("selected_net_sharpe_after_costs")
+            if selected_score is None:
+                selected_epoch = max(0, int(fold_history.get("selected_epoch", 1)) - 1)
+                score_curve = fold_history.get("cost_aware_sharpe") or []
+                selected_score = score_curve[selected_epoch] if selected_epoch < len(score_curve) else None
+            if selected_score is not None and np.isfinite(float(selected_score)):
+                honest_fold_scores.append({"fold": entry.get("fold"), "net_sharpe_after_costs": float(selected_score)})
         card["validation_results"] = {
-            "best_val_sharpe_proxy": best_fold.get("best_metric"),
-            "fold": best_fold.get("fold"),
+            "metric": "honest_net_sharpe_after_costs" if honest_fold_scores else "unavailable",
+            "fold_scores": honest_fold_scores,
+            "median_fold_net_sharpe_after_costs": float(np.median([x["net_sharpe_after_costs"] for x in honest_fold_scores])) if honest_fold_scores else None,
         }
         card["forward_holdout_results"] = "See fold validation metrics"
     elif isinstance(history_or_cv, dict):
-        best_val = max(history_or_cv.get("val_sharpe", [0.0])) if history_or_cv.get("val_sharpe") else None
-        best_loss = min(history_or_cv.get("val_loss", [999.0])) if history_or_cv.get("val_loss") else None
-        card["validation_results"] = {"best_val_sharpe_proxy": best_val, "best_val_loss": best_loss}
+        best_val = history_or_cv.get("selected_net_sharpe_after_costs")
+        if best_val is None:
+            selected_epoch = max(0, int(history_or_cv.get("selected_epoch", 1)) - 1)
+            score_curve = history_or_cv.get("cost_aware_sharpe") or []
+            best_val = score_curve[selected_epoch] if selected_epoch < len(score_curve) else None
+        if best_val is not None and not np.isfinite(float(best_val)):
+            best_val = None
+        best_loss = history_or_cv.get("selected_val_loss")
+        if best_loss is None:
+            losses = history_or_cv.get("val_loss") or []
+            selected_epoch = max(0, int(history_or_cv.get("selected_epoch", 1)) - 1)
+            best_loss = losses[selected_epoch] if selected_epoch < len(losses) else None
+        card["validation_results"] = {
+            "metric": "honest_net_sharpe_after_costs" if best_val is not None else "unavailable",
+            "best_net_sharpe_after_costs": best_val,
+            "best_val_loss": best_loss,
+        }
         card["forward_holdout_results"] = "Pending"
 
     out_path = Path(ckpt_dir) / f"{model_name}_model_card.json"
@@ -509,9 +536,10 @@ def _stability_adjusted_score(score, sharpe_curve, gen_gap):
 
     volatility = 0.0
     gap_penalty = 0.0
-    if len(sharpe_curve) >= 4 and score is not None:
-        volatility = float(np.std(sharpe_curve, ddof=1))
-        final_val = sharpe_curve[-1]
+    finite_curve = [float(v) for v in (sharpe_curve or []) if v is not None and np.isfinite(float(v))]
+    if len(finite_curve) >= 4 and score is not None:
+        volatility = float(np.std(finite_curve, ddof=1))
+        final_val = finite_curve[-1]
         gap_penalty = max(0.0, score - final_val)
         train_val_gap_penalty = (gen_gap * 0.1) if gen_gap is not None and gen_gap > 0 else 0.0
         score = score - (gap_penalty * 0.5) - (volatility * 0.5) - train_val_gap_penalty
@@ -543,16 +571,21 @@ def holdout_sharpe_for_checkpoint(ckpt_path, model_name, cache_path, n_samples, 
 
 
 def _cv_refit_epochs(cv_hist: list, max_epochs: int) -> int:
-    """Median selected epoch across folds (+1 for 0-based), at least warmup + 2."""
+    """Use the median epoch selected by each fold's own checkpoint metric."""
     eps = []
     for e in cv_hist:
         h = e.get("history") or {}
-        ci = h.get("honest_sharpe_ci_low") or []
-        vl = h.get("val_loss") or []
-        if ci and any(v != 0.0 for v in ci):
-            eps.append(int(np.argmax(ci)) + 1)
-        elif vl:
-            eps.append(int(np.argmin(vl)) + 1)
+        selected = h.get("selected_epoch")
+        if selected is not None and int(selected) > 0:
+            eps.append(int(selected))
+            continue
+        # Legacy fold histories lack selection provenance, so use loss rather
+        # than guessing which Sharpe-like curve actually selected the checkpoint.
+        losses = h.get("val_loss") or []
+        if losses:
+            valid_losses = [(i, float(v)) for i, v in enumerate(losses) if np.isfinite(float(v))]
+            if valid_losses:
+                eps.append(min(valid_losses, key=lambda pair: pair[1])[0] + 1)
     n = int(np.median(eps)) if eps else int(max_epochs)
     return int(min(max(n, 4), max(4, int(max_epochs))))
 
@@ -581,7 +614,19 @@ def _promote_refit(model_name: str, checkpoint_dir: str, cv_hist: list, refit_ep
         "refit_epochs": int(refit_epochs),
         "note": "folds used only to estimate performance; deployed model refit on all pre-holdout data",
         "fold_estimates": [
-            {"fold": e.get("fold"), "best_metric": e.get("best_metric")} for e in cv_hist
+            {
+                "fold": e.get("fold"),
+                "best_metric": e.get("best_metric"),
+                "selected_metric_score": e.get("selected_metric_score"),
+                "selected_val_loss": e.get("selected_val_loss"),
+                "selection_metric_name": e.get("selection_metric_name"),
+                "selected_epoch": e.get("selected_epoch"),
+                "selected_net_sharpe_after_costs": e.get("selected_net_sharpe_after_costs"),
+                "selected_trade_count": e.get("selected_trade_count"),
+                "selected_portfolio_periods": e.get("selected_portfolio_periods"),
+                "provenance": e.get("provenance"),
+            }
+            for e in cv_hist
         ],
     }
     _safe_save_json(summary, ckpt_dir / "fold_selection.json")
@@ -602,9 +647,17 @@ def _promote_best_fold(
     <checkpoint_dir>/<model_name>_best.pt.
     """
     ckpt_dir = Path(checkpoint_dir)
-    use_sharpe = early_stop_metric in ("sharpe", "cost_sharpe")
+    honest_selection_names = (
+        "cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe"
+    )
+    use_sharpe = early_stop_metric in ("sharpe", "cost_sharpe") or any(
+        e.get("selection_metric_name") in honest_selection_names for e in cv_hist
+    )
+    use_sacs_loss = any(e.get("selection_metric_name") == "sacs_robust_validation_loss" for e in cv_hist)
     # Metric label stored in deployment.json — must match the actual metric used.
-    metric_label = early_stop_metric if use_sharpe else "val_loss"
+    metric_label = "sacs_robust_honest_net_sharpe" if any(
+        e.get("selection_metric_name") == "sacs_robust_honest_net_sharpe" for e in cv_hist
+    ) else "sacs_robust_validation_loss" if use_sacs_loss else "honest_net_sharpe_after_costs" if use_sharpe else "val_loss"
     best_fold = None
     best_score = None
     best_tie_breaker = None
@@ -648,28 +701,44 @@ def _promote_best_fold(
             try:
                 with open(cfg_path, encoding="utf-8") as f:
                     cfg = json.load(f)
-                sharpe_val = cfg.get("best_val_sharpe_proxy")
+                _honest_selected = (
+                    cfg.get("best_metric_name") in honest_selection_names
+                    and cfg.get("val_sharpe_is_honest", False)
+                    and not cfg.get("validation_is_logging_only", False)
+                )
+                sharpe_val = (
+                    cfg.get("best_sacs_robust_score")
+                    if cfg.get("best_metric_name") == "sacs_robust_honest_net_sharpe"
+                    else cfg.get("best_cost_aware_sharpe")
+                ) if _honest_selected else None
                 loss_val = cfg.get("best_val_loss")
 
                 if use_sharpe:
                     score = sharpe_val
-                    sharpe_curve = history.get("val_sharpe", [])
-                    score, volatility, gap_penalty = _stability_adjusted_score(score, sharpe_curve, gen_gap)
-
                     tie_breaker = -loss_val if loss_val is not None else None
                 else:
-                    score = -loss_val if loss_val is not None else None
+                    _selected_loss_metric = (
+                        cfg.get("best_sacs_robust_score")
+                        if cfg.get("best_metric_name") == "sacs_robust_validation_loss"
+                        else loss_val
+                    )
+                    score = -_selected_loss_metric if _selected_loss_metric is not None else None
                     tie_breaker = sharpe_val
             except Exception:
                 pass
 
         if score is None:
-            raw = entry.get("best_metric")
+            raw = None
+            if use_sharpe:
+                if entry.get("selection_metric_name") == "sacs_robust_honest_net_sharpe":
+                    raw = entry.get("selected_metric_score")
+                elif entry.get("selection_metric_name") in honest_selection_names:
+                    raw = entry.get("selected_net_sharpe_after_costs")
+            else:
+                raw = entry.get("selected_metric_score") if entry.get("selection_metric_name") == "sacs_robust_validation_loss" else entry.get("best_metric")
             if raw is not None:
                 if use_sharpe:
                     score = raw
-                    sharpe_curve = history.get("val_sharpe", [])
-                    score, volatility, gap_penalty = _stability_adjusted_score(score, sharpe_curve, gen_gap)
                 else:
                     score = -raw
                 tie_breaker = 0.0
@@ -1491,11 +1560,14 @@ def _auto_tune_next_run(
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     # HEURISTIC 3 -- Sharpe collapse: peaked early then degraded
     # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    val_sharpe_curve = history.get("val_sharpe", []) if isinstance(history, dict) else []
-    if val_sharpe_curve and len(val_sharpe_curve) >= 4:
-        peak_val = max(val_sharpe_curve)
-        peak_epoch = val_sharpe_curve.index(peak_val)
-        final_val = val_sharpe_curve[-1]
+    val_sharpe_curve = history.get("cost_aware_sharpe", []) if isinstance(history, dict) else []
+    valid_sharpe_points = [
+        (i, float(v)) for i, v in enumerate(val_sharpe_curve)
+        if v is not None and np.isfinite(float(v))
+    ]
+    if len(valid_sharpe_points) >= 4:
+        peak_epoch, peak_val = max(valid_sharpe_points, key=lambda pair: pair[1])
+        final_val = valid_sharpe_points[-1][1]
         collapse = (peak_val - final_val) / max(abs(peak_val), 1e-9)
         if collapse > 0.20 and peak_epoch < len(val_sharpe_curve) * 0.60:
             # LR was likely too high ΓåÆ reduce warmup peak
@@ -1695,8 +1767,16 @@ def _auto_tune_next_run(
 def _best_epoch_from_history(history: dict) -> int:
     """Pick the epoch index used by auto-tune without depending on outer locals."""
 
-    if isinstance(history, dict) and history.get("val_sharpe"):
-        return int(history["val_sharpe"].index(max(history["val_sharpe"])))
+    if isinstance(history, dict) and history.get("selected_epoch") is not None:
+        return max(0, int(history["selected_epoch"]) - 1)
+
+    if isinstance(history, dict) and history.get("cost_aware_sharpe"):
+        import numpy as np
+
+        scores = [(i, float(v)) for i, v in enumerate(history["cost_aware_sharpe"])
+                  if v is not None and np.isfinite(float(v))]
+        if scores:
+            return max(scores, key=lambda pair: pair[1])[0]
 
     if isinstance(history, dict) and history.get("val_loss"):
         return int(history["val_loss"].index(min(history["val_loss"])))

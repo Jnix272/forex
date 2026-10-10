@@ -1,7 +1,9 @@
 # ── Tabular Model Dataset Config (CatBoost / XGBoost) ───────────────────────
 # Optimized for tree-based models:
-#   - triple_barrier labels: cleaner directional 3-class targets vs RL reward
-#   - seq_len=30: trees reduce sequences to summary stats; shorter = faster build
+#   - Train tree baselines on the discrete direction target (not the synthetic
+#     CPAR reward used by the deep regression heads).
+#   - last_bar view: trees consume the latest causal feature row, keeping the
+#     baseline compact and avoiding unnecessary sequence summaries
 #   - n_ticks=5M: trees don't benefit from massive history depth like DL models
 #   - dataset builds in ~2-3h vs 9+h for the deep learning dataset
 
@@ -82,14 +84,14 @@ training:
 
 catboost:
   enabled: true
-  task: regression
-  sequence_mode: temporal
-  iterations: 500
-  depth: 7
+  task: classification
+  sequence_mode: last_bar
+  iterations: 400
+  depth: 4
   learning_rate: 0.03
   subsample: 0.8
   colsample_bylevel: 0.8
-  l2_leaf_reg: 2.0
+  l2_leaf_reg: 5.0
   folds: 5
   tune: false
   tune_trials: 20
@@ -97,17 +99,17 @@ catboost:
 
 xgboost:
   enabled: true
-  task: regression
-  sequence_mode: temporal
-  n_estimators: 500
-  max_depth: 7
+  task: classification
+  sequence_mode: last_bar
+  n_estimators: 400
+  max_depth: 4
   learning_rate: 0.03
   subsample: 0.8
-  colsample_bytree: 0.8
-  min_child_weight: 5
+  colsample_bytree: 0.6
+  min_child_weight: 50
   gamma: 0.2
   reg_alpha: 0.1
-  reg_lambda: 2.0
+  reg_lambda: 5.0
   folds: 5
   tune: false
   tune_trials: 20
@@ -144,7 +146,7 @@ hardware:
 
 tracking:
   no_wandb: true
-  run_name: tabular_triple_barrier
+  run_name: tabular_cpar_direction
 
 maturity:
   stage: paper

@@ -76,6 +76,41 @@ FOLD_COLOURS = [
     "#ff7b72",  # coral
 ]
 
+
+def _honest_cfg_sharpe(cfg: dict) -> float | None:
+    """Return a Sharpe only when the checkpoint selected on a real net metric."""
+    if (
+        cfg.get("best_metric_name") not in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe")
+        or not cfg.get("val_sharpe_is_honest", False)
+        or cfg.get("validation_is_logging_only", False)
+    ):
+        return None
+    value = (
+        cfg.get("best_sacs_robust_score")
+        if cfg.get("best_metric_name") == "sacs_robust_honest_net_sharpe"
+        else cfg.get("best_cost_aware_sharpe")
+    )
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
+def _honest_fold_sharpe(fold: dict) -> float | None:
+    if fold.get("selection_metric_name") not in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe"):
+        return None
+    value = (
+        fold.get("selected_metric_score")
+        if fold.get("selection_metric_name") == "sacs_robust_honest_net_sharpe"
+        else fold.get("selected_net_sharpe_after_costs")
+    )
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
 MODEL_COLOURS = {
     "haelt": "#58a6ff",
     "tft": "#3fb950",
@@ -206,8 +241,8 @@ def _plot_metric_per_fold(
         else:
             ax.plot(x, y, color=colour, lw=1.5, label=f"Fold {fi}")
 
-        best = fold_data.get("best_metric")
-        if best is not None and key in ("val_sharpe", "dir_acc"):
+        best = _honest_fold_sharpe(fold_data) if key in ("val_sharpe", "cost_aware_sharpe") else fold_data.get("best_metric")
+        if best is not None and key in ("val_sharpe", "cost_aware_sharpe", "dir_acc"):
             ax.axhline(best, color=colour, lw=0.8, ls="--", alpha=0.5)
 
     if len(folds) <= 8:
@@ -255,19 +290,22 @@ def _plot_fold_bars(
     ax.grid(True, alpha=0.4, axis="y")
 
     xs = [f["fold"] for f in folds]
-    ys = [f.get(metric, 0.0) for f in folds]
+    ys = [(_honest_fold_sharpe(f) if metric == "best_metric" else f.get(metric)) for f in folds]
+    ys_plot = [v if v is not None and np.isfinite(float(v)) else 0.0 for v in ys]
     cols = [FOLD_COLOURS[x % len(FOLD_COLOURS)] for x in xs]
-    bars = ax.bar(xs, ys, color=cols, width=0.6, edgecolor="#30363d", linewidth=0.5)
+    bars = ax.bar(xs, ys_plot, color=cols, width=0.6, edgecolor="#30363d", linewidth=0.5)
 
-    mean_y = float(np.mean(ys))
-    ax.axhline(mean_y, color="#ffa657", lw=1.2, ls="--", label=f"Mean {mean_y:.4f}")
-    ax.legend(fontsize=7, framealpha=0.5)
+    finite_ys = [float(v) for v in ys if v is not None and np.isfinite(float(v))]
+    if finite_ys:
+        mean_y = float(np.mean(finite_ys))
+        ax.axhline(mean_y, color="#ffa657", lw=1.2, ls="--", label=f"Mean {mean_y:.4f}")
+        ax.legend(fontsize=7, framealpha=0.5)
 
     for bar, y in zip(bars, ys, strict=False):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.005,
-            f"{y:.3f}",
+            f"{float(y):.3f}" if y is not None and np.isfinite(float(y)) else "n/a",
             ha="center",
             va="bottom",
             fontsize=7,
@@ -286,7 +324,7 @@ def _plot_model_comparison(
     """
     Grouped bar chart: best val Sharpe per model.
     Left bars = from log files (best across folds).
-    Right bars = from checkpoint configs (best_val_sharpe_proxy).
+    Right bars = honest after-cost Sharpe from selected checkpoint configs.
     """
     ax.set_title("Model Comparison - Best Validation Sharpe", fontsize=10, pad=6)
     ax.set_xlabel("Model", fontsize=8)
@@ -300,13 +338,14 @@ def _plot_model_comparison(
     for _key, entry in all_logs.items():
         model = entry["model"]
         folds = entry["folds"]
-        best = max((f.get("best_metric", -999) for f in folds), default=-999)
-        if model not in model_best_log or best > model_best_log[model]:
+        fold_scores = [v for f in folds if (v := _honest_fold_sharpe(f)) is not None]
+        best = max(fold_scores) if fold_scores else None
+        if best is not None and (model not in model_best_log or best > model_best_log[model]):
             model_best_log[model] = best
 
     for model, cfgs in ckpt_cfgs.items():
-        sharpes = [c.get("best_val_sharpe_proxy", -999) for c in cfgs]
-        model_best_ckpt[model] = max(sharpes)
+        sharpes = [v for c in cfgs if (v := _honest_cfg_sharpe(c)) is not None]
+        model_best_ckpt[model] = max(sharpes) if sharpes else None
 
     all_models = sorted(set(list(model_best_log.keys()) + list(model_best_ckpt.keys())))
     if not all_models:
@@ -364,13 +403,17 @@ def _plot_sharpe_heatmap(
 
     # Build matrix: rows = folds, cols = epochs (pad shorter folds with NaN)
     rows = sorted(folds, key=lambda f: f["fold"])
-    lengths = [len(f["history"].get("val_sharpe", [])) for f in rows]
+    lengths = [len(f["history"].get("cost_aware_sharpe", [])) for f in rows]
     max_ep = max(lengths) if lengths else 1
     matrix = np.full((len(rows), max_ep), np.nan)
     for r, fold_data in enumerate(rows):
-        vals = fold_data["history"].get("val_sharpe", [])
+        vals = fold_data["history"].get("cost_aware_sharpe", [])
         matrix[r, : len(vals)] = vals
 
+    if matrix.size == 0 or not np.isfinite(matrix).any():
+        ax.text(0.5, 0.5, "No valid honest after-cost Sharpe", transform=ax.transAxes,
+                ha="center", va="center", color="#8b949e")
+        return
     vmax = max(abs(np.nanmin(matrix)), abs(np.nanmax(matrix)), 0.1)
     im = ax.imshow(matrix, aspect="auto", cmap="RdYlGn", vmin=-vmax, vmax=vmax, interpolation="nearest")
     plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02).set_label("Sharpe", fontsize=7)
@@ -411,17 +454,17 @@ def _plot_summary_table(
         epochs = [len(f["history"].get("train_loss", [])) for f in folds]
         avg_ep = float(np.mean(epochs)) if epochs else 0
 
-        sharpes = [f.get("best_metric", -999) for f in folds]
-        best_sh = max(sharpes)
-        mean_sh = float(np.mean(sharpes))
+        sharpes = [v for f in folds if (v := _honest_fold_sharpe(f)) is not None]
+        best_sh = max(sharpes) if sharpes else float("nan")
+        mean_sh = float(np.mean(sharpes)) if sharpes else float("nan")
 
         accs = [max(f["history"].get("dir_acc", [0])) for f in folds]
         best_acc = max(accs)
 
         ckpt_sh = None
         if model in ckpt_cfgs:
-            ckpt_vals = [c.get("best_val_sharpe_proxy", -999) for c in ckpt_cfgs[model]]
-            ckpt_sh = max(ckpt_vals)
+            ckpt_vals = [v for c in ckpt_cfgs[model] if (v := _honest_cfg_sharpe(c)) is not None]
+            ckpt_sh = max(ckpt_vals) if ckpt_vals else None
 
         rows_data.append((model, run, n_fold, avg_ep, best_sh, mean_sh, best_acc, ckpt_sh))
 
@@ -526,7 +569,7 @@ def build_dashboard(
         # Row 2: Sharpe | LR
         ax_sh = fig.add_subplot(gs[row, :2])
         ax_lr = fig.add_subplot(gs[row, 2:])
-        _plot_metric_per_fold(ax_sh, folds, "val_sharpe", "Validation Sharpe (proxy)", "Sharpe", smooth=True)
+        _plot_metric_per_fold(ax_sh, folds, "cost_aware_sharpe", "Validation net Sharpe after costs", "Sharpe", smooth=True)
         _plot_metric_per_fold(ax_lr, folds, "lr", "Learning Rate Schedule", "LR")
         row += 1
 
@@ -587,14 +630,15 @@ def print_summary(
         folds = entry["folds"]
         epochs = [len(f["history"].get("train_loss", [])) for f in folds]
         avg_ep = int(np.mean(epochs)) if epochs else 0
-        sharpes = [f.get("best_metric", 0) for f in folds]
-        best_sh = max(sharpes)
-        mean_sh = float(np.mean(sharpes))
+        sharpes = [v for f in folds if (v := _honest_fold_sharpe(f)) is not None]
+        best_sh = max(sharpes) if sharpes else float("nan")
+        mean_sh = float(np.mean(sharpes)) if sharpes else float("nan")
         accs = [max(f["history"].get("dir_acc", [0])) for f in folds]
         best_acc = max(accs)
         ckpt_sh = "-"
         if model in ckpt_cfgs:
-            ckpt_sh = f"{max(c.get('best_val_sharpe_proxy', -999) for c in ckpt_cfgs[model]):.4f}"
+            ckpt_vals = [v for c in ckpt_cfgs[model] if (v := _honest_cfg_sharpe(c)) is not None]
+            ckpt_sh = f"{max(ckpt_vals):.4f}" if ckpt_vals else "n/a"
 
         print(
             f"  {model.upper():<12} {run[:22]:<22} {len(folds):>5} {avg_ep:>4}  "
@@ -605,8 +649,9 @@ def print_summary(
         print("\n  Checkpoint-only models (no log file):")
         for model, cfgs in sorted(ckpt_cfgs.items()):
             if not any(e["model"] == model for e in all_logs.values()):
-                best = max(c.get("best_val_sharpe_proxy", -999) for c in cfgs)
-                print(f"    {model.upper():<12}  {len(cfgs)} fold(s)  best_ckpt_sharpe={best:.4f}")
+                scores = [v for c in cfgs if (v := _honest_cfg_sharpe(c)) is not None]
+                best = f"{max(scores):.4f}" if scores else "n/a"
+                print(f"    {model.upper():<12}  {len(cfgs)} fold(s)  best honest after-cost Sharpe={best}")
 
     print(sep)
 

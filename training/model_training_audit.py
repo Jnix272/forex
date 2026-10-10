@@ -247,10 +247,13 @@ def validate_model_training_package(
         reasons.append(f"train_summary.json: train_val_gap {train_val_gap:.6g} > {cfg.max_train_val_gap:.6g}")
 
     best_val_sharpe = _as_float(
-        train_summary.get(
-            "best_val_sharpe",
-            train_summary.get("best_val_sharpe_proxy", _nested_get(model_card, "performance", "validation_sharpe")),
-        ),
+        train_summary.get("best_honest_net_sharpe")
+        if train_summary.get("validation_metric_name") in (
+            "honest_net_sharpe",
+            "cross_validation_honest_net_sharpe",
+            "cross_validation_sacs_robust_honest_net_sharpe",
+        )
+        else None,
         default=0.0,
     )
     gates["best_val_sharpe_ok"] = cfg.min_best_val_sharpe is None or best_val_sharpe >= cfg.min_best_val_sharpe

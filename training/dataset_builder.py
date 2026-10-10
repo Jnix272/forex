@@ -562,12 +562,12 @@ def _build_multipair_feature_schema(
 
 
 def _fit_scaler_from_cache(cache_path: Path, scaler, max_sample: int = 50000) -> None:
-    """Fit the scaler from the written Zarr/NPY cache X array.
+    """Fit a cache-wide diagnostic scaler from the written cache X array.
 
     Samples up to ``max_sample`` rows (last-timestep feature vectors) from the
-    cache to fit the scaler.  This is called after all chunks are appended so
-    the scaler statistics reflect the full dataset without D3 leakage
-    (the scaler is only used at data-load time, never during label generation).
+    cache to fit the scaler. This is called after all chunks are appended, so
+    it includes validation and holdout rows. Training must fit its own scaler
+    on the fold's training indices; this cache-wide scaler is diagnostic only.
     """
     if scaler is None:
         return
@@ -626,10 +626,15 @@ def _fit_scaler_from_cache(cache_path: Path, scaler, max_sample: int = 50000) ->
         return
 
     scaler.fit(X_finite)
-    print(f"[Scaler] Fitted {scaler.__class__.__name__} on {len(X_finite):,} samples x {X_finite.shape[1]} features")
+    print(
+        f"[Scaler] Built full-cache diagnostic {scaler.__class__.__name__} on "
+        f"{len(X_finite):,} samples x {X_finite.shape[1]} features; trainers must refit by fold"
+    )
 
 
-def _save_scaler_npz(cache_path: Path, scaler, path: Path | None = None) -> None:
+def _save_scaler_npz(
+    cache_path: Path, scaler, path: Path | None = None, *, fit_scope: str = "full_cache_diagnostic_only"
+) -> None:
     has_center = hasattr(scaler, "center_") and scaler.center_ is not None
     has_mean = hasattr(scaler, "mean_") and scaler.mean_ is not None
     if not has_center and not has_mean:
@@ -641,6 +646,7 @@ def _save_scaler_npz(cache_path: Path, scaler, path: Path | None = None) -> None
         "scale": scaler.scale_,
         "n_features_in_": int(scaler.n_features_in_),
         "n_samples_seen_": int(getattr(scaler, "n_samples_seen_", 0) or 0),
+        "fit_scope": np.array(str(fit_scope), dtype=str),
     }
     if has_center:
         payload["center"] = scaler.center_
@@ -653,6 +659,11 @@ def _save_scaler_npz(cache_path: Path, scaler, path: Path | None = None) -> None
 
 
 def _load_scaler_npz(cache_path: Path):
+    """Load scaler statistics with provenance; legacy files are full-cache only.
+
+    Callers that train models must refit on the current training fold and save
+    that fitted object alongside the checkpoint.
+    """
     p = _scaler_npz_path(cache_path)
     if not p.exists():
         return None
@@ -674,6 +685,9 @@ def _load_scaler_npz(cache_path: Path):
         s.n_samples_seen_ = int(z["n_samples_seen_"])  # type: ignore[reportAttributeAccessIssue]
     if "feature_names" in z.files:
         s.feature_names_in_ = np.asarray(z["feature_names"], dtype=object)
+    fit_scope = str(z["fit_scope"].item()) if "fit_scope" in z.files else "legacy_full_cache_unknown"
+    s.fit_scope_ = fit_scope
+    s.training_ready_ = fit_scope in ("train_fold", "pre_holdout_refit")
     return s
 
 

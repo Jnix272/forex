@@ -192,8 +192,8 @@ tags:
 #  Model Family  | Config                    | Label Method    | seq_len | Dataset Size
 #  Deep (DL)     | config/run_deep.yaml      | rl_reward       | 120     | ~35 GB / ~9 hrs
 #  RL agents     | config/run_rl.yaml        | rl_reward       | 60      | ~15 GB / ~4-5 hrs
-#  Tabular (CB)  | config/run_tabular.yaml   | triple_barrier  | 30      | ~500 MB / ~2 hrs
-#  Tabular (XGB) | config/run_tabular.yaml   | triple_barrier  | 30      | shared with CB
+#  Tabular (CB)  | config/run_tabular.yaml   | CPAR directions | 30      | ~500 MB / ~2 hrs
+#  Tabular (XGB) | config/run_tabular.yaml   | CPAR directions | 30      | shared with CB
 #
 # Run order:
 #   Step 1 - Build deep dataset:

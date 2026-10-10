@@ -150,12 +150,18 @@ def _load_cv_fold_entry(
     if not isinstance(history, dict) or not history:
         return None
     best_metric = None
-    if history.get("val_sharpe"):
-        best_metric = float(max(history["val_sharpe"]))
+    selected_epoch = history.get("selected_epoch")
+    selected_index = max(0, int(selected_epoch) - 1) if selected_epoch is not None else None
+    cost_curve = history.get("cost_aware_sharpe") or []
+    if (
+        history.get("selection_metric_name") == "honest_net_sharpe"
+        and selected_index is not None
+        and selected_index < len(cost_curve)
+        and cost_curve[selected_index] is not None
+    ):
+        best_metric = float(cost_curve[selected_index])
     elif history.get("val_loss"):
         best_metric = float(min(history["val_loss"]))
-    elif ck.get("best_sharpe") is not None:
-        best_metric = float(ck["best_sharpe"])
     elif ck.get("best_val_loss") is not None:
         best_metric = float(ck["best_val_loss"])
     return {"fold": int(fold_idx), "best_metric": best_metric, "history": history}

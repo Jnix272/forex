@@ -954,9 +954,9 @@ def supervised_train(
                     _scaler.fit(_x_finite)
                     print(f"[Data] Refitted {_scaler.__class__.__name__} on {_max_sample} train samples (no data leakage)")
                 else:
-                    _scaler = _global_scaler
+                    raise RuntimeError("train-only scaler refit found no finite training feature rows")
             else:
-                _scaler = _global_scaler
+                raise RuntimeError("train-only scaler refit requires cached X rows and non-empty train indices")
         except Exception as _se:
             # The cache-wide scaler was fit on validation/holdout rows too; using it
             # would leak evaluation statistics into training. Fail instead.
@@ -1027,7 +1027,7 @@ def supervised_train(
                 )
             print(f"[Val][honest] enabled: {len(_hc_close):,} cached prices, spread={'yes' if _hc_spread is not None else 'no'}")
         else:
-            print("[Val][honest] WARN: cache has no 'close' array; selection falls back to label-based cost_sharpe")
+            print("[Val][honest] WARN: cache has no 'close' array; cost_sharpe is unavailable and checkpoint selection will use val_loss")
     except Exception as _hc_e:
         print(f"[Val][honest] WARN: price arrays unavailable ({_hc_e})")
     _deadband = float(getattr(args, "trade_deadband", 0.0) or getattr(args, "deadband", 0.0) or 0.0)
@@ -1401,7 +1401,11 @@ def supervised_train(
         try:
             from training.dataset_builder import _save_scaler_npz
 
-            _save_scaler_npz(Path(cache_path), _scaler, path=best_path.with_name(best_path.stem + "_scaler.npz"))
+            _save_scaler_npz(
+                Path(cache_path), _scaler,
+                path=best_path.with_name(best_path.stem + "_scaler.npz"),
+                fit_scope="pre_holdout_refit" if getattr(args, "_refit_fixed_epochs", False) else "train_fold",
+            )
             # Ordered feature names ("PAIR::feature"): live asserts its column and
             # pair order against this before trading.
             _fnames = _lfs(cache_path, n_features)
@@ -2482,7 +2486,7 @@ def supervised_train(
         _ctrl_sharpe = (
             float(_cost_sharpe_val)
             if _cost_sharpe_val is not None and math.isfinite(float(_cost_sharpe_val))
-            else float(v_sh)
+            else (float(v_sh) if math.isfinite(float(v_sh)) else 0.0)
         )
         _ctrl_resp = _train_ctrl.evaluate_epoch(ep + 1, float(tl), float(vl), _ctrl_sharpe, dir_acc=float(da))
         _ctrl_curriculum = {"seq_frozen": _seq_frozen}
@@ -2547,11 +2551,19 @@ def supervised_train(
         history["dir_acc"].append(da)
         history["lr"].append(lr)
         history["val_sharpe"].append(v_sh)
-        history.setdefault("cost_aware_sharpe", []).append(float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0)
+        # None means no valid honest trade metric (missing prices or fewer
+        # than the minimum trade count).  Zero would look like a real score
+        # to HPO and fold aggregation.
+        history.setdefault("cost_aware_sharpe", []).append(
+            float(_cost_sharpe_val) if _cost_sharpe_val is not None else None
+        )
         _hm_ci = getattr(validate_epoch, "last_honest", None) or {}
         history.setdefault("honest_sharpe_ci_low", []).append(float(_hm_ci.get("sharpe_net_ci_low", 0.0)))
         history.setdefault("honest_sharpe_ci_high", []).append(float(_hm_ci.get("sharpe_net_ci_high", 0.0)))
         history.setdefault("honest_n_trades", []).append(int(_hm_ci.get("n_trades", 0)))
+        history.setdefault("honest_n_portfolio_periods", []).append(
+            int(_hm_ci.get("n_portfolio_periods", _hm_ci.get("n_trades", 0)))
+        )
         history.setdefault("val_pred_counts", []).append([int(x) for x in _class_counts.get("pred", [0, 0, 0])])
         history.setdefault("val_true_counts", []).append([int(x) for x in _class_counts.get("true", [0, 0, 0])])
 
@@ -2570,7 +2582,7 @@ def supervised_train(
             "val_loss": vl,
             "dir_acc": da,
             "val_sharpe": v_sh,
-            "cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
+            "cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else None,
             "lr": lr,
             "gpu_mb": gm,
             "val_pred_counts": _class_counts.get("pred", [0, 0, 0]),
@@ -2649,7 +2661,7 @@ def supervised_train(
                     "val/loss": vl,
                     "val/dir_acc": da,
                     "val/sharpe_proxy": v_sh,
-                    "val/cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
+                    "val/cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else None,
                     "train/lr": lr,
                     "gpu_mb": gm,
                     "epoch": ep,
@@ -2664,18 +2676,17 @@ def supervised_train(
             )
 
         # -- Is best? (SACS-aware) ------------------------------------------------
-        # Compute sharpness = mean val-loss increase over N random ε-ball
-        # perturbations.  Robust score = val_loss + λ * sharpness.
-        # Lower robust score → flatter minimum → prefer this checkpoint.
-        # Falls back to plain val_loss when SACS is disabled or fails.
+        # SACS measures perturbation sensitivity in the same metric used for
+        # checkpoint selection: after-cost Sharpe when available, otherwise loss.
         _sacs_score = vl  # default: no sharpness penalty
-        # S7: when the honest metric exists, select on its 95% CI lower bound
-        # (lower score = better, so negate). Validation loss is a poor proxy
-        # for trade quality with heavy-tailed targets.
         _hm_sel = getattr(validate_epoch, "last_honest", None) or {}
-        _select_on_honest = bool(_hm_sel) and int(_hm_sel.get("n_trades", 0)) >= 30
+        _select_on_honest = _cost_sharpe_val is not None
         if _sacs_enabled:
-            try:
+            _sacs_metric_available = _cost_sharpe_val is not None
+            if (stop_on_cost_sharpe or stop_on_sharpe) and not _sacs_metric_available:
+                print(f"[SACS] epoch {ep+1}: honest metric unavailable; selecting with validation-loss fallback")
+            else:
+              try:
                 _core_now = _core_model(model)
                 _sharpness_acc = 0.0
                 for _ in range(_sacs_n):
@@ -2689,14 +2700,33 @@ def supervised_train(
                         pbar=None, amp=False, amp_dtype=torch.float32,
                         seq_len=curr_seq_len, multitask=multitask,
                         feature_mask=_feat_mask,
+                        sharpe_ann_factor=_sharpe_ann_factor(args),
+                        lookahead_bars=int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30)),
+                        sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
+                        return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
+                        tx_cost_bps=float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0,
+                        pip_size=float(LABELING.get("pip_size", 0.0001)),
+                        honest_ctx=_honest_ctx,
+                        deadband=_deadband,
+                        min_confidence=_min_conf,
                     )
                     del _perturbed
-                    _sharpness_acc += abs(_vl_p - vl)
+                    if _sacs_metric_available:
+                        _p_cost = getattr(validate_epoch, "last_cost_sharpe", None)
+                        if _p_cost is None:
+                            raise RuntimeError("perturbed candidate has no honest after-cost Sharpe")
+                        _sharpness_acc += abs(float(_p_cost) - float(_cost_sharpe_val))
+                    else:
+                        _sharpness_acc += abs(_vl_p - vl)
                 _sharpness = _sharpness_acc / _sacs_n
-                _sacs_score = vl + _sacs_lam * _sharpness
-            except Exception as _sacs_ep_e:
-                _sacs_score = vl
-                print(f"[SACS] epoch {ep+1} sharpness eval failed (non-fatal): {_sacs_ep_e}")
+                _sacs_score = (
+                    -float(_cost_sharpe_val) + _sacs_lam * _sharpness
+                    if _sacs_metric_available else vl + _sacs_lam * _sharpness
+                )
+              except Exception as _sacs_ep_e:
+                raise RuntimeError(
+                    f"[SACS] epoch {ep+1} sharpness evaluation failed; refusing to substitute another metric"
+                ) from _sacs_ep_e
 
         # Direction-warmup epochs score a direction-only loss on a class-balanced
         # subset, which is lower than and not comparable with the full multitask
@@ -2707,20 +2737,20 @@ def supervised_train(
             _best_from_warmup = False
         _score_is_fallback = False
         _score_is_metric = False
-        if stop_on_cost_sharpe or stop_on_sharpe:
-            _metric_val = _cost_sharpe_val if stop_on_cost_sharpe else v_sh
-            _n_trades_val = int(
-                getattr(validate_epoch, "last_n_trades", (getattr(validate_epoch, "last_honest", None) or {}).get("n_trades", 0))
-                or 0
+        if stop_on_cost_sharpe or stop_on_sharpe or _select_on_honest:
+            # Legacy "sharpe" is an alias for the same real-price, after-cost
+            # metric; never select on a separate label or gross-return proxy.
+            _metric_val = _cost_sharpe_val
+            _honest_periods_val = int(
+                (_hm_sel or {}).get("n_portfolio_periods", (_hm_sel or {}).get("n_trades", 0)) or 0
             )
-            if stop_on_cost_sharpe and _n_trades_val < 30:
-                # When trades are filtered out (e.g. conviction deadband holds 0 position),
-                # cost_sharpe is 0.0000. Do NOT treat <30 trades as a valid trading metric,
-                # otherwise dynamic early stopping considers 0.0000 an unbeatable baseline
-                # and terminates the training run prematurely.
+            if (stop_on_cost_sharpe or stop_on_sharpe) and _honest_periods_val < 30:
+                # Match the evaluator's validity threshold: honest Sharpe is
+                # defined by portfolio periods, not raw trade count.
                 _score_is_fallback = True
             elif _metric_val is not None and math.isfinite(float(_metric_val)):
-                _sacs_score = -float(_metric_val)
+                if not _sacs_enabled:
+                    _sacs_score = -float(_metric_val)
                 _score_is_metric = True
                 if _best_is_fallback:
                     _best_sacs_score = float("inf")
@@ -2729,8 +2759,6 @@ def supervised_train(
                 # Metric unavailable this epoch: keep a val-loss placeholder best
                 # that the first real metric epoch replaces.
                 _score_is_fallback = True
-        elif _select_on_honest and not _sacs_enabled:
-            _sacs_score = -float(_hm_sel.get("sharpe_net_ci_low", 0.0))
         if _score_is_fallback and _best_sacs_score < float("inf") and not _best_is_fallback:
             improved = False
         else:
@@ -2876,10 +2904,18 @@ def supervised_train(
                         "num_layers": args.num_layers,
                         "dropout": args.dropout,
                         "best_val_loss": vl,
-                        "best_val_sharpe_proxy": v_sh,
-                        "best_cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else 0.0,
-                        "best_metric": float(_cost_sharpe_val) if stop_on_cost_sharpe and _cost_sharpe_val is not None else (float(v_sh) if stop_on_sharpe else float(vl)),
-                        "best_metric_name": "cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
+                        "best_val_sharpe": v_sh if math.isfinite(float(v_sh)) else None,
+                        "best_cost_aware_sharpe": float(_cost_sharpe_val) if _cost_sharpe_val is not None else None,
+                        "best_metric": (
+                            float(vl) if getattr(args, "_refit_fixed_epochs", False)
+                            else float(_cost_sharpe_val) if _score_is_metric and _cost_sharpe_val is not None
+                            else float(vl)
+                        ),
+                        "best_metric_name": (
+                            "fixed_epoch_last" if getattr(args, "_refit_fixed_epochs", False)
+                            else "cost_sharpe" if _score_is_metric
+                            else "val_loss_fallback" if _score_is_fallback else "val_loss"
+                        ),
                         "early_stop_metric": _es_metric,
                         "feature_ablation_masked": (
                             int(_feature_ablation_report.get("masked_count") or 0)
@@ -2894,13 +2930,27 @@ def supervised_train(
                         "fold_id": fold_id,
                         # T4 provenance: what this checkpoint was trained/validated on.
                         **_fold_provenance(cache_path, train_idx, val_idx, args),
-                        # T5: v_sh is the honest net Sharpe when price arrays exist
-                        # (S9); its CI lower bound is the selection statistic.
+                        # Save point estimate and uncertainty together; acceptance
+                        # still requires fresh holdout confidence bounds.
                         "val_sharpe_is_honest": bool(getattr(validate_epoch, "last_honest", None)),
+                        "honest_n_trades": int(
+                            (getattr(validate_epoch, "last_honest", None) or {}).get("n_trades", 0)
+                        ),
+                        "honest_n_portfolio_periods": int(
+                            (getattr(validate_epoch, "last_honest", None) or {}).get(
+                                "n_portfolio_periods",
+                                (getattr(validate_epoch, "last_honest", None) or {}).get("n_trades", 0),
+                            )
+                        ),
                         "honest_sharpe_ci_low": float(
                             (getattr(validate_epoch, "last_honest", None) or {}).get("sharpe_net_ci_low", 0.0)
                         ),
                         "refit": bool(getattr(args, "_refit_fixed_epochs", False)),
+                        "validation_is_logging_only": bool(getattr(args, "_refit_fixed_epochs", False)),
+                        "checkpoint_selection": (
+                            "fixed_epoch_last" if getattr(args, "_refit_fixed_epochs", False)
+                            else ("honest_net_sharpe" if _score_is_metric else "validation_loss_fallback" if _score_is_fallback else _es_metric)
+                        ),
                     },
                     _cfg_fp,
                     indent=2,
@@ -2909,7 +2959,7 @@ def supervised_train(
                 run,
                 {
                     "best_val_loss": vl,
-                    "best_val_sharpe_proxy": v_sh,
+                    "best_val_sharpe": v_sh if math.isfinite(float(v_sh)) else None,
                     "best_epoch": ep,
                 },
             )
@@ -3035,30 +3085,70 @@ def supervised_train(
         except Exception as _cal_e:
             _log_warn(f"[Calibration] Failed: {_cal_e}")
 
-    if history.get("cost_aware_sharpe"):
-        _has_cost_hist = True
-    else:
-        _has_cost_hist = False
+    _has_cost_hist = any(
+        v is not None and math.isfinite(float(v)) for v in (history.get("cost_aware_sharpe") or [])
+    )
 
     if _best_epoch_idx is not None and 0 <= int(_best_epoch_idx) < len(history.get("val_loss") or []):
         _best_ep = int(_best_epoch_idx)
     elif history["val_sharpe"]:
-        if stop_on_cost_sharpe and _has_cost_hist:
-            _best_ep = int(history["cost_aware_sharpe"].index(max(history["cost_aware_sharpe"])))
-        elif stop_on_sharpe:
-            _best_ep = int(history["val_sharpe"].index(max(history["val_sharpe"])))
+        if (stop_on_cost_sharpe or stop_on_sharpe) and _has_cost_hist:
+            _valid_cost_epochs = [
+                (i, float(v)) for i, v in enumerate(history["cost_aware_sharpe"])
+                if v is not None and math.isfinite(float(v))
+            ]
+            _best_ep = max(_valid_cost_epochs, key=lambda item: item[1])[0]
+        elif stop_on_cost_sharpe or stop_on_sharpe:
+            _best_ep = int(history["val_loss"].index(min(history["val_loss"])))
         else:
             _best_ep = int(history["val_loss"].index(min(history["val_loss"])))
     else:
         _best_ep = 0
-    _best_met = best_cost_sharpe if stop_on_cost_sharpe else (best_sharpe if stop_on_sharpe else best_val_loss)
+    _cost_metric_valid = (
+        not getattr(args, "_refit_fixed_epochs", False)
+        and
+        not _best_is_fallback
+        and math.isfinite(float(best_cost_sharpe))
+    )
+    _sharpe_metric_valid = False
+    _best_met = (
+        best_cost_sharpe if _cost_metric_valid
+        else best_sharpe if _sharpe_metric_valid
+        else best_val_loss
+    )
+    history["selected_epoch"] = int(_best_ep) + 1
+    history["selected_val_loss"] = (
+        float(history["val_loss"][_best_ep])
+        if 0 <= int(_best_ep) < len(history.get("val_loss") or []) else None
+    )
+    # Persist the metrics belonging to the selected checkpoint explicitly.
+    # Consumers should not have to infer them from an epoch curve (especially
+    # after SACS can replace the checkpoint with an EMA/SWA candidate).
+    for _selected_key, _curve_key in (
+        ("selected_net_sharpe_after_costs", "cost_aware_sharpe"),
+        ("selected_trade_count", "honest_n_trades"),
+        ("selected_portfolio_periods", "honest_n_portfolio_periods"),
+        ("selected_sharpe_ci_low", "honest_sharpe_ci_low"),
+    ):
+        _selected_curve = history.get(_curve_key) or []
+        history[_selected_key] = (
+            _selected_curve[_best_ep]
+            if 0 <= int(_best_ep) < len(_selected_curve) else None
+        )
+    history["selection_metric_name"] = (
+        "fixed_epoch_last" if getattr(args, "_refit_fixed_epochs", False)
+        else "honest_net_sharpe" if _cost_metric_valid
+        else "validation_loss_fallback" if (stop_on_cost_sharpe or stop_on_sharpe)
+        else "validation_loss"
+    )
 
     if _TRAIN_LOGGER is not None:
         _TRAIN_LOGGER.on_training_complete(
             best_epoch=_best_ep,
             best_metric=_best_met,
             total_s=time.time() - _t_start,
-            metric_name="cost_sharpe" if stop_on_cost_sharpe else ("val_sharpe" if stop_on_sharpe else "val_loss"),
+            metric_name=("cost_sharpe" if _cost_metric_valid else "val_loss_fallback")
+            if (stop_on_cost_sharpe or stop_on_sharpe) else "val_loss",
         )
 
     if _rich_display is not None:
@@ -3120,9 +3210,11 @@ def supervised_train(
     }
     if _final_train_val_gap > 0.05:
         _control_report["overfitting_warnings"].append(f"High train-val gap: {_final_train_val_gap:.4f}")
-    if len(history.get("val_sharpe", [])) > 5:
-        max_sh = max(history["val_sharpe"])
-        final_sh = history["val_sharpe"][-1]
+    _honest_curve = [float(v) for v in (history.get("cost_aware_sharpe") or [])
+                     if v is not None and math.isfinite(float(v))]
+    if len(_honest_curve) > 5:
+        max_sh = max(_honest_curve)
+        final_sh = _honest_curve[-1]
         if max_sh - final_sh > 0.3:
             _control_report["overfitting_warnings"].append(f"Sharpe collapsed by {max_sh - final_sh:.3f} from peak")
     _control_report["controller_signals"] = list(_train_ctrl.report_data.get("overfitting_signals_detected") or [])
@@ -3163,86 +3255,60 @@ def supervised_train(
         print(f"[TrainingController] finalize skipped: {_tc_fin}")
 
     # -- SACS: Sharpness-Aware Checkpoint Selection -----------------------------
-    print("\n[SACS] Running Sharpness-Aware Checkpoint Selection...")
-    sacs_candidates = {"Active": model}
-    # The epoch picked by the early-stop metric must stay a candidate; otherwise
-    # SACS always replaces it with the last-epoch / SWA / EMA weights.
-    if best_path.exists() and not getattr(args, "_refit_fixed_epochs", False):
+    if not _sacs_enabled:
+        print("\n[SACS] Disabled by configuration; keeping the checkpoint selected during training.")
+    elif getattr(args, "_refit_fixed_epochs", False):
+        print("\n[SACS] Skipped during fixed-epoch refit; fold validation rows are logging-only.")
+    else:
+        print("\n[SACS] Running Sharpness-Aware Checkpoint Selection...")
+        sacs_candidates = {"Active": model}
+        # The epoch picked by the early-stop metric must stay a candidate; otherwise
+        # SACS always replaces it with the last-epoch / SWA / EMA weights.
+        if best_path.exists() and not getattr(args, "_refit_fixed_epochs", False):
+            try:
+                _best_ckpt_model = copy.deepcopy(_core_model(model))
+                _best_ckpt_model.load_state_dict(torch.load(best_path, map_location=device))
+                sacs_candidates["BestEpoch"] = _best_ckpt_model
+            except Exception as _bc_e:
+                print(f"[SACS] Best-epoch checkpoint not added as candidate: {_bc_e}")
+        if _swa_enabled and _swa_started and _swa_model is not None:
+            sacs_candidates["SWA"] = _swa_model.module
+        if _ema_model is not None:
+            sacs_candidates["EMA"] = _ema_model
+
+        # The tournament can select on honest Sharpe even when Sharpe is not
+        # also configured as the epoch early-stopping metric. Keep the
+        # comparison direction tied to the metric actually used by SACS.
+        _sacs_use_honest_metric = bool(stop_on_cost_sharpe or stop_on_sharpe or _select_on_honest)
+        best_sacs_score = -float("inf") if _sacs_use_honest_metric else float("inf")
+        best_sacs_name = None
+        best_sacs_state = None
+
         try:
-            _best_ckpt_model = copy.deepcopy(_core_model(model))
-            _best_ckpt_model.load_state_dict(torch.load(best_path, map_location=device))
-            sacs_candidates["BestEpoch"] = _best_ckpt_model
-        except Exception as _bc_e:
-            print(f"[SACS] Best-epoch checkpoint not added as candidate: {_bc_e}")
-    if _swa_enabled and _swa_started and _swa_model is not None:
-        sacs_candidates["SWA"] = _swa_model.module
-    if _ema_model is not None:
-        sacs_candidates["EMA"] = _ema_model
+            from training.train_gpu import _sharpe_ann_factor
+            _sacs_ann = _sharpe_ann_factor(args)
+        except Exception:
+            _sacs_ann = 1.0
 
-    best_sacs_score = -float("inf") if (stop_on_sharpe or stop_on_cost_sharpe) else float("inf")
-    best_sacs_name = None
-    best_sacs_state = None
+        _pt_sacs_eps = float(getattr(args, "sacs_eps", 0.005))
+        _pt_sacs_n = max(1, int(getattr(args, "sacs_n_samples", 5)))
+        _pt_sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
+        _lookahead = int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30))
+        _tx_cost = float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0
+        _pip = float(LABELING.get("pip_size", 0.0001))
+        _best_sacs_clean_metric = None
+        _best_sacs_trade_count = None
+        _best_sacs_periods = None
+        _best_sacs_sharpness = None
+        _best_sacs_val_loss = None
+        _best_sacs_ci_low = None
 
-    try:
-        from training.train_gpu import _sharpe_ann_factor
-        _sacs_ann = _sharpe_ann_factor(args)
-    except Exception:
-        _sacs_ann = 1.0
+        for cand_name, cand_model in sacs_candidates.items():
+            try:
+                cand_core = _core_model(cand_model)
 
-    _pt_sacs_eps = float(getattr(args, "sacs_eps", 0.005))
-    _pt_sacs_n = max(1, int(getattr(args, "sacs_n_samples", 5)))
-    _pt_sacs_lam = float(getattr(args, "sacs_sharpness_weight", 1.0))
-    _lookahead = int(getattr(args, "lookahead_bars", None) or LABELING.get("lookahead_bars", 30))
-    _tx_cost = float(LABELING.get("transaction_cost_pips", 1.5)) * 4.0
-    _pip = float(LABELING.get("pip_size", 0.0001))
-
-    for cand_name, cand_model in sacs_candidates.items():
-        try:
-            cand_core = _core_model(cand_model)
-
-            vl_c, da_c, v_sh_c = validate_epoch(
-                cand_core, val_dl, crit, device, classification,
-                pbar=None, amp=False, amp_dtype=torch.float32, seq_len=curr_seq_len, multitask=multitask,
-                feature_mask=_feat_mask, sharpe_ann_factor=_sacs_ann,
-                lookahead_bars=_lookahead,
-                sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
-                return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
-                direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
-                deadband=_deadband, min_confidence=_min_conf,
-            )
-            c_cost = getattr(validate_epoch, "last_cost_sharpe", None)
-
-            # Degenerate-candidate guard: a model that collapses to one class or
-            # takes no trades scores exactly 0 and would otherwise beat every
-            # trading candidate whose honest net Sharpe is negative.
-            _cc = getattr(validate_epoch, "last_class_counts", None) or {}
-            _pred_cc = [float(x) for x in (_cc.get("pred") or [])]
-            _pred_tot = sum(_pred_cc)
-            _min_share = float(getattr(args, "sacs_min_pred_share", 0.05))
-            _hm_c = getattr(validate_epoch, "last_honest", None)
-            _reject_reason = None
-            if _pred_tot > 0 and min(_pred_cc) / _pred_tot < _min_share:
-                _reject_reason = (
-                    f"class-balance fail (min pred share {min(_pred_cc) / _pred_tot:.4f} < {_min_share})"
-                )
-            elif _hm_c is not None and float(_hm_c.get("n_trades", 0) or 0) <= 0:
-                _reject_reason = "zero honest trades"
-            if _reject_reason is not None:
-                print(f"[SACS] {cand_name}: REJECTED - {_reject_reason}")
-                continue
-
-            # Sharpness = mean metric change over N ε-ball perturbations.
-            # For loss-based selection: sharpness is how much loss rises.
-            # For Sharpe-based selection: sharpness is how much Sharpe drops.
-            sharpness_acc = 0.0
-            for _ in range(_pt_sacs_n):
-                _perturbed = copy.deepcopy(cand_core).to(device)
-                with torch.no_grad():
-                    for _pm in _perturbed.parameters():
-                        if _pm.requires_grad:
-                            _pm.add_(torch.randn_like(_pm) * _pt_sacs_eps)
-                vl_p, _, v_sh_p = validate_epoch(
-                    _perturbed, val_dl, crit, device, classification,
+                vl_c, da_c, v_sh_c = validate_epoch(
+                    cand_core, val_dl, crit, device, classification,
                     pbar=None, amp=False, amp_dtype=torch.float32, seq_len=curr_seq_len, multitask=multitask,
                     feature_mask=_feat_mask, sharpe_ann_factor=_sacs_ann,
                     lookahead_bars=_lookahead,
@@ -3251,87 +3317,178 @@ def supervised_train(
                     direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
                     deadband=_deadband, min_confidence=_min_conf,
                 )
-                p_cost_i = getattr(validate_epoch, "last_cost_sharpe", None)
-                if stop_on_cost_sharpe and c_cost is not None and p_cost_i is not None:
-                    sharpness_acc += abs(float(p_cost_i) - float(c_cost))
-                elif stop_on_sharpe:
-                    sharpness_acc += abs(float(v_sh_p) - float(v_sh_c))
+                c_cost = getattr(validate_epoch, "last_cost_sharpe", None)
+
+                # Degenerate-candidate guard: a model that collapses to one class or
+                # takes no trades scores exactly 0 and would otherwise beat every
+                # trading candidate whose honest net Sharpe is negative.
+                _cc = getattr(validate_epoch, "last_class_counts", None) or {}
+                _pred_cc = [float(x) for x in (_cc.get("pred") or [])]
+                _pred_tot = sum(_pred_cc)
+                _min_share = float(getattr(args, "sacs_min_pred_share", 0.05))
+                _hm_c = getattr(validate_epoch, "last_honest", None)
+                _reject_reason = None
+                if _sacs_use_honest_metric and c_cost is None:
+                    _reject_reason = "no valid honest Sharpe with at least 30 portfolio periods"
+                elif _sacs_use_honest_metric and not math.isfinite(float(v_sh_c)):
+                    _reject_reason = "honest Sharpe unavailable"
+                elif _pred_tot > 0 and min(_pred_cc) / _pred_tot < _min_share:
+                    _reject_reason = (
+                        f"class-balance fail (min pred share {min(_pred_cc) / _pred_tot:.4f} < {_min_share})"
+                    )
+                elif _hm_c is not None and float(_hm_c.get("n_trades", 0) or 0) <= 0:
+                    _reject_reason = "zero honest trades"
+                if _reject_reason is not None:
+                    print(f"[SACS] {cand_name}: REJECTED - {_reject_reason}")
+                    continue
+
+                # Sharpness = mean metric change over N ε-ball perturbations.
+                # For loss-based selection: sharpness is how much loss rises.
+                # For Sharpe-based selection: sharpness is how much Sharpe drops.
+                sharpness_acc = 0.0
+                _perturb_metric_missing = False
+                for _ in range(_pt_sacs_n):
+                    _perturbed = copy.deepcopy(cand_core).to(device)
+                    with torch.no_grad():
+                        for _pm in _perturbed.parameters():
+                            if _pm.requires_grad:
+                                _pm.add_(torch.randn_like(_pm) * _pt_sacs_eps)
+                    vl_p, _, v_sh_p = validate_epoch(
+                        _perturbed, val_dl, crit, device, classification,
+                        pbar=None, amp=False, amp_dtype=torch.float32, seq_len=curr_seq_len, multitask=multitask,
+                        feature_mask=_feat_mask, sharpe_ann_factor=_sacs_ann,
+                        lookahead_bars=_lookahead,
+                        sharpe_non_overlapping=bool(getattr(args, "sharpe_non_overlapping", True)),
+                        return_per_trade_sharpe=bool(getattr(args, "sharpe_per_trade", True)),
+                        direction_only=False, tx_cost_bps=_tx_cost, pip_size=_pip, honest_ctx=_honest_ctx,
+                        deadband=_deadband, min_confidence=_min_conf,
+                    )
+                    p_cost_i = getattr(validate_epoch, "last_cost_sharpe", None)
+                    if _sacs_use_honest_metric:
+                        if p_cost_i is None:
+                            _perturb_metric_missing = True
+                            break
+                        sharpness_acc += abs(float(p_cost_i) - float(c_cost))
+                    else:
+                        sharpness_acc += abs(float(vl_p) - float(vl_c))
+                    del _perturbed
+                if _perturb_metric_missing:
+                    print(f"[SACS] {cand_name}: REJECTED - honest selection metric unavailable for a perturbation")
+                    continue
+                sharpness = sharpness_acc / _pt_sacs_n
+
+                # Robust score: lower = better for loss; higher = better for Sharpe.
+                # Sharpness penalty always reduces quality → subtract for Sharpe, add for loss.
+                if _sacs_use_honest_metric and c_cost is not None:
+                    c_val = float(c_cost)
+                    robust_score = c_val - _pt_sacs_lam * sharpness
+                    is_better = robust_score > best_sacs_score
                 else:
-                    sharpness_acc += abs(float(vl_p) - float(vl_c))
-                del _perturbed
-            sharpness = sharpness_acc / _pt_sacs_n
+                    c_val = float(vl_c)
+                    robust_score = c_val + _pt_sacs_lam * sharpness
+                    is_better = robust_score < best_sacs_score
 
-            # Robust score: lower = better for loss; higher = better for Sharpe.
-            # Sharpness penalty always reduces quality → subtract for Sharpe, add for loss.
-            if stop_on_cost_sharpe and c_cost is not None:
-                c_val = float(c_cost)
-                robust_score = c_val - _pt_sacs_lam * sharpness
-                is_better = robust_score > best_sacs_score
-            elif stop_on_sharpe:
-                c_val = float(v_sh_c)
-                robust_score = c_val - _pt_sacs_lam * sharpness
-                is_better = robust_score > best_sacs_score
+                print(
+                    f"[SACS] {cand_name}: clean={c_val:.4f}  sharpness={sharpness:.4f}"
+                    f"  robust={robust_score:.4f}  (λ={_pt_sacs_lam}, n={_pt_sacs_n}, ε={_pt_sacs_eps})"
+                )
+
+                if is_better:
+                    best_sacs_score = robust_score
+                    best_sacs_name = cand_name
+                    best_sacs_state = copy.deepcopy(cand_core.state_dict())
+                    _best_sacs_clean_metric = c_val
+                    _best_sacs_trade_count = int((_hm_c or {}).get("n_trades", 0))
+                    _best_sacs_periods = int((_hm_c or {}).get("n_portfolio_periods", _best_sacs_trade_count))
+                    _best_sacs_sharpness = float(sharpness)
+                    _best_sacs_val_loss = float(vl_c)
+                    _best_sacs_ci_low = float((_hm_c or {}).get("sharpe_net_ci_low", 0.0))
+
+            except Exception as _sacs_e:
+                print(f"[SACS] Evaluation failed for {cand_name}: {_sacs_e}")
+
+        if best_sacs_state is not None:
+            print(f"[SACS] Best model: {best_sacs_name} with robust score {best_sacs_score:.4f}. Saving to {best_path}.")
+            _safe_save(best_sacs_state, best_path)
+            _core_model(model).load_state_dict(best_sacs_state)
+            if _sacs_use_honest_metric:
+                history["selection_metric_name"] = "sacs_robust_honest_net_sharpe"
+                history["selected_net_sharpe_after_costs"] = _best_sacs_clean_metric
+                history["selected_metric_score"] = float(best_sacs_score)
+                history["selected_trade_count"] = _best_sacs_trade_count
+                history["selected_portfolio_periods"] = _best_sacs_periods
+                history["selected_sharpe_ci_low"] = _best_sacs_ci_low
+                history["selected_epoch"] = _best_epoch_idx + 1 if _best_epoch_idx is not None else len(history.get("val_loss", []))
+                history["selected_val_loss"] = _best_sacs_val_loss
+                best_cost_sharpe = float(_best_sacs_clean_metric)
+                best_val_loss = float(_best_sacs_val_loss)
+                _cost_metric_valid = True
             else:
-                c_val = float(vl_c)
-                robust_score = c_val + _pt_sacs_lam * sharpness
-                is_better = robust_score < best_sacs_score
-
-            print(
-                f"[SACS] {cand_name}: clean={c_val:.4f}  sharpness={sharpness:.4f}"
-                f"  robust={robust_score:.4f}  (λ={_pt_sacs_lam}, n={_pt_sacs_n}, ε={_pt_sacs_eps})"
-            )
-
-            if is_better:
-                best_sacs_score = robust_score
-                best_sacs_name = cand_name
-                best_sacs_state = copy.deepcopy(cand_core.state_dict())
-
-        except Exception as _sacs_e:
-            print(f"[SACS] Evaluation failed for {cand_name}: {_sacs_e}")
-            
-    if best_sacs_state is not None:
-        print(f"[SACS] Best model: {best_sacs_name} with robust score {best_sacs_score:.4f}. Saving to {best_path}.")
-        _safe_save(best_sacs_state, best_path)
-        _core_model(model).load_state_dict(best_sacs_state)
-    else:
-        print("[SACS] WARNING: all candidates rejected (degenerate/no trades); keeping existing best-epoch checkpoint.")
-    # ---------------------------------------------------------------------------
-
-    if stop_on_cost_sharpe:
-        print(f"\n[Train] Best cost-aware Sharpe (after tx costs): {best_cost_sharpe:.4f}  ->  {best_path}")
-        if sidecar is not None:
+                history["selection_metric_name"] = "sacs_robust_validation_loss"
+                history["selected_metric_score"] = float(best_sacs_score)
+                history["selected_epoch"] = _best_epoch_idx + 1 if _best_epoch_idx is not None else len(history.get("val_loss", []))
+                history["selected_val_loss"] = _best_sacs_val_loss
             try:
-                sidecar.stop()
-            except Exception:
-                pass
-        return history, best_cost_sharpe
-    elif stop_on_sharpe:
-        print(f"\n[Train] Best val Sharpe (proxy): {best_sharpe:.4f}  ->  {best_path}")
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _cfg_read:
+                        _sacs_cfg = json.load(_cfg_read)
+                    _sacs_cfg.update({
+                        "best_metric_name": "sacs_robust_honest_net_sharpe" if _sacs_use_honest_metric else "sacs_robust_validation_loss",
+                        "best_metric": float(best_sacs_score),
+                        "best_sacs_robust_score": float(best_sacs_score),
+                        "sacs_selected_candidate": best_sacs_name,
+                        "sacs_sharpness": _best_sacs_sharpness,
+                        "best_cost_aware_sharpe": _best_sacs_clean_metric if _sacs_use_honest_metric else None,
+                        "best_val_sharpe": _best_sacs_clean_metric if _sacs_use_honest_metric else None,
+                        "best_val_loss": _best_sacs_val_loss,
+                        "honest_n_trades": _best_sacs_trade_count if _sacs_use_honest_metric else 0,
+                        "honest_n_portfolio_periods": _best_sacs_periods if _sacs_use_honest_metric else 0,
+                        "honest_sharpe_ci_low": _best_sacs_ci_low if _sacs_use_honest_metric else None,
+                        "val_sharpe_is_honest": bool(_sacs_use_honest_metric),
+                        "checkpoint_selection": "sacs_robust_after_cost_sharpe" if _sacs_use_honest_metric else "sacs_robust_validation_loss",
+                    })
+                    _safe_save_json(_sacs_cfg, cfg_path)
+            except Exception as _sacs_meta_err:
+                raise RuntimeError(f"[SACS] Failed to persist selected candidate metadata: {_sacs_meta_err}") from _sacs_meta_err
+        else:
+            print("[SACS] WARNING: all candidates rejected (degenerate/no trades); keeping existing best-epoch checkpoint.")
+        # ---------------------------------------------------------------------------
 
+    if stop_on_cost_sharpe or stop_on_sharpe:
+        if _cost_metric_valid:
+            print(f"\n[Train] Best honest cost-aware Sharpe: {best_cost_sharpe:.4f}  ->  {best_path}")
+            _returned_metric = (
+                float(best_sacs_score)
+                if _sacs_enabled and not getattr(args, "_refit_fixed_epochs", False)
+                and _best_sacs_state is not None and _sacs_use_honest_metric
+                else float(best_cost_sharpe)
+            )
+        else:
+            print(f"\n[Train] No honest Sharpe with >=30 trades; checkpoint selected by validation loss ({best_val_loss:.6f}) -> {best_path}")
+            _returned_metric = float(best_val_loss)
         if getattr(args, "ollama_auto_tune", False):
             try:
                 from infrastructure.ollama_helper import ollama
 
-                final_metrics = {
-                    "best_sharpe": float(best_sharpe),
+                ollama.auto_tune_model(model_name, {
+                    "best_sharpe": float(best_cost_sharpe) if _cost_metric_valid else None,
                     "best_val_loss": float(best_val_loss),
                     "best_epoch": int(_best_ep),
-                }
-                ollama.auto_tune_model(model_name, final_metrics)
+                })
             except Exception:
                 pass
-
         if sidecar is not None:
             try:
                 sidecar.stop()
             except Exception:
                 pass
-
-        return history, best_sharpe
+        return history, _returned_metric
     print(f"\n[Train] Best val loss: {best_val_loss:.6f}  ->  {best_path}")
     if sidecar is not None:
         try:
             sidecar.stop()
         except Exception:
             pass
+    if _sacs_enabled and not getattr(args, "_refit_fixed_epochs", False) and "best_sacs_score" in locals() and best_sacs_state is not None:
+        return history, float(best_sacs_score)
     return history, best_val_loss

@@ -30,6 +30,38 @@ def test_oanda_practice_default(monkeypatch):
     broker = OANDABroker()
     assert broker._host == 'https://api-fxpractice.oanda.com'
 
+def test_paper_only_oanda_uses_practice_and_logs_endpoint(monkeypatch, capsys):
+    monkeypatch.setenv('OANDA_ENV', 'practice')
+    monkeypatch.delenv('OANDA_API_URL', raising=False)
+    monkeypatch.delenv('OANDA_API_HOST', raising=False)
+    monkeypatch.delenv('OANDA_STREAM_URL', raising=False)
+
+    broker = OANDABroker(paper_only=True)
+
+    assert broker._host == 'https://api-fxpractice.oanda.com'
+    output = capsys.readouterr().out
+    assert 'environment=practice' in output
+    assert 'paper_only=True' in output
+
+@pytest.mark.parametrize('env, api_url, stream_url', [
+    ('live', None, None),
+    ('practice', 'https://api-fxtrade.oanda.com', None),
+    ('practice', None, 'https://stream-fxtrade.oanda.com'),
+    ('practice', 'http://api-fxpractice.oanda.com', None),
+])
+def test_paper_only_oanda_rejects_non_practice_endpoints(monkeypatch, env, api_url, stream_url):
+    monkeypatch.setenv('OANDA_ENV', env)
+    monkeypatch.delenv('OANDA_API_URL', raising=False)
+    monkeypatch.delenv('OANDA_API_HOST', raising=False)
+    monkeypatch.delenv('OANDA_STREAM_URL', raising=False)
+    if api_url is not None:
+        monkeypatch.setenv('OANDA_API_URL', api_url)
+    if stream_url is not None:
+        monkeypatch.setenv('OANDA_STREAM_URL', stream_url)
+
+    with pytest.raises(RuntimeError, match='Paper-only OANDA mode rejects'):
+        OANDABroker(paper_only=True)
+
 def test_oanda_market_order_fill(monkeypatch):
     monkeypatch.setenv('OANDA_API_KEY', 'dummy')
     monkeypatch.setenv('OANDA_ACCOUNT_ID', 'dummy')

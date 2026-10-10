@@ -35,9 +35,24 @@ def promote_best_fold(model_name: str, checkpoint_dir: str, metric: str = "sharp
                 cfg = json.load(f)
 
             if use_sharpe:
-                raw_score = cfg.get("best_val_sharpe_proxy")
+                metric_name = cfg.get("best_metric_name")
+                raw_score = (
+                    cfg.get("best_sacs_robust_score")
+                    if metric_name == "sacs_robust_honest_net_sharpe"
+                    else cfg.get("best_cost_aware_sharpe")
+                )
+                if (
+                    metric_name not in ("cost_sharpe", "honest_net_sharpe", "sacs_robust_honest_net_sharpe")
+                    or cfg.get("validation_is_logging_only", False)
+                    or not cfg.get("val_sharpe_is_honest", False)
+                ):
+                    raw_score = None
             else:
-                raw = cfg.get("best_val_loss")
+                raw = (
+                    cfg.get("best_sacs_robust_score")
+                    if cfg.get("best_metric_name") == "sacs_robust_validation_loss"
+                    else cfg.get("best_val_loss")
+                )
                 raw_score = -raw if raw is not None else None  # Negate so higher=better
 
             train_val_gap = cfg.get("train_val_loss_gap", 0.0)
@@ -77,7 +92,7 @@ def promote_best_fold(model_name: str, checkpoint_dir: str, metric: str = "sharp
 
     shutil.copy2(src, dst)
 
-    metric_label = "sharpe" if use_sharpe else "val_loss"
+    metric_label = "honest_net_sharpe_after_costs" if use_sharpe else "val_loss"
     winning_fold_data = next(f for f in folds_found if f["fold"] == best_fold)
 
     print(f"{'=' * 60}")
