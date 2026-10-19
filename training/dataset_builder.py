@@ -4118,8 +4118,25 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             n_samples = _clamp_n_samples_to_disk(str(cache_path), n_samples)
             print(f"[Data] {n_samples:,} samples x {n_features} features (zarr cache)")
             _warn_multitask_cache_sidecars(str(cache_path), args)
+            args._n_pairs = len(pairs)
+            args._f_per_pair = n_features // max(1, len(pairs))
             return str(cache_path), n_samples, n_features, scaler
-        pass
+        else:
+            import json
+
+            meta_path = str(cache_path) + "_meta.json"
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                n_samples = int(meta["total_samples"])
+                n_features = int(meta["n_features"])
+                scaler = _load_scaler_npz(Path(cache_path)) or _identity_scaler(n_features)
+                n_samples = _clamp_n_samples_to_disk(str(cache_path), n_samples)
+                print(f"[Data] {n_samples:,} samples x {n_features} features (npy cache)")
+                _warn_multitask_cache_sidecars(str(cache_path), args)
+                args._n_pairs = len(pairs)
+                args._f_per_pair = n_features // max(1, len(pairs))
+                return str(cache_path), n_samples, n_features, scaler
     print(f"\n[Data] Building 20M tick dataset -- chunk size: {args.chunk_size:,}")
     _pairs_display = ", ".join(pairs)
     print(f"       Source: {args.data_source} | Pairs: {_pairs_display}")

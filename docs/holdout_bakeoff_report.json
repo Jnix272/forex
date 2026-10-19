@@ -1,0 +1,134 @@
+{
+  "holdout_start": 172144,
+  "n_bars": 19127,
+  "results": [
+    {
+      "pair": "EURUSD",
+      "model": "HAELT Specialist",
+      "arch": "HAELT (Validated Fold + Hyst)",
+      "trades": 107,
+      "win_rate": 45.794392523364486,
+      "net_pips": -396.4504883792162,
+      "sharpe": -1.0884530226374232,
+      "pf": 0.7597239983313216,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "EURUSD",
+      "model": "Mamba Specialist",
+      "arch": "MAMBA (mamba_best.pt + Hyst)",
+      "trades": 260,
+      "win_rate": 51.153846153846146,
+      "net_pips": 72.92232108263141,
+      "sharpe": 0.1691681702883293,
+      "pf": 1.026159524484793,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "EURUSD",
+      "model": "Stationary Ensemble (OOS)",
+      "arch": "LightGBM (4H + Hysteresis)",
+      "trades": 54,
+      "win_rate": 40.74074074074074,
+      "net_pips": -217.6834573673956,
+      "sharpe": -0.7532711083638537,
+      "pf": 0.769111839869567,
+      "horizon": "4h (48b)"
+    },
+    {
+      "pair": "EURUSD",
+      "model": "Multi-Arch Zoo Ensemble",
+      "arch": "HAELT + MAMBA + 4H Hyst",
+      "trades": 131,
+      "win_rate": 44.274809160305345,
+      "net_pips": -586.323848089759,
+      "sharpe": -1.6123490281749058,
+      "pf": 0.7120364550330528,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "USDCAD",
+      "model": "HAELT Specialist",
+      "arch": "HAELT (Validated Fold + Hyst)",
+      "trades": 92,
+      "win_rate": 56.52173913043478,
+      "net_pips": 118.47787766894311,
+      "sharpe": 0.4876279937209596,
+      "pf": 1.122266771336718,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "USDCAD",
+      "model": "Mamba Specialist",
+      "arch": "MAMBA (mamba_best.pt + Hyst)",
+      "trades": 193,
+      "win_rate": 44.559585492227974,
+      "net_pips": -369.4100401776609,
+      "sharpe": -1.0966154633891871,
+      "pf": 0.8302635315615833,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "USDCAD",
+      "model": "Stationary Ensemble (OOS)",
+      "arch": "LightGBM (4H + Hysteresis)",
+      "trades": 117,
+      "win_rate": 41.02564102564102,
+      "net_pips": -604.6141113209655,
+      "sharpe": -2.0968242046452974,
+      "pf": 0.6096953766829162,
+      "horizon": "4h (48b)"
+    },
+    {
+      "pair": "USDCAD",
+      "model": "Multi-Arch Zoo Ensemble",
+      "arch": "HAELT + MAMBA + 4H Hyst",
+      "trades": 135,
+      "win_rate": 50.37037037037037,
+      "net_pips": -250.2868691452315,
+      "sharpe": -0.8190231593670694,
+      "pf": 0.8481758734382916,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "USDJPY",
+      "model": "HAELT Specialist",
+      "arch": "HAELT (Validated Fold + Hyst)",
+      "trades": 61,
+      "win_rate": 54.09836065573771,
+      "net_pips": 217.9735422392376,
+      "sharpe": 0.5028569779665973,
+      "pf": 1.176655795679678,
+      "horizon": "2.5h (30b)"
+    },
+    {
+      "pair": "USDJPY",
+      "model": "Stationary Ensemble (OOS)",
+      "arch": "LightGBM (4H + Hysteresis)",
+      "trades": 137,
+      "win_rate": 48.9051094890511,
+      "net_pips": -626.8447047533465,
+      "sharpe": -1.1426097065526855,
+      "pf": 0.801323384612101,
+      "horizon": "4h (48b)"
+    },
+    {
+      "pair": "USDJPY",
+      "model": "Multi-Arch Zoo Ensemble",
+      "arch": "HAELT + 4H Hyst",
+      "trades": 86,
+      "win_rate": 53.48837209302325,
+      "net_pips": 185.14608913818392,
+      "sharpe": 0.3634865913993403,
+      "pf": 1.1003180709424452,
+      "horizon": "2.5h (30b)"
+    }
+  ],
+  "portfolio_3pair_zoo": {
+    "trades": 352,
+    "win_rate": 48.86,
+    "profit_factor": 0.88,
+    "net_pips": -651.5,
+    "sharpe": -0.93
+  }
+}

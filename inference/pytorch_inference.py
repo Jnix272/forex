@@ -268,6 +268,37 @@ def load_pytorch_model(
     dev = device or _resolve_device()
     model = cast(Any, model).to(dev)
     model.eval()
+
+    # Discover and attach feature mask from metadata sidecar if present
+    meta_json = Path(checkpoint_path).with_suffix(Path(checkpoint_path).suffix + ".metadata.json")
+    if not meta_json.is_file():
+        meta_json = Path(checkpoint_path).with_name(Path(checkpoint_path).name + ".metadata.json")
+    if not meta_json.is_file():
+        for cand_dir in (Path(checkpoint_path).parent, Path(checkpoint_path).parent.parent):
+            if cand_dir.is_dir():
+                for pat in ("*refit*.metadata.json", "*best*.metadata.json", "*.metadata.json"):
+                    metas = list(cand_dir.glob(pat))
+                    if metas:
+                        meta_json = metas[0]
+                        break
+            if meta_json.is_file():
+                break
+    if meta_json.is_file():
+        try:
+            import json
+            import torch
+
+            mdata = json.loads(meta_json.read_text(encoding="utf-8"))
+            fmask_raw = mdata.get("feature_ablation", {}).get("mask")
+            if fmask_raw:
+                fmask_np = np.asarray(fmask_raw, dtype=np.float32)
+                fmask_t = torch.from_numpy(fmask_np).to(dev)
+                setattr(model, "feature_mask", fmask_t)
+                if hasattr(model, "inner"):
+                    setattr(model.inner, "feature_mask", fmask_t)
+        except Exception:
+            pass
+
     return model, int(n_features), int(seq_len), sidecar_model, scaler
 
 
@@ -283,6 +314,8 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         hold_threshold: float = 0.45,
         device: Any | None = None,
         cache_path: str | None = None,
+        model: Any | None = None,
+        scaler: Any | None = None,
     ):
         import torch
 
@@ -291,48 +324,81 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         self.hold_threshold = float(hold_threshold)
         self._obs_buffer = deque(maxlen=int(seq_len))
         self.device = device or _resolve_device()
-
-        self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = load_pytorch_model(
-            self.checkpoint_path,
-            self.model_name,
-            seq_len=seq_len,
-            n_features=n_features,
-            device=self.device,
-            cache_path=cache_path,
-        )
-        self._obs_buffer = deque(self._obs_buffer, maxlen=int(self.seq_len))
         self._torch = torch
+
+        if model is not None:
+            self.model = _wrap_logits_output(model).to(self.device)
+            self.model.eval()
+            self.n_features = int(n_features or 146)
+            self.seq_len = int(seq_len)
+            self.arch_name = self.model_name
+            self.scaler = scaler
+            self.feature_mask = getattr(model, "feature_mask", None)
+        else:
+            self.model, self.n_features, self.seq_len, self.arch_name, self.scaler = load_pytorch_model(
+                self.checkpoint_path,
+                self.model_name,
+                seq_len=seq_len,
+                n_features=n_features,
+                device=self.device,
+                cache_path=cache_path,
+            )
+            self.feature_mask = getattr(self.model, "feature_mask", None)
+        self._obs_buffer = deque(self._obs_buffer, maxlen=int(self.seq_len))
+        self.pair = None
+        self.pair_index = 0
+        self.per_pair_heads = bool(
+            int(self.n_features) == 146
+            or any("MultiPair" in type(mod).__name__ for mod in self.model.modules())
+        )
         print(
             f"[PyTorch] Loaded {Path(checkpoint_path).name} | "
             f"arch={self.arch_name} | seq={self.seq_len} | "
             f"n_feat={self.n_features} | scaler={'yes' if self.scaler is not None else 'no'}"
+            f" | mask={'yes' if self.feature_mask is not None else 'no'}"
             f" | device={self.device}"
         )
         self._warmup()
 
     def _transform_window(self, window: np.ndarray) -> np.ndarray:
-        """Apply the training-time StandardScaler to a (T, F) live window.
+        """Apply the training-time StandardScaler and feature ablation mask to a (T, F) live window.
 
         Mirrors :func:`training.gpu_datasets._decompress_block` ordering:
-        NaN/Inf cleanup → scaler.transform → float32 cast. No-op when no
-        scaler was discovered (RL encoder-only path, demo) so existing callers
-        are unaffected.
+        NaN/Inf cleanup → scaler.transform → feature_mask → float32 cast.
         """
         arr = np.asarray(window, dtype=np.float32)
-        if self.scaler is None:
-            return arr
-        scaler_n = getattr(self.scaler, "n_features_in_", None)
-        if scaler_n is not None and arr.shape[-1] == scaler_n * 4:
-            blocks = []
-            for p_idx in range(4):
-                blk = arr[..., p_idx * scaler_n : (p_idx + 1) * scaler_n]
-                blocks.append(apply_inference_scaler(self.scaler, blk))
-            return np.concatenate(blocks, axis=-1)
-        # apply_inference_scaler expects (..., F); we pass (T, F) directly.
-        return apply_inference_scaler(self.scaler, arr)
+        # Handle multi-pair window (584) fed to single-pair specialist (146)
+        if arr.shape[-1] > self.n_features:
+            if arr.shape[-1] == 584 and self.n_features == 146:
+                p_idx = int(getattr(self, "pair_index", 0))
+                arr = arr[..., p_idx * 146 : (p_idx + 1) * 146]
+            else:
+                arr = arr[..., : self.n_features]
+        if self.scaler is not None:
+            scaler_n = getattr(self.scaler, "n_features_in_", None)
+            if scaler_n is not None and arr.shape[-1] == scaler_n * 4:
+                blocks = []
+                for p_idx in range(4):
+                    blk = arr[..., p_idx * scaler_n : (p_idx + 1) * scaler_n]
+                    blocks.append(apply_inference_scaler(self.scaler, blk))
+                arr = np.concatenate(blocks, axis=-1)
+            else:
+                arr = apply_inference_scaler(self.scaler, arr)
+        if self.feature_mask is not None:
+            mask_np = self.feature_mask.detach().cpu().numpy() if hasattr(self.feature_mask, "detach") else np.asarray(self.feature_mask)
+            if mask_np.shape[-1] == arr.shape[-1]:
+                arr = arr * mask_np
+        return arr
 
     def select_action(self, obs: np.ndarray) -> int:
-        self._obs_buffer.append(np.asarray(obs, dtype=np.float32).reshape(-1))
+        arr = np.asarray(obs, dtype=np.float32).reshape(-1)
+        if arr.shape[0] > self.n_features:
+            if arr.shape[0] == 584 and self.n_features == 146:
+                p_idx = int(getattr(self, "pair_index", 0))
+                arr = arr[p_idx * 146 : (p_idx + 1) * 146]
+            else:
+                arr = arr[: self.n_features]
+        self._obs_buffer.append(arr)
         if len(self._obs_buffer) < self.seq_len:
             return 1
         proba = self.predict_proba(np.stack(self._obs_buffer, axis=0))
@@ -341,10 +407,14 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
         return int(proba.argmax())
 
     def predict_proba(self, window: np.ndarray) -> np.ndarray:
+        window = np.asarray(window, dtype=np.float32)
+        if window.ndim == 1:
+            window = np.repeat(window[np.newaxis, :], self.seq_len, axis=0)
         scaled = self._transform_window(window)
         x = self._torch.as_tensor(scaled[np.newaxis], dtype=self._torch.float32, device=self.device)
+        core = getattr(self.model, "inner", self.model)
         with self._torch.no_grad():
-            logits = self.model(x)
+            logits = core(x)
             if isinstance(logits, (tuple, list)) and len(logits) >= 3:
                 # Multitask heads: same [SELL, HOLD, BUY] rule as validation and
                 # the gate (training.decision); select_action then applies
@@ -353,19 +423,113 @@ class PyTorchInferenceEngine(BaseInferenceEngine):
                 from training.decision import action_proba
 
                 pr = action_proba(logits).detach().cpu().numpy()[0]
-                return (pr[PRIMARY_PAIR_INDEX] if pr.ndim == 2 else pr).astype(np.float32)
+                idx = getattr(self, "pair_index", PRIMARY_PAIR_INDEX)
+                if pr.ndim == 2:
+                    idx = min(idx, pr.shape[0] - 1)
+                    return pr[idx].astype(np.float32)
+                return pr.astype(np.float32)
             if isinstance(logits, (tuple, list)):
                 logits = logits[0]
             if hasattr(logits, "detach"):
                 logits = logits.detach().cpu().numpy()
-        row = np.asarray(logits)[0]
+        row = logits
+        if isinstance(row, (tuple, list)):
+            row = row[0]
+        if hasattr(row, "detach"):
+            row = row.detach().cpu().numpy()
+        row = np.asarray(row)
+        if row.ndim == 0:
+            row = row.reshape(1)
+        elif row.ndim == 1 and row.size == 1:
+            row = row
+        elif row.ndim >= 2:
+            row = row[0]
         if row.ndim == 1 and row.size > 1 and row.size != 3 and getattr(self.model, "_per_pair_output", True):
-            # Per-pair heads: (P,) direction logits, one per pair. Trade the primary
-            # pair; treating them as a P-class softmax would be meaningless.
+            # Per-pair heads: (P,) direction logits, one per pair. Trade the target pair.
             from models.ensemble import PRIMARY_PAIR_INDEX
 
-            row = row[PRIMARY_PAIR_INDEX : PRIMARY_PAIR_INDEX + 1]
+            idx = getattr(self, "pair_index", PRIMARY_PAIR_INDEX)
+            idx = min(idx, row.size - 1)
+            row = row[idx : idx + 1]
         return _logits_to_proba(row, threshold=getattr(self, "threshold", None))
+
+    def for_pair(self, pair: str) -> "PyTorchInferenceEngine":
+        """Return an inference engine specialized for `pair`.
+
+        Discovers dedicated single-pair specialist checkpoints for the active
+        architecture (e.g. checkpoints/{arch}_{pair}_v1/...), falling back to
+        production checkpoints or HAELT specialist checkpoints if available.
+        Otherwise returns an isolated clone configured for the pair slot.
+        """
+        pair_clean = pair.upper().replace("/", "").replace("_", "")
+        if getattr(self, "pair", None) == pair_clean:
+            return self
+
+        pair_order = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+        idx = pair_order.index(pair_clean) if pair_clean in pair_order else 0
+
+        m_name = getattr(self, "model_name", "haelt").lower()
+        candidates = [
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_v1/{m_name}/{m_name}_best.pt"),
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_v1/{m_name}/{m_name}/{m_name}_best.pt"),
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_v1/{m_name}_best.pt"),
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_v1/{m_name}_foldrefit_best.pt"),
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_v1/{m_name}_foldrefit_calibrated.pt"),
+            Path(f"checkpoints/production_{m_name}_{pair_clean.lower()}.pt"),
+            Path(f"checkpoints/{m_name}_{pair_clean.lower()}_best.pt"),
+        ]
+        if m_name != "haelt":
+            candidates.extend([
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt/haelt_best.pt"),
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt/haelt/haelt_best.pt"),
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt/haelt_foldrefit_best.pt"),
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt/haelt_foldrefit_calibrated.pt"),
+            ])
+        candidates.extend([
+            Path(f"checkpoints/production_{pair_clean.lower()}.pt"),
+            Path(f"checkpoints/{pair_clean.lower()}_best.pt"),
+        ])
+        for cand in candidates:
+            if cand.is_file():
+                try:
+                    cand_model = self.model_name
+                    if "haelt_" in str(cand).lower() and m_name != "haelt":
+                        cand_model = "haelt"
+                    engine = PyTorchInferenceEngine(
+                        checkpoint_path=str(cand),
+                        model_name=cand_model,
+                        seq_len=self.seq_len,
+                        n_features=None,
+                        hold_threshold=self.hold_threshold,
+                        device=self.device,
+                    )
+                    engine.pair = pair_clean
+                    engine.pair_index = idx
+                    print(f"[SpecialistRouter] Successfully routed {pair_clean} -> Dedicated Specialist ({cand})")
+                    return engine
+                except Exception as exc:
+                    print(f"[SpecialistRouter] Note: Candidate {cand} for {pair_clean} not loadable ({exc})")
+
+        # Multi-pair or in-memory fallback: configure pair head index
+        if self.checkpoint_path == ":memory:" or not Path(self.checkpoint_path).is_file():
+            import copy
+            cloned = copy.copy(self)
+            cloned._obs_buffer = deque(maxlen=int(self.seq_len))
+            cloned.pair = pair_clean
+            cloned.pair_index = idx
+            return cloned
+
+        cloned = PyTorchInferenceEngine(
+            checkpoint_path=self.checkpoint_path,
+            model_name=self.model_name,
+            seq_len=self.seq_len,
+            n_features=self.n_features,
+            hold_threshold=self.hold_threshold,
+            device=self.device,
+        )
+        cloned.pair = pair_clean
+        cloned.pair_index = idx
+        return cloned
 
     def reset_buffer(self):
         self._obs_buffer.clear()

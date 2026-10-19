@@ -88,6 +88,10 @@ def _read_training_config(ckpt_path: Path, model_name: str) -> dict:
     ]
     if "_fold" not in ckpt_path.stem:
         candidates.extend(sorted(ckpt_path.parent.glob(f"{model_name}_fold*_config.json")))
+        if ckpt_path.parent.parent.is_dir():
+            candidates.append(ckpt_path.parent.parent / f"{model_name}_config.json")
+            candidates.append(ckpt_path.parent.parent / (stem.replace("_best", "") + "_config.json"))
+            candidates.extend(sorted(ckpt_path.parent.parent.glob(f"{model_name}_fold*_config.json")))
 
     for path in candidates:
         if path.exists():

@@ -1,0 +1,254 @@
+{
+  "config": {
+    "H": 48,
+    "EMBARGO": 96,
+    "N_FOLDS": 8,
+    "TEST_FRAC": 0.4,
+    "n_engineered_features_per_pair": 93
+  },
+  "pairs": {
+    "EURUSD": {
+      "oos_spearman_ic": 0.0337,
+      "oos_ic_pvalue": 0.174586,
+      "fixed_4h_exit": {
+        "sharpe": -0.402,
+        "net_pips": -1033.4,
+        "trades": 810
+      },
+      "hysteresis_vol_sized": {
+        "sharpe": 0.646,
+        "net_pips": 1057.2,
+        "trades": 96,
+        "net_pips_per_trade": 11.01
+      },
+      "hysteresis_trailing_gated": {
+        "sharpe": 0.65,
+        "net_pips": 982.4,
+        "trades": 86,
+        "net_pips_per_trade": 11.42
+      }
+    },
+    "USDJPY": {
+      "oos_spearman_ic": 0.0295,
+      "oos_ic_pvalue": 0.234479,
+      "fixed_4h_exit": {
+        "sharpe": 0.567,
+        "net_pips": 1539.3,
+        "trades": 694
+      },
+      "hysteresis_vol_sized": {
+        "sharpe": 0.537,
+        "net_pips": 1040.7,
+        "trades": 107,
+        "net_pips_per_trade": 9.73
+      },
+      "hysteresis_trailing_gated": {
+        "sharpe": 0.325,
+        "net_pips": 593.5,
+        "trades": 92,
+        "net_pips_per_trade": 6.45
+      }
+    },
+    "GBPUSD": {
+      "oos_spearman_ic": -0.0321,
+      "oos_ic_pvalue": 0.196158,
+      "fixed_4h_exit": {
+        "sharpe": -0.918,
+        "net_pips": -3535.9,
+        "trades": 938
+      },
+      "hysteresis_vol_sized": {
+        "sharpe": -0.401,
+        "net_pips": -735.9,
+        "trades": 82,
+        "net_pips_per_trade": -8.97
+      },
+      "hysteresis_trailing_gated": {
+        "sharpe": -0.614,
+        "net_pips": -959.7,
+        "trades": 67,
+        "net_pips_per_trade": -14.32
+      }
+    },
+    "USDCAD": {
+      "oos_spearman_ic": 0.0252,
+      "oos_ic_pvalue": 0.309399,
+      "fixed_4h_exit": {
+        "sharpe": -0.662,
+        "net_pips": -1570.1,
+        "trades": 871
+      },
+      "hysteresis_vol_sized": {
+        "sharpe": 1.098,
+        "net_pips": 1504.1,
+        "trades": 62,
+        "net_pips_per_trade": 24.26
+      },
+      "hysteresis_trailing_gated": {
+        "sharpe": 1.098,
+        "net_pips": 1504.1,
+        "trades": 62,
+        "net_pips_per_trade": 24.26
+      }
+    }
+  },
+  "portfolio_4pair_fixed_4h_exit": {
+    "inv_vol_sharpe": -0.661,
+    "equal_weight_sharpe": -0.676,
+    "ci90": [
+      -1.637,
+      0.535
+    ],
+    "first_half_sharpe": -1.31,
+    "second_half_sharpe": -0.194,
+    "total_net_pips": -4600.0,
+    "pair_corr": [
+      [
+        1.0,
+        -0.083,
+        0.494,
+        0.286
+      ],
+      [
+        -0.083,
+        1.0,
+        -0.229,
+        -0.037
+      ],
+      [
+        0.494,
+        -0.229,
+        1.0,
+        0.274
+      ],
+      [
+        0.286,
+        -0.037,
+        0.274,
+        1.0
+      ]
+    ]
+  },
+  "portfolio_3pair_fixed_4h_exit": {
+    "pairs": [
+      "EURUSD",
+      "USDJPY",
+      "USDCAD"
+    ],
+    "inv_vol_sharpe": -0.359,
+    "equal_weight_sharpe": -0.23,
+    "ci90": [
+      -1.305,
+      0.793
+    ],
+    "first_half_sharpe": -0.949,
+    "second_half_sharpe": 0.035,
+    "total_net_pips": -1064.1
+  },
+  "portfolio_4pair_hysteresis_vol_sized": {
+    "inv_vol_sharpe": 0.936,
+    "equal_weight_sharpe": 0.73,
+    "ci90": [
+      -0.143,
+      2.039
+    ],
+    "first_half_sharpe": 0.234,
+    "second_half_sharpe": 1.55,
+    "total_net_pips": 2866.1,
+    "pair_corr": [
+      [
+        1.0,
+        -0.058,
+        0.437,
+        0.225
+      ],
+      [
+        -0.058,
+        1.0,
+        -0.005,
+        -0.094
+      ],
+      [
+        0.437,
+        -0.005,
+        1.0,
+        0.199
+      ],
+      [
+        0.225,
+        -0.094,
+        0.199,
+        1.0
+      ]
+    ]
+  },
+  "portfolio_3pair_hysteresis_vol_sized": {
+    "pairs": [
+      "EURUSD",
+      "USDJPY",
+      "USDCAD"
+    ],
+    "inv_vol_sharpe": 1.395,
+    "equal_weight_sharpe": 1.239,
+    "ci90": [
+      0.378,
+      2.461
+    ],
+    "first_half_sharpe": 0.876,
+    "second_half_sharpe": 1.859,
+    "total_net_pips": 3602.0
+  },
+  "portfolio_4pair_hysteresis_trailing_gated": {
+    "inv_vol_sharpe": 0.778,
+    "equal_weight_sharpe": 0.609,
+    "ci90": [
+      -0.306,
+      1.922
+    ],
+    "first_half_sharpe": 0.035,
+    "second_half_sharpe": 1.606,
+    "total_net_pips": 2120.2,
+    "pair_corr": [
+      [
+        1.0,
+        -0.022,
+        0.288,
+        0.174
+      ],
+      [
+        -0.022,
+        1.0,
+        0.025,
+        -0.089
+      ],
+      [
+        0.288,
+        0.025,
+        1.0,
+        0.127
+      ],
+      [
+        0.174,
+        -0.089,
+        0.127,
+        1.0
+      ]
+    ]
+  },
+  "portfolio_3pair_hysteresis_trailing_gated": {
+    "pairs": [
+      "EURUSD",
+      "USDJPY",
+      "USDCAD"
+    ],
+    "inv_vol_sharpe": 1.18,
+    "equal_weight_sharpe": 1.114,
+    "ci90": [
+      0.164,
+      2.271
+    ],
+    "first_half_sharpe": 0.48,
+    "second_half_sharpe": 1.827,
+    "total_net_pips": 3080.0
+  }
+}

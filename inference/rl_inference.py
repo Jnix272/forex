@@ -206,7 +206,7 @@ class RLInferenceAgent(BaseInferenceEngine):
             if not self._encoder_obs:
                 print(
                     f"[RLInference] WARN: obs_size {obs_size} != encoder { _inferred_emb}+5 "
-                    f"→ training used RAW features; live will feed raw (no encoder)."
+                    f"-> training used RAW features; live will feed raw (no encoder)."
                 )
         else:
             self._encoder_obs = True
@@ -305,6 +305,12 @@ class RLInferenceAgent(BaseInferenceEngine):
         import torch
 
         row = np.asarray(obs, dtype=np.float32).reshape(-1)
+        if row.shape[0] > self.n_features:
+            if row.shape[0] == 584 and self.n_features == 146:
+                p_idx = int(getattr(self, "pair_index", 0))
+                row = row[p_idx * 146 : (p_idx + 1) * 146]
+            else:
+                row = row[: self.n_features]
         self._feat_buffer.append(row)
         if len(self._feat_buffer) < self.seq_len:
             return int(LiveAction.HOLD)
@@ -380,6 +386,64 @@ class RLInferenceAgent(BaseInferenceEngine):
         action = max(0, min(9, action_int))
         return scaling_action_to_live_action(action, position_lots=self._position)
 
+    def for_pair(self, pair: str) -> "RLInferenceAgent":
+        """Return an RL inference agent specialized for `pair`.
+
+        Discovers dedicated single-pair specialist RL checkpoints (e.g.
+        checkpoints/haelt_eurusd_v1, checkpoints/haelt_usdcad_v1, etc.) or creates
+        an isolated clone of the agent with dedicated observation and position
+        buffers so that multi-pair live trading does not cross-contaminate state.
+        """
+        import copy
+        from collections import deque
+
+        pair_clean = pair.upper().replace("/", "").replace("_", "")
+        if getattr(self, "pair", None) == pair_clean:
+            return self
+
+        pair_order = ["EURUSD", "USDJPY", "GBPUSD", "USDCAD"]
+        idx = pair_order.index(pair_clean) if pair_clean in pair_order else 0
+
+        # Search for pair-specific specialist RL checkpoints
+        arch = getattr(self, "arch_name", "haelt").lower()
+        specialist_dirs = [
+            Path(f"checkpoints/{arch}_{pair_clean.lower()}_v1"),
+            Path(f"checkpoints/{arch}_{pair_clean.lower()}_v1/{arch}"),
+            Path(f"checkpoints/{arch}_{pair_clean.lower()}_v1/{arch}/{arch}"),
+        ]
+        if arch != "haelt":
+            specialist_dirs.extend([
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1"),
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt"),
+                Path(f"checkpoints/haelt_{pair_clean.lower()}_v1/haelt/haelt"),
+            ])
+        for sdir in specialist_dirs:
+            if sdir.is_dir():
+                spec_agent = build_rl_fast_agent(
+                    checkpoint_dir=sdir,
+                    model_name=self.arch_name,
+                    seq_len=self.seq_len,
+                    n_features=self.n_features,
+                    algo=self.algo,
+                )
+                if spec_agent is not None:
+                    spec_agent.pair = pair_clean
+                    spec_agent.pair_index = idx
+                    print(f"[SpecialistRLRouter] Routed {pair_clean} -> Dedicated RL Specialist ({sdir})")
+                    return spec_agent
+
+        # Fallback: create an isolated clone with fresh buffers so state isn't overwritten across pairs
+        cloned = copy.copy(self)
+        cloned._feat_buffer = deque(maxlen=self.seq_len)
+        cloned._position = 0.0
+        cloned._entry_price = 0.0
+        cloned._equity = self.initial_equity
+        cloned._holding = 0
+        cloned._last_price = 0.0
+        cloned.pair = pair_clean
+        cloned.pair_index = idx
+        return cloned
+
 
 def build_rl_fast_agent(
     checkpoint_dir: Path,
@@ -392,7 +456,8 @@ def build_rl_fast_agent(
 
     Supervised checkpoint is resolved via the canonical
     ``resolve_checkpoint_paths`` (handles nested ``haelt/haelt_best.pt`` etc.)
-    with additional fallbacks for the historic double-nested layout.
+    with additional fallbacks for the historic double-nested layout and
+    multi-architecture specialists.
     RL checkpoint falls back across sibling dirs / ensemble if the exact
     ``algo`` is missing (e.g. haelt requests dqn but only ensemble PPO exists).
     """
@@ -420,16 +485,26 @@ def build_rl_fast_agent(
     except Exception:
         pass
     if sup is None or not sup.is_file():
-        # Legacy / double-nested fallbacks
-        for cand in (
-            ckpt_dir / f"{model_name}_best.pt",
-            ckpt_dir / model_name / f"{model_name}_best.pt",
-            ckpt_dir / model_name / model_name / f"{model_name}_best.pt",
-            ckpt_dir.parent / f"{model_name}_best.pt",
-            ckpt_dir.parent / model_name / f"{model_name}_best.pt",
-        ):
-            if cand.is_file():
-                sup = cand
+        # Architecture-specific and fallback candidates
+        candidate_models = [model_name]
+        if model_name.lower() != "haelt":
+            candidate_models.append("haelt")
+        for m in candidate_models:
+            for cand in (
+                ckpt_dir / f"{m}_best.pt",
+                ckpt_dir / m / f"{m}_best.pt",
+                ckpt_dir / m / m / f"{m}_best.pt",
+                ckpt_dir / f"{m}_foldrefit_best.pt",
+                ckpt_dir / m / f"{m}_foldrefit_best.pt",
+                ckpt_dir / m / m / f"{m}_foldrefit_best.pt",
+                ckpt_dir.parent / f"{m}_best.pt",
+                ckpt_dir.parent / m / f"{m}_best.pt",
+            ):
+                if cand.is_file():
+                    sup = cand
+                    model_name = m
+                    break
+            if sup is not None and sup.is_file():
                 break
     if sup is None or not sup.is_file():
         return None

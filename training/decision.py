@@ -46,6 +46,7 @@ def decide(
     outputs,
     threshold: float | None = None,
     deadband: float = 0.0,
+    pair_thresholds=None,
 ) -> torch.Tensor:
     """Positions in {-1, 0, +1} (float), shaped like the direction logits.
 
@@ -70,7 +71,20 @@ def decide(
     d = idx.float() - 1.0
     d = torch.where(top >= thr, d, torch.zeros_like(d))
 
-    if deadband > 0.0:
+    if pair_thresholds is not None:
+        # Per-pair conviction gate (option 4): column k must clear its own threshold
+        # on directional confidence max(P_sell, P_buy).
+        pt = torch.as_tensor(pair_thresholds, dtype=top.dtype, device=top.device)
+        dconf = torch.maximum(proba[..., 0], proba[..., 2])
+        if dconf.dim() >= 2 and pt.numel() == dconf.shape[-1]:
+            d = torch.where(dconf >= pt.reshape(1, -1), d, torch.zeros_like(d))
+        elif pt.numel() == 1:
+            d = torch.where(dconf >= pt.reshape(-1)[0], d, torch.zeros_like(d))
+
+    import os
+
+    _pure_bce = os.environ.get("FOREX_PURE_BCE", "0").strip() == "1"
+    if deadband > 0.0 and not _pure_bce:
         if isinstance(outputs, (tuple, list)) and len(outputs) > 1 and outputs[1] is not None:
             ret_hat = outputs[1].float()
             if ret_hat.shape != d.shape:
@@ -81,4 +95,14 @@ def decide(
             out_f = outputs.float()
             d = torch.where(out_f.abs() > float(deadband), torch.sign(out_f), torch.zeros_like(out_f))
     return d
+
+
+def quantile_pair_thresholds(top: torch.Tensor, trade_fraction: float) -> torch.Tensor:
+    """Per-pair confidence thresholds so each pair trades its most-confident
+    ``trade_fraction`` of rows. Label-free: uses only model outputs.
+
+    top : (N, P) top-class probability per row/pair. Returns (P,).
+    """
+    f = float(min(max(trade_fraction, 1e-4), 1.0))
+    return torch.quantile(top.float(), 1.0 - f, dim=0)
 

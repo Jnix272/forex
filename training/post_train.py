@@ -530,11 +530,21 @@ def holdout_sharpe_for_checkpoint(ckpt_path, model_name, cache_path, n_samples, 
             n_features=int(n_features), device=device, cache_path=str(cache_path),
         )
         start = max(0, int(n_samples) - int(_promotion_holdout_n(n_samples, args)))
+        _tf = None
+        _tf_raw = os.environ.get("FOREX_TRADE_FRACTION") or getattr(args, "trade_fraction", None)
+        if _tf_raw not in (None, "", "0", 0):
+            try:
+                _tf = float(_tf_raw)
+            except (ValueError, TypeError):
+                _tf = None
+        _fmask = getattr(args, "_feature_ablation_mask_np", None)
+
         m = holdout_gate_metrics(
             model, str(cache_path), np.arange(start, int(n_samples)),
             horizon=int(getattr(args, "lookahead_bars", None) or 30),
             bar_freq=str(getattr(args, "bar_freq", "5min")), scaler=scaler,
             pair_names=list(_get_pairs(args)) or None, device=device,
+            trade_fraction=_tf, feature_mask=_fmask,
         )
         return float(m["sharpe"])
     except Exception as exc:
@@ -543,30 +553,49 @@ def holdout_sharpe_for_checkpoint(ckpt_path, model_name, cache_path, n_samples, 
 
 
 def _cv_refit_epochs(cv_hist: list, max_epochs: int) -> int:
-    """Median selected epoch across folds (+1 for 0-based), at least warmup + 2."""
+    """Median selected epoch across folds (+1 for 0-based), at least warmup + 6."""
     eps = []
     for e in cv_hist:
         h = e.get("history") or {}
         ci = h.get("honest_sharpe_ci_low") or []
+        cs = h.get("cost_aware_sharpe") or []
+        vs = h.get("val_sharpe") or []
         vl = h.get("val_loss") or []
         if ci and any(v != 0.0 for v in ci):
             eps.append(int(np.argmax(ci)) + 1)
+        elif cs and any(v != 0.0 for v in cs):
+            eps.append(int(np.argmax(cs)) + 1)
+        elif vs and any(v != 0.0 for v in vs):
+            eps.append(int(np.argmax(vs)) + 1)
         elif vl:
             eps.append(int(np.argmin(vl)) + 1)
     n = int(np.median(eps)) if eps else int(max_epochs)
-    return int(min(max(n, 4), max(4, int(max_epochs))))
+    return int(min(max(n, 10), max(10, int(max_epochs))))
 
 
 def _promote_refit(model_name: str, checkpoint_dir: str, cv_hist: list, refit_epochs: int) -> None:
-    """Copy the refit checkpoint (+ scaler/feature sidecars) to <model>_best.pt."""
+    """Promote the best validated CV fold if positive validation Sharpe exists or refit is under-trained;
+    otherwise copy the refit checkpoint (+ scaler/feature sidecars) to <model>_best.pt."""
     ckpt_dir = Path(checkpoint_dir)
+    has_positive_cv = any(
+        (e.get("best_metric") is not None and float(e.get("best_metric") or 0.0) > 0.0)
+        for e in (cv_hist or [])
+    )
+    if has_positive_cv or int(refit_epochs) < 8:
+        print(
+            f"[Refit] {model_name}: selecting best validated CV fold instead of unvalidated "
+            f"{refit_epochs}-epoch refit (has_positive_cv={has_positive_cv})"
+        )
+        _promote_best_fold(model_name, checkpoint_dir, cv_hist, early_stop_metric="cost_sharpe", force_promotion=True)
+        return
     src = next(
         (p for p in (ckpt_dir / model_name / f"{model_name}_foldrefit_best.pt", ckpt_dir / f"{model_name}_foldrefit_best.pt")
          if p.exists()),
         None,
     )
     if src is None:
-        print(f"[Refit] {model_name}: refit checkpoint not found; nothing promoted")
+        print(f"[Refit] {model_name}: refit checkpoint not found; falling back to _promote_best_fold")
+        _promote_best_fold(model_name, checkpoint_dir, cv_hist, early_stop_metric="cost_sharpe", force_promotion=True)
         return
     for dst in {ckpt_dir / f"{model_name}_best.pt", ckpt_dir / model_name / f"{model_name}_best.pt"}:
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -805,13 +834,18 @@ def _promote_best_fold(
     _atomic_copy(src, dst_flat)
     if src != dst_nested:
         _atomic_copy(src, dst_nested)
-    # The train-only scaler must travel with the weights: inference and the
-    # ensemble look for ``<stem>_scaler.npz`` beside the promoted checkpoint.
-    for _suffix in ("_features.json",):
+    # The train-only scaler and metadata sidecars must travel with the weights:
+    # inference and the ensemble look for ``<stem>_scaler.npz`` and ``<ckpt>.metadata.json``
+    # beside the promoted checkpoint.
+    for _suffix in ("_features.json", "_config.json"):
         _src_side = src.with_name(src.stem + _suffix)
         if _src_side.is_file():
             for _dst in {dst_flat, dst_nested}:
                 _atomic_copy(_src_side, _dst.with_name(_dst.stem + _suffix))
+    _src_meta = src.with_name(src.name + ".metadata.json")
+    if _src_meta.is_file():
+        for _dst in {dst_flat, dst_nested}:
+            _atomic_copy(_src_meta, _dst.with_name(_dst.name + ".metadata.json"))
     _src_scaler = src.with_name(src.stem + "_scaler.npz")
     if _src_scaler.is_file():
         for _dst in {dst_flat, dst_nested}:
@@ -1117,6 +1151,15 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
     try:
         from training.honest_eval import holdout_gate_metrics
 
+        _tf = None
+        _tf_raw = os.environ.get("FOREX_TRADE_FRACTION") or getattr(args, "trade_fraction", None)
+        if _tf_raw not in (None, "", "0", 0):
+            try:
+                _tf = float(_tf_raw)
+            except (ValueError, TypeError):
+                _tf = None
+        _fmask = getattr(args, "_feature_ablation_mask_np", None)
+
         bt_metrics = holdout_gate_metrics(
             model,
             str(cache_path),
@@ -1127,6 +1170,8 @@ def _evaluate_forward_gate(model_name, cache_path, n_samples, n_features, args, 
             pair_names=pairs,
             device=device,
             batch_size=min(int(getattr(args, "batch_size", 512) or 512), 1024),
+            trade_fraction=_tf,
+            feature_mask=_fmask,
         )
     except Exception as e:
         print(f"[PromotionGate] Holdout backtest failed: {e}")

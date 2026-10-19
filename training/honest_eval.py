@@ -277,6 +277,7 @@ def pooled_pair_metrics(
         ts = np.concatenate(pooled_idx)
         uniq, inv = np.unique(ts, return_inverse=True)
         net = np.bincount(inv, weights=trades) / np.bincount(inv)
+        gross_p = np.bincount(inv, weights=out["_gross_returns"]) / np.bincount(inv)
         out["_net_returns"] = net
         out["n_portfolio_periods"] = int(len(net))
         _span = float(ts.max() - ts.min() + max(1, int(horizon))) if len(ts) else float(horizon)
@@ -285,6 +286,8 @@ def pooled_pair_metrics(
         ann = math.sqrt(ppy)
         if len(net) >= min_trades and net.std(ddof=1) > 0:
             out["sharpe_net"] = float(net.mean() / net.std(ddof=1) * ann)
+            if gross_p.std(ddof=1) > 0:
+                out["sharpe_gross"] = float(gross_p.mean() / gross_p.std(ddof=1) * ann)
             out["win_rate"] = float((net > 0).mean())
             out["mean_ret_bps"] = float(net.mean() * 1e4)
             lo, hi, p0 = bootstrap_sharpe_ci(net, ann)
@@ -390,6 +393,9 @@ def holdout_gate_metrics(
     pair_names: list[str] | None = None,
     device=None,
     batch_size: int = 512,
+    trade_fraction: float | None = None,
+    feature_mask: np.ndarray | None = None,
+    min_trades: int | None = None,
 ) -> dict:
     """Promotion-gate backtest on the cached holdout rows.
 
@@ -402,10 +408,56 @@ def holdout_gate_metrics(
     Returns gate inputs: sharpe, n_trades, profit_factor, max_drawdown,
     gross_pnl, transaction_costs, returns, periods_per_year (+ per_pair).
     """
+    import os
     import torch
     import zarr  # type: ignore
 
     from inference._scaler_load import SCALED_FEATURE_CLIP
+
+    if trade_fraction is None:
+        _tf_raw = os.environ.get("FOREX_TRADE_FRACTION")
+        try:
+            trade_fraction = float(_tf_raw) if _tf_raw not in (None, "", "0", 0) else None
+        except (ValueError, TypeError):
+            trade_fraction = None
+
+    if min_trades is None:
+        try:
+            from config.settings import TRAINING as _TR
+            min_trades = int(_TR.get("min_reliable_val_trades", 20 if trade_fraction else 30))
+        except Exception:
+            min_trades = 20 if trade_fraction else 30
+
+    if feature_mask is None:
+        if getattr(model, "feature_mask", None) is not None:
+            try:
+                feature_mask = np.asarray(model.feature_mask.detach().cpu().numpy())
+            except Exception:
+                pass
+        else:
+            try:
+                from training.feature_ablation import _feature_base_name
+                import json
+                schema_path = Path(cache_path).with_name(Path(cache_path).stem + "_feature_schema.json")
+                if not schema_path.is_file():
+                    schema_path = Path(cache_path) / "_feature_schema.json"
+                if schema_path.is_file():
+                    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                    cand = list(Path("checkpoints").glob("**/*feature_ablation_report.json"))
+                    for cp in cand:
+                        if any(p.lower() in str(cp).lower() for p in (pair_names or [])):
+                            rep = json.loads(cp.read_text(encoding="utf-8"))
+                            drop_feats = set(rep.get("drop_features", []))
+                            if drop_feats:
+                                fmask = np.ones(len(schema), dtype=np.float32)
+                                for idx_f, raw_name in enumerate(schema):
+                                    base = _feature_base_name(str(raw_name)).lower()
+                                    if base in drop_feats or str(raw_name).lower() in drop_feats:
+                                        fmask[idx_f] = 0.0
+                                feature_mask = fmask
+                                break
+            except Exception:
+                pass
 
     idx = np.sort(np.asarray(holdout_idx, dtype=np.int64))
     root = zarr.open(str(cache_path), mode="r")
@@ -413,6 +465,7 @@ def holdout_gate_metrics(
     dev = device or torch.device("cpu")
     model.eval()
     rows = []
+    top_rows = []
     with torch.no_grad():
         for i in range(0, len(idx), int(batch_size)):
             b = idx[i : i + int(batch_size)]
@@ -422,26 +475,44 @@ def holdout_gate_metrics(
                 shp = xb.shape
                 xb = scaler.transform(xb.reshape(-1, shp[-1])).astype(np.float32).reshape(shp)
                 np.clip(xb, -SCALED_FEATURE_CLIP, SCALED_FEATURE_CLIP, out=xb)
+            if feature_mask is not None:
+                xb = xb * feature_mask
             out = model(torch.from_numpy(xb).to(dev))
-            from training.decision import decide
+            from training.decision import action_proba, decide, quantile_pair_thresholds
 
             # Same confidence-gated rule as validation and live (audit S8).
             d = decide(out).detach().cpu().numpy().astype(np.float64).reshape(len(b), -1)
-            d = d[:, 0] if d.shape[1] == 1 else d
+            d = d[:, 0] if (d.shape[1] == 1 and "close_pairs" not in root) else d
             rows.append(d)
+            if trade_fraction is not None:
+                pr = action_proba(out)
+                tp = torch.maximum(pr[..., 0], pr[..., 2]).float().cpu().reshape(len(b), -1)
+                top_rows.append(tp)
     dirs = np.concatenate(rows, axis=0)
+    if trade_fraction is not None and top_rows:
+        top_all = torch.cat(top_rows, dim=0)
+        if dirs.ndim == 2 and top_all.shape[-1] == dirs.shape[-1]:
+            pthr = quantile_pair_thresholds(top_all, trade_fraction).numpy()
+            dirs = np.where(top_all.numpy() >= pthr.reshape(1, -1), dirs, 0.0)
+        elif dirs.ndim == 1:
+            top_flat = top_all.reshape(-1)
+            f = float(min(max(trade_fraction, 1e-4), 1.0))
+            thr = float(torch.quantile(top_flat.float(), 1.0 - f))
+            dirs = np.where(top_flat.numpy() >= thr, dirs, 0.0)
     bpy = fx_bars_per_year(bar_freq)
     h = max(1, int(horizon))
     if dirs.ndim == 2:
         if "close_pairs" not in root:
             raise RuntimeError("per-pair model but cache has no close_pairs; rebuild the cache")
         sp = np.asarray(root["spread_pairs"][:]) if "spread_pairs" in root else None
+        t_ns, atr_pairs = load_aux_arrays(cache_path)
         m = pooled_pair_metrics(
-            dirs, idx, np.asarray(root["close_pairs"][:]), sp, h, pair_names=pair_names, bars_per_year=bpy
+            dirs, idx, np.asarray(root["close_pairs"][:]), sp, h, pair_names=pair_names, bars_per_year=bpy,
+            t_ns=t_ns, atr_pairs=atr_pairs, skip_gap_windows=True, min_trades=int(min_trades),
         )
     else:
         sp = np.asarray(root["spread"][:]) if "spread" in root else None
-        m = net_pnl_metrics(dirs, idx, np.asarray(root["close"][:]), sp, h, bars_per_year=bpy)
+        m = net_pnl_metrics(dirs, idx, np.asarray(root["close"][:]), sp, h, bars_per_year=bpy, min_trades=int(min_trades))
     net = np.asarray(m.pop("_net_returns", np.zeros(0)))
     gross = m.pop("_gross_returns", None)
     cost = m.pop("_costs", None)

@@ -42,17 +42,31 @@ def _default_labeling() -> dict[str, Any]:
 
 
 @njit(cache=True)
-def _cost_aware_label(cpar_l: float, cpar_s: float) -> float:
-    """BUY/SELL only when that side pays after costs, else HOLD.
+def _cost_aware_label(cpar_l: float, cpar_s: float, min_edge: float = 0.05) -> float:
+    """BUY/SELL only when that side pays after costs + slippage buffer, else HOLD.
 
-    Each side's CPAR already enters at the ask (long) / bid (short), so it is net
-    of spread. The old ``sign((cpar_l - cpar_s) / 2)`` cancelled the spread and
-    labelled the mid-price move, leaving HOLD almost empty (127 of 418k EURUSD).
+    Each side's CPAR already enters at the ask (long) / bid (short) plus slippage,
+    so it is net of spread + slippage. The old ``sign((cpar_l - cpar_s) / 2)``
+    cancelled the spread and labelled the mid-price move.
     """
-    if cpar_l > 0.0 and cpar_l >= cpar_s:
+    if cpar_l > min_edge and cpar_l >= cpar_s:
         return 1.0
-    if cpar_s > 0.0 and cpar_s > cpar_l:
+    if cpar_s > min_edge and cpar_s > cpar_l:
         return -1.0
+    return 0.0
+
+
+def _cost_aware_reward(cpar_l: float, cpar_s: float) -> float:
+    """Continuous scalar regression target preserving net-of-cost spread edge.
+
+    Note: ``(cpar_l - cpar_s) / 2`` algebraically cancels the bid-ask spread
+    because ``(bid_exit - ask_entry) - (bid_entry - ask_exit) = 2*(mid_exit - mid_entry)``.
+    Using the dominant net-of-cost side when positive preserves exact transaction costs.
+    """
+    if cpar_l >= cpar_s and cpar_l > 0.0:
+        return cpar_l
+    if cpar_s > cpar_l and cpar_s > 0.0:
+        return -cpar_s
     return 0.0
 
 
@@ -111,10 +125,20 @@ def _scan_outcomes_cpar_numba(
         cpar_long_out[i] = cpar_l
         cpar_short_out[i] = cpar_s
         
-        # Continuous scalar label for regression
-        reward_val = (cpar_l - cpar_s) / 2.0
+        # Continuous scalar label for regression (net of spread, not mid-price)
+        if cpar_l >= cpar_s and cpar_l > 0.0:
+            reward_val = cpar_l
+        elif cpar_s > cpar_l and cpar_s > 0.0:
+            reward_val = -cpar_s
+        else:
+            reward_val = 0.0
         reward_out[i] = reward_val
-        label_out[i] = _cost_aware_label(cpar_l, cpar_s)
+        if cpar_l > 0.05 and cpar_l >= cpar_s:
+            label_out[i] = 1.0
+        elif cpar_s > 0.05 and cpar_s > cpar_l:
+            label_out[i] = -1.0
+        else:
+            label_out[i] = 0.0
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
 
@@ -172,8 +196,7 @@ def _scan_outcomes_cpar_sequential(
         
         cpar_long_out[i] = cpar_l
         cpar_short_out[i] = cpar_s
-        reward_val = (cpar_l - cpar_s) / 2.0
-        reward_out[i] = reward_val
+        reward_out[i] = _cost_aware_reward(cpar_l, cpar_s)
         label_out[i] = _cost_aware_label(cpar_l, cpar_s)
 
     return cpar_long_out, cpar_short_out, reward_out, label_out
@@ -253,8 +276,7 @@ def _scan_outcomes_cpar_dynamic(
 
         cpar_long_out[i] = cpar_l
         cpar_short_out[i] = cpar_s
-        reward_val = (cpar_l - cpar_s) / 2.0
-        reward_out[i] = reward_val
+        reward_out[i] = _cost_aware_reward(cpar_l, cpar_s)
         # The 'label' column must be discrete {-1, 0, 1} for row_quality checks
         label_out[i] = _cost_aware_label(cpar_l, cpar_s)
 
@@ -293,6 +315,8 @@ def compute_triple_barrier_labels(
 
     # MAE penalty weight. Was hard-coded 0.5 regardless of config.
     penalty = float(cfg.get("cpar_mae_penalty", 0.5))
+    extra_cost_pips = float(cfg.get("extra_cost_pips", 0.7))
+    slip_price = max(0.0, extra_cost_pips) * pip_size
 
     if len(bars) < vertical_bars + 2:
         warnings.warn(
@@ -312,17 +336,17 @@ def compute_triple_barrier_labels(
     if "bid_close" in bars.columns and "ask_close" in bars.columns:
         bid = np.asarray(bars["bid_close"].reindex(features.index).ffill(), dtype=np.float64)
         ask = np.asarray(bars["ask_close"].reindex(features.index).ffill(), dtype=np.float64)
-        entry_long = ask.copy()  
-        entry_short = bid.copy() 
+        entry_long = ask + slip_price
+        entry_short = bid - slip_price
     elif "spread_pips" in features.columns:
         spread_half = np.asarray(features["spread_pips"], dtype=np.float64) * pip_size / 2.0
-        entry_long = close + spread_half
-        entry_short = close - spread_half
+        entry_long = close + spread_half + slip_price
+        entry_short = close - spread_half - slip_price
         bid = close - spread_half  
         ask = close + spread_half  
     else:
-        entry_long = close.copy()
-        entry_short = close.copy()
+        entry_long = close + slip_price
+        entry_short = close - slip_price
         bid = close.copy()
         ask = close.copy()
 

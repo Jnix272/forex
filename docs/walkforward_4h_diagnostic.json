@@ -1,0 +1,26 @@
+{
+  "EURUSD": {
+    "IC": -0.01053281195521439,
+    "n_signals": 8019,
+    "hit_rate": 0.502930539967577,
+    "gross_pips_per_trade": -0.6563120284332036,
+    "avg_cost_pips": 1.0348902930538768,
+    "net_pips_per_trade": -1.6912023214870802
+  },
+  "USDJPY": {
+    "IC": 0.020107124645492122,
+    "n_signals": 10378,
+    "hit_rate": 0.5102139140489497,
+    "gross_pips_per_trade": 1.324915375914457,
+    "avg_cost_pips": 1.212215493992294,
+    "net_pips_per_trade": 0.11269988192216407
+  },
+  "USDCAD": {
+    "IC": -0.010829165492269982,
+    "n_signals": 8747,
+    "hit_rate": 0.4999428375443009,
+    "gross_pips_per_trade": -1.0376297106971275,
+    "avg_cost_pips": 1.9214221301072207,
+    "net_pips_per_trade": -2.959051840804349
+  }
+}

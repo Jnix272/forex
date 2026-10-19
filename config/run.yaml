@@ -504,7 +504,7 @@ optuna:
   metric: val_sharpe
 # ── Filesystem paths for checkpoints and processed data ─────────────────────
 paths:
-  checkpoint_dir: checkpoints/haelt_modern_2018_2025
+  checkpoint_dir: checkpoints/haelt_relabelled_v1
   data_cache: ./data/processed
 # ── Contrastive pre-training (BYOL / SimCLR / CPC) ──────────────────────────
 pretrain:
@@ -652,6 +652,8 @@ training:
   sacs_enabled: false
   # One multitask head per pair on that pair's own label (was a 4-pair average).
   per_pair_heads: true
+  min_reliable_val_trades: 30
+  trade_fraction: 0.05
   # Conviction deadband hurdle rate (Option 1): filters out micro-noise trades below expected return hurdle
   deadband: 0.15
   trade_deadband: 0.15
@@ -660,7 +662,7 @@ training:
   trade_min_confidence: 0.52
   # Equal total weight per calendar year of training rows.
   period_balance: true
-  batch_size: 256
+  batch_size: 300
   enable_ewc: false
   ewc_lambda: 400.0
   enable_si: false
@@ -686,7 +688,7 @@ training:
   epochs: 25
   grad_accum_steps: 2
   grad_clip: 0.5
-  label_method: cpar
+  label_method: triple_barrier
   label_smoothing: 0.1
   loss: huber
   lr: 1.5e-05

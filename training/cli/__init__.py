@@ -190,7 +190,22 @@ def parse_args():
 
     # Model
     p.add_argument(
-        "--model", type=str, default="haelt", choices=["tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm"]
+        "--model",
+        type=str,
+        default="haelt",
+        choices=[
+            "tft",
+            "transformer",
+            "itransformer",
+            "haelt",
+            "mamba",
+            "gnn",
+            "expert",
+            "glm",
+            "patchtst",
+            "timesnet",
+            "timemixer",
+        ],
     )
     p.add_argument("--all-models", dest="all_models", action="store_true")
 

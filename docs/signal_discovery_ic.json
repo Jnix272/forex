@@ -1,0 +1,221 @@
+{
+  "EURUSD_1h": {
+    "n_selected": 34,
+    "n_confirmed": 17,
+    "n_confirmed_chance": 3,
+    "best_confirmed": [
+      {
+        "feat": "EURUSD::bb_pct",
+        "disc_ic": -0.021092185066650813,
+        "conf_ic": -0.023356383890912307
+      },
+      {
+        "feat": "GBPUSD::time_cos",
+        "disc_ic": 0.03239966629915359,
+        "conf_ic": 0.023050048757925767
+      },
+      {
+        "feat": "EURUSD::time_cos",
+        "disc_ic": 0.03239966629915359,
+        "conf_ic": 0.023050048757925767
+      },
+      {
+        "feat": "USDJPY::time_cos",
+        "disc_ic": 0.03239966629915359,
+        "conf_ic": 0.023050048757925767
+      },
+      {
+        "feat": "USDCAD::time_cos",
+        "disc_ic": 0.03239966629915359,
+        "conf_ic": 0.023050048757925767
+      }
+    ],
+    "max_abs_conf_ic": 0.023356383890912307
+  },
+  "EURUSD_4h": {
+    "n_selected": 20,
+    "n_confirmed": 0,
+    "n_confirmed_chance": 1,
+    "best_confirmed": [],
+    "max_abs_conf_ic": 0.0
+  },
+  "EURUSD_1d": {
+    "n_selected": 37,
+    "n_confirmed": 5,
+    "n_confirmed_chance": 6,
+    "best_confirmed": [
+      {
+        "feat": "USDCAD::volatility_regime",
+        "disc_ic": 0.03898217064215871,
+        "conf_ic": 0.011573482809042038
+      },
+      {
+        "feat": "USDCAD::session_label",
+        "disc_ic": 0.024870599347911464,
+        "conf_ic": 0.010661360141389091
+      },
+      {
+        "feat": "GBPUSD::session_label",
+        "disc_ic": 0.024870599347911464,
+        "conf_ic": 0.010661360141389091
+      },
+      {
+        "feat": "USDJPY::session_label",
+        "disc_ic": 0.024870599347911464,
+        "conf_ic": 0.010661360141389091
+      },
+      {
+        "feat": "EURUSD::session_label",
+        "disc_ic": 0.024870599347911464,
+        "conf_ic": 0.010661360141389091
+      }
+    ],
+    "max_abs_conf_ic": 0.011573482809042038
+  },
+  "USDJPY_1h": {
+    "n_selected": 34,
+    "n_confirmed": 1,
+    "n_confirmed_chance": 2,
+    "best_confirmed": [
+      {
+        "feat": "GBPUSD::noise_to_signal_60",
+        "disc_ic": -0.024917761489416657,
+        "conf_ic": -0.012378710234319051
+      }
+    ],
+    "max_abs_conf_ic": 0.012378710234319051
+  },
+  "USDJPY_4h": {
+    "n_selected": 19,
+    "n_confirmed": 1,
+    "n_confirmed_chance": 2,
+    "best_confirmed": [
+      {
+        "feat": "USDJPY::vol_clock_z",
+        "disc_ic": 0.015086361117226894,
+        "conf_ic": 0.014960456346312
+      }
+    ],
+    "max_abs_conf_ic": 0.014960456346312
+  },
+  "USDJPY_1d": {
+    "n_selected": 41,
+    "n_confirmed": 3,
+    "n_confirmed_chance": 4,
+    "best_confirmed": [
+      {
+        "feat": "USDCAD::vp_poc_pos",
+        "disc_ic": -0.06177405385557381,
+        "conf_ic": -0.03266241265923172
+      },
+      {
+        "feat": "USDCAD::vp_skew",
+        "disc_ic": 0.059710783753025284,
+        "conf_ic": 0.026678249996838446
+      },
+      {
+        "feat": "USDCAD::rsi_14",
+        "disc_ic": -0.022620887011101667,
+        "conf_ic": -0.01623116515914211
+      }
+    ],
+    "max_abs_conf_ic": 0.03266241265923172
+  },
+  "GBPUSD_1h": {
+    "n_selected": 15,
+    "n_confirmed": 1,
+    "n_confirmed_chance": 2,
+    "best_confirmed": [
+      {
+        "feat": "USDCAD::rsi_5m",
+        "disc_ic": 0.027549126513246404,
+        "conf_ic": 0.014747160959814104
+      }
+    ],
+    "max_abs_conf_ic": 0.014747160959814104
+  },
+  "GBPUSD_4h": {
+    "n_selected": 14,
+    "n_confirmed": 2,
+    "n_confirmed_chance": 0,
+    "best_confirmed": [
+      {
+        "feat": "GBPUSD::price_ofi_div",
+        "disc_ic": 0.026957592909334967,
+        "conf_ic": 0.014580650286841704
+      },
+      {
+        "feat": "EURUSD::cat_inflation",
+        "disc_ic": 0.020417464529499007,
+        "conf_ic": 0.013965225121910703
+      }
+    ],
+    "max_abs_conf_ic": 0.014580650286841704
+  },
+  "GBPUSD_1d": {
+    "n_selected": 11,
+    "n_confirmed": 0,
+    "n_confirmed_chance": 0,
+    "best_confirmed": [],
+    "max_abs_conf_ic": 0.0
+  },
+  "USDCAD_1h": {
+    "n_selected": 31,
+    "n_confirmed": 9,
+    "n_confirmed_chance": 3,
+    "best_confirmed": [
+      {
+        "feat": "GBPUSD::vp_skew",
+        "disc_ic": 0.026901067859450435,
+        "conf_ic": 0.030442101819479726
+      },
+      {
+        "feat": "USDCAD::bb_pct",
+        "disc_ic": -0.025852482437038193,
+        "conf_ic": -0.026724547039336733
+      },
+      {
+        "feat": "USDCAD::rsi_14",
+        "disc_ic": -0.024447397941684244,
+        "conf_ic": -0.025236891546110866
+      },
+      {
+        "feat": "USDCAD::breakout_pressure",
+        "disc_ic": -0.033342849314835867,
+        "conf_ic": -0.020751275388670134
+      },
+      {
+        "feat": "GBPUSD::vp_poc_pos",
+        "disc_ic": -0.025172970811843297,
+        "conf_ic": -0.0201121622970847
+      }
+    ],
+    "max_abs_conf_ic": 0.030442101819479726
+  },
+  "USDCAD_4h": {
+    "n_selected": 17,
+    "n_confirmed": 1,
+    "n_confirmed_chance": 3,
+    "best_confirmed": [
+      {
+        "feat": "GBPUSD::vp_skew",
+        "disc_ic": 0.04681413104847576,
+        "conf_ic": 0.030345369368860068
+      }
+    ],
+    "max_abs_conf_ic": 0.030345369368860068
+  },
+  "USDCAD_1d": {
+    "n_selected": 11,
+    "n_confirmed": 1,
+    "n_confirmed_chance": 0,
+    "best_confirmed": [
+      {
+        "feat": "USDCAD::rsi_1h",
+        "disc_ic": -0.051910255323065944,
+        "conf_ic": -0.038121481112198076
+      }
+    ],
+    "max_abs_conf_ic": 0.038121481112198076
+  }
+}

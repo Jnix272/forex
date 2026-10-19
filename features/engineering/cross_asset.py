@@ -77,18 +77,34 @@ class CrossAssetFeatures:
             except Exception:
                 pass
             s_df = s_df.select(["timestamp_utc", asset]).sort("timestamp_utc")
+            s_df = s_df.with_columns(pl.col(asset).fill_null(strategy="forward"))
+
+            # Compute returns and lags on the native asset timeframe (e.g. daily)
+            # BEFORE join_asof onto 5m bars so daily returns are not 99.3% zeros.
+            # Also lag daily timestamps by +1 day to prevent same-day midnight UTC lookahead.
+            if len(s_df) >= 2:
+                try:
+                    dt_med = s_df["timestamp_utc"].diff().median()
+                    if dt_med is not None and dt_med >= pl.duration(hours=12):
+                        s_df = s_df.with_columns(
+                            (pl.col("timestamp_utc") + pl.duration(days=1)).alias("timestamp_utc")
+                        )
+                except Exception:
+                    pass
+
+            lr_native = (pl.col(asset).clip(lower_bound=1e-9).log() - pl.col(asset).clip(lower_bound=1e-9).shift(1).log()).fill_null(0.0)
+            s_df = s_df.with_columns([lr_native.alias(f"{asset}_ret")])
+            lag_exprs = [pl.col(f"{asset}_ret").shift(lag).fill_null(0.0).alias(f"{asset}_ret_l{lag}") for lag in self.lags]
+            s_df = s_df.with_columns(lag_exprs)
+
             try:
                 F = F.join_asof(s_df, on="timestamp_utc", strategy="backward")
-                F = F.with_columns([pl.col(asset).fill_null(strategy="forward").fill_null(0.0)])
+                fill_cols = [asset, f"{asset}_ret", *[f"{asset}_ret_l{lag}" for lag in self.lags]]
+                F = F.with_columns([pl.col(c).fill_null(strategy="forward").fill_null(0.0) for c in fill_cols if c in F.columns])
             except Exception:
                 continue
 
-            # Returns
-            lr = pl.col(asset).log() - pl.col(asset).shift(1).log()
-            exprs = [lr.alias(f"{asset}_ret")]
-            for lag in self.lags:
-                exprs.append(lr.shift(lag).alias(f"{asset}_ret_l{lag}"))
-
+            lr = pl.col(f"{asset}_ret")
             # rolling corr and beta
             cov = pl.rolling_cov(lr, pl.col("forex_ret"), window_size=self.cw)
             var_x = pl.col("forex_ret").rolling_var(window_size=self.cw)
@@ -97,9 +113,7 @@ class CrossAssetFeatures:
             corr = cov / (var_x.sqrt() * var_y.sqrt() + 1e-9)
             beta = cov / (var_x + 1e-9)
 
-            exprs.append(corr.alias(f"{asset}_corr"))
-            exprs.append(beta.alias(f"{asset}_beta"))
-            F = F.with_columns(exprs)
+            F = F.with_columns([corr.alias(f"{asset}_corr"), beta.alias(f"{asset}_beta")])
 
         cols = F.columns
         exprs = []
@@ -118,8 +132,8 @@ class CrossAssetFeatures:
                 ]
             )
         if "SPX" in cols and "VIX" in cols:
-            spx_ret = pl.col("SPX").log().diff()
-            vix_ret = pl.col("VIX").log().diff()
+            spx_ret = pl.col("SPX_ret") if "SPX_ret" in cols else pl.col("SPX").log().diff()
+            vix_ret = pl.col("VIX_ret") if "VIX_ret" in cols else pl.col("VIX").log().diff()
             exprs.append(
                 (((spx_ret < 0).cast(pl.Float64) + (vix_ret > 0).cast(pl.Float64)) / 2.0).alias("risk_off_signal")
             )

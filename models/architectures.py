@@ -537,9 +537,13 @@ if TORCH:
             if self.class_balance_weight > 0:
                 loss = loss + self.class_balance_weight * (torch.sigmoid(logit).mean() - 0.5).pow(2)
             if self.w_sharpe > 0 and y_cont.numel() > 2:
-                pnl = torch.tanh(logit) * y_reg
-                sr = pnl.mean() / (pnl.std() + 1e-6) * (self.sharpe_ann ** 0.5)
-                loss = loss - self.w_sharpe * sr
+                pos = torch.tanh(logit) * torch.sigmoid(cf)
+                dw = torch.abs(pos[1:] - pos[:-1]) if pos.shape[0] > 1 else torch.abs(pos)
+                pnl = pos * y_reg
+                if pnl.shape[0] > 1:
+                    pnl = pnl[1:] - 0.05 * dw
+                sr = pnl.mean() / (pnl.std() + 1e-6) * (min(float(self.sharpe_ann), 252.0) ** 0.5)
+                loss = loss - self.w_sharpe * sr + 0.02 * self.w_sharpe * torch.abs(pos).mean()
             if recon_hat is not None and recon_tgt is not None and self.recon_w > 0:
                 loss = loss + self.recon_w * self.hub(recon_hat, recon_tgt).mean()
             if vol_hat is not None and vol_tgt is not None and self.vol_w > 0:

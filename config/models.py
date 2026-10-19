@@ -8,7 +8,9 @@ Edit here to change per-architecture specs; `settings.MODELS` re-exports this di
 from typing import Any
 
 # Keys accepted by train_gpu --model and build_model()
-SUPPORTED_SUPERVISED: frozenset[str] = frozenset({"tft", "transformer", "haelt", "mamba", "gnn", "expert", "glm", "patchtst"})
+SUPPORTED_SUPERVISED: frozenset[str] = frozenset(
+    {"tft", "transformer", "itransformer", "haelt", "mamba", "gnn", "expert", "glm", "patchtst", "timesnet", "timemixer"}
+)
 
 BENCHMARK_BASELINES: dict[str, dict[str, Any]] = {
     "xgboost": {
@@ -139,6 +141,41 @@ MODELS: dict[str, dict[str, Any]] = {
         "num_layers": 3,
         "dropout": 0.1,
         "num_classes": 1,
+    },
+    "itransformer": {
+        "decision_role": "generic_long_range_baseline",
+        "use_when": "Need inverted transformer for variate-level attention across features.",
+        "default_use": "Inverted transformer baseline.",
+        "d_model": 128,
+        "nhead": 8,
+        "num_layers": 3,
+        "dim_feedforward": 256,
+        "dropout": 0.1,
+        "seq_len": 120,
+        "learning_rate": 1e-4,
+    },
+    "timesnet": {
+        "decision_role": "context",
+        "use_when": "Need 2D-variation multiscale period decomposition.",
+        "default_use": "Advanced time series multiscale model.",
+        "seq_len": 120,
+        "d_model": 64,
+        "d_ff": 128,
+        "top_k": 3,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "learning_rate": 1e-4,
+    },
+    "timemixer": {
+        "decision_role": "context",
+        "use_when": "Need decomposable multiscale mixing across time.",
+        "default_use": "Advanced multiscale time series mixer.",
+        "seq_len": 120,
+        "d_model": 64,
+        "d_ff": 128,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "learning_rate": 1e-4,
     },
 }
 

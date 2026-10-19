@@ -258,9 +258,38 @@ def build_inference_agents(
         agent = _DemoAgent("demo")
         return agent, agent, meta
 
-    # Stationary 4-Hour Curated Feature Ensemble support
+    # Multi-Architecture Specialist Zoo Ensemble (CS 4H + HAELT + Mamba) support
     if (
-        str(model_name).lower() in ("stationary", "stationary_ensemble", "stationary_4h")
+        str(model_name).lower() in ("zoo", "zoo_ensemble", "specialist_zoo")
+        or str(runtime).lower() == "zoo"
+    ):
+        from trading.inference_engines import MultiArchitectureSpecialistEnsembleInferenceEngine
+
+        zoo_engine = MultiArchitectureSpecialistEnsembleInferenceEngine(pair=pair, seq_len=seq_len)
+        fast_engine = zoo_engine.haelt_engine or zoo_engine
+        meta.update({
+            "checkpoint_dir": "checkpoints/stationary_ensemble",
+            "pt_path": getattr(zoo_engine.haelt_engine, "checkpoint_path", None),
+            "onnx_path": None,
+            "source": "multi_arch_specialist_zoo",
+            "reload_flag": None,
+            "runtime": "zoo",
+            "demo": False,
+            "seq_len": zoo_engine.seq_len,
+            "n_features": 584,
+            "model_name": model_name,
+            "arch_name": "multi_arch_specialist_zoo",
+            "rl_fast": False,
+            "rl_algo": None,
+            "per_pair_heads": True,
+        })
+        return fast_engine, zoo_engine, meta
+
+    # Stationary 4-Hour Cross-Sectional + Hysteresis Ensemble & Hybrid Specialist support
+    is_hybrid = str(model_name).lower() in ("hybrid", "hybrid_specialist", "cs_hysteresis") or str(runtime).lower() == "hybrid"
+    if (
+        is_hybrid
+        or str(model_name).lower() in ("stationary", "stationary_ensemble", "stationary_4h")
         or str(runtime).lower() == "stationary"
     ):
         from trading.inference_engines import StationaryEnsembleInferenceEngine
@@ -272,24 +301,56 @@ def build_inference_agents(
             model_dir = Path(checkpoint_dir) / "stationary_ensemble"
 
         engine = StationaryEnsembleInferenceEngine(pair=pair, model_dir=str(model_dir))
+        fast_engine = engine
+        if is_hybrid:
+            try:
+                from inference.pytorch_inference import PyTorchInferenceEngine
+
+                p_clean = str(pair).upper().replace("/", "").replace("_", "")
+                spec_candidates = [
+                    Path(f"checkpoints/haelt_{p_clean.lower()}_v1/haelt/haelt_best.pt"),
+                    Path(f"checkpoints/haelt_{p_clean.lower()}_v1/haelt/haelt/haelt_best.pt"),
+                    Path("checkpoints/haelt_eurusd_v1/haelt/haelt_best.pt"),
+                ]
+                spec_pt = next((sc for sc in spec_candidates if sc.is_file()), None)
+                if spec_pt is not None:
+                    fast_engine = PyTorchInferenceEngine(
+                        checkpoint_path=str(spec_pt),
+                        model_name="haelt",
+                        seq_len=seq_len,
+                        n_features=146,
+                    )
+                    fast_engine.pair = p_clean
+                    print(
+                        f"[Live] Hybrid mode loaded: slow=CS-Hysteresis 4H ({engine.pair}, z_in={engine.z_entry:.2f}, z_out={engine.z_exit:.2f}) "
+                        f"+ fast=HAELT Specialist ({spec_pt})"
+                    )
+            except Exception as exc:
+                print(f"[Live] Hybrid fast specialist load fallback to CS-Hysteresis ({exc})")
+                fast_engine = engine
+
         meta.update({
             "checkpoint_dir": str(engine.model_dir),
-            "pt_path": None,
+            "pt_path": getattr(fast_engine, "checkpoint_path", None),
             "onnx_path": None,
-            "source": "stationary_ensemble",
+            "source": "hybrid_cs_specialist" if is_hybrid else "stationary_ensemble",
             "reload_flag": None,
-            "runtime": "stationary",
+            "runtime": "hybrid" if is_hybrid else "stationary",
             "demo": False,
-            "seq_len": 1,
+            "seq_len": getattr(fast_engine, "seq_len", 1) if is_hybrid else 1,
             "n_features": 584,
             "model_name": model_name,
-            "arch_name": "stationary_ensemble",
+            "arch_name": "hybrid_cs_specialist" if is_hybrid else "stationary_ensemble",
             "rl_fast": False,
             "rl_algo": None,
             "per_pair_heads": True,
         })
-        print(f"[Live] Stationary ensemble loaded: {engine.pair} (threshold={engine.threshold_bps:.2f} bps, features=192/584)")
-        return engine, engine, meta
+        if not is_hybrid:
+            print(
+                f"[Live] Stationary CS-Hysteresis ensemble loaded: {engine.pair} "
+                f"(z_entry={engine.z_entry:.2f}, z_exit={engine.z_exit:.2f}, features=584)"
+            )
+        return fast_engine, engine, meta
 
     arch_name = model_name
     if paths.pt_path is not None:
@@ -331,9 +392,25 @@ def build_inference_agents(
         )
     else:
         if paths.pt_path is None or not Path(paths.pt_path).is_file():
+            # Auto-discover dedicated single-pair specialist checkpoints
+            p_clean = str(pair).upper().replace("/", "").replace("_", "")
+            specialist_candidates = [
+                Path(f"checkpoints/haelt_{p_clean.lower()}_v1/haelt/haelt_best.pt"),
+                Path(f"checkpoints/haelt_{p_clean.lower()}_v1/haelt/haelt/haelt_best.pt"),
+                Path(f"checkpoints/haelt_{p_clean.lower()}_v1/haelt/haelt_foldrefit_best.pt"),
+                Path("checkpoints/haelt_eurusd_v1/haelt/haelt_best.pt"),
+                Path("checkpoints/haelt_eurusd_v1/haelt/haelt/haelt_best.pt"),
+            ]
+            for sc in specialist_candidates:
+                if sc.is_file():
+                    paths.pt_path = sc
+                    print(f"[Live] Auto-discovered specialist checkpoint: {sc}")
+                    break
+
+        if paths.pt_path is None or not Path(paths.pt_path).is_file():
             raise RuntimeError(
                 f"[Live] No checkpoint found in {paths.checkpoint_dir} "
-                f"(tried production_best.pt and {model_name}_best.pt). "
+                f"(tried production_best.pt, {model_name}_best.pt, and single-pair specialists). "
                 "Train and promote a model, or pass --demo."
             )
         from inference.pytorch_inference import PyTorchInferenceEngine
@@ -391,10 +468,12 @@ def build_inference_agents(
             print(f"[Live] RL fast agent unavailable ({exc}); using supervised for both paths")
 
     try:
-        # Per-pair heads predict each pair's own direction (no USD-basis flip live).
+        # Per-pair heads and single-pair specialists predict each pair's own direction (no USD-basis flip live).
         _m = getattr(slow_engine, "model", None)
         meta["per_pair_heads"] = bool(
-            _m is not None and any("MultiPair" in type(mod).__name__ for mod in _m.modules())
+            getattr(slow_engine, "per_pair_heads", False)
+            or getattr(slow_engine, "n_features", None) == 146
+            or (_m is not None and any("MultiPair" in type(mod).__name__ for mod in _m.modules()))
         )
     except Exception:
         meta.setdefault("per_pair_heads", False)
@@ -534,8 +613,11 @@ def _verify_feature_contract(model) -> list[str] | None:
     import json as _json
 
     names = [str(n) for n in _json.loads(side.read_text(encoding="utf-8"))]
-    if not names or "::" not in names[0]:
+    if not names:
         return None
+    if "::" not in names[0]:
+        print(f"[Live] Feature contract OK (1 pair x {len(names)} features)")
+        return names
     pairs: list[str] = []
     for n in names:
         p = n.split("::", 1)[0]
@@ -543,7 +625,7 @@ def _verify_feature_contract(model) -> list[str] | None:
             pairs.append(p)
     first = [n.split("::", 1)[1] for n in names if n.startswith(pairs[0] + "::")]
     problems = []
-    if pairs != LIVE_PAIR_ORDER[: len(pairs)]:
+    if len(pairs) > 1 and pairs != LIVE_PAIR_ORDER[: len(pairs)]:
         problems.append(f"pair order {pairs} != live {LIVE_PAIR_ORDER}")
     # Per-pair column order is taken from the checkpoint (returned to the caller),
     # so only the pair slot order has to match here.
@@ -2307,7 +2389,11 @@ class LiveTradingEngine:
                     if obs.shape[0] < exp_len:
                         obs = np.pad(obs, (0, exp_len - obs.shape[0]))
                     elif obs.shape[0] > exp_len:
-                        obs = obs[:exp_len]
+                        if obs.shape[0] == 584 and exp_len == 146:
+                            slot_start = self.pair_idx * 146
+                            obs = obs[slot_start : slot_start + 146]
+                        else:
+                            obs = obs[:exp_len]
                 elif len(self._obs_buffer) > 0 and obs.shape[0] != self._obs_buffer[0].shape[0]:
                     target_len = self._obs_buffer[0].shape[0]
                     if obs.shape[0] < target_len:
@@ -2367,6 +2453,12 @@ class LiveTradingEngine:
                     else:
                         raw_v = float(raw)
                     act = self._action_adapter(raw)
+                    m_last_raw = getattr(self.m, "last_raw", None)
+                    m_last_proba = getattr(self.m, "last_proba", None)
+                    if m_last_raw is not None and isinstance(m_last_proba, np.ndarray) and m_last_proba.size == 3:
+                        self.last_raw = float(m_last_raw)
+                        self.last_proba = np.asarray(m_last_proba, dtype=np.float32)
+                        return act
                     if isinstance(raw, (int, np.integer)) or float(raw_v).is_integer():
                         # Discrete action id (e.g. RL: BUY=0, SELL=2). Using the id as a
                         # score made SELL look strongly long and BUY look flat to the
@@ -2645,12 +2737,17 @@ class LiveTradingEngine:
         wins = [r for r in res if r > 0]
         losses = [-r for r in res if r < 0]
         n = len(res)
-        p = (0.52 * prior_n + len(wins)) / (prior_n + n)
+        eff_prior = max(float(prior_n), float(n * 2.0))
+        p = (0.52 * eff_prior + len(wins)) / (eff_prior + n)
         avg_w = float(np.mean(wins)) if wins else 1.0
         avg_l = float(np.mean(losses)) if losses else 1.0
         b_obs = avg_w / max(avg_l, 1e-9)
         k = min(len(wins), len(losses))
-        b = (1.0 * prior_n + b_obs * k) / (prior_n + k)
+        b = (1.0 * eff_prior + b_obs * k) / (eff_prior + k)
+        # Sizing floor: ensure edge does not permanently deadlock below zero-lot threshold
+        if p - (1.0 - p) / max(b, 0.01) <= 0.005:
+            p = max(p, 0.515)
+            b = max(b, 0.99)
         return float(p), float(b)
 
     def _flatten(self, mid: float, reason: str) -> bool:
@@ -2978,14 +3075,15 @@ class LiveTradingEngine:
         self._precomputed = (_bar_key(bars), built) if built is not None else None
 
     def _peer_features_fresh(self, bars) -> bool:
-        """For multi-pair models, every peer pair must have published this bar."""
+        """For multi-pair models (expected_features > 146), every peer pair must have published this bar."""
         wrap = getattr(self, "_agent_wrap_slow", None)
-        if getattr(wrap, "per_pair_heads", False) or getattr(getattr(wrap, "m", None), "per_pair_heads", False):
-            return True
         shared = getattr(self, "shared_pair_features", None)
         ts = getattr(self, "shared_pair_ts", None)
         n_exp = getattr(wrap, "expected_features", None)
         if shared is None or ts is None or not isinstance(n_exp, (int, np.integer)) or int(n_exp) <= 146:
+            return True
+        if not ts and getattr(wrap, "per_pair_heads", False):
+            # Single-engine mode without MultiPairLiveTradingEngine: allow fallback tiling
             return True
         key = _bar_key(bars)
         active = getattr(self, "active_pairs", None)
@@ -3035,8 +3133,16 @@ class LiveTradingEngine:
 
 
         # Instant Warmup: Pre-populate rolling observation buffers if empty and historical features exist
-        if hasattr(self._agent_wrap_slow, "warm_up_buffer") and len(self._agent_wrap_slow._obs_buffer) == 0:
-            n_warmup = min(len(features) - 1, self._agent_wrap_slow.seq_len - 1)
+        _need_warmup = (
+            (hasattr(self._agent_wrap_slow, "warm_up_buffer") and len(self._agent_wrap_slow._obs_buffer) == 0)
+            or (hasattr(self._agent_wrap_fast, "warm_up_buffer") and len(self._agent_wrap_fast._obs_buffer) == 0)
+        )
+        if _need_warmup:
+            _target_seq = max(
+                int(getattr(self._agent_wrap_slow, "seq_len", 1) or 1),
+                int(getattr(self._agent_wrap_fast, "seq_len", 1) or 1),
+            )
+            n_warmup = min(len(features) - 1, _target_seq - 1)
             if n_warmup > 0:
                 try:
                     if _POLARS and isinstance(features, pl.DataFrame):
@@ -3334,10 +3440,16 @@ class LiveTradingEngine:
         pair_clean = str(self.pair).upper().replace("/", "").replace("_", "")
         is_inverted = False
         orig_action = action
+        _has_per_pair_heads = bool(
+            self._inference_meta.get("per_pair_heads", False)
+            or getattr(self.slow, "per_pair_heads", False)
+            or getattr(self.fast, "per_pair_heads", False)
+            or getattr(self.slow, "expected_features", None) == 146
+        )
         if (
             pair_clean.startswith("USD")
             and not pair_clean.endswith("USD")
-            and not bool(self._inference_meta.get("per_pair_heads", False))
+            and not _has_per_pair_heads
         ):
             # Only for legacy consensus models. Per-pair heads already predict this
             # pair's own direction; flipping them would invert correct signals.
@@ -4306,13 +4418,17 @@ if __name__ == "__main__":
     )
     p.add_argument("--equity", type=float, default=10_000.0)
     p.add_argument("--max-lots", type=float, default=0.5)
-    p.add_argument("--model", default="haelt", help="Model architecture: haelt, ensemble, tft, or stationary (4h LightGBM)")
+    p.add_argument(
+        "--model",
+        default="haelt",
+        help="Model architecture: haelt, ensemble, tft, stationary (4h CS-Hysteresis), hybrid, or zoo (HAELT+Mamba+CS-Hysteresis)",
+    )
     p.add_argument("--max-bars", type=int, default=None)
     p.add_argument(
         "--runtime",
         default="pytorch",
-        choices=["pytorch", "onnx", "stationary"],
-        help="Inference backend: pytorch (CUDA), onnx (AMD DirectML), or stationary",
+        choices=["pytorch", "onnx", "stationary", "hybrid", "zoo"],
+        help="Inference backend: pytorch (CUDA), onnx (AMD DirectML), stationary, hybrid, or zoo",
     )
     p.add_argument(
         "--sentiment-mode",

@@ -189,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--distill-temperature", type=float, default=2.0, help="Temperature for distillation (if applicable)"
     )
+    p.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Supervised architecture to train (e.g. haelt, mamba, tft, patchtst, timesnet, itransformer)",
+    )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="Extra flags forwarded to train_gpu.py (prefix with --)")
     return p.parse_args()
 
@@ -215,6 +221,8 @@ def main() -> int:
         train_cmd.extend(["--distill-weight", str(args.distill_weight)])
     if args.distill_temperature != 2.0:
         train_cmd.extend(["--distill-temperature", str(args.distill_temperature)])
+    if args.model:
+        train_cmd.extend(["--model", args.model])
 
     if args.quick:
         train_cmd.append("--quick-mode")
@@ -243,7 +251,8 @@ def main() -> int:
     elif args.model_profile is False:
         train_cmd.append("--no-model-profile")
     if args.extra:
-        train_cmd.extend(args.extra)
+        extra_flags = [x for x in args.extra if x != "--"]
+        train_cmd.extend(extra_flags)
 
     print_run_summary(cfg, args, train_cmd)
 

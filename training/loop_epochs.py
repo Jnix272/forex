@@ -33,7 +33,7 @@ from training.loop_batches import (
     _sanitize_batch_tensors,
     _unpack_batch,
 )
-from training.decision import decide
+from training.decision import action_proba, decide
 from training.loop_losses import _build_train_loss, _compute_loss
 from training.loop_optim import _optimizer_step
 
@@ -472,6 +472,14 @@ def validate_epoch(
         return pred_cls
 
     _dir_parts: list[torch.Tensor] = []  # per-row directions (loader order) for honest_ctx
+    _top_parts: list[torch.Tensor] = []  # per-row/pair top-class probability (for quantile gate)
+    import os as _os
+
+    _tf_raw = _os.environ.get("FOREX_TRADE_FRACTION") or TRAINING.get("trade_fraction")
+    try:
+        _trade_fraction = float(_tf_raw) if _tf_raw not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        _trade_fraction = None
     with torch.no_grad():
         for i, batch in enumerate(loader):
             _b_rows = 0
@@ -614,11 +622,17 @@ def validate_epoch(
                 if honest_ctx is not None:
                     _d2 = d.detach().float().reshape(d.shape[0], -1).cpu()
                     _np_h = int(honest_ctx.get("n_pairs") or 0)
-                    if _np_h > 1 and _d2.shape[1] == _np_h:
+                    if _np_h >= 1 and _d2.shape[1] == _np_h and honest_ctx.get("close_pairs") is not None:
                         # Per-pair heads: keep one position per pair (scored on its own prices).
                         _d_row = torch.sign(_d2)
                         _full = torch.zeros(_b_rows, _np_h)
+                        _tfull = None
+                        if _trade_fraction is not None and isinstance(pred, tuple):
+                            _pr = action_proba(pred)
+                            _tp = torch.maximum(_pr[..., 0], _pr[..., 2]).float().cpu().reshape(_d2.shape)
+                            _tfull = torch.zeros(_b_rows, _np_h)
                     else:
+                        _tfull = None
                         # One position per row: average multi-output signs, re-sign.
                         if deadband > 0.0:
                             _mean_d = _d2.mean(dim=1)
@@ -632,9 +646,15 @@ def validate_epoch(
                         _full = torch.zeros(_b_rows)
                     if _b_keep is not None and not bool(_b_keep.all()):
                         _full[_b_keep.detach().cpu().bool()] = _d_row
+                        if _tfull is not None:
+                            _tfull[_b_keep.detach().cpu().bool()] = _tp
                     else:
                         _full[: _d_row.numel()] = _d_row
+                        if _tfull is not None:
+                            _tfull[: _tp.shape[0]] = _tp
                     _dir_parts.append(_full)
+                    if _tfull is not None:
+                        _top_parts.append(_tfull)
                 if r.numel() > 0:
                     r_sum += r.sum()
                     r_sq_sum += (r * r).sum()
@@ -810,7 +830,20 @@ def validate_epoch(
 
             from training.honest_eval import net_pnl_metrics, pooled_pair_metrics
 
-            _dirs = torch.cat(_dir_parts).numpy()
+            _dirs_t = torch.cat(_dir_parts)
+            if _trade_fraction is not None and _top_parts and _dirs_t.ndim == 2:
+                _top_t = torch.cat(_top_parts)
+                if _top_t.shape == _dirs_t.shape:
+                    from training.decision import quantile_pair_thresholds
+
+                    _pthr = quantile_pair_thresholds(_top_t, _trade_fraction)
+                    _dirs_t = torch.where(_top_t >= _pthr.reshape(1, -1), _dirs_t, torch.zeros_like(_dirs_t))
+                    validate_epoch.last_pair_thresholds = [float(v) for v in _pthr]
+                    print(f"[Val][gate] trade_fraction={_trade_fraction:.3f} per-pair conf thr="
+                          f"{[round(float(v), 3) for v in _pthr]}")
+                else:
+                    print("[Val][gate] skipped: top-prob rows misaligned with directions")
+            _dirs = _dirs_t.numpy()
             _sidx = np.asarray(honest_ctx["sample_idx"])
             if len(_dirs) == len(_sidx):
                 if _dirs.ndim == 2 and honest_ctx.get("close_pairs") is not None:
@@ -837,6 +870,17 @@ def validate_epoch(
                     _hm.pop("_net_returns", None)
                 validate_epoch.last_honest = _hm
                 cost_sharpe = _hm["sharpe_net"]
+                # Reliability guard: a positive Sharpe from very few trades is noise
+                # (e.g. < 20 trades -> wide CI); scale dynamically to the validation fold size
+                # so top-decile quantile gating (e.g. 8% of 650 windows = 52 trades) is never penalized.
+                _h_bars = max(1, int(honest_ctx.get("horizon", lookahead_bars)))
+                _max_possible_trades = max(1, len(_dirs) // _h_bars)
+                _dynamic_min = max(20, min(100, int(_max_possible_trades * (_trade_fraction or 0.08) * 0.55)))
+                _min_rel = int(TRAINING.get("min_reliable_val_trades", _dynamic_min))
+                if cost_sharpe > 0.0 and int(_hm.get("n_trades", 0)) < _min_rel:
+                    print(f"[Val][honest] Sharpe {cost_sharpe:.3f} from {_hm.get('n_trades', 0)} trades "
+                          f"< {_min_rel}: not reliable, scored as 0 for selection")
+                    cost_sharpe = 0.0
                 print(
                     f"[Val][honest] net_sharpe={_hm['sharpe_net']:.3f} gross={_hm['sharpe_gross']:.3f} "
                     f"trades={_hm['n_trades']} win={_hm['win_rate']:.1%} "

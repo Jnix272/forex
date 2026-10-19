@@ -320,30 +320,16 @@ class MacroYieldFeatureBuilder:
         pdf.index.name = "timestamp_utc"
 
         yield_df = pl.from_pandas(pdf.reset_index())
-        yield_df = yield_df.with_columns(pl.all().exclude("timestamp_utc").forward_fill())
-
-        # Ensure yield_df has the same tz awareness as bars
-        bar_dtype = bars["timestamp_utc"].dtype
-        bars_tz = getattr(bar_dtype, "time_zone", None)
-        if bars_tz is None:
-            yield_df = yield_df.with_columns(pl.col("timestamp_utc").dt.replace_time_zone(None))
-        else:
-            yield_df = yield_df.with_columns(pl.col("timestamp_utc").dt.convert_time_zone(bars_tz))
-        yield_df = yield_df.with_columns(pl.col("timestamp_utc").cast(bar_dtype))
-
-        # Join asof
-        out = (
-            bars.select(["timestamp_utc"])
-            .sort("timestamp_utc")
-            .join_asof(yield_df.sort("timestamp_utc"), on="timestamp_utc", strategy="backward")
+        yield_df = yield_df.sort("timestamp_utc").with_columns(
+            pl.all().exclude("timestamp_utc").forward_fill().fill_null(0.0)
         )
 
-        # Forward-fill only. Backward-fill would leak future yield observations
-        # into bars before the first available macro timestamp.
-        out = out.with_columns(pl.all().exclude("timestamp_utc").forward_fill().fill_null(0.0))
+        # Lag daily yields by +1 day before joining onto intraday bars so day D's
+        # US Treasury close is only visible starting on day D+1 (zero lookahead).
+        yield_df = yield_df.with_columns((pl.col("timestamp_utc") + pl.duration(days=1)).alias("timestamp_utc"))
 
-        # ── Yield spreads (positive = USD-bullish for that pair) ──────────────
-        out = out.with_columns(
+        # ── Yield spreads on daily frame (positive = USD-bullish for that pair) ─
+        yield_df = yield_df.with_columns(
             [
                 (pl.col("US10Y") - pl.col("DE10Y")).alias("spread_us_de"),
                 (pl.col("US10Y") - pl.col("JP10Y")).alias("spread_us_jp"),
@@ -359,7 +345,7 @@ class MacroYieldFeatureBuilder:
         )
 
         # ── Carry signals: positive = long base currency of pair ──────────────
-        out = out.with_columns(
+        yield_df = yield_df.with_columns(
             [
                 (-pl.col("spread_us_de")).alias("carry_eur"),
                 (pl.col("spread_us_jp")).alias("carry_jpy"),
@@ -373,16 +359,40 @@ class MacroYieldFeatureBuilder:
             ]
         )
 
-        # ── Primary spread momentum + volatility (USD−EUR as primary) ─────────  # noqa: RUF003
+        # ── Primary spread momentum + volatility on DAILY rows (not 5m bars!) ──
         exprs = []
         for w in self._mom_wins:
-            exprs.append((pl.col("spread_us_de") - pl.col("spread_us_de").shift(w)).alias(f"yield_momentum_{w}d"))
+            exprs.append(
+                (pl.col("spread_us_de") - pl.col("spread_us_de").shift(w)).fill_null(0.0).alias(f"yield_momentum_{w}d")
+            )
 
         exprs.append(
-            pl.col("spread_us_de").rolling_std(window_size=self._vol_win).fill_null(0.0).alias("yield_vol_20d")
+            pl.col("spread_us_de")
+            .rolling_std(window_size=self._vol_win, min_samples=2)
+            .fill_null(0.0)
+            .alias("yield_vol_20d")
+        )
+        yield_df = yield_df.with_columns(exprs)
+
+        # Ensure yield_df has the same tz awareness as bars
+        bar_dtype = bars["timestamp_utc"].dtype
+        bars_tz = getattr(bar_dtype, "time_zone", None)
+        if bars_tz is None:
+            yield_df = yield_df.with_columns(pl.col("timestamp_utc").dt.replace_time_zone(None))
+        else:
+            yield_df = yield_df.with_columns(pl.col("timestamp_utc").dt.convert_time_zone(bars_tz))
+        yield_df = yield_df.with_columns(pl.col("timestamp_utc").cast(bar_dtype))
+
+        # Join asof onto 5m bars
+        out = (
+            bars.select(["timestamp_utc"])
+            .sort("timestamp_utc")
+            .join_asof(yield_df.sort("timestamp_utc"), on="timestamp_utc", strategy="backward")
         )
 
-        out = out.with_columns(exprs)
+        # Forward-fill only. Backward-fill would leak future yield observations
+        # into bars before the first available macro timestamp.
+        out = out.with_columns(pl.all().exclude("timestamp_utc").forward_fill().fill_null(0.0))
 
         drop_cols = ["timestamp_utc", "US10Y", "US2Y", "DE10Y", "JP10Y", "GB10Y", "AU10Y", "CA10Y", "NZ10Y", "CH10Y"]
         out = out.drop([c for c in drop_cols if c in out.columns])

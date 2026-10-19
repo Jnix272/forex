@@ -14,6 +14,17 @@ import torch
 import torch.nn as nn
 
 from config.settings import TRAINING
+
+
+def pure_bce_enabled() -> bool:
+    """Experiment switch: direction BCE (+ confidence BCE) only; no Huber return/quantile/focal."""
+    import os
+
+    return os.environ.get("FOREX_PURE_BCE", "0").strip() == "1"
+
+
+def _pbce(value: float, pure_value: float = 0.0) -> float:
+    return pure_value if pure_bce_enabled() else value
 from models.architectures import (
     AsymmetricDirectionalLoss,
     HuberLoss,
@@ -498,8 +509,7 @@ def build_criterion(
                 device,
                 use_direction_sidecar=True,
             )
-        loss_str = str(getattr(args, "loss", "huber") or "huber").lower()
-        w_sharpe = float(getattr(args, "sharpe_weight", 0.0)) if loss_str == "sharpe_huber" else 0.0
+        w_sharpe = max(0.0, float(getattr(args, "sharpe_weight", 0.0) or 0.0))
         sharpe_ann = 1.0
         if w_sharpe > 0:
             from training.train_gpu import _sharpe_ann_factor
@@ -511,17 +521,17 @@ def build_criterion(
         cw, w_sharpe, sharpe_ann = _mt_class_weights_and_sharpe()
         crit_pp = MultiPairMultiTaskLoss(
             w_dir=1.0,
-            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
+            w_ret=_pbce(float(getattr(args, "mt_w_ret", 0.5))),
             w_conf=float(getattr(args, "mt_w_conf", 0.3)),
             huber_delta=d,
             class_weights=cw,
             w_sharpe=w_sharpe,
             sharpe_ann=sharpe_ann,
-            focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
+            focal_gamma=_pbce(float(getattr(args, "mt_focal_gamma", 0.0))),
             class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
             label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
             target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
-            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
+            w_quantile=_pbce(float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2)))),
             quantiles=(0.05, 0.95),
         ).to(device)
         crit_pp.entropy_weight = float(getattr(args, "mt_entropy_weight", 0.0) or 0.0)
@@ -532,16 +542,16 @@ def build_criterion(
         crit_mt = MultiTaskLoss(  # type: ignore
             class_weights=cw,
             w_dir=1.0,
-            w_ret=float(getattr(args, "mt_w_ret", 0.5)),
+            w_ret=_pbce(float(getattr(args, "mt_w_ret", 0.5))),
             w_conf=float(getattr(args, "mt_w_conf", 0.3)),
             huber_delta=d,
             class_balance_weight=float(getattr(args, "mt_class_balance_weight", 0.0)),
-            focal_gamma=float(getattr(args, "mt_focal_gamma", 0.0)),
+            focal_gamma=_pbce(float(getattr(args, "mt_focal_gamma", 0.0))),
             w_sharpe=w_sharpe,
             sharpe_ann=sharpe_ann,
             label_smoothing=float(getattr(args, "label_smoothing", TRAINING.get("label_smoothing", 0.05))),
             target_clip=float(TRAINING.get("regression_target_clip", 5.0)),
-            w_quantile=float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2))),
+            w_quantile=_pbce(float(getattr(args, "mt_w_quantile", getattr(args, "w_quantile", 0.2)))),
             quantiles=(0.05, 0.95),
         ).to(device)  # type: ignore
         crit_mt.entropy_weight = float(getattr(args, "mt_entropy_weight", 0.0) or 0.0)

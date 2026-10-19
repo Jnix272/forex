@@ -18,11 +18,19 @@ aug_idx  = miner.get_oversampled_indices(base_idx)
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
 
 _log = logging.getLogger(__name__)
+
+
+def _safe_nanmean(arr, axis=0):
+    """Compute nanmean while ignoring benign RuntimeWarning when entire columns are NaN (e.g. masked HOLD rows)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(arr, axis=axis)
 
 _DEFAULT_LOG_DIR = Path("logs/hard_examples")
 _MAX_OVERSAMPLE_RATIO = 2.0  # hard examples can at most double their share
@@ -82,11 +90,11 @@ class ForgettingTracker:
         if len(self._history) < recent_window * 2:
             return np.zeros(self.n_samples, dtype=bool)
 
-        old = np.nanmean(
+        old = _safe_nanmean(
             [self._history[-(recent_window + i + 1)] for i in range(recent_window)],
             axis=0,
         )
-        recent = np.nanmean(
+        recent = _safe_nanmean(
             [self._history[-(i + 1)] for i in range(recent_window)],
             axis=0,
         )
@@ -102,7 +110,7 @@ class ForgettingTracker:
         if len(self._history) < recent_window:
             return np.zeros(self.n_samples, dtype=bool)
 
-        recent = np.nanmean(
+        recent = _safe_nanmean(
             [self._history[-(i + 1)] for i in range(recent_window)],
             axis=0,
         )
@@ -251,7 +259,7 @@ class OnlineHardExampleMiner:
             return np.zeros(self.n_samples, dtype=bool)
 
         recent = self._loss_buffer[-min(self._epoch, self.window_size) :, :]
-        mean_recent = np.nanmean(recent, axis=0)
+        mean_recent = _safe_nanmean(recent, axis=0)
         # Blend: equal weight between rolling mean and EMA for stability
         observed = ~np.isnan(mean_recent)
         if not np.any(observed):

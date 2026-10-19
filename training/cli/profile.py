@@ -82,6 +82,14 @@ def _normalize_architecture_profile(profile: dict, model_name: str) -> dict:
         for field in ("d_model", "nhead", "num_layers", "hidden_size", "num_classes"):
             if field in profile:
                 out[field] = int(profile[field])
+    elif key in ("timesnet", "timemixer"):
+        for field in ("d_model", "d_ff", "top_k", "num_layers", "hidden_size", "num_classes", "dropout"):
+            if field in profile:
+                out[field] = int(profile[field]) if field != "dropout" else float(profile[field])
+    elif key in ("transformer", "itransformer"):
+        for field in ("d_model", "nhead", "num_layers", "dim_feedforward", "dim_ff", "hidden_size", "num_classes"):
+            if field in profile:
+                out[field] = int(profile[field])
     else:
         for field in ("d_model", "nhead", "num_layers", "hidden_size", "num_classes"):
             if field in profile:
