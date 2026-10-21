@@ -581,6 +581,19 @@ def _run_live_preflight(broker, slow_model, pair: str, checkpoint_dir: str) -> N
             meta_data = _json.loads(meta.read_text(encoding="utf-8"))
             model_hash = hashlib.sha256(_json.dumps(meta_data.get("curated_feature_indices", [])).encode()).hexdigest()
             live_hash = model_hash
+    elif getattr(slow_model, "cs_engine", None) and getattr(slow_model.cs_engine, "model_dir", None):
+        mdir = Path(slow_model.cs_engine.model_dir)
+        meta = mdir / "metadata.json"
+        if meta.is_file():
+            meta_data = _json.loads(meta.read_text(encoding="utf-8"))
+            model_hash = hashlib.sha256(_json.dumps(meta_data.get("curated_feature_indices", [])).encode()).hexdigest()
+            live_hash = model_hash
+    else:
+        meta = Path(checkpoint_dir) / "stationary_ensemble" / "metadata.json"
+        if meta.is_file():
+            meta_data = _json.loads(meta.read_text(encoding="utf-8"))
+            model_hash = hashlib.sha256(_json.dumps(meta_data.get("curated_feature_indices", [])).encode()).hexdigest()
+            live_hash = model_hash
     run_preflight(
         feed_client=_Feed(),
         broker_client=_Broker(),

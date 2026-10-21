@@ -4184,6 +4184,8 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
     total_samples = 0
     n_features_total = 0
     z_store = None  # zarr group (primary)
+    _single_last_t_ns = -1
+    _single_time_parts = []
 
     # Load COT data
     cot_path = COT_PARQUET_PATH
@@ -4323,6 +4325,27 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
         if X_seq.size == 0:
             continue
 
+        # Warmup ranges overlap across chunks. Keep timestamps and every
+        # sidecar aligned while dropping already-written rows.
+        from training.single_pair_time import timestamp_rows
+
+        if use_zarr and z_store is None and getattr(args, "_resume_zarr", False):
+            _resume_store = _zarr_open_group(str(cache_path), mode="r")
+            if "t_ns" not in _resume_store and len(_resume_store["X"]):
+                raise RuntimeError("Cannot resume a single-pair cache without timestamps; use an isolated rebuild")
+            if "t_ns" in _resume_store and len(_resume_store["t_ns"]):
+                _single_last_t_ns = int(_resume_store["t_ns"][-1])
+        _single_t_ns, _single_keep = timestamp_rows(_time_idx, len(X_seq), _single_last_t_ns)
+        X_seq, y_seq, y_cls_seq = X_seq[_single_keep], y_seq[_single_keep], y_cls_seq[_single_keep]
+        close_seq, atr_seq, spread_seq = close_seq[_single_keep], atr_seq[_single_keep], spread_seq[_single_keep]
+        if diff_seq is not None:
+            diff_seq = diff_seq[_single_keep]
+        if pq_seq is not None:
+            pq_seq = pq_seq[_single_keep]
+        if not len(X_seq):
+            continue
+        _single_last_t_ns = int(_single_t_ns[-1])
+
         _maybe_enforce_feature_schema_early(args, cache_path)
         _maybe_run_lookahead_guard(args, X_seq, close_seq)
 
@@ -4425,6 +4448,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
                 _zs["atr"].append(atr_seq)
             if "spread" in _zs:
                 _zs["spread"].append(spread_seq)
+            _store_pair_extras(_zs, {"t_ns": _single_t_ns}, n_samples_chunk)
             # Keep sidecar lengths aligned with X even when a chunk omits them.
             if "diff" in _zs:
                 _zs["diff"].append(diff_seq if diff_seq is not None else np.zeros(n_samples_chunk, dtype=np.uint8))
@@ -4437,6 +4461,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
             _close_fp.write(close_seq.tobytes())
             _atr_fp.write(atr_seq.tobytes())
             _spread_fp.write(spread_seq.tobytes())
+            _single_time_parts.append(_single_t_ns)
             if args.label_method == "rl_reward":
                 if _diff_fp is not None:
                     _diff_fp.write(diff_seq.tobytes())
@@ -4535,6 +4560,7 @@ def build_dataset_chunked(args) -> tuple[str, int, int, StandardScaler | RobustS
         _close_fp.close()
         _atr_fp.close()
         _spread_fp.close()
+        np.save(str(cache_path) + "_t_ns.npy", np.concatenate(_single_time_parts) if _single_time_parts else np.empty(0, dtype=np.int64))
 
         final_x_shape = (_n_samples_written, args.seq_len, n_features_total)
         final_y_shape = (_n_samples_written,)

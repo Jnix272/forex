@@ -462,37 +462,9 @@ class StationaryEnsembleInferenceEngine(BaseInferenceEngine):
         from trading.live_actions import LiveAction
 
         z = self.predict_z_score(obs, record_history=True)
-        cur_dir = self._pos_dir
+        from trading.zoo_policy import hysteresis
 
-        if cur_dir == 0:
-            if z >= self.z_entry:
-                self._pos_dir = 1
-                act = int(LiveAction.BUY)
-            elif z <= -self.z_entry:
-                self._pos_dir = -1
-                act = int(LiveAction.SELL)
-            else:
-                act = int(LiveAction.HOLD)
-        elif cur_dir == 1:
-            if z <= -self.z_entry:
-                self._pos_dir = -1
-                act = int(LiveAction.SELL)
-            elif z < self.z_exit:
-                self._pos_dir = 0
-                act = int(LiveAction.CLOSE)
-            else:
-                # Maintain open long position (LiveTradingEngine sees already_positioned and increments holding_bars)
-                act = int(LiveAction.BUY)
-        else:
-            if z >= self.z_entry:
-                self._pos_dir = 1
-                act = int(LiveAction.BUY)
-            elif -z < self.z_exit:
-                self._pos_dir = 0
-                act = int(LiveAction.CLOSE)
-            else:
-                # Maintain open short position
-                act = int(LiveAction.SELL)
+        self._pos_dir, act = hysteresis(z, self._pos_dir, self.z_entry, self.z_exit)
 
         self._update_proba_from_z(z, act)
         return act
@@ -714,34 +686,9 @@ class MultiArchitectureSpecialistEnsembleInferenceEngine(BaseInferenceEngine):
         self.last_z_score = z_total
         self.last_sub_signals = {"z_cs": round(z_cs, 4), "z_haelt": round(z_haelt, 4), "z_mamba": round(z_mamba, 4)}
 
-        cur_dir = self._pos_dir
-        if cur_dir == 0:
-            if z_total >= self.z_entry:
-                self._pos_dir = 1
-                act = int(LiveAction.BUY)
-            elif z_total <= -self.z_entry:
-                self._pos_dir = -1
-                act = int(LiveAction.SELL)
-            else:
-                act = int(LiveAction.HOLD)
-        elif cur_dir == 1:
-            if z_total <= -self.z_entry:
-                self._pos_dir = -1
-                act = int(LiveAction.SELL)
-            elif z_total < self.z_exit:
-                self._pos_dir = 0
-                act = int(LiveAction.CLOSE)
-            else:
-                act = int(LiveAction.BUY)
-        else:
-            if z_total >= self.z_entry:
-                self._pos_dir = 1
-                act = int(LiveAction.BUY)
-            elif -z_total < self.z_exit:
-                self._pos_dir = 0
-                act = int(LiveAction.CLOSE)
-            else:
-                act = int(LiveAction.SELL)
+        from trading.zoo_policy import hysteresis
+
+        self._pos_dir, act = hysteresis(z_total, self._pos_dir, self.z_entry, self.z_exit)
 
         self.cs_engine._update_proba_from_z(z_total, act)
         self.last_raw = self.cs_engine.last_raw

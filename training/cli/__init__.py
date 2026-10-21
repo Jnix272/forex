@@ -1216,6 +1216,13 @@ def parse_args():
         help="Explicit checkpoint to warm-start from. Default: production_best.pt then the model's own _best.pt.",
     )
 
+    p.add_argument(
+        "--online-hard-mining",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable online hard-example mining; disable for controlled baseline experiments.",
+    )
+
     # Promotion gate (B-C1)
     p.add_argument(
         "--promotion-gate",

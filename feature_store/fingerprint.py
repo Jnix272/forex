@@ -38,6 +38,8 @@ FEATURE_CODE_GLOBS: tuple[str, ...] = (
     "data/data_ingestion.py",
     "data/historical_news.py",
     "data/cross_asset.py",
+    "training/dataset_builder.py",
+    "training/single_pair_time.py",
 )
 
 # FeatureStore materializers additionally depend on the registry definitions.

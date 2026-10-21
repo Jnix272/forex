@@ -98,6 +98,7 @@ missing_cols.txt
 wandb/
 .coverage
 htmlcov/
+research/
 coverage.xml
 e2e_report.xml
 *.zarr/

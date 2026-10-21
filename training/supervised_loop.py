@@ -2865,7 +2865,7 @@ def supervised_train(
                 }
             _safe_save(core.state_dict(), best_path, metadata=ckpt_meta)
             with open(cfg_path, "w", encoding="utf-8") as _cfg_fp:
-                json.dump(
+                _json_hash.dump(
                     {
                         "model": model_name,
                         "n_features": n_features,

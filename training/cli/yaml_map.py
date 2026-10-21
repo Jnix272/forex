@@ -104,6 +104,7 @@ _YAML_MAP = {
     "training.amp": "amp",
     "training.resume": "resume",
     "training.training_memory": "training_memory",
+    "training.online_hard_mining": "online_hard_mining",
     "training.label_smoothing": "label_smoothing",
     "training.use_mixup": "use_mixup",
     "training.use_volatility_sampler": "use_volatility_sampler",
