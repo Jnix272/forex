@@ -12,6 +12,7 @@ Do not hardcode test results.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -437,37 +438,21 @@ def test_scenario_live_sizing_regimes(client):
 
 def test_non_finite_returns_filtering(client):
     """Verify that returns containing NaN/Inf trigger a 400 Bad Request."""
-    import json
-
-    payload_vol = {
-        "returns": [0.001, float("nan"), -0.002, float("inf"), 0.003, float("-inf"), -0.001, 0.002] * 5,
-        "target_vol": 0.10,
-        "lookback": 10,
-    }
+    raw_payload_vol = '{"returns": [0.001, "NaN", -0.002, "Infinity", 0.003, "-Infinity", -0.001, 0.002], "target_vol": 0.10, "lookback": 10}'
     response_vol = client.post(
-        "/volatility_bounds", content=json.dumps(payload_vol), headers={"Content-Type": "application/json"}
+        "/volatility_bounds", content=raw_payload_vol, headers={"Content-Type": "application/json"}
     )
     assert response_vol.status_code == 400
 
-    payload_sizing = {
-        "win_prob": 0.55,
-        "win_loss_ratio": 1.5,
-        "returns": [0.001, float("nan"), -0.002, float("inf"), 0.003, float("-inf"), -0.001, 0.002] * 5,
-        "price": 1.1000,
-        "current_atr": 0.0005,
-        "equity": 10000.0,
-        "lot_size": 10000.0,
-    }
+    raw_payload_sizing = '{"win_prob": 0.55, "win_loss_ratio": 1.5, "returns": [0.001, "NaN", -0.002, "Infinity", 0.003, "-Infinity", -0.001, 0.002], "price": 1.1000, "current_atr": 0.0005, "equity": 10000.0, "lot_size": 10000.0}'
     response_sizing = client.post(
-        "/kelly_sizing", content=json.dumps(payload_sizing), headers={"Content-Type": "application/json"}
+        "/kelly_sizing", content=raw_payload_sizing, headers={"Content-Type": "application/json"}
     )
     assert response_sizing.status_code == 400
 
 
 def test_kelly_sizing_win_prob_zero_or_negative(client):
     """Verify that win_prob <= 0.0 ensures lots = 0.0 and other attributes are zeroed."""
-    import json
-
     payload_zero = {
         "win_prob": 0.0,
         "win_loss_ratio": 1.5,
@@ -488,3 +473,95 @@ def test_kelly_sizing_win_prob_zero_or_negative(client):
     assert data["vol_scalar"] == 0.0
     assert data["risk_usd"] == 0.0
     assert data["impact_usd"] == 0.0
+
+
+# ===========================================================================
+# Additional Tests specifically for /volatility_bounds Endpoint
+# ===========================================================================
+
+
+def test_volatility_bounds_non_finite_target_vol(client):
+    """Verify non-finite target_vol (NaN / Inf / -Inf) triggers HTTP 400 or 422 error response."""
+    for bad_str in ['"NaN"', '"Infinity"', '"-Infinity"']:
+        raw_payload = f'{{"returns": [0.001, -0.002, 0.003, -0.001, 0.002], "target_vol": {bad_str}, "lookback": 10}}'
+        res = client.post(
+            "/volatility_bounds", content=raw_payload, headers={"Content-Type": "application/json"}
+        )
+        assert res.status_code in (400, 422)
+
+
+def test_volatility_bounds_pydantic_validation(client):
+    """Verify schema boundary validations (target_vol <= 0 or lookback <= 1)."""
+    # target_vol <= 0
+    payload_bad_vol = {
+        "returns": [0.001, -0.002, 0.003],
+        "target_vol": 0.0,
+        "lookback": 10,
+    }
+    res_vol = client.post("/volatility_bounds", json=payload_bad_vol)
+    assert res_vol.status_code == 422
+
+    # lookback <= 1
+    payload_bad_lookback = {
+        "returns": [0.001, -0.002, 0.003],
+        "target_vol": 0.10,
+        "lookback": 1,
+    }
+    res_lookback = client.post("/volatility_bounds", json=payload_bad_lookback)
+    assert res_lookback.status_code == 422
+
+
+def test_volatility_bounds_single_element_returns(client):
+    """Verify returns list with 1 element yields fallback scalar=1.0, realized_vol=0.0."""
+    payload = {
+        "returns": [0.01],
+        "target_vol": 0.10,
+        "lookback": 20,
+    }
+    res = client.post("/volatility_bounds", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["vol_scalar"] == 1.0
+    assert data["realized_vol"] == 0.0
+
+
+def test_volatility_bounds_calculation_accuracy(client):
+    """Verify realized_vol and vol_scalar calculation against manual numpy calculations."""
+    returns = [0.01, -0.005, 0.008, -0.002, 0.004]
+    lookback = 3
+    target_vol = 0.15
+
+    payload = {
+        "returns": returns,
+        "target_vol": target_vol,
+        "lookback": lookback,
+    }
+    res = client.post("/volatility_bounds", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+
+    # Manual calculation
+    recent = np.array(returns[-lookback:], dtype=float)
+    expected_realized = float(np.std(recent) * np.sqrt(252))
+    expected_scalar = float(np.clip(target_vol / (expected_realized + 1e-9), 0.1, 3.0))
+
+    assert pytest.approx(data["realized_vol"], rel=1e-5) == expected_realized
+    assert pytest.approx(data["vol_scalar"], rel=1e-5) == expected_scalar
+
+
+def test_volatility_bounds_calculation_error(client, monkeypatch):
+    """Verify HTTP 400 error response when volatility calculation raises an unexpected exception."""
+
+    def mock_vol_target_scalar(*args, **kwargs):
+        raise ValueError("Simulated calculation crash")
+
+    monkeypatch.setattr("api.main.vol_target_scalar", mock_vol_target_scalar)
+
+    payload = {
+        "returns": [0.01, -0.005, 0.008, -0.002, 0.004],
+        "target_vol": 0.10,
+        "lookback": 10,
+    }
+    res = client.post("/volatility_bounds", json=payload)
+    assert res.status_code == 400
+    assert "Volatility bounds calculation failed" in res.json()["detail"]
