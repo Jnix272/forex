@@ -331,13 +331,13 @@ def build_plotly_chart(
         )
 
         # Connecting lines
-        for _, t in trades_df.iterrows():
-            if pd.notna(t["exit_time"]):
-                line_color = "#26a69a" if t["pnl_usd"] >= 0 else "#ef5350"
+        for t in trades_df.itertuples():
+            if pd.notna(t.exit_time):
+                line_color = "#26a69a" if t.pnl_usd >= 0 else "#ef5350"
                 fig.add_trace(
                     go.Scatter(
-                        x=[t["entry_time"], t["exit_time"]],
-                        y=[t["entry_price"], t["exit_price"]],
+                        x=[t.entry_time, t.exit_time],
+                        y=[t.entry_price, t.exit_price],
                         mode="lines",
                         line={"color": line_color, "width": 1, "dash": "dash"},
                         showlegend=False,
@@ -596,9 +596,9 @@ def main():
             predictions = equity_df["confidence"].values
         elif not trades_df.empty and "confidence" in trades_df.columns:
             # Map trade confidence to bars
-            for _, t in trades_df.iterrows():
-                if t["entry_time"] in bars.index:
-                    bars.loc[t["entry_time"], "confidence"] = t["confidence"]
+            for t in trades_df.itertuples():
+                if t.entry_time in bars.index:
+                    bars.loc[t.entry_time, "confidence"] = t.confidence
             bars["confidence"] = bars.get("confidence", pd.Series(0.0, index=bars.index)).ffill().fillna(0.0)
             predictions = bars["confidence"].values
 
