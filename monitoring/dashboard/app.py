@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,10 +54,28 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAPI:
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:9090",
+    "http://127.0.0.1:9090",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+
+def create_dashboard_app(
+    logger_instance: UnifiedLogger | None = None,
+    allowed_origins: list[str] | None = None,
+) -> FastAPI:
     """Create FastAPI app with dashboard routes."""
     global logger
     logger = logger_instance
+
+    if allowed_origins is None:
+        env_origins = os.getenv("DASHBOARD_CORS_ORIGINS") or os.getenv("ALLOWED_ORIGINS")
+        if env_origins:
+            allowed_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+        else:
+            allowed_origins = DEFAULT_CORS_ORIGINS
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -77,7 +96,7 @@ def create_dashboard_app(logger_instance: UnifiedLogger | None = None) -> FastAP
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -598,11 +617,12 @@ def run_dashboard(
     host: str = "0.0.0.0",
     port: int = 9090,
     logger_instance: UnifiedLogger | None = None,
+    allowed_origins: list[str] | None = None,
 ):
     """Run the dashboard server."""
     import uvicorn
 
-    app = create_dashboard_app(logger_instance)
+    app = create_dashboard_app(logger_instance, allowed_origins=allowed_origins)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
