@@ -488,3 +488,151 @@ def test_kelly_sizing_win_prob_zero_or_negative(client):
     assert data["vol_scalar"] == 0.0
     assert data["risk_usd"] == 0.0
     assert data["impact_usd"] == 0.0
+
+
+def test_kelly_sizing_parameter_overrides(client):
+    """Verify that optional PositionSizer configuration parameter overrides work as expected."""
+    base_payload = {
+        "win_prob": 0.55,
+        "win_loss_ratio": 1.5,
+        "returns": [0.001, -0.002, 0.003, -0.001, 0.002] * 5,
+        "price": 1.1000,
+        "current_atr": 0.0005,
+        "equity": 10000.0,
+        "lot_size": 10000.0,
+    }
+    res_default = client.post("/kelly_sizing", json=base_payload)
+    assert res_default.status_code == 200
+    default_lots = res_default.json()["lots"]
+
+    overridden_payload = base_payload.copy()
+    overridden_payload.update({
+        "kelly_fraction": 0.05,
+        "max_position_pct": 0.001,
+        "target_vol": 0.01,
+        "pip_risk": 500.0,
+    })
+    res_override = client.post("/kelly_sizing", json=overridden_payload)
+    assert res_override.status_code == 200
+    override_lots = res_override.json()["lots"]
+    assert override_lots != default_lots
+    assert override_lots < default_lots
+
+
+def test_kelly_sizing_non_finite_optional_parameters(client):
+    """Verify that non-finite optional parameter overrides trigger 400 Bad Request."""
+    from api.main import HTTPException, KellySizingRequest, kelly_sizing
+
+    for field in ["kelly_fraction", "max_position_pct", "target_vol", "pip_risk"]:
+        req = KellySizingRequest(
+            win_prob=0.55,
+            win_loss_ratio=1.5,
+            returns=[0.001, -0.002, 0.003],
+            price=1.1000,
+            current_atr=0.0005,
+            equity=10000.0,
+        )
+        setattr(req, field, float("nan"))
+        with pytest.raises(HTTPException) as exc_info:
+            kelly_sizing(req)
+        assert exc_info.value.status_code == 400
+        assert f"Parameter {field} must be a finite float" in exc_info.value.detail
+
+
+def test_kelly_sizing_non_finite_required_parameters(client):
+    """Verify that non-finite required parameters trigger 400 Bad Request."""
+    from api.main import HTTPException, KellySizingRequest, kelly_sizing
+
+    for field in ["win_prob", "win_loss_ratio", "price", "current_atr", "equity", "lot_size"]:
+        req = KellySizingRequest(
+            win_prob=0.55,
+            win_loss_ratio=1.5,
+            returns=[0.001, -0.002, 0.003],
+            price=1.1000,
+            current_atr=0.0005,
+            equity=10000.0,
+        )
+        setattr(req, field, float("nan"))
+        with pytest.raises(HTTPException) as exc_info:
+            kelly_sizing(req)
+        assert exc_info.value.status_code == 400
+        assert f"Parameter {field} must be a finite float" in exc_info.value.detail
+
+
+def test_returns_conversion_exceptions(client, monkeypatch):
+    """Verify 400 Bad Request when np.array conversion raises TypeError or ValueError."""
+    from api.main import HTTPException, KellySizingRequest, VolatilityBoundsRequest, kelly_sizing, volatility_bounds
+
+    def mock_np_array_type_error(*args, **kwargs):
+        raise TypeError("Invalid return type conversion")
+
+    monkeypatch.setattr(np, "array", mock_np_array_type_error)
+
+    req_sizing = KellySizingRequest(
+        win_prob=0.55,
+        win_loss_ratio=1.5,
+        returns=[0.001, -0.002, 0.003],
+        price=1.1000,
+        current_atr=0.0005,
+        equity=10000.0,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        kelly_sizing(req_sizing)
+    assert exc_info.value.status_code == 400
+    assert "returns must contain only finite floats" in exc_info.value.detail
+
+    req_vol = VolatilityBoundsRequest(returns=[0.001, -0.002, 0.003], target_vol=0.10, lookback=10)
+    with pytest.raises(HTTPException) as exc_info_vol:
+        volatility_bounds(req_vol)
+    assert exc_info_vol.value.status_code == 400
+    assert "returns must contain only finite floats" in exc_info_vol.value.detail
+
+
+def test_kelly_sizing_calculation_exception(client, monkeypatch):
+    """Verify 400 Bad Request when PositionSizer raises an exception during calculation."""
+    from api import main
+
+    def mock_size_position(*args, **kwargs):
+        raise RuntimeError("Calculation mock error")
+
+    monkeypatch.setattr(main.PositionSizer, "size_position", mock_size_position)
+
+    payload = {
+        "win_prob": 0.55,
+        "win_loss_ratio": 1.5,
+        "returns": [0.001, -0.002, 0.003],
+        "price": 1.1000,
+        "current_atr": 0.0005,
+        "equity": 10000.0,
+    }
+    response = client.post("/kelly_sizing", json=payload)
+    assert response.status_code == 400
+    assert "Sizing calculation failed: Calculation mock error" in response.json()["detail"]
+
+
+def test_volatility_bounds_non_finite_target_vol(client):
+    """Verify that non-finite target_vol in /volatility_bounds triggers 400 Bad Request."""
+    from api.main import HTTPException, VolatilityBoundsRequest, volatility_bounds
+
+    req = VolatilityBoundsRequest(returns=[0.001, -0.002, 0.003], target_vol=0.10, lookback=10)
+    req.target_vol = float("nan")
+
+    with pytest.raises(HTTPException) as exc_info:
+        volatility_bounds(req)
+    assert exc_info.value.status_code == 400
+    assert "Parameter target_vol must be a finite float" in exc_info.value.detail
+
+
+def test_volatility_bounds_calculation_exception(client, monkeypatch):
+    """Verify 400 Bad Request when vol_target_scalar raises an exception."""
+    from api import main
+
+    def mock_vol_scalar(*args, **kwargs):
+        raise RuntimeError("Vol calculation mock error")
+
+    monkeypatch.setattr(main, "vol_target_scalar", mock_vol_scalar)
+
+    payload = {"returns": [0.001, -0.002, 0.003] * 5, "target_vol": 0.10, "lookback": 10}
+    response = client.post("/volatility_bounds", json=payload)
+    assert response.status_code == 400
+    assert "Volatility bounds calculation failed: Vol calculation mock error" in response.json()["detail"]
