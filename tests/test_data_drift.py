@@ -6,6 +6,7 @@ orchestrator.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import pytest
 
@@ -19,6 +20,7 @@ from drift.data_drift import (
     adversarial_validation,
     check_feature_distribution_drift,
     check_shap_attribution_drift,
+    math_cutoff,
     run_data_drift_check,
 )
 
@@ -173,6 +175,59 @@ def test_concept_tracker_score_and_events():
     assert 0.0 <= tracker.streaming_score() <= 1.0
     assert isinstance(tracker.events(), list)
     assert tracker.events()[0]["type"] == "concept_drift"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# math_cutoff unit tests
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_math_cutoff_expected_value():
+    # math_cutoff(delta, n) formula:
+    # sqrt( (2 * 0.25 / n) * ln(1/delta) ) * (1 + sqrt(2/n))
+    delta = 0.002
+    n = 100
+    expected = math.sqrt((0.5 / 100.0) * math.log(1.0 / 0.002)) * (1.0 + math.sqrt(2.0 / 100.0))
+    val = math_cutoff(delta, n)
+    assert pytest.approx(val, rel=1e-6) == expected
+
+
+def test_math_cutoff_monotonic_n():
+    delta = 0.002
+    # As sample size n increases, cutoff should decrease
+    cutoff_small_n = math_cutoff(delta, 10)
+    cutoff_med_n = math_cutoff(delta, 100)
+    cutoff_large_n = math_cutoff(delta, 1000)
+
+    assert cutoff_small_n > cutoff_med_n > cutoff_large_n
+
+
+def test_math_cutoff_monotonic_delta():
+    n = 100
+    # As confidence delta decreases (requiring higher significance), cutoff increases
+    cutoff_large_delta = math_cutoff(0.05, n)
+    cutoff_med_delta = math_cutoff(0.01, n)
+    cutoff_small_delta = math_cutoff(0.001, n)
+
+    assert cutoff_small_delta > cutoff_med_delta > cutoff_large_delta
+
+
+def test_math_cutoff_edge_cases():
+    # n <= 0 should be guarded by max(n, 1) and behave same as n = 1
+    val_n_zero = math_cutoff(0.002, 0)
+    val_n_neg = math_cutoff(0.002, -10)
+    val_n_one = math_cutoff(0.002, 1)
+
+    assert val_n_zero == val_n_one
+    assert val_n_neg == val_n_one
+
+    # delta <= 0 should be guarded by max(delta, 1e-12) and not raise ZeroDivisionError or ValueError
+    val_delta_zero = math_cutoff(0.0, 100)
+    val_delta_neg = math_cutoff(-0.05, 100)
+    val_delta_min = math_cutoff(1e-12, 100)
+
+    assert val_delta_zero == val_delta_min
+    assert val_delta_neg == val_delta_min
 
 
 # ═════════════════════════════════════════════════════════════════════════════
