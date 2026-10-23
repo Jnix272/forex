@@ -24,7 +24,6 @@ st.set_page_config(
 # Try imports of core modules
 try:
     from backtesting.backtest import ForexScalingBacktest, ScalingAction  # noqa: F401
-    from models.rl_agents import ForexTradingEnv  # noqa: F401
 
     HAS_STRATEGY_LIBS = True
 except ImportError:
