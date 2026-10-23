@@ -17,6 +17,8 @@ from lineage.provenance import (
     ModelRegistryRecord,
     decision_trail,
 )
+from datetime import datetime
+from pathlib import Path
 from audit.manifest import (
     capture_env,
     compute_dir_hash,
@@ -27,6 +29,7 @@ from audit.manifest import (
     regenerate_manifest,
     verify_manifest,
     verify_manifests_in_tree,
+    MANIFEST_FILENAME,
     write_manifest,
 )
 
@@ -153,6 +156,45 @@ def test_generate_manifest_shape(ckpt_dir):
     assert m["seed"] == 42
     assert m["artifacts"]["production_best.pt"]["sha256"] == compute_file_hash(str(ckpt_dir / "production_best.pt"))
     assert "hash" in m
+
+
+def test_write_manifest_custom_filename_and_nonexistent_dir(tmp_path):
+    nested_dir = tmp_path / "deeply" / "nested" / "run_dir"
+    assert not nested_dir.exists()
+
+    now = datetime(2026, 10, 5, 12, 0, 0)
+    dummy_manifest = {
+        "run_id": "test_run_42",
+        "model": "xgboost",
+        "created_at": now,
+        "metrics": {"loss": 0.123},
+    }
+
+    out_path = write_manifest(dummy_manifest, nested_dir, filename="custom_manifest.json")
+
+    assert Path(out_path) == nested_dir / "custom_manifest.json"
+    assert nested_dir.is_dir()
+    assert Path(out_path).exists()
+
+    with open(out_path, encoding="utf-8") as f:
+        loaded_data = json.load(f)
+
+    assert loaded_data["run_id"] == "test_run_42"
+    assert loaded_data["model"] == "xgboost"
+    assert loaded_data["created_at"] == "2026-10-05 12:00:00"
+    assert loaded_data["metrics"] == {"loss": 0.123}
+
+
+def test_write_manifest_default_filename(tmp_path):
+    run_dir_str = str(tmp_path / "str_run_dir")
+    dummy_manifest = {"run_id": "r99", "status": "completed"}
+
+    out_path = write_manifest(dummy_manifest, run_dir_str)
+
+    assert out_path == str(tmp_path / "str_run_dir" / MANIFEST_FILENAME)
+    assert os.path.exists(out_path)
+    with open(out_path, encoding="utf-8") as f:
+        assert json.load(f) == dummy_manifest
 
 
 def test_write_and_verify_manifest(ckpt_dir):
