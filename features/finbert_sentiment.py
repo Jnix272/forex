@@ -26,8 +26,8 @@ Usage:
     print(pipe.active_backend())                       # "ollama" / "finbert" / "vader"
 
 Caching:
-    Results cached to data/embeddings/sentiment_cache.pkl keyed by MD5(headline).
-    Stale root-level sentiment_cache.pkl is merged in and deleted on first load.
+    Results cached to data/embeddings/sentiment_cache.json keyed by MD5(headline).
+    Stale root-level sentiment_cache.json is merged in and deleted on first load.
     Cache is flushed to disk every `cache_save_every` new entries (default 50),
     not on every single call.
 
@@ -43,7 +43,6 @@ import hashlib
 import json
 import logging
 import os
-import pickle
 import re
 import threading
 import time
@@ -78,10 +77,12 @@ CACHE_DIR = Path(
     )
 )
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_FILE = CACHE_DIR / "sentiment_cache.pkl"
+CACHE_FILE = CACHE_DIR / "sentiment_cache.json"
 
-# Stale root-level cache (written by older code versions) - merged on startup.
+# Legacy pickle cache paths (migrated to JSON on load if present)
+_LEGACY_PKL_CACHE = CACHE_DIR / "sentiment_cache.pkl"
 _STALE_CACHE_FILE = Path(__file__).resolve().parent.parent / "sentiment_cache.pkl"
+_STALE_JSON_CACHE_FILE = Path(__file__).resolve().parent.parent / "sentiment_cache.json"
 
 # ── Backend config ─────────────────────────────────────────────────────────────
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -100,7 +101,7 @@ _SHARED_CACHE_LOCK = threading.Lock()
 
 def _load_cache() -> dict:
     """
-    Load the canonical cache, merging the stale root-level file if present.
+    Load the canonical JSON cache, migrating legacy pickle files if present.
     Cached as a singleton in memory across instances.
     """
     global _SHARED_CACHE
@@ -111,11 +112,13 @@ def _load_cache() -> dict:
         cache: dict = {}
         _t0 = time.perf_counter()
 
-        # Load canonical cache
+        # Load canonical JSON cache
         if CACHE_FILE.exists():
             try:
-                with open(CACHE_FILE, "rb") as f:
-                    cache = pickle.load(f)
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    raw_cache = json.load(f)
+                    if isinstance(raw_cache, dict):
+                        cache = {str(k): float(v) for k, v in raw_cache.items()}
                 log_data_load(
                     "finbert_cache_load",
                     str(CACHE_FILE),
@@ -138,29 +141,59 @@ def _load_cache() -> dict:
         else:
             log_data_load("finbert_cache_load", str(CACHE_FILE), n_rows=0, status="skip_missing")
 
-        # Merge stale root cache if it exists
-        if _STALE_CACHE_FILE.exists() and _STALE_CACHE_FILE != CACHE_FILE:
+        # Migrate legacy .pkl file in CACHE_DIR if present
+        if _LEGACY_PKL_CACHE.exists():
             try:
-                with open(_STALE_CACHE_FILE, "rb") as f:
-                    stale = pickle.load(f)
-                before = len(cache)
-                cache.update({k: v for k, v in stale.items() if k not in cache})
-                merged = len(cache) - before
-                if merged:
-                    print(
-                        f"[Sentiment] Merged {merged} entries from stale cache {_STALE_CACHE_FILE}",
-                        flush=True,
-                    )
-                _STALE_CACHE_FILE.unlink(missing_ok=True)
-                log_data_load(
-                    "finbert_cache_stale_merge",
-                    str(_STALE_CACHE_FILE),
-                    n_rows=merged,
-                    status="ok",
-                    note=f"into {len(cache)} total entries",
-                )
+                import pickle
+
+                with open(_LEGACY_PKL_CACHE, "rb") as f:
+                    legacy_data = pickle.load(f)
+                if isinstance(legacy_data, dict):
+                    before = len(cache)
+                    cache.update({str(k): float(v) for k, v in legacy_data.items() if str(k) not in cache})
+                    merged = len(cache) - before
+                    if merged:
+                        print(
+                            f"[Sentiment] Migrated {merged} entries from legacy pickle cache {_LEGACY_PKL_CACHE}",
+                            flush=True,
+                        )
+                _LEGACY_PKL_CACHE.unlink(missing_ok=True)
             except Exception as _e:
-                log_data_load("finbert_cache_stale_merge", str(_STALE_CACHE_FILE), n_rows=0, status="error", exc=_e)
+                log_data_load("finbert_cache_legacy_pkl_migrate", str(_LEGACY_PKL_CACHE), n_rows=0, status="error", exc=_e)
+
+        # Merge stale root-level json/pkl cache if present
+        for stale_path in (_STALE_JSON_CACHE_FILE, _STALE_CACHE_FILE):
+            if stale_path.exists() and stale_path != CACHE_FILE:
+                try:
+                    stale_data: dict = {}
+                    if stale_path.suffix == ".json":
+                        with open(stale_path, "r", encoding="utf-8") as f:
+                            stale_data = json.load(f)
+                    else:
+                        import pickle
+
+                        with open(stale_path, "rb") as f:
+                            stale_data = pickle.load(f)
+
+                    if isinstance(stale_data, dict):
+                        before = len(cache)
+                        cache.update({str(k): float(v) for k, v in stale_data.items() if str(k) not in cache})
+                        merged = len(cache) - before
+                        if merged:
+                            print(
+                                f"[Sentiment] Merged {merged} entries from stale cache {stale_path}",
+                                flush=True,
+                            )
+                    stale_path.unlink(missing_ok=True)
+                    log_data_load(
+                        "finbert_cache_stale_merge",
+                        str(stale_path),
+                        n_rows=merged if 'merged' in locals() else 0,
+                        status="ok",
+                        note=f"into {len(cache)} total entries",
+                    )
+                except Exception as _e:
+                    log_data_load("finbert_cache_stale_merge", str(stale_path), n_rows=0, status="error", exc=_e)
 
         _SHARED_CACHE = cache
         return _SHARED_CACHE
@@ -171,9 +204,9 @@ def _save_cache(cache: dict) -> None:
     _t0 = time.perf_counter()
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE_FILE.with_suffix(".pkl.tmp")
-        with open(tmp, "wb") as f:
-            pickle.dump(cache, f)
+        tmp = CACHE_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
         os.replace(tmp, CACHE_FILE)
         with _SHARED_CACHE_LOCK:
             _SHARED_CACHE = cache

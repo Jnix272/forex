@@ -1612,7 +1612,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="After the final dedup/flush, run sentiment scoring over the "
         "downloaded headlines to pre-warm the cache "
-        "(data/embeddings/sentiment_cache.pkl). Skipped during --dry-run.",
+        "(data/embeddings/sentiment_cache.json). Skipped during --dry-run.",
     )
     p.add_argument(
         "--sentiment-workers",
@@ -1643,9 +1643,9 @@ def run_post_download_sentiment(
     Loads the unique headlines from the news CSV and runs them through
     features.finbert_sentiment.SentimentPipeline.score_headlines_batch in
     batches. The pipeline caches every result keyed by MD5(headline) to
-    data/embeddings/sentiment_cache.pkl, so this is fully resumable/idempotent:
+    data/embeddings/sentiment_cache.json, so this is fully resumable/idempotent:
     a re-run skips already-cached headlines and only scores new ones. The giant
-    news CSV is NOT modified - only the pkl cache is warmed.
+    news CSV is NOT modified - only the JSON cache is warmed.
 
     Returns the number of unique headlines submitted for scoring.
     """
